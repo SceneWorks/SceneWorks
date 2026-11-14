@@ -7,6 +7,8 @@ pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str
     use crate::contracts::JobType::*;
     match job_type {
         ImageGenerate | ImageEdit => Some("image"),
+        ImageDetail => Some("imageDetail"),
+        ModelConvert | DatasetAnalysis | TrainingCaption => Some("utility"),
         VideoGenerate | VideoExtend | VideoBridge | PersonReplace => Some("video"),
         AudioGenerate => Some("audio"),
         LoraTrain => Some("lora_train"),

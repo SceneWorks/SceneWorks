@@ -1584,6 +1584,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
             | JobType::PromptRefine
             | JobType::LoraTrain
             | JobType::ControlTraining
+            | JobType::ImageDetail
+            | JobType::ModelConvert
+            | JobType::DatasetAnalysis
+            | JobType::TrainingCaption
     ) {
         let kind = sceneworks_core::request_validation::kind_for_job(&job_type)
             .expect("registered utility");
@@ -2424,6 +2428,18 @@ async fn validate_raw_job_payload(
     payload: &mut JsonObject,
     license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
+    if matches!(
+        job_type,
+        JobType::ImageDetail
+            | JobType::ModelConvert
+            | JobType::DatasetAnalysis
+            | JobType::TrainingCaption
+    ) {
+        let kind = sceneworks_core::request_validation::kind_for_job(job_type)
+            .expect("registered source utility");
+        sceneworks_core::request_validation::validate_shape(kind, payload)
+            .map_err(ApiError::from)?;
+    }
     if matches!(
         job_type,
         JobType::VideoGenerate

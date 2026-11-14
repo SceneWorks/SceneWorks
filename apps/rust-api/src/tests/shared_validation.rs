@@ -27,9 +27,9 @@ async fn shared_refusals_survive_http_raw_deserialization() {
             json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"tree","sourceClipAssetIds":["clip",5]}),
         ),
         (
-            "/api/v1/image/vqa/jobs",
-            "vqa",
-            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"NaN"}),
+            "/api/v1/image/interleave/jobs",
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","advanced":{"guidanceScale":"NaN"}}),
         ),
         (
             "/api/v1/audio/jobs",
@@ -262,6 +262,14 @@ async fn sensenova_http_extractor_preserves_authored_numbers_and_shared_effectiv
             "interleave",
             json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","maxImages":2,"advanced":{"maxImages":4}}),
         ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"2.5","height":"1e100","maxImages":"bad"}),
+        ),
+        (
+            "vqa",
+            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":null,"maxImagePixels":"bad"}),
+        ),
     ] {
         let request = axum::http::Request::builder()
             .header("content-type", "application/json")
@@ -298,5 +306,114 @@ async fn sensenova_http_extractor_preserves_authored_numbers_and_shared_effectiv
             )
             .unwrap()
         );
+    }
+}
+
+#[tokio::test]
+async fn image_detail_registered_controls_match_raw_http_and_worker_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let payload =
+        json!({"model":"flux_dev","sourceAssetId":"source","advanced":{"tileControlNetRepo":42}});
+    let expected = sceneworks_core::request_validation::validate_shape(
+        "imageDetail",
+        payload.as_object().unwrap(),
+    )
+    .unwrap_err();
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({"type":"image_detail","projectId":"p","requestedGpu":"auto","payload":payload}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["field"], expected.field);
+    assert_eq!(body["code"], expected.code);
+    assert_eq!(
+        sceneworks_core::request_validation::kind_for_job(
+            &sceneworks_core::contracts::JobType::ImageDetail
+        ),
+        Some("imageDetail")
+    );
+}
+
+#[tokio::test]
+async fn source_utility_registered_fields_refuse_before_raw_job_parsing() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    for job_type in ["model_convert", "dataset_analysis", "training_caption"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({"type":job_type,"projectId":"p","requestedGpu":"auto","payload":{"advanced":{"mlxQuantize":"bad"}}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["field"], "advanced.mlxQuantize", "{body}");
+    }
+}
+
+#[tokio::test]
+async fn shared_source_utility_refusal_precedes_local_paths_on_create_retry_duplicate() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let valid_options = json!({"modelId":"model-1","advanced":{"mlxQuantize":"4"}});
+    let job = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: crate::JobType::ModelConvert,
+            project_id: None,
+            project_name: None,
+            payload: valid_options.as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    for output in [Value::Null, json!("/outside-conversion-root/model")] {
+        for malformed in [true, false] {
+            let mut payload = valid_options.clone();
+            payload["outputDir"] = output.clone();
+            if malformed {
+                payload["advanced"]["mlxQuantize"] = json!("bad");
+            }
+            let expected = sceneworks_core::request_validation::validate_shape(
+                "utility",
+                payload.as_object().unwrap(),
+            )
+            .err();
+            let mut paths = vec![(
+                "/api/v1/jobs".to_owned(),
+                json!({"type":"model_convert","requestedGpu":"auto","payload":payload}),
+            )];
+            for operation in ["retry", "duplicate"] {
+                paths.push((
+                    format!("/api/v1/jobs/{}/{operation}", job.id),
+                    json!({"payloadChanges":payload}),
+                ));
+            }
+            for (path, body) in paths {
+                let (status, refusal) = request(app.clone(), "POST", &path, body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {refusal}");
+                if let Some(expected) = expected.as_ref() {
+                    assert_eq!(refusal["code"], expected.code, "{path}: {refusal}");
+                    assert_eq!(refusal["field"], expected.field, "{path}: {refusal}");
+                    assert_eq!(refusal["context"], *expected.context, "{path}: {refusal}");
+                } else {
+                    assert!(refusal["field"].is_null(), "{path}: {refusal}");
+                    let detail = refusal["detail"].as_str().unwrap();
+                    assert!(
+                        detail.contains("outputDir")
+                            || detail.contains("conversion")
+                            || detail.contains("models/mlx"),
+                        "{path}: {refusal}"
+                    );
+                }
+            }
+        }
     }
 }

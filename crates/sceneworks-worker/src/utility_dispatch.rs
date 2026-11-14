@@ -845,13 +845,65 @@ fn shared_sensenova_legacy_numbers_survive_worker_gate() {
         for value in [
             serde_json::json!("bad"),
             serde_json::json!("NaN"),
+            serde_json::json!("2.5"),
+            serde_json::json!("1e100"),
             serde_json::json!(null),
         ] {
             payload[key] = value;
-            assert!(matches!(
-                validate_static_job_options(&job_type, payload.as_object().unwrap()),
-                Err(WorkerError::Validation(_))
-            ));
+            validate_static_job_options(&job_type, payload.as_object().unwrap()).unwrap();
+            let resolved = sceneworks_core::request_validation::resolve(
+                kind,
+                payload.as_object().unwrap(),
+                model.as_object().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resolved[key], if kind == "vqa" { 256 } else { 2048 });
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn shared_image_detail_checks_registered_controls_without_prompt_requirement() {
+    let valid = serde_json::json!({"model":"flux_dev","sourceAssetId":"source","advanced":{"tileControlNetRepo":"example/control"}});
+    validate_static_job_options(&JobType::ImageDetail, valid.as_object().unwrap()).unwrap();
+    let effective = sceneworks_core::request_validation::resolve_request(
+        "imageDetail",
+        valid.as_object().unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(effective.as_payload()["advanced"], valid["advanced"]);
+    let mut invalid = valid;
+    invalid["advanced"]["tileControlNetRepo"] = serde_json::json!(42);
+    assert!(matches!(
+        validate_static_job_options(&JobType::ImageDetail, invalid.as_object().unwrap()),
+        Err(WorkerError::Validation(_))
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn shared_source_utility_fields_resolve_without_generation_requirements() {
+    for kind in [
+        JobType::ModelConvert,
+        JobType::DatasetAnalysis,
+        JobType::TrainingCaption,
+    ] {
+        let payload = serde_json::json!({"advanced":{"mlxQuantize":"4"}});
+        validate_static_job_options(&kind, payload.as_object().unwrap()).unwrap();
+        let owner_kind = sceneworks_core::request_validation::kind_for_job(&kind).unwrap();
+        let effective = sceneworks_core::request_validation::resolve_request(
+            owner_kind,
+            payload.as_object().unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(effective.as_payload()["advanced"]["mlxQuantize"], 4);
+        let malformed = serde_json::json!({"advanced":{"mlxQuantize":"bad"}});
+        assert!(matches!(
+            validate_static_job_options(&kind, malformed.as_object().unwrap()),
+            Err(WorkerError::Validation(_))
+        ));
     }
 }

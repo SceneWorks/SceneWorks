@@ -445,9 +445,17 @@ pub struct VqaJobRequest {
     pub question: String,
     #[serde(default = "default_vqa_model")]
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
     pub max_new_tokens: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
     pub max_image_pixels: Option<Value>,
     #[serde(default = "default_requested_gpu")]
     pub requested_gpu: String,
@@ -467,11 +475,23 @@ pub struct InterleaveJobRequest {
     pub source_asset_ids: Vec<String>,
     #[serde(default = "default_interleave_model")]
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
     pub max_images: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
     pub width: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_json_value"
+    )]
     pub height: Option<Value>,
     #[serde(default)]
     pub seed: Option<i64>,
@@ -479,6 +499,13 @@ pub struct InterleaveJobRequest {
     pub requested_gpu: String,
     #[serde(default)]
     pub advanced: JsonObject,
+}
+
+// A present null is authored data, distinct from an omitted carrier.
+fn present_json_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 fn default_audio_base_model() -> String {

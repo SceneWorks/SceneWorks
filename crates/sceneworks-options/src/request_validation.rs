@@ -123,6 +123,16 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
         return validate_yue2(kind, payload).map_err(|error| error.with_request(kind, payload));
     }
     (|| {
+        if matches!(kind, "imageDetail" | "utility")
+            && payload
+                .get("advanced")
+                .is_some_and(|value| !value.is_null() && !value.is_object())
+        {
+            return Err(ValidationRefusal::new(
+                "advanced",
+                "advanced must be an object",
+            ));
+        }
         let numeric_payload = crate::sensenova_validation::canonical_numbers(kind, payload)?;
         crate::validate::shape(kind, &Value::Object(numeric_payload))
             .map_err(|error| ValidationRefusal::new(error.field, error.detail))?;
@@ -220,6 +230,15 @@ pub fn resolve(
     }
     if matches!(kind, "image" | "video" | "vqa" | "interleave") {
         crate::effective_values::resolve_advanced(&mut resolved, entry);
+    }
+    if matches!(kind, "imageDetail" | "utility") {
+        crate::effective_values::resolve_present_advanced(&mut resolved, entry);
+    }
+    if kind == "image" {
+        crate::moss_validation::materialize(payload, entry, &mut resolved)
+            .map_err(ValidationRefusal::bad_request)?;
+        crate::supra2::materialize(payload, entry, &mut resolved)
+            .map_err(ValidationRefusal::bad_request)?;
     }
     match kind {
         "vqa" => crate::sensenova_validation::materialize_vqa(payload, &mut resolved),
@@ -328,6 +347,8 @@ pub fn validate(
         }
         match kind {
             "image" => {
+                crate::supra2::validate_request(payload,entry).map_err(ValidationRefusal::bad_request)?;
+                crate::moss_validation::native_request(payload,entry).map_err(ValidationRefusal::bad_request)?;
                 crate::prompt_enhancement::validate(model, advanced)?;
                 check(
                     "advanced.quantTier",

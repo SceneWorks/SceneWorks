@@ -39,6 +39,13 @@ pub fn legacy_image_flag(value: &Value) -> bool {
 }
 
 pub fn resolve_advanced(payload: &mut JsonObject, entry: &JsonObject) {
+    resolve_advanced_inner(payload, entry, true);
+}
+/// Utility carriers lower authored registered fields without inventing image-generation defaults.
+pub fn resolve_present_advanced(payload: &mut JsonObject, entry: &JsonObject) {
+    resolve_advanced_inner(payload, entry, false);
+}
+fn resolve_advanced_inner(payload: &mut JsonObject, entry: &JsonObject, defaults: bool) {
     let model = Value::Object(entry.clone());
     let operation = payload
         .get("mode")
@@ -65,21 +72,27 @@ pub fn resolve_advanced(payload: &mut JsonObject, entry: &JsonObject) {
         }
         let path = spec.location.strip_prefix("advanced.").unwrap_or("");
         let segments: Vec<_> = path.split('.').filter(|part| !part.is_empty()).collect();
-        visit(advanced, &segments, spec, &context);
+        visit(advanced, &segments, spec, &context, defaults);
     }
 }
-fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionContext<'_>) {
+fn visit(
+    value: &mut Value,
+    path: &[&str],
+    spec: &OptionSpec,
+    context: &OptionContext<'_>,
+    defaults: bool,
+) {
     if let Some((segment, rest)) = path.split_first() {
         let key = segment.trim_end_matches("[]");
         if let Some(child) = value.get_mut(key) {
             if segment.ends_with("[]") {
                 if let Some(values) = child.as_array_mut() {
                     for child in values {
-                        visit(child, rest, spec, context);
+                        visit(child, rest, spec, context, defaults);
                     }
                 }
             } else {
-                visit(child, rest, spec, context);
+                visit(child, rest, spec, context, defaults);
             }
         }
         return;
@@ -98,8 +111,13 @@ fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionCo
             .find_map(|key| object.get(*key).cloned())
     });
     if effective.as_ref().is_none_or(Value::is_null) {
-        effective = if spec.applies_when.matches(context)
-            && context.model.get("family").and_then(Value::as_str) != Some("moss_image")
+        effective = if defaults
+            && spec.applies_when.matches(context)
+            && !matches!(
+                context.model.get("family").and_then(Value::as_str),
+                Some("moss_image" | "supra2")
+            )
+            && context.model.get("id").and_then(Value::as_str) != Some("supra2_img")
         {
             match spec.default {
                 DefaultRule::Literal(json) => serde_json::from_str(json).ok(),

@@ -7,7 +7,8 @@ const DEFAULT_MODEL: &str = "z_image_turbo";
 const DEFAULT_COUNT: u32 = 4;
 const DEFAULT_DIMENSION: u32 = 1024;
 const MIN_COUNT: u32 = 1;
-const MAX_COUNT: u32 = 8;
+pub const MAX_COUNT: u32 = 8;
+pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
 const MIN_DIMENSION: u32 = 256;
 const MAX_DIMENSION: u32 = 4096;
 pub fn default_count(model_manifest_entry: &JsonObject) -> Option<u32> {

@@ -1226,6 +1226,8 @@ pub fn video_too_big_error(
     )
 }
 
+pub use sceneworks_options::video_request::normalize_ltx25_generation_controls;
+
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
@@ -5235,5 +5237,3 @@ mod tests {
         assert_eq!(ltx_frame_count(297), 297);
     }
 }
-
-pub use sceneworks_options::video_request::normalize_ltx25_generation_controls;

@@ -4083,6 +4083,500 @@
         "candleVideoLora": false
       }
     },
+    "moss_image_base": {
+      "id": "moss_image_base",
+      "name": "MOSS-Image Base",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_base",
+      "candle": {
+        "measured": false
+      },
+      "capabilities": [
+        "text_to_image"
+      ],
+      "conditionalComponents": [
+        {
+          "componentId": "moss-image-edit",
+          "files": [
+            "adapter_config.json",
+            "adapter_model.safetensors"
+          ],
+          "license": "unspecified",
+          "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",
+          "provider": "huggingface",
+          "repo": "chinoll/Moss-Image-Edit",
+          "requiredFor": [
+            "moss_image_edit"
+          ],
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
+          "weightsSha256": "17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf"
+        }
+      ],
+      "defaults": {
+        "count": 1,
+        "guidanceScale": 3,
+        "resolution": "1024x1024",
+        "schedulerShift": 5,
+        "steps": 50
+      },
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 10164749652,
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-Base",
+          "revision": "1ceede80badddd6a7812069619edaa5633587192"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot",
+          "estimatedSizeBytes": 17055137947,
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1"
+        }
+      ],
+      "gated": false,
+      "image": {
+        "maxPromptBatchImages": 8,
+        "supportsSchedulerShift": true
+      },
+      "license": "Apache-2.0",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/blob/1ceede80badddd6a7812069619edaa5633587192/LICENSE",
+      "limits": {
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "maxDimension": 4096,
+        "maxReferenceAssets": 4,
+        "minDimension": 16,
+        "requiresDimensionsMultipleOf": 16,
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "moss-image"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ]
+      },
+      "mlx": {},
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-Base"
+      },
+      "ui": {
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "label": "MOSS-Image Base",
+        "multiReference": true,
+        "promptGuide": {
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base"
+            }
+          ],
+          "title": "MOSS-Image Prompt Guide"
+        },
+        "recommendedFor": [
+          "text_to_image"
+        ]
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": false,
+        "candleVideoRouted": false,
+        "candleVideoI2v": false,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
+    "moss_image_sft": {
+      "id": "moss_image_sft",
+      "name": "MOSS-Image SFT",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_sft",
+      "candle": {
+        "measured": false
+      },
+      "capabilities": [
+        "text_to_image"
+      ],
+      "conditionalComponents": [
+        {
+          "componentId": "moss-image-edit",
+          "files": [
+            "adapter_config.json",
+            "adapter_model.safetensors"
+          ],
+          "license": "unspecified",
+          "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",
+          "provider": "huggingface",
+          "repo": "chinoll/Moss-Image-Edit",
+          "requiredFor": [
+            "moss_image_edit"
+          ],
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
+          "weightsSha256": "17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf"
+        },
+        {
+          "componentId": "moss-dmd-lora",
+          "estimatedSizeBytes": 1189176800,
+          "files": [
+            "lora.safetensors"
+          ],
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ],
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e"
+        },
+        {
+          "componentId": "moss-dmd-time",
+          "estimatedSizeBytes": 41017896,
+          "files": [
+            "time_embedding.safetensors"
+          ],
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ],
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e"
+        },
+        {
+          "componentId": "moss-dmd-dataspace",
+          "estimatedSizeBytes": 65728,
+          "files": [
+            "dataspace.safetensors"
+          ],
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16",
+            "moss_dmd_full_fp32"
+          ],
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e"
+        },
+        {
+          "componentId": "moss-dmd-transformer",
+          "estimatedSizeBytes": 20329321561,
+          "files": [
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00004-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json"
+          ],
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "requiredFor": [
+            "moss_dmd_full_fp32"
+          ],
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e"
+        }
+      ],
+      "defaults": {
+        "count": 1,
+        "guidanceScale": 3,
+        "resolution": "1024x1024",
+        "schedulerShift": 5,
+        "steps": 50
+      },
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 10164749875,
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot",
+          "estimatedSizeBytes": 17055137947,
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1"
+        }
+      ],
+      "gated": false,
+      "image": {
+        "maxPromptBatchImages": 8,
+        "supportsSchedulerShift": true
+      },
+      "license": "Apache-2.0",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/blob/fc5de0d56fc910cbca6f6625a70f5f582b26deb1/LICENSE",
+      "limits": {
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "maxDimension": 4096,
+        "maxReferenceAssets": 4,
+        "minDimension": 16,
+        "requiresDimensionsMultipleOf": 16,
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "moss-image"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ]
+      },
+      "mlx": {},
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-SFT"
+      },
+      "ui": {
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "label": "MOSS-Image SFT",
+        "multiReference": true,
+        "promptGuide": {
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT"
+            }
+          ],
+          "title": "MOSS-Image Prompt Guide"
+        },
+        "recommendedFor": [
+          "text_to_image"
+        ]
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": false,
+        "candleVideoRouted": false,
+        "candleVideoI2v": false,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
+    "supra2_img": {
+      "id": "supra2_img",
+      "name": "Supra2-IMG",
+      "family": "supra2",
+      "type": "image",
+      "adapter": "mlx_supra2",
+      "candle": {
+        "minMemoryGb": 4,
+        "measured": false,
+        "imageActivationGbPerMegapixel": 0.5
+      },
+      "capabilities": [
+        "text_to_image"
+      ],
+      "defaults": {
+        "count": 1,
+        "guidanceScale": 3.0,
+        "resolution": "256x256",
+        "steps": 50
+      },
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 416651529,
+          "expectedSha256": "e96aa0537e0fd120af82b3a606dd50c90ae079ac7aa97b38a8da4882daeeee48",
+          "expectedSizeBytes": 416651529,
+          "files": [
+            "model_final_ema.pt"
+          ],
+          "footprint": {
+            "diskSizeBytes": 416651529,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "SupraLabs/Supra2-IMG",
+          "revision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 992770529,
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json"
+          ],
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "google/flan-t5-base",
+          "revision": "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "vae",
+          "estimatedSizeBytes": 334643823,
+          "files": [
+            "config.json",
+            "diffusion_pytorch_model.safetensors"
+          ],
+          "license": "MIT",
+          "provider": "huggingface",
+          "repo": "stabilityai/sd-vae-ft-mse",
+          "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493"
+        }
+      ],
+      "gated": false,
+      "image": {
+        "maxPromptTokens": 128,
+        "nativeCountBatch": true,
+        "supportsNegativePrompt": false
+      },
+      "license": "Apache-2.0 AND MIT",
+      "licenseNotice": "Supra2-IMG downloads three upstream components, each under its own licence: the Supra2-IMG denoiser (SupraLabs/Supra2-IMG) is Apache-2.0, the Flan-T5-Base text encoder and tokenizer (google/flan-t5-base) are Apache-2.0, and the SD VAE ft-MSE decoder (stabilityai/sd-vae-ft-mse) is MIT. Each licence is declared in its model card; none of the repositories ships a separate LICENSE file.",
+      "licenseUrl": "https://huggingface.co/SupraLabs/Supra2-IMG/blob/10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b/README.md",
+      "limits": {
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "hardMaxSteps": 100000,
+        "maxDimension": 256,
+        "minDimension": 256,
+        "resolutions": [
+          "256x256"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "macOnly": false,
+      "mlx": {
+        "convertSourceFile": "model_final_ema.pt",
+        "convertSourceRepo": "SupraLabs/Supra2-IMG",
+        "converter": "supra2_img",
+        "requiresConversion": true,
+        "minMemoryGb": 8
+      },
+      "paths": {
+        "model": "${HF_CACHE}/SupraLabs/Supra2-IMG"
+      },
+      "ui": {
+        "description": "SupraLabs Supra2-IMG text-to-image: a small 104M-parameter rectified-flow DiT conditioned on Flan-T5-Base and decoded by SD VAE ft-MSE, rendering 256x256 images. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 50 Euler steps at CFG 3.0 by default. Downloads ~417 MB checkpoint (converted on install) + ~993 MB text encoder + ~335 MB VAE.",
+        "label": "Supra2-IMG",
+        "promptGuide": {
+          "path": "/prompt-guides/supra2-img.md",
+          "sources": [
+            {
+              "label": "Supra2-IMG model card",
+              "url": "https://huggingface.co/SupraLabs/Supra2-IMG"
+            }
+          ],
+          "title": "Supra2-IMG Prompt Guide"
+        },
+        "recommendedFor": [
+          "text_to_image"
+        ]
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": false,
+        "candleVideoRouted": false,
+        "candleVideoI2v": false,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
     "z_image_turbo_lora": {
       "id": "z_image_turbo_lora",
       "name": "Z-Image-Turbo LoRA",
@@ -6701,6 +7195,601 @@
       }
     },
     {
+      "name": "moss_image_base bare published defaults",
+      "kind": "image",
+      "model": "moss_image_base",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_base",
+        "prompt": "tree"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_base",
+          "prompt": "tree",
+          "width": 1024,
+          "height": 1024,
+          "count": 1,
+          "advanced": {
+            "steps": 50,
+            "guidanceScale": 3.0,
+            "schedulerShift": 5.0,
+            "mossImage": {
+              "acceleration": "off",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": [
+                22
+              ],
+              "slg": null,
+              "training_shift": 1.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "moss_image_sft bare published defaults",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "prompt": "tree"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_sft",
+          "prompt": "tree",
+          "width": 1024,
+          "height": 1024,
+          "count": 1,
+          "advanced": {
+            "steps": 50,
+            "guidanceScale": 3.0,
+            "schedulerShift": 5.0,
+            "mossImage": {
+              "acceleration": "off",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": [
+                22
+              ],
+              "slg": null,
+              "training_shift": 1.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "supra2_img bare published defaults",
+      "kind": "image",
+      "model": "supra2_img",
+      "payload": {
+        "projectId": "p",
+        "model": "supra2_img",
+        "prompt": "tree"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "supra2_img",
+          "prompt": "tree",
+          "width": 256,
+          "height": 256,
+          "count": 1,
+          "advanced": {
+            "steps": 50,
+            "guidanceScale": 3.0,
+            "sampler": "euler",
+            "scheduler": "supra2_uniform_flow"
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS SFT DMD defaults",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "prompt": "tree",
+        "advanced": {
+          "mossImage": {
+            "acceleration": "unmerged_bf16"
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_sft",
+          "prompt": "tree",
+          "advanced": {
+            "mossImage": {
+              "acceleration": "unmerged_bf16",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": null,
+              "slg": null,
+              "training_shift": null
+            },
+            "steps": 8,
+            "guidanceScale": 0.0
+          },
+          "width": 1024,
+          "height": 1024,
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "MOSS Base DMD refusal",
+      "kind": "image",
+      "model": "moss_image_base",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_base",
+        "prompt": "tree",
+        "advanced": {
+          "mossImage": {
+            "acceleration": "unmerged_bf16"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "request",
+          "detail": "MOSS-Image: DMD requires the exact SFT parent",
+          "context": {
+            "kind": "image",
+            "model": "moss_image_base",
+            "mode": "text_to_image",
+            "field": "request"
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS flash attention refusal",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "prompt": "tree",
+        "advanced": {
+          "flashAttn": false
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.flashAttn",
+          "detail": "MOSS-Image does not support advanced.flashAttn",
+          "context": {
+            "kind": "image",
+            "model": "moss_image_sft",
+            "mode": "text_to_image",
+            "field": "advanced.flashAttn"
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS edit defaults",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "mode": "edit_image",
+        "prompt": "tree",
+        "referenceAssetIds": [
+          "source"
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_sft",
+          "mode": "edit_image",
+          "prompt": "tree",
+          "referenceAssetIds": [
+            "source"
+          ],
+          "width": 512,
+          "height": 512,
+          "count": 1,
+          "advanced": {
+            "steps": 30,
+            "guidanceScale": 4.0,
+            "schedulerShift": 5.0,
+            "mossImage": {
+              "acceleration": "off",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": [],
+              "slg": null,
+              "training_shift": 1.0
+            },
+            "mossImageEdit": {
+              "reference_max_edge": 512,
+              "use_kv_cache": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS malformed nested options",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "prompt": "tree",
+        "advanced": {
+          "mossImage": {
+            "uncond_skip_layers": "bad"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.mossImage.uncond_skip_layers",
+          "detail": "advanced.mossImage.uncond_skip_layers has an invalid value for Numbers",
+          "context": {
+            "kind": "image",
+            "model": "moss_image_sft",
+            "mode": "text_to_image",
+            "field": "advanced.mossImage.uncond_skip_layers"
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS positive embedding prompt omission",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "mode": "edit_image",
+        "prompt": "",
+        "referenceAssetIds": [
+          "source"
+        ],
+        "advanced": {
+          "mossImageAdvanced": {
+            "positive": {
+              "values": {
+                "assetId": "embedding",
+                "sha256": "00"
+              }
+            }
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_sft",
+          "mode": "edit_image",
+          "prompt": "",
+          "referenceAssetIds": [
+            "source"
+          ],
+          "advanced": {
+            "mossImageAdvanced": {
+              "positive": {
+                "values": {
+                  "assetId": "embedding",
+                  "sha256": "00"
+                }
+              }
+            },
+            "steps": 30,
+            "guidanceScale": 4.0,
+            "schedulerShift": 5.0,
+            "mossImage": {
+              "acceleration": "off",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": [],
+              "slg": null,
+              "training_shift": 1.0
+            },
+            "mossImageEdit": {
+              "reference_max_edge": 512,
+              "use_kv_cache": true
+            }
+          },
+          "width": 512,
+          "height": 512,
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "Supra2 unsupported reference",
+      "kind": "image",
+      "model": "supra2_img",
+      "payload": {
+        "projectId": "p",
+        "model": "supra2_img",
+        "prompt": "tree",
+        "referenceAssetIds": [
+          "source"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "referenceAssetIds",
+          "detail": "supra2_img: `referenceAssetIds` is not supported; Supra2-IMG renders from one text prompt only",
+          "context": {
+            "kind": "image",
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "field": "referenceAssetIds"
+          }
+        }
+      }
+    },
+    {
+      "name": "Supra2 negative guidance allowed",
+      "kind": "image",
+      "model": "supra2_img",
+      "payload": {
+        "projectId": "p",
+        "model": "supra2_img",
+        "prompt": "tree",
+        "advanced": {
+          "guidanceScale": -1
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "supra2_img",
+          "prompt": "tree",
+          "advanced": {
+            "guidanceScale": -1.0,
+            "steps": 50,
+            "sampler": "euler",
+            "scheduler": "supra2_uniform_flow"
+          },
+          "width": 256,
+          "height": 256,
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "Supra2 unsupported negative prompt",
+      "kind": "image",
+      "model": "supra2_img",
+      "payload": {
+        "projectId": "p",
+        "model": "supra2_img",
+        "prompt": "tree",
+        "negativePrompt": "bad"
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "guidance",
+          "detail": "supra2_img: a negative prompt is not supported (guidance steers against the checkpoint's own unconditional embedding); clear it",
+          "context": {
+            "kind": "image",
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "field": "guidance"
+          }
+        }
+      }
+    },
+    {
+      "name": "ImageDetail authored tile repository",
+      "kind": "imageDetail",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "sourceAssetId": "source",
+        "advanced": {
+          "tileControlNetRepo": "example/control"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "flux_dev",
+          "sourceAssetId": "source",
+          "advanced": {
+            "tileControlNetRepo": "example/control"
+          }
+        }
+      }
+    },
+    {
+      "name": "ImageDetail invalid tile repository",
+      "kind": "imageDetail",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "sourceAssetId": "source",
+        "advanced": {
+          "tileControlNetRepo": 42
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.tileControlNetRepo",
+          "detail": "advanced.tileControlNetRepo has an invalid value for Text",
+          "context": {
+            "kind": "imageDetail",
+            "model": "flux_dev",
+            "mode": null,
+            "field": "advanced.tileControlNetRepo"
+          }
+        }
+      }
+    },
+    {
+      "name": "MOSS top-level positive tensor carrier",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "mode": "edit_image",
+        "prompt": "",
+        "referenceAssetIds": [
+          "source"
+        ],
+        "mossImageAdvanced": {
+          "positive": {
+            "values": {
+              "assetId": "embedding",
+              "sha256": "00"
+            }
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "moss_image_sft",
+          "mode": "edit_image",
+          "prompt": "",
+          "referenceAssetIds": [
+            "source"
+          ],
+          "advanced": {
+            "mossImageAdvanced": {
+              "positive": {
+                "values": {
+                  "assetId": "embedding",
+                  "sha256": "00"
+                }
+              }
+            },
+            "steps": 30,
+            "guidanceScale": 4.0,
+            "schedulerShift": 5.0,
+            "mossImage": {
+              "acceleration": "off",
+              "max_sequence_length": 4096,
+              "uncond_skip_layers": [],
+              "slg": null,
+              "training_shift": 1.0
+            },
+            "mossImageEdit": {
+              "reference_max_edge": 512,
+              "use_kv_cache": true
+            }
+          },
+          "width": 512,
+          "height": 512,
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "MOSS duplicate tensor carriers refuse",
+      "kind": "image",
+      "model": "moss_image_sft",
+      "payload": {
+        "projectId": "p",
+        "model": "moss_image_sft",
+        "mode": "edit_image",
+        "prompt": "tree",
+        "referenceAssetIds": [
+          "source"
+        ],
+        "mossImageAdvanced": {},
+        "advanced": {
+          "mossImageAdvanced": {}
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "mossImageAdvanced",
+          "detail": "supply mossImageAdvanced once, not at both request boundaries",
+          "context": {
+            "kind": "image",
+            "model": "moss_image_sft",
+            "mode": "edit_image",
+            "field": "mossImageAdvanced"
+          }
+        }
+      }
+    },
+    {
+      "name": "utility authored tier",
+      "kind": "utility",
+      "model": "",
+      "payload": {
+        "advanced": {
+          "mlxQuantize": "4"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "advanced": {
+            "mlxQuantize": 4
+          }
+        }
+      }
+    },
+    {
+      "name": "utility invalid tier",
+      "kind": "utility",
+      "model": "",
+      "payload": {
+        "advanced": {
+          "mlxQuantize": "bad"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.mlxQuantize",
+          "detail": "advanced.mlxQuantize has an invalid value for Integer",
+          "context": {
+            "kind": "utility",
+            "model": null,
+            "mode": null,
+            "field": "advanced.mlxQuantize"
+          }
+        }
+      }
+    },
+    {
       "name": "vector source",
       "kind": "vector",
       "model": "starvector_1b",
@@ -7072,7 +8161,7 @@
       }
     },
     {
-      "name": "VQA malformed numeric controls",
+      "name": "VQA historical invalid integer fallback",
       "kind": "vqa",
       "model": "sensenova_u1_8b",
       "payload": {
@@ -7083,17 +8172,31 @@
         "maxNewTokens": "bad"
       },
       "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "maxNewTokens",
-          "detail": "must be a finite number or numeric string",
-          "context": {
-            "kind": "vqa",
-            "model": "sensenova_u1_8b",
-            "mode": null,
-            "field": "maxNewTokens"
-          }
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "sourceAssetId": "source",
+          "question": "What?",
+          "maxNewTokens": 256,
+          "projectName": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false
+          },
+          "maxImagePixels": 589824
         }
       }
     },
@@ -7148,7 +8251,7 @@
       }
     },
     {
-      "name": "interleave malformed geometry",
+      "name": "interleave historical invalid geometry fallback",
       "kind": "interleave",
       "model": "sensenova_u1_8b",
       "payload": {
@@ -7158,16 +8261,208 @@
         "width": "bad"
       },
       "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "width",
-          "detail": "must be a finite number or numeric string",
-          "context": {
-            "kind": "interleave",
-            "model": "sensenova_u1_8b",
-            "mode": null,
-            "field": "width"
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "width": 2048,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "height": 1152,
+          "maxImages": 6
+        }
+      }
+    },
+    {
+      "name": "interleave historical integer string fallback 2.5",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "maxImages": "2.5"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "maxImages": 6,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "width": 2048,
+          "height": 1152
+        }
+      }
+    },
+    {
+      "name": "interleave historical integer string fallback 1e100",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "maxImages": "1e100"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "maxImages": 6,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "width": 2048,
+          "height": 1152
+        }
+      }
+    },
+    {
+      "name": "interleave historical integer string fallback bad",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "maxImages": "bad"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "maxImages": 6,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "width": 2048,
+          "height": 1152
+        }
+      }
+    },
+    {
+      "name": "interleave historical geometry strings",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "width": "2.5",
+        "height": "1e100",
+        "maxImages": null
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "width": 2048,
+          "height": 1152,
+          "maxImages": 6,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
           }
         }
       }

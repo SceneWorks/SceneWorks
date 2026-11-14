@@ -29,73 +29,86 @@ pub struct InterleaveControls {
     pub system_message: Option<String>,
 }
 
-/// Validate historical numeric syntax before any tolerant reader can erase an authored value.
-/// The copy is for shape checking only; persisted DTO fields keep the original JSON spelling.
+// Source-backed integer readers historically use their default for any value that cannot
+// become an i64 (including decimal/exponent strings). Keep that choice explicit in the effective
+// copy while preserving the complete authored carrier for history and provenance.
+const VQA_INTEGERS: &[(&str, i64, i64, i64)] = &[
+    ("maxNewTokens", 256, 16, 2048),
+    ("maxImagePixels", 768 * 768, 256 * 256, 2048 * 2048),
+];
+const INTERLEAVE_INTEGERS: &[(&str, i64, i64, i64)] = &[
+    ("width", 2048, 256, 4096),
+    ("height", 1152, 256, 4096),
+    ("maxImages", 6, 1, 10),
+];
+const INTERLEAVE_ADVANCED_INTEGERS: &[(&str, i64, i64, i64)] = &[
+    ("numInferenceSteps", 50, 1, 100),
+    ("maxNewTokens", 2048, 64, 8192),
+    ("maxImages", 6, 1, 10),
+];
+fn legacy_integer(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .map(|number| number as i64)
+        })
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+}
+fn integer(object: &JsonObject, key: &str, specs: &[(&str, i64, i64, i64)]) -> i64 {
+    let (_, default, low, high) = specs
+        .iter()
+        .find(|(name, ..)| *name == key)
+        .expect("declared SenseNova integer");
+    object
+        .get(key)
+        .and_then(legacy_integer)
+        .unwrap_or(*default)
+        .clamp(*low, *high)
+}
+/// Project historical integer fallback before generic shape checks without mutating authored data.
 pub fn canonical_numbers(
     kind: &str,
     authored: &JsonObject,
 ) -> Result<JsonObject, crate::request_validation::ValidationRefusal> {
     let mut result = authored.clone();
-    let fields: &[(&str, bool)] = match kind {
-        "vqa" => &[("maxNewTokens", true), ("maxImagePixels", true)],
-        "interleave" => &[("width", true), ("height", true), ("maxImages", true)],
+    let specs = match kind {
+        "vqa" => VQA_INTEGERS,
+        "interleave" => INTERLEAVE_INTEGERS,
         _ => return Ok(result),
     };
-    fn lower(
-        object: &mut JsonObject,
-        key: &str,
-        integer: bool,
-        prefix: &str,
-    ) -> Result<(), crate::request_validation::ValidationRefusal> {
-        if let Some(value) = object.get(key) {
-            let number = crate::effective_values::legacy_number(value).ok_or_else(|| {
-                crate::request_validation::ValidationRefusal::new(
-                    format!("{prefix}{key}"),
-                    "must be a finite number or numeric string",
-                )
-            })?;
-            object.insert(
-                key.into(),
-                if integer {
-                    json!(number as i64)
-                } else {
-                    json!(number)
-                },
-            );
+    for (key, ..) in specs {
+        if authored.contains_key(*key) {
+            result.insert((*key).into(), json!(integer(authored, key, specs)));
         }
-        Ok(())
-    }
-    for (key, integer) in fields {
-        lower(&mut result, key, *integer, "")?;
     }
     if kind == "interleave" {
         if let Some(advanced) = result.get_mut("advanced").and_then(Value::as_object_mut) {
-            for key in ["numInferenceSteps", "maxNewTokens", "maxImages"] {
-                lower(advanced, key, true, "advanced.")?;
+            for (key, ..) in INTERLEAVE_ADVANCED_INTEGERS {
+                if advanced.contains_key(*key) {
+                    advanced.insert(
+                        (*key).into(),
+                        json!(integer(advanced, key, INTERLEAVE_ADVANCED_INTEGERS)),
+                    );
+                }
             }
             for key in ["guidanceScale", "imageGuidanceScale", "timestepShift"] {
-                lower(advanced, key, false, "advanced.")?;
+                if let Some(value) = advanced.get(key) {
+                    let number =
+                        crate::effective_values::legacy_number(value).ok_or_else(|| {
+                            crate::request_validation::ValidationRefusal::new(
+                                format!("advanced.{key}"),
+                                "must be a finite number or numeric string",
+                            )
+                        })?;
+                    advanced.insert(key.into(), json!(number));
+                }
             }
         }
     }
     Ok(result)
-}
-
-/// Match the worker's numeric input order: integer, float cast to integer, then trimmed integer
-/// string. Invalid input uses the caller's default before clamping.
-fn safe_int(object: &JsonObject, key: &str, default: i64, low: i64, high: i64) -> i64 {
-    object
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|float| float as i64))
-                .or_else(|| {
-                    crate::effective_values::legacy_number(value).map(|number| number as i64)
-                })
-        })
-        .unwrap_or(default)
-        .clamp(low, high)
 }
 
 fn advanced_float(advanced: &JsonObject, key: &str, default: f64) -> f64 {
@@ -111,14 +124,8 @@ fn advanced_float(advanced: &JsonObject, key: &str, default: f64) -> f64 {
 
 pub fn resolve_vqa(authored: &JsonObject) -> VqaControls {
     VqaControls {
-        max_new_tokens: safe_int(authored, "maxNewTokens", 256, 16, 2048),
-        max_image_pixels: safe_int(
-            authored,
-            "maxImagePixels",
-            768 * 768,
-            256 * 256,
-            2048 * 2048,
-        ),
+        max_new_tokens: integer(authored, "maxNewTokens", VQA_INTEGERS),
+        max_image_pixels: integer(authored, "maxImagePixels", VQA_INTEGERS),
     }
 }
 
@@ -129,19 +136,19 @@ pub fn resolve_interleave(authored: &JsonObject) -> InterleaveControls {
         .and_then(Value::as_object)
         .unwrap_or(&empty);
     InterleaveControls {
-        width: safe_int(authored, "width", 2048, 256, 4096),
-        height: safe_int(authored, "height", 1152, 256, 4096),
-        steps: safe_int(advanced, "numInferenceSteps", 50, 1, 100),
+        width: integer(authored, "width", INTERLEAVE_INTEGERS),
+        height: integer(authored, "height", INTERLEAVE_INTEGERS),
+        steps: integer(advanced, "numInferenceSteps", INTERLEAVE_ADVANCED_INTEGERS),
         guidance_scale: advanced_float(advanced, "guidanceScale", 4.0),
         image_guidance_scale: advanced_float(advanced, "imageGuidanceScale", 1.0),
         // SenseNova reads this spelling directly. `schedulerShift` is a different generic image
         // option and must not override it when both are present.
         timestep_shift: advanced_float(advanced, "timestepShift", 3.0),
-        max_new_tokens: safe_int(advanced, "maxNewTokens", 2048, 64, 8192),
+        max_new_tokens: integer(advanced, "maxNewTokens", INTERLEAVE_ADVANCED_INTEGERS),
         max_images: if advanced.contains_key("maxImages") {
-            safe_int(advanced, "maxImages", 6, 1, 10)
+            integer(advanced, "maxImages", INTERLEAVE_ADVANCED_INTEGERS)
         } else {
-            safe_int(authored, "maxImages", 6, 1, 10)
+            integer(authored, "maxImages", INTERLEAVE_INTEGERS)
         },
         think_mode: advanced
             .get("thinkMode")

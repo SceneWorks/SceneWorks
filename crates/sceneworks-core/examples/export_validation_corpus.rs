@@ -14,6 +14,9 @@ fn main() {
         ("sensenova_u1_8b", "text_to_image"),
         ("scail2_14b", "animate_character"),
         ("svd", "image_to_video"),
+        ("moss_image_base", "text_to_image"),
+        ("moss_image_sft", "text_to_image"),
+        ("supra2_img", "text_to_image"),
     ] {
         models.insert(
             model.into(),
@@ -167,6 +170,82 @@ fn main() {
         "video",
         json!({"projectId":"p","model":"scail2_14b","mode":"animate_character","prompt":"tree","sourceClipAssetId":"clip","referenceAssetIds":["person1","person2"]}),
     );
+    for model in ["moss_image_base", "moss_image_sft", "supra2_img"] {
+        add(
+            &format!("{model} bare published defaults"),
+            "image",
+            json!({"projectId":"p","model":model,"prompt":"tree"}),
+        );
+    }
+    for (name, payload) in [
+        (
+            "MOSS SFT DMD defaults",
+            json!({"projectId":"p","model":"moss_image_sft","prompt":"tree","advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+        ),
+        (
+            "MOSS Base DMD refusal",
+            json!({"projectId":"p","model":"moss_image_base","prompt":"tree","advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+        ),
+        (
+            "MOSS flash attention refusal",
+            json!({"projectId":"p","model":"moss_image_sft","prompt":"tree","advanced":{"flashAttn":false}}),
+        ),
+        (
+            "MOSS edit defaults",
+            json!({"projectId":"p","model":"moss_image_sft","mode":"edit_image","prompt":"tree","referenceAssetIds":["source"]}),
+        ),
+        (
+            "MOSS malformed nested options",
+            json!({"projectId":"p","model":"moss_image_sft","prompt":"tree","advanced":{"mossImage":{"uncond_skip_layers":"bad"}}}),
+        ),
+        (
+            "MOSS positive embedding prompt omission",
+            json!({"projectId":"p","model":"moss_image_sft","mode":"edit_image","prompt":"","referenceAssetIds":["source"],"advanced":{"mossImageAdvanced":{"positive":{"values":{"assetId":"embedding","sha256":"00"}}}}}),
+        ),
+        (
+            "Supra2 unsupported reference",
+            json!({"projectId":"p","model":"supra2_img","prompt":"tree","referenceAssetIds":["source"]}),
+        ),
+        (
+            "Supra2 negative guidance allowed",
+            json!({"projectId":"p","model":"supra2_img","prompt":"tree","advanced":{"guidanceScale":-1}}),
+        ),
+        (
+            "Supra2 unsupported negative prompt",
+            json!({"projectId":"p","model":"supra2_img","prompt":"tree","negativePrompt":"bad"}),
+        ),
+    ] {
+        add(name, "image", payload);
+    }
+    for (name, value) in [
+        (
+            "ImageDetail authored tile repository",
+            json!("example/control"),
+        ),
+        ("ImageDetail invalid tile repository", json!(42)),
+    ] {
+        add(
+            name,
+            "imageDetail",
+            json!({"projectId":"p","model":"flux_dev","sourceAssetId":"source","advanced":{"tileControlNetRepo":value}}),
+        );
+    }
+    add(
+        "MOSS top-level positive tensor carrier",
+        "image",
+        json!({"projectId":"p","model":"moss_image_sft","mode":"edit_image","prompt":"","referenceAssetIds":["source"],"mossImageAdvanced":{"positive":{"values":{"assetId":"embedding","sha256":"00"}}}}),
+    );
+    add(
+        "MOSS duplicate tensor carriers refuse",
+        "image",
+        json!({"projectId":"p","model":"moss_image_sft","mode":"edit_image","prompt":"tree","referenceAssetIds":["source"],"mossImageAdvanced":{},"advanced":{"mossImageAdvanced":{}}}),
+    );
+    for (name, value) in [
+        ("utility authored tier", json!("4")),
+        ("utility invalid tier", json!("bad")),
+    ] {
+        add(name, "utility", json!({"advanced":{"mlxQuantize":value}}));
+    }
     add("vector source", "vector", vector.clone());
     for (key, value) in [
         ("prompt", json!("unsupported guidance")),
@@ -214,7 +293,7 @@ fn main() {
             json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"4096","maxImagePixels":2.5}),
         ),
         (
-            "VQA malformed numeric controls",
+            "VQA historical invalid integer fallback",
             "vqa",
             json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"bad"}),
         ),
@@ -224,13 +303,25 @@ fn main() {
             json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"9999","height":12.9,"advanced":{"timestepShift":1.5,"schedulerShift":9,"maxNewTokens":"9000","numInferenceSteps":0}}),
         ),
         (
-            "interleave malformed geometry",
+            "interleave historical invalid geometry fallback",
             "interleave",
             json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"bad"}),
         ),
     ] {
         add(name, kind, payload);
     }
+    for spelling in ["2.5", "1e100", "bad"] {
+        add(
+            &format!("interleave historical integer string fallback {spelling}"),
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","maxImages":spelling}),
+        );
+    }
+    add(
+        "interleave historical geometry strings",
+        "interleave",
+        json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"2.5","height":"1e100","maxImages":null}),
+    );
     add(
         "video upscale",
         "videoUpscale",

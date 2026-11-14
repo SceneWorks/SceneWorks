@@ -394,6 +394,26 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             && (self.file.contains("/training/") || self.file.contains("/training_validation/"))
         {
             self.strings(&item.expr)
+        } else if self.file == "crates/sceneworks-options/src/sensenova_validation.rs"
+            && item.ident == "INTERLEAVE_ADVANCED_INTEGERS"
+        {
+            if let Expr::Array(array) = unwrapped(&item.expr) {
+                Some(
+                    array
+                        .elems
+                        .iter()
+                        .flat_map(|entry| {
+                            let Expr::Tuple(tuple) = unwrapped(entry) else {
+                                panic!("SenseNova integer declaration must be a tuple")
+                            };
+                            self.strings(&tuple.elems[0])
+                                .expect("finite SenseNova integer key")
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
         } else if item.ident == "IRIS_MICRO_STEP_FIELDS" {
             // The boolean separates top-level config fields from advanced-bag keys.
             if let Expr::Array(array) = unwrapped(&item.expr) {
@@ -427,7 +447,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 self.coverage.reads.insert(Read {
                     file: self.file.into(),
                     function: item.ident.to_string(),
-                    location: "training.config.advanced",
+                    location: if self.file
+                        == "crates/sceneworks-options/src/sensenova_validation.rs"
+                    {
+                        "advanced"
+                    } else {
+                        "training.config.advanced"
+                    },
                     key,
                 });
             }
@@ -986,6 +1012,7 @@ fn common_constant_names_and_training_context_stay_scoped() {
 // This is intentionally not a blanket exemption for a training module or function.
 fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'static str> {
     match (file, function, expression) {
+        ("crates/sceneworks-options/src/sensenova_validation.rs","canonical_numbers","computed expression") => Some("integer carrier normalization iterates only INTERLEAVE_ADVANCED_INTEGERS; its tuple keys are structurally checked"),
         ("crates/sceneworks-options/src/training_validation.rs", "inverted_window_message", "max_key") =>
             Some("diagnostic-only max key supplied by technique parsers; their finite TECHNIQUE_KEYS are checked"),
         ("crates/sceneworks-options/src/training_validation/body_losses.rs", "schedule", "every_key" | "min_key" | "max_key" | "loss.weight_key(...)") =>
@@ -1568,4 +1595,13 @@ fn timeline_context_reads_require_nested_declarations() {
             1
         );
     }
+}
+
+#[test]
+fn sensenova_integer_tables_cannot_hide_an_unregistered_control() {
+    let source = "crates/sceneworks-options/src/sensenova_validation.rs";
+    let valid=scan(&[(source.into(),syn::parse_file(r#"const INTERLEAVE_ADVANCED_INTEGERS: &[(&str,i64,i64,i64)] = &[("maxImages",6,1,10)];"#).unwrap())]);
+    assert!(missing(&valid).is_empty());
+    let invalid=scan(&[(source.into(),syn::parse_file(r#"const INTERLEAVE_ADVANCED_INTEGERS: &[(&str,i64,i64,i64)] = &[("__unknown_integer_option__",6,1,10)];"#).unwrap())]);
+    assert_eq!(missing(&invalid).len(), 1);
 }
