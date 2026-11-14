@@ -1,4 +1,4 @@
-// Pure browser measurements only. Each cold sample gets a fresh Chromium context, loads
+// Pure browser measurements only. Each cold sample gets a fresh Chromium process, loads
 // the deployed JS/WASM through the requested origin, and calls the real Rust export once.
 // Usage: node scripts/measure-options-validator.mjs --origin https://HOST --profile runpod
 import { readFileSync } from "node:fs";
@@ -44,15 +44,16 @@ if (!moduleUrl) {
   moduleUrl = new URL(`/${candidates[0].fileName}`, origin).href;
 }
 
-const browser = await chromium.launch({
-  headless: true,
-  ...(process.env.PLAYWRIGHT_CHROME ? { executablePath: process.env.PLAYWRIGHT_CHROME } : {}),
-});
-const browserVersion = browser.version();
+let browserVersion;
 const cold = [];
 let pure = [];
-try {
-  for (let index = 0; index < samples; index += 1) {
+for (let index = 0; index < samples; index += 1) {
+  const browser = await chromium.launch({
+    headless: true,
+    ...(process.env.PLAYWRIGHT_CHROME ? { executablePath: process.env.PLAYWRIGHT_CHROME } : {}),
+  });
+  browserVersion ??= browser.version();
+  try {
     const context = await browser.newContext({ serviceWorkers: "block" });
     try {
       const page = await context.newPage();
@@ -88,9 +89,9 @@ try {
     } finally {
       await context.close();
     }
+  } finally {
+    await browser.close();
   }
-} finally {
-  await browser.close();
 }
 
 function p95(values) {
@@ -101,7 +102,7 @@ const coldP95 = p95(cold);
 const pureP95 = p95(pure);
 const coldBudgetMs = args.profile === "desktop" ? 250 : 1000;
 const result = { origin, moduleUrl, profile: args.profile, browser: `Chromium ${browserVersion}`,
-  platform: process.platform, cache: "fresh context per cold sample", coldSamples: samples,
+  platform: process.platform, cache: "fresh browser process per cold sample", coldSamples: samples,
   coldFetchCompileFirstP95Ms: coldP95, coldMinMs: Math.min(...cold), coldMaxMs: Math.max(...cold), coldBudgetMs,
   pureSamples: pure.length, pureValidationP95Ms: pureP95, pureBudgetMs: 16,
   coldWithinBudget: coldP95 <= coldBudgetMs, pureWithinBudget: pureP95 <= 16 };
