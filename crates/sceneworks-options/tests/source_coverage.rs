@@ -1449,6 +1449,13 @@ fn production_execution_has_no_raw_advanced_reads() {
                 )
             )
     };
+    // Creation/replay upgrades validate and stamp this authored field before persistence. The
+    // film controller and worker consume the stamped value through typed projections later.
+    let resize_mode_authoring_stamp = |file: &str, function: &str, expression: &str| {
+        file == "crates/sceneworks-core/src/video_request.rs"
+            && function == "stamp_reference_image_resize_mode"
+            && expression == "delegated advanced lookup: requested_reference_image_resize_mode"
+    };
     // Workflow share and gallery rendering read the persisted authored envelope. These exact
     // fields never feed a provider or route decision; replay construction resolves the share
     // anew before execution.
@@ -1535,7 +1542,10 @@ fn production_execution_has_no_raw_advanced_reads() {
     let whole_map = coverage
         .whole_map_reads
         .iter()
-        .filter(|(file, function, expression)| !authored_receipt_clone(file, function, expression))
+        .filter(|(file, function, expression)| {
+            !authored_receipt_clone(file, function, expression)
+                && !resize_mode_authoring_stamp(file, function, expression)
+        })
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let nested = coverage
         .nested_reads

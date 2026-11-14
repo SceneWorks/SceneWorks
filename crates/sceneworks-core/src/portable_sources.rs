@@ -387,22 +387,8 @@ pub fn pid_backbone_for(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Strict-control depth needs the estimator only for automatic preprocessing:
-/// a job that already carries a user control map (`advanced.controlImage`)
-/// bypasses it, mirroring the worker loader predicate.
-pub fn strict_control_requires_depth_estimator(advanced: Option<&Value>) -> bool {
-    let Some(Value::Object(advanced)) = advanced else {
-        return false;
-    };
-    let payload = JsonObject::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
-    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
-    matches!(facts.control_mode, crate::resolved_options::RouteField::Valid(mode) if mode == "depth")
-        && match facts.control_image {
-            crate::resolved_options::RouteField::Valid(id) => id.trim().is_empty(),
-            _ => true,
-        }
-}
-
+/// Strict-control depth needs the estimator only for automatic preprocessing: a supplied user
+/// control map bypasses it, matching the worker loader predicate.
 pub fn strict_control_requires_depth_estimator_resolved(options: &AuxOptionSelection) -> bool {
     options.control_mode.as_deref() == Some("depth")
         && options
