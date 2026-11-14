@@ -459,6 +459,7 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
+                    request,
                     project_path,
                     backend,
                     asset_writes,

@@ -182,6 +182,7 @@ pub(super) async fn generate_sensenova_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -247,6 +248,7 @@ pub(super) async fn generate_sensenova_edit_stream(
         score_likeness,
     } = plan_edit_batch(
         request,
+        execution,
         &grouping,
         sensenova_edit_raw_settings(
             request,

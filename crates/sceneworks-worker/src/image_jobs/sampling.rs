@@ -456,6 +456,7 @@ pub(crate) fn emit_sampling_knob_unsupported(
 /// numeric string. Shared by the MLX (`generate_stream`) + candle (`generate_candle_stream`) image lanes
 /// — the result is then realvisxl-forced (the lightning checkpoint) and N3-guarded via
 /// [`normalize_sampling_knob`]. Returns `(sampler, scheduler, scheduler_shift)`.
+#[cfg(test)]
 pub(crate) fn read_advanced_sampling_knobs(
     advanced: &JsonObject,
 ) -> (Option<String>, Option<String>, Option<f32>) {
@@ -484,6 +485,7 @@ pub(crate) fn read_advanced_sampling_knobs(
 /// knobs. Strips the `"default"` sentinel + blanks to `None` so the engine default (the N1 no-op) is
 /// the ABSENCE of a method. The result is then N3-guarded via [`normalize_sampling_knob`] against the
 /// model descriptor's `supported_guidance_methods` and threaded onto `GenerationRequest.guidance_method`.
+#[cfg(test)]
 pub(crate) fn read_advanced_guidance_method(advanced: &JsonObject) -> Option<String> {
     advanced
         .get("guidanceMethod")
