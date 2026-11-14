@@ -114,6 +114,8 @@ struct Coverage {
     reads: BTreeSet<Read>,
     dynamic: BTreeSet<(String, String, String)>,
     delegated: BTreeSet<(String, String, String)>,
+    whole_map_reads: BTreeSet<(String, String, String)>,
+    mutations: BTreeSet<(String, String, String)>,
     domains: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -525,13 +527,30 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !production(&expr.attrs) {
             return;
         }
-        if matches!(
-            expr.method.to_string().as_str(),
-            "get" | "get_mut" | "contains_key"
-        ) && self.map(&expr.receiver)
-        {
-            if let Some(key) = expr.args.first() {
-                self.read(key);
+        if self.map(&expr.receiver) {
+            match expr.method.to_string().as_str() {
+                "get" | "get_mut" | "get_key_value" | "contains_key" => {
+                    if let Some(key) = expr.args.first() {
+                        self.read(key);
+                    }
+                }
+                "remove" | "entry" => {
+                    if let Some(key) = expr.args.first() {
+                        self.coverage.mutations.insert((
+                            self.file.into(),
+                            self.function.clone(),
+                            describe(key),
+                        ));
+                    }
+                }
+                "iter" | "iter_mut" | "keys" | "values" | "values_mut" | "into_iter" => {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!("whole advanced map: {}", expr.method),
+                    ));
+                }
+                _ => {}
             }
         }
         if let Some(Expr::Closure(closure)) = expr.args.first() {
@@ -1030,6 +1049,71 @@ fn production_advanced_reads_resolve_to_option_specs() {
     }
     assert!(unresolved.is_empty(), "Dynamic reads require structural coverage or a documented narrow exception:\n{unresolved:#?}");
     assert!(!coverage.reads.is_empty());
+}
+
+#[test]
+#[ignore = "temporary SW-7038 inventory"]
+fn print_production_binding_inventory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    let mut by_file = BTreeMap::<&str, usize>::new();
+    for read in &coverage.reads {
+        *by_file.entry(&read.file).or_default() += 1;
+    }
+    eprintln!("TOTAL production advanced reads: {}", coverage.reads.len());
+    eprintln!("Whole-map reads: {}", coverage.whole_map_reads.len());
+    eprintln!("Raw-map mutations: {}", coverage.mutations.len());
+    for (file, count) in by_file {
+        eprintln!("{count:>3} {file}");
+    }
+}
+
+// SW-7038 migration gate. Keep this explicit zero assertion next to the live inventory
+// while family execution paths are converted. Only authored persistence and the historical
+// upgrader may be excluded when those exact source sites are identified and reviewed.
+// No path, directory, option family, or dynamic-accessor blanket exemption is permitted.
+#[test]
+#[ignore = "SW-7038 production binding migration in progress"]
+fn production_execution_has_no_raw_advanced_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    let direct = coverage.reads.iter().map(|read| {
+        format!(
+            "{}::{} {}.{}",
+            read.file, read.function, read.location, read.key
+        )
+    });
+    let dynamic = coverage
+        .dynamic
+        .iter()
+        .map(|(file, function, expr)| format!("{file}::{function} dynamic {expr}"));
+    let delegated = coverage
+        .delegated
+        .iter()
+        .map(|(file, function, expr)| format!("{file}::{function} delegated {expr}"));
+    let whole_map = coverage
+        .whole_map_reads
+        .iter()
+        .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
+    let remaining: Vec<_> = direct
+        .chain(dynamic)
+        .chain(delegated)
+        .chain(whole_map)
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "Production execution still reads raw advanced options ({} sites):\n{}",
+        remaining.len(),
+        remaining.join("\n")
+    );
 }
 
 // A small lexical guard keeps Rust-only CI independent of Node/npm. It recognizes
