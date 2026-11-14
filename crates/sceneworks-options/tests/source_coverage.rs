@@ -98,6 +98,7 @@ fn ident(pat: &Pat) -> Option<String> {
 #[derive(Default, Clone)]
 struct Bindings {
     maps: BTreeSet<String>,
+    descendants: BTreeSet<String>,
     strings: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -115,6 +116,7 @@ struct Coverage {
     dynamic: BTreeSet<(String, String, String)>,
     delegated: BTreeSet<(String, String, String)>,
     whole_map_reads: BTreeSet<(String, String, String)>,
+    nested_reads: BTreeSet<(String, String, String)>,
     mutations: BTreeSet<(String, String, String)>,
     domains: BTreeMap<String, BTreeSet<String>>,
 }
@@ -230,6 +232,44 @@ impl Scanner<'_> {
                                 | "clone"
                         ))
                         && self.map(&it.receiver)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// A JSON value reached by reading a child of `advanced`. Follow only source-visible
+    /// aliases and simple wrappers; typed domain structs are deliberately not aliases here.
+    fn descendant(&self, expr: &Expr) -> bool {
+        match unwrapped(expr) {
+            Expr::Path(_) => {
+                name(expr).is_some_and(|name| self.bindings.descendants.contains(&name))
+            }
+            Expr::Index(it) => self.map(&it.expr) || self.descendant(&it.expr),
+            Expr::MethodCall(it) => {
+                let method = it.method.to_string();
+                if matches!(method.as_str(), "get" | "get_mut") {
+                    self.map(&it.receiver) || self.descendant(&it.receiver)
+                } else {
+                    matches!(
+                        method.as_str(),
+                        "as_object"
+                            | "as_object_mut"
+                            | "as_array"
+                            | "as_array_mut"
+                            | "as_ref"
+                            | "as_mut"
+                            | "unwrap"
+                            | "expect"
+                            | "cloned"
+                            | "clone"
+                            | "iter"
+                            | "iter_mut"
+                            | "into_iter"
+                            | "filter"
+                            | "map"
+                            | "and_then"
+                    ) && self.descendant(&it.receiver)
                 }
             }
             _ => false,
@@ -519,14 +559,19 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
             if let Some(key) = ident(&local.pat) {
                 let is_map = self.map(&init.expr);
+                let is_descendant = self.descendant(&init.expr);
                 let strings = self.strings(&init.expr);
                 self.bindings.maps.remove(&key);
+                self.bindings.descendants.remove(&key);
                 self.bindings.strings.remove(&key);
                 if let Some(strings) = strings {
                     self.bindings.strings.insert(key.clone(), strings);
                 }
                 if is_map {
-                    self.bindings.maps.insert(key);
+                    self.bindings.maps.insert(key.clone());
+                }
+                if is_descendant {
+                    self.bindings.descendants.insert(key);
                 }
             }
             self.bind_strings(&local.pat, &[&init.expr]);
@@ -539,6 +584,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
         self.visit_expr(&expr.expr);
         let old = self.bindings.clone();
+        if self.descendant(&expr.expr) {
+            if let Some(key) = ident(&expr.pat) {
+                self.bindings.descendants.insert(key);
+            }
+        }
         if let Expr::Array(array) = unwrapped(&expr.expr) {
             self.bind_strings(&expr.pat, &array.elems.iter().collect::<Vec<_>>());
         } else {
@@ -603,13 +653,29 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 _ => {}
             }
         }
+        if self.descendant(&expr.receiver)
+            && matches!(
+                expr.method.to_string().as_str(),
+                "get" | "get_mut" | "contains_key" | "iter" | "iter_mut" | "values" | "keys"
+            )
+        {
+            self.coverage.nested_reads.insert((
+                self.file.into(),
+                self.function.clone(),
+                format!("nested advanced JSON: {}", expr.method),
+            ));
+        }
         if let Some(Expr::Closure(closure)) = expr.args.first() {
             if matches!(expr.method.to_string().as_str(), "and_then" | "map")
-                && self.map(&expr.receiver)
+                && (self.map(&expr.receiver) || self.descendant(&expr.receiver))
             {
                 let old = self.bindings.clone();
                 if let Some(key) = closure.inputs.first().and_then(ident) {
-                    self.bindings.maps.insert(key);
+                    if self.map(&expr.receiver) {
+                        self.bindings.maps.insert(key);
+                    } else {
+                        self.bindings.descendants.insert(key);
+                    }
                 }
                 visit::visit_expr_method_call(self, expr);
                 self.bindings = old;
@@ -640,6 +706,12 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if !self.writing && self.map(&expr.expr) {
             self.read(&expr.index);
+        } else if !self.writing && self.descendant(&expr.expr) {
+            self.coverage.nested_reads.insert((
+                self.file.into(),
+                self.function.clone(),
+                "nested advanced JSON: index".into(),
+            ));
         }
         visit::visit_expr_index(self, expr);
     }
@@ -1036,6 +1108,25 @@ fn advanced_index_writes_are_not_execution_reads() {
 }
 
 #[test]
+fn nested_advanced_json_remains_visible_after_aliasing() {
+    let coverage = fixture(
+        r#"fn production() {
+            let poses = request.advanced.get("poses").and_then(Value::as_array).unwrap();
+            for pose in poses.iter() { pose.get("keypoints"); }
+            let phases = request.advanced["phases"].as_array().unwrap();
+            phases[0].get("steps");
+        }"#,
+    );
+    assert!(coverage.reads.iter().any(|read| read.key == "poses"));
+    assert!(coverage.reads.iter().any(|read| read.key == "phases"));
+    assert!(
+        coverage.nested_reads.len() >= 2,
+        "{:?}",
+        coverage.nested_reads
+    );
+}
+
+#[test]
 fn adding_an_unregistered_key_to_a_dynamic_domain_fails_coverage() {
     let path = "crates/sceneworks-core/src/training/body_losses.rs";
     let valid = scan(&[(
@@ -1187,6 +1278,13 @@ fn print_production_binding_inventory() {
     eprintln!("Unresolved dynamic reads: {}", coverage.dynamic.len());
     eprintln!("Delegated dynamic reads: {}", coverage.delegated.len());
     eprintln!("Whole-map reads: {}", coverage.whole_map_reads.len());
+    eprintln!(
+        "Nested structured JSON reads: {}",
+        coverage.nested_reads.len()
+    );
+    for site in &coverage.nested_reads {
+        eprintln!("nested read: {site:?}");
+    }
     for site in &coverage.whole_map_reads {
         eprintln!("whole-map read: {site:?}");
     }
@@ -1235,6 +1333,10 @@ fn production_execution_has_no_raw_advanced_reads() {
         .whole_map_reads
         .iter()
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
+    let nested = coverage
+        .nested_reads
+        .iter()
+        .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let mutations = coverage
         .mutations
         .iter()
@@ -1243,6 +1345,7 @@ fn production_execution_has_no_raw_advanced_reads() {
         .chain(dynamic)
         .chain(delegated)
         .chain(whole_map)
+        .chain(nested)
         .chain(mutations)
         .collect();
     assert!(
