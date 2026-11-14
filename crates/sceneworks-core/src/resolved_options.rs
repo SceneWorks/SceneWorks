@@ -652,6 +652,35 @@ pub struct TrainingExecutionOptions {
     pub model_options_wire: ValidatedModelOptionsWire,
 }
 
+#[derive(Debug)]
+pub enum TrainingExecutionError {
+    Validation(crate::request_validation::ValidationRefusal),
+    Technique(crate::training::TrainingPlanError),
+    Binding(String),
+}
+
+impl std::fmt::Display for TrainingExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(error) => error.fmt(formatter),
+            Self::Technique(error) => error.fmt(formatter),
+            Self::Binding(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<crate::request_validation::ValidationRefusal> for TrainingExecutionError {
+    fn from(error: crate::request_validation::ValidationRefusal) -> Self {
+        Self::Validation(error)
+    }
+}
+
+impl From<crate::training::TrainingPlanError> for TrainingExecutionError {
+    fn from(error: crate::training::TrainingPlanError) -> Self {
+        Self::Technique(error)
+    }
+}
+
 impl TrainingExecutionOptions {
     pub fn bind(
         authored: &JsonObject,
@@ -662,12 +691,6 @@ impl TrainingExecutionOptions {
             .get("plan")
             .and_then(Value::as_object)
             .unwrap_or(effective);
-        let advanced = carrier
-            .get("config")
-            .and_then(Value::as_object)
-            .and_then(|config| config.get("advanced"))
-            .and_then(Value::as_object)
-            .ok_or_else(|| "resolved training request has no config.advanced object".to_owned())?;
         let target = carrier.get("target").and_then(Value::as_object);
         let kernel = target
             .and_then(|target| target.get("kernel"))
@@ -677,8 +700,41 @@ impl TrainingExecutionOptions {
             .and_then(|target| target.get("baseModel"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let common = crate::training::resolve_advanced_for_model(advanced, kernel, base_model)
-            .map_err(|error| error.to_string())?;
+        Self::bind_with_model(authored, resolved, kernel, base_model)
+            .map_err(|error| error.to_string())
+    }
+
+    /// API submissions carry the catalog target as resolver facts, outside the authored payload.
+    pub fn bind_for_target(
+        authored: &JsonObject,
+        resolved: &crate::request_validation::ResolvedRequest,
+        target: &crate::training::TrainingTarget,
+    ) -> Result<Self, TrainingExecutionError> {
+        Self::bind_with_model(authored, resolved, &target.kernel, &target.base_model)
+    }
+
+    fn bind_with_model(
+        authored: &JsonObject,
+        resolved: &crate::request_validation::ResolvedRequest,
+        kernel: &str,
+        base_model: &str,
+    ) -> Result<Self, TrainingExecutionError> {
+        let effective = resolved.as_payload();
+        let carrier = effective
+            .get("plan")
+            .and_then(Value::as_object)
+            .unwrap_or(effective);
+        let advanced = carrier
+            .get("config")
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("advanced"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                TrainingExecutionError::Binding(
+                    "resolved training request has no config.advanced object".to_owned(),
+                )
+            })?;
+        let common = crate::training::resolve_advanced_for_model(advanced, kernel, base_model)?;
         Self::from_effective(authored, effective, advanced, kernel, common)
     }
 
@@ -714,6 +770,7 @@ impl TrainingExecutionOptions {
             .as_object()
             .expect("constructed training advanced object");
         Self::from_effective(&authored, &effective, advanced, kernel, common)
+            .map_err(|error| error.to_string())
     }
 
     fn from_effective(
@@ -722,14 +779,11 @@ impl TrainingExecutionOptions {
         advanced: &JsonObject,
         kernel: &str,
         common: crate::training::ResolvedTrainingAdvanced,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TrainingExecutionError> {
         let iris = IrisTrainingOptions::bind(&BindingInput::new(authored, effective))
-            .map_err(|error| error.to_string())?;
-        let technique_error = |error: crate::training::TrainingPlanError| error.to_string();
-        let subject_mask_loss_weights =
-            crate::training::subject_mask_loss_weights(advanced).map_err(technique_error)?;
-        let body_losses =
-            crate::training::body_losses::body_loss_settings(advanced).map_err(technique_error)?;
+            .map_err(|error| TrainingExecutionError::Binding(error.to_string()))?;
+        let subject_mask_loss_weights = crate::training::subject_mask_loss_weights(advanced)?;
+        let body_losses = crate::training::body_losses::body_loss_settings(advanced)?;
         let subject_mask_consumer = crate::training::subject_mask_consumer_resolved(
             subject_mask_loss_weights,
             &body_losses,
@@ -739,33 +793,39 @@ impl TrainingExecutionOptions {
             iris,
             ltx_workflow: BindingInput::new(authored, effective)
                 .text("training.config.advanced", "ltxWorkflow")
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| TrainingExecutionError::Binding(error.to_string()))?,
             subject_mask_loss_weights,
             subject_mask_consumer,
             depth_anchoring: crate::training::depth_anchoring::depth_anchoring_settings(advanced)
-                .map_err(technique_error)?,
+                .map_err(TrainingExecutionError::from)?,
             body_losses,
             vae_anchor: crate::training::latent_perceptual::latent_loss_settings(
                 &crate::training::latent_perceptual::VAE_ANCHOR,
                 advanced,
             )
-            .map_err(technique_error)?,
+            .map_err(TrainingExecutionError::from)?,
             latent_lpips: crate::training::latent_perceptual::latent_loss_settings(
                 &crate::training::latent_perceptual::LATENT_LPIPS,
                 advanced,
             )
-            .map_err(technique_error)?,
+            .map_err(TrainingExecutionError::from)?,
             identity_loss: crate::training::face_losses::identity_loss_settings(advanced)
-                .map_err(technique_error)?,
+                .map_err(TrainingExecutionError::from)?,
             face_landmark_loss: crate::training::face_losses::face_landmark_loss_settings(advanced)
-                .map_err(technique_error)?,
+                .map_err(TrainingExecutionError::from)?,
             training_adapter: crate::training::training_adapter::training_adapter_model(advanced)
-                .map_err(technique_error)?,
-            buckets: crate::training::parse_training_bucket_config(advanced)?,
+                .map_err(TrainingExecutionError::from)?,
+            buckets: crate::training::parse_training_bucket_config(advanced)
+                .map_err(TrainingExecutionError::Binding)?,
             model_options_wire: ValidatedModelOptionsWire(
                 crate::training::training_model_options_wire(
                     BindingInput::parent(authored, "training.config.advanced").ok_or_else(
-                        || "authored training request has no config.advanced object".to_owned(),
+                        || {
+                            TrainingExecutionError::Binding(
+                                "authored training request has no config.advanced object"
+                                    .to_owned(),
+                            )
+                        },
                     )?,
                     kernel,
                 ),
