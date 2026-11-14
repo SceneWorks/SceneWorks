@@ -79,6 +79,10 @@ macro_rules! nested {
 }
 
 pub(crate) const SPECS: &[OptionSpec] = &[
+    opt!("lowResStart", Object("LowResStartV1"), Absent, Feature("low_res_start"), WhatToMake, "GenerationOptions.low_res_start"),
+    nested!("lowResStart", "version", Integer, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.version").limits(&["1"]),
+    nested!("lowResStart", "k", Integer, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.k").limits(&["positive"]),
+    nested!("lowResStart", "scale", Number, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.scale").limits(&["0 < scale < 1"]),
 
     nested!("mossImage", "acceleration", OneOf("off | unmerged_bf16 | full_fp32"), Literal("\"off\""), MOSS, WhatToMake, "MossImageOptions.acceleration")
         .effects(&[effect("DMD", "exclude", "advanced.sampler"),effect("DMD", "exclude", "advanced.scheduler"),effect("DMD", "exclude", "advanced.schedulerShift"),effect("DMD", "exclude", "advanced.mossImage.training_shift"),effect("DMD", "exclude", "image.negativePrompt"),effect("DMD", "override", "advanced.steps"),effect("DMD", "override", "advanced.guidanceScale")])
@@ -236,8 +240,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .limits(&["image_request phase plan"])
         .effects(&[effect("enabled", "override with phase step sum", "advanced.steps"), effect("enabled", "override with per-phase guidance", "advanced.guidanceScale"), effect("enabled", "exclude", "advanced.usePid"), effect("enabled", "exclude", "image.hiresFix"), effect("enabled", "exclude", "image.sourceAssetId"), effect("enabled", "exclude", "image.referenceAssetIds"), effect("enabled", "exclude", "advanced.poses")])
         .ui("Multi-phase denoise", "phaseEditor"),
-    opt!("flashAttn", Bool, Literal("true"), IMAGE, MachineBudget, "Candle SDXL flash attention kernel"),
-    opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]),
+    opt!("flashAttn", Bool, Literal("true"), Family("sdxl"), MachineBudget, "Candle SDXL flash attention kernel"),
+    opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]).compat("JSON integer or numeric string. Explicit null blocks portable bound-tier fallback; absent selection is resolved after verified source binding."),
     opt!("mlxQuantizeExplicit", Bool, Literal("false"), VISUAL, MachineBudget, "user tier selection provenance"),
     opt!("convRot", Bool, Literal("false"), IMAGE, MachineBudget, "ConvRot load recipe").limits(&["declared memory routes"]),
     opt!("quantTier", Text, Provider("available checkpoint tiers"), VISUAL, MachineBudget, "artifact tier identity").limits(&["download variants","declared memory routes"]),
@@ -304,8 +308,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     opt!("motionBucketId", Integer, Model("motionBucketId"), Family("svd"), WhatToMake, "VideoGenInput.motion_bucket_id").limits(&["clamp 1..=255"]).compat("Manifest fallback, then 127; JSON integer or numeric string."),
     opt!("noiseAugStrength", Number, Model("noiseAugStrength"), Family("svd"), WhatToMake, "VideoGenInput.noise_aug_strength").compat("Manifest fallback, then 0.02; JSON number or numeric string, no clamp."),
     opt!("decodeChunkSize", Integer, Model("decodeChunkSize"), Family("svd"), MachineBudget, "VideoGenInput.decode_chunk_size").limits(&["clamp 1..=64"]).compat("Manifest fallback, then 8; JSON integer or numeric string."),
-    opt!("segment", Bool, Literal("true"), Always, WhatToMake, "SAM2 person-track segmentation"),
-    opt!("confidence", Number, Literal("0.25"), Always, WhatToMake, "person detection/tracking confidence threshold").limits(&["clamp 0.01..=1"]),
+    opt!("segment", Bool, Literal("true"), Operation("personTrack"), WhatToMake, "SAM2 person-track segmentation"),
+    opt!("confidence", Number, Literal("0.25"), Any(&[Operation("personTrack"), Operation("personDetect")]), WhatToMake, "person detection/tracking confidence threshold").limits(&["clamp 0.01..=1"]).compat("JSON number or numeric string; whitespace-padded strings are invalid."),
     opt!("timelineAction", OneOf("extend | replace | bridge"), Absent, VIDEO, Context, "timeline operation"),
     opt!("timelineContext", Object("timeline, item and track identities"), Absent, VIDEO, Context, "timeline result placement"),
     // Server/job context and resource bindings. These records remain discoverable to upgrades

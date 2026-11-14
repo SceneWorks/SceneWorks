@@ -1,3 +1,4 @@
+import { isSettingsRefusal, SettingsRefusal } from "./components/SettingsRefusal.jsx";
 import { useAppDomainValue } from "./context/useAppDomainValue.js";
 import { KEEP_ALIVE_VIEWS, navSections, viewTitles, KeepAlivePane, ProjectSwitcher, FirstRunProjectGate } from "./components/shell/ShellChrome.jsx";
 import { useThemeAccent } from "./hooks/useThemeAccent.js";
@@ -369,6 +370,7 @@ export function App() {
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  const [studioSettingsRefusal, setStudioSettingsRefusal] = useState(null);
   // Domain loaders and mutations own separate notice slots. A successful Models
   // request must never erase a Training or Characters failure (sc-14783).
   const setDomainError = useCallback(
@@ -1169,7 +1171,9 @@ export function App() {
           setActiveView(persistedView);
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (!cancelled && isSettingsRefusal(error)) setStudioSettingsRefusal(error);
+      })
       .finally(() => {
         if (!cancelled) {
           // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
@@ -1673,6 +1677,8 @@ export function App() {
       projects={projects}
     />
   );
+
+  if (studioSettingsRefusal) return <SettingsRefusal error={studioSettingsRefusal} />;
 
   if (showSimpleShell) {
     return (

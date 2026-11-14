@@ -683,6 +683,20 @@ export function providerNamedThroughGenCore({ repo, revision, provider, crateDir
       continue;
     }
     if (body.split("\n").some((line) => line.trim() === declaration)) return true;
+    // A native family may re-export its single portable policy owner. Follow only that
+    // exact public constant spelling, one hop, at the same revision.
+    for (const line of body.split("\n")) {
+      const reexport = /^pub use (gen_core_[a-z0-9_]+)::PROVIDER_ID;$/.exec(line.trim());
+      if (!reexport) continue;
+      const owner = reexport[1].replaceAll("_", "-");
+      let policy = "";
+      try {
+        policy = runGit(repo, ["show", `${revision}:crates/contracts/${owner}/src/lib.rs`]);
+      } catch {
+        continue;
+      }
+      if (policy.split("\n").some((entry) => entry.trim() === declaration)) return true;
+    }
   }
   return false;
 }

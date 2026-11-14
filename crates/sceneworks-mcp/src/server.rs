@@ -270,6 +270,67 @@ pub struct ListLorasArgs {
     pub project_id: Option<String>,
 }
 
+/// Keep the published tool schema while checking raw registered fields before typed decoding.
+#[derive(Debug, serde::Deserialize)]
+#[serde(transparent)]
+pub struct GenerateImageInput(Map<String, Value>);
+impl schemars::JsonSchema for GenerateImageInput {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        GenerateImageArgs::schema_name()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        GenerateImageArgs::json_schema(generator)
+    }
+}
+impl GenerateImageInput {
+    fn decode(self) -> Result<GenerateImageArgs, ErrorData> {
+        let mut canonical = self.0.clone();
+        if canonical
+            .get("mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| matches!(mode.trim(), "" | "generate"))
+        {
+            canonical.insert("mode".into(), json!("text_to_image"));
+        }
+        // Project the tool's flat controls onto its HTTP carrier before the shared gate.
+        // This is transport mapping only: the portable owner decides shape and compatibility.
+        // mossImageAdvanced is also an HTTP top-level carrier. Keep its authored value there
+        // until shared shape validation has checked it; the typed mapper folds it afterward.
+        let advanced: Map<String, Value> = [
+            "mossImage",
+            "mossImageEdit",
+            "steps",
+            "guidanceScale",
+            "sampler",
+            "schedulerShift",
+            "cfgInterval",
+            "captionOverflow",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            canonical
+                .remove(key)
+                .filter(|value| !value.is_null())
+                .map(|value| (key.to_owned(), value))
+        })
+        .collect();
+        canonical.remove("advanced");
+        if !advanced.is_empty() {
+            canonical.insert("advanced".into(), Value::Object(advanced));
+        }
+        sceneworks_core::request_validation::validate_shape("image", &canonical).map_err(
+            |error| {
+                ErrorData::invalid_params(
+                    error.detail.clone(),
+                    Some(serde_json::to_value(error).expect("typed refusal")),
+                )
+            },
+        )?;
+        serde_json::from_value(Value::Object(self.0))
+            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))
+    }
+}
+
 /// Arguments for `generate_image`, mapped 1:1 onto the API's `ImageJobRequest`
 /// (`apps/rust-api/src/dto.rs`). Only the provided fields are sent, so the API's
 /// serde defaults stay authoritative — except `count`, which defaults to 1 here
@@ -732,10 +793,11 @@ impl SceneWorksMcp {
     )]
     async fn generate_image(
         &self,
-        Parameters(args): Parameters<GenerateImageArgs>,
+        Parameters(input): Parameters<GenerateImageInput>,
         ctx: RequestContext<RoleServer>,
         extensions: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
+        let args = input.decode()?;
         let body =
             image_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
         let include_workflow = args.include_workflow.unwrap_or(DEFAULT_INCLUDE_WORKFLOW);
@@ -1428,7 +1490,24 @@ fn json_result(value: Value) -> Result<CallToolResult, ErrorData> {
 /// Surface an API failure as a JSON-RPC internal error; the Display impl already
 /// includes the upstream status + detail, and never the token.
 fn api_error(error: ApiClientError) -> ErrorData {
-    ErrorData::internal_error(error.to_string(), None)
+    let data = match &error {
+        ApiClientError::Api { detail, .. } => serde_json::from_str::<Value>(detail)
+            .ok()
+            .filter(Value::is_object),
+        _ => None,
+    };
+    let message = data
+        .as_ref()
+        .and_then(|body| body.get("detail"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    match &error {
+        ApiClientError::Api { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST => {
+            ErrorData::invalid_params(message, data)
+        }
+        _ => ErrorData::internal_error(message, data),
+    }
 }
 
 /// A domain failure (failed/canceled job, timeout) as a tool-level error result
@@ -2307,6 +2386,49 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn raw_image_arguments_preserve_the_published_tool_schema() {
+        let mut raw = serde_json::to_value(schemars::schema_for!(GenerateImageInput)).unwrap();
+        let mut typed = serde_json::to_value(schemars::schema_for!(GenerateImageArgs)).unwrap();
+        raw.as_object_mut().unwrap().remove("title");
+        typed.as_object_mut().unwrap().remove("title");
+        assert_eq!(raw, typed);
+    }
+
+    #[test]
+    fn shared_validation_refusal_preserves_machine_fields() {
+        let body = json!({"code":"invalid_generation_option", "field":"advanced.steps",
+            "detail":"steps exceeds the model limit", "context":{"field":"advanced.steps", "model":"flux_dev", "kind":"image"}});
+        let error = api_error(ApiClientError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            detail: body.to_string(),
+        });
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.message, "steps exceeds the model limit");
+        assert_eq!(error.data, Some(body));
+    }
+
+    #[test]
+    fn other_api_client_failures_are_not_invalid_params() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::CONFLICT,
+        ] {
+            let error = api_error(ApiClientError::Api {
+                status,
+                detail: r#"{"detail":"upstream failure"}"#.to_owned(),
+            });
+            assert_eq!(
+                error.code,
+                ErrorData::internal_error("upstream failure".to_owned(), None).code,
+                "status {status} must not be a parameter error"
+            );
+            assert_eq!(error.message, "upstream failure");
+        }
+    }
 
     #[test]
     fn compact_projects_keeps_only_id_name_created_at() {

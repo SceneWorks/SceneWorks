@@ -509,13 +509,10 @@ pub(crate) async fn run_person_detect(
         .get("preview")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let confidence = job
-        .payload
-        .get("advanced")
-        .and_then(|advanced| advanced.get("confidence"))
-        .or_else(|| job.payload.get("confidence"))
-        .map_or(0.25, |value| value_f64(value, 0.25))
-        .clamp(0.01, 1.0);
+    let controls =
+        sceneworks_core::request_validation::utility_validation::person_controls(&job.payload)
+            .map_err(WorkerError::Validation)?;
+    let confidence = controls.confidence;
     let source_display_name = source
         .source_asset
         .get("displayName")
@@ -1824,13 +1821,10 @@ pub(crate) async fn run_person_track(
         .get("duration")
         .map_or(6.0, |value| value_f64(value, 6.0))
         .clamp(1.0, 3600.0);
-    let confidence = job
-        .payload
-        .get("advanced")
-        .and_then(|advanced| advanced.get("confidence"))
-        .or_else(|| job.payload.get("confidence"))
-        .map_or(0.25, |value| value_f64(value, 0.25))
-        .clamp(0.01, 1.0);
+    let controls =
+        sceneworks_core::request_validation::utility_validation::person_controls(&job.payload)
+            .map_err(WorkerError::Validation)?;
+    let confidence = controls.confidence;
     let is_preview = job
         .payload
         .get("preview")
@@ -1852,12 +1846,7 @@ pub(crate) async fn run_person_track(
 
     // Segmentation is on by default (Python `advanced.segment`); a per-frame SAM2 mask is
     // written for each detected target frame. `segment: false` skips it (maskState=missing).
-    let segment_enabled = job
-        .payload
-        .get("advanced")
-        .and_then(|advanced| advanced.get("segment"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let segment_enabled = controls.segment;
     // The track id is generated up front so the SAM2 segmentation pass can write masks under
     // `person-tracks/{track_id}/masks/` before the sidecar is assembled.
     let track_id = format!("track_{}", Uuid::new_v4().simple());

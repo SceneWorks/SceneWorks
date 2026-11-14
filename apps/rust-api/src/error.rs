@@ -346,6 +346,9 @@ impl IntoResponse for ApiError {
         };
         if correlation_id.is_none() {
             if let (Some(object), Some(context)) = (body.as_object_mut(), self.context) {
+                if let Some(field) = context.get("field") {
+                    object.insert("field".to_owned(), field.clone());
+                }
                 object.insert("context".to_owned(), context);
             }
         }
@@ -388,5 +391,13 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code, Some("other_service_unavailable"));
         assert_eq!(error.detail, "Retry later");
+    }
+}
+
+impl From<sceneworks_core::request_validation::ValidationRefusal> for ApiError {
+    fn from(error: sceneworks_core::request_validation::ValidationRefusal) -> Self {
+        let mut context = *error.context;
+        context["field"] = json!(error.field);
+        Self::typed(StatusCode::BAD_REQUEST, error.detail, error.code, context)
     }
 }

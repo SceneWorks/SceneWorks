@@ -602,14 +602,9 @@ pub(crate) async fn run_vqa_job(
 
     // VQA latency ~ output tokens + input vision tokens; both default low and are tunable per
     // request (top-level payload, mirroring the Python adapter — NOT under `advanced`).
-    let max_new_tokens = payload_int(&job.payload, "maxNewTokens", 256, 16, 2048) as usize;
-    let max_image_pixels = payload_int(
-        &job.payload,
-        "maxImagePixels",
-        768 * 768,
-        256 * 256,
-        2048 * 2048,
-    );
+    let controls = sceneworks_core::options::sensenova_validation::resolve_vqa(&job.payload);
+    let max_new_tokens = controls.max_new_tokens as usize;
+    let max_image_pixels = controls.max_image_pixels;
 
     let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
@@ -936,29 +931,20 @@ struct InterleaveParams {
 /// values and it can be unit-tested without weights or a device (sc-8839).
 #[cfg(native_lane)]
 fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> InterleaveParams {
-    let advanced = &request.advanced;
-    // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
-    // the Python `interleave_resolution_for`. Defaults 2048×1152 (16:9), clamped 256..4096.
-    let req_width = payload_int(payload, "width", 2048, 256, 4096);
-    let req_height = payload_int(payload, "height", 1152, 256, 4096);
-    let (width, height) = interleave_resolution_snap(req_width, req_height);
+    let controls = sceneworks_core::options::sensenova_validation::resolve_interleave(payload);
+    let (width, height) = interleave_resolution_snap(controls.width, controls.height);
     InterleaveParams {
         width,
         height,
-        // Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
-        steps: advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize,
-        cfg_scale: advanced_float(advanced, "guidanceScale", 4.0),
-        img_cfg_scale: advanced_float(advanced, "imageGuidanceScale", 1.0),
-        timestep_shift: advanced_float(advanced, "timestepShift", 3.0),
-        max_new_tokens: advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize,
-        max_images: advanced_int(advanced, "maxImages", 6, 1, 10) as usize,
-        // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.
-        think_mode: advanced
-            .get("thinkMode")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        system_message: crate::payload::trimmed_string(advanced.get("systemMessage"))
-            .map(str::to_owned)
+        steps: controls.steps as usize,
+        cfg_scale: controls.guidance_scale as f32,
+        img_cfg_scale: controls.image_guidance_scale as f32,
+        timestep_shift: controls.timestep_shift as f32,
+        max_new_tokens: controls.max_new_tokens as usize,
+        max_images: controls.max_images as usize,
+        think_mode: controls.think_mode,
+        system_message: controls
+            .system_message
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
     }
@@ -1755,45 +1741,6 @@ fn strip_reasoning(text: &str) -> String {
         .to_owned()
 }
 
-/// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,
-/// then clamp to `[lo, hi]`. Used by the macOS handlers; also unit-tested cross-platform.
-#[cfg(any(test, native_lane))]
-fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
-    payload
-        .get(key)
-        .and_then(json_to_i64)
-        .unwrap_or(default)
-        .clamp(lo, hi)
-}
-
-/// `safe_int` over an `advanced` field (same parse/clamp as [`payload_int`]).
-#[cfg(native_lane)]
-fn advanced_int(advanced: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
-    payload_int(advanced, key, default, lo, hi)
-}
-
-/// `_advanced_float`: parse an `advanced` field as f32 else `default`.
-#[cfg(native_lane)]
-fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
-    advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default)
-}
-
-#[cfg(any(test, native_lane))]
-fn json_to_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().map(|float| float as i64))
-        .or_else(|| value.as_str()?.trim().parse().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1865,32 +1812,6 @@ mod tests {
         assert_eq!(strip_reasoning("answer<think>cut off"), "answer");
         // No think block: returned trimmed, unchanged.
         assert_eq!(strip_reasoning("  plain answer  "), "plain answer");
-    }
-
-    #[test]
-    fn payload_int_parses_clamps_and_defaults() {
-        let map = json!({ "a": 500, "b": "1024", "c": 3.0, "d": "bad" })
-            .as_object()
-            .cloned()
-            .unwrap();
-        assert_eq!(payload_int(&map, "a", 256, 16, 2048), 500);
-        assert_eq!(payload_int(&map, "b", 256, 16, 2048), 1024);
-        assert_eq!(
-            payload_int(&map, "c", 256, 16, 2048),
-            16,
-            "3 clamps up to lo"
-        );
-        assert_eq!(
-            payload_int(&map, "d", 256, 16, 2048),
-            256,
-            "unparseable → default"
-        );
-        assert_eq!(payload_int(&map, "missing", 768, 16, 2048), 768);
-        assert_eq!(
-            payload_int(&map, "a", 256, 16, 400),
-            400,
-            "500 clamps to hi"
-        );
     }
 
     #[cfg(target_os = "macos")]

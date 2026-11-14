@@ -164,6 +164,12 @@ pub(crate) async fn create_job(
         &mut payload.payload,
     )
     .await?;
+    if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&payload.job_type) {
+        let entry =
+            sceneworks_core::request_validation::facts_for_job(&payload.job_type, &payload.payload);
+        sceneworks_core::request_validation::validate(kind, &payload.payload, &entry)
+            .map_err(ApiError::from)?;
+    }
     if matches!(payload.job_type, JobType::ImageDetail) {
         validate_job_lora_compatibility(
             &state,
@@ -1549,6 +1555,49 @@ async fn validate_and_canonicalize_merged_generation_payload(
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
     // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
     // or the persisted value would survive the merge.
+    if matches!(
+        job_type,
+        JobType::AudioGenerate
+            | JobType::ImageVqa
+            | JobType::ImageInterleave
+            | JobType::VectorGenerate
+    ) {
+        let model = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let entry = resolve_model_manifest_entry(state, model).await?;
+        if let (Some(kind), Some(facts)) = (
+            sceneworks_core::request_validation::kind_for_job(&job_type),
+            entry.as_object(),
+        ) {
+            sceneworks_core::request_validation::validate(kind, &merged, facts)
+                .map_err(ApiError::from)?;
+        }
+        merged.insert("modelManifestEntry".to_owned(), entry);
+    }
+    if matches!(
+        job_type,
+        JobType::VideoUpscale
+            | JobType::PersonDetect
+            | JobType::PersonTrack
+            | JobType::PromptRefine
+            | JobType::LoraTrain
+            | JobType::ControlTraining
+            | JobType::ImageDetail
+            | JobType::ModelConvert
+            | JobType::DatasetAnalysis
+            | JobType::TrainingCaption
+    ) {
+        let kind = sceneworks_core::request_validation::kind_for_job(&job_type)
+            .expect("registered utility");
+        sceneworks_core::request_validation::validate(
+            kind,
+            &merged,
+            &sceneworks_core::request_validation::facts_for_job(&job_type, &merged),
+        )
+        .map_err(ApiError::from)?;
+    }
     let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
     if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
         merged.insert(checkpoint_key.to_owned(), Value::Null);
@@ -1569,6 +1618,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // typed `/video/jobs` pre-enqueue platform gate.
         let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
         ensure_expected_imported_model_reference(state, &merged, &model_manifest_entry)?;
+        if let Some(entry) = model_manifest_entry.as_object() {
+            sceneworks_core::request_validation::validate("video", &merged, entry)
+                .map_err(ApiError::from)?;
+        }
         // Retry/duplicate are video creation boundaries too. Validate the exact shallow-merged
         // reference array against the CURRENT server-owned entry before stamping it: malformed
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
@@ -2095,6 +2148,12 @@ pub(crate) async fn canonicalize_image_model_payload(
         return Err(ApiError::bad_request(reason));
     }
 
+    if !matches!(job_type, JobType::ImageDetail) {
+        if let Some(entry) = model_manifest_entry.as_object() {
+            sceneworks_core::request_validation::validate("image", payload, entry)
+                .map_err(ApiError::from)?;
+        }
+    }
     // Every image entry point reaches this post-expansion/post-merge seam.
     sceneworks_core::moss_image::scrub_reports(payload);
     if let Some(entry) = model_manifest_entry.as_object() {
@@ -2369,6 +2428,18 @@ async fn validate_raw_job_payload(
     payload: &mut JsonObject,
     license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
+    if matches!(
+        job_type,
+        JobType::ImageDetail
+            | JobType::ModelConvert
+            | JobType::DatasetAnalysis
+            | JobType::TrainingCaption
+    ) {
+        let kind = sceneworks_core::request_validation::kind_for_job(job_type)
+            .expect("registered source utility");
+        sceneworks_core::request_validation::validate_shape(kind, payload)
+            .map_err(ApiError::from)?;
+    }
     if matches!(
         job_type,
         JobType::VideoGenerate

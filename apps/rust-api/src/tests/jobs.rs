@@ -13792,7 +13792,8 @@ fn vqa_job_validation_requires_question_and_asset() {
         source_asset_id: "asset_1".to_owned(),
         question: "What is in this image?".to_owned(),
         model: "sensenova_u1_8b".to_owned(),
-        max_new_tokens: 256,
+        max_new_tokens: Some(json!(256)),
+        max_image_pixels: None,
         requested_gpu: "auto".to_owned(),
         advanced: serde_json::Map::new(),
     };
@@ -13801,7 +13802,7 @@ fn vqa_job_validation_requires_question_and_asset() {
     // The UI's length presets are all valid.
     for tokens in [256u32, 512, 1024] {
         let mut request = base.clone();
-        request.max_new_tokens = tokens;
+        request.max_new_tokens = Some(json!(tokens));
         assert!(crate::validate_vqa_job(&request).is_ok());
     }
 
@@ -13818,8 +13819,8 @@ fn vqa_job_validation_requires_question_and_asset() {
     assert!(crate::validate_vqa_job(&missing_project).is_err());
 
     let mut too_many_tokens = base.clone();
-    too_many_tokens.max_new_tokens = 4096;
-    assert!(crate::validate_vqa_job(&too_many_tokens).is_err());
+    too_many_tokens.max_new_tokens = Some(json!(4096));
+    assert!(crate::validate_vqa_job(&too_many_tokens).is_ok());
 }
 
 #[test]
@@ -13830,9 +13831,9 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
         prompt: "A short illustrated guide to brewing tea".to_owned(),
         source_asset_ids: Vec::new(),
         model: "sensenova_u1_8b".to_owned(),
-        max_images: 6,
-        width: 1024,
-        height: 1024,
+        max_images: Some(json!(6)),
+        width: Some(json!(1024)),
+        height: Some(json!(1024)),
         seed: None,
         requested_gpu: "auto".to_owned(),
         advanced: serde_json::Map::new(),
@@ -13853,20 +13854,20 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
     assert!(crate::validate_interleave_job(&missing_project).is_err());
 
     let mut zero_images = base.clone();
-    zero_images.max_images = 0;
-    assert!(crate::validate_interleave_job(&zero_images).is_err());
+    zero_images.max_images = Some(json!(0));
+    assert!(crate::validate_interleave_job(&zero_images).is_ok());
 
     let mut too_many_images = base.clone();
-    too_many_images.max_images = 11;
-    assert!(crate::validate_interleave_job(&too_many_images).is_err());
+    too_many_images.max_images = Some(json!(11));
+    assert!(crate::validate_interleave_job(&too_many_images).is_ok());
 
     let mut blank_asset = base.clone();
     blank_asset.source_asset_ids = vec!["  ".to_owned()];
     assert!(crate::validate_interleave_job(&blank_asset).is_err());
 
     let mut tiny = base.clone();
-    tiny.width = 64;
-    assert!(crate::validate_interleave_job(&tiny).is_err());
+    tiny.width = Some(json!(64));
+    assert!(crate::validate_interleave_job(&tiny).is_ok());
 }
 
 #[tokio::test]

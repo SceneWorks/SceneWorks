@@ -186,21 +186,12 @@ pub(crate) async fn fresh_flux3_training_duplicate(
 /// retains the established MLX defaults; on non-macOS hosts the API projects only the Candle
 /// limitations into the response the Studio seeds and later submits. That makes the visible form,
 /// submitted config, resolved plan, and provenance snapshot agree without a worker-side override.
-fn effective_training_targets() -> TrainingTargetRegistry {
+pub(crate) fn effective_training_targets() -> TrainingTargetRegistry {
     effective_training_targets_for_candle(!cfg!(target_os = "macos"))
 }
 
 pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTargetRegistry {
-    let mut registry = builtin_training_targets();
-    if candle {
-        for target in &mut registry.targets {
-            sceneworks_core::training::apply_candle_training_defaults(
-                &target.kernel,
-                &mut target.defaults,
-            );
-        }
-    }
-    registry
+    sceneworks_core::training::effective_training_targets_for_candle(candle)
 }
 
 fn effective_training_presets() -> sceneworks_core::training::TrainingPresetRegistry {
@@ -2225,20 +2216,14 @@ fn validate_training_submission(
     // directly to clients, so every advertised numeric bound is a submit-time
     // contract rather than an advisory UI hint. This also runs the shared MOSS field-shape
     // validator used by worker preflight, before malformed controls can enter the queue.
-    sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
-        .map_err(training_plan_error_to_api_error)?;
-    if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
-        && payload
-            .config
-            .advanced
-            .get("resume")
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        return Err(ApiError::bad_request(
-            "Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity.",
-        ));
-    }
+    let submitted = serde_json::to_value(payload).expect("training request serializes");
+    let facts = serde_json::to_value(target).expect("training target serializes");
+    sceneworks_core::training::validate(
+        "training",
+        submitted.as_object().expect("request object"),
+        facts.as_object().expect("target object"),
+    )
+    .map_err(ApiError::from)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -2259,11 +2244,6 @@ fn validate_training_submission(
         output_kind,
         sceneworks_core::training::TrainingOutputKind::BaseCheckpoint
     );
-    if is_control && payload.dry_run {
-        return Err(ApiError::bad_request(
-            "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
-        ));
-    }
     let preset_metadata = match payload.preset_id.as_deref() {
         Some(preset_id) => {
             let preset_registry = effective_training_presets();
@@ -2274,20 +2254,14 @@ fn validate_training_submission(
                 .ok_or_else(|| {
                     ApiError::bad_request(format!("Unknown training preset: {preset_id}"))
                 })?;
-            if preset.target_id != target.id {
-                return Err(ApiError::bad_request(format!(
-                    "Training preset '{}' targets '{}', but the request targets '{}'.",
-                    preset.id, preset.target_id, target.id
-                )));
-            }
-            if let Some(requested_version) = payload.preset_version {
-                if requested_version != preset.version {
-                    return Err(ApiError::bad_request(format!(
-                        "Training preset '{}' is version {}, but the request pinned version {requested_version}.",
-                        preset.id, preset.version
-                    )));
-                }
-            }
+            sceneworks_core::training::validate_preset_binding(
+                &target.id,
+                &preset.id,
+                &preset.target_id,
+                preset.version,
+                payload.preset_version,
+            )
+            .map_err(ApiError::from)?;
             let preset_config_snapshot = serde_json::to_value(&preset.config)
                 .ok()
                 .and_then(|value| match value {
@@ -2302,20 +2276,10 @@ fn validate_training_submission(
                 preset_config_snapshot,
             })
         }
-        None => {
-            if payload.preset_version.is_some() {
-                return Err(ApiError::bad_request(
-                    "presetVersion requires a matching presetId.",
-                ));
-            }
-            None
-        }
+        None => None,
     };
 
     let output_name = payload.output_name.trim().to_owned();
-    if output_name.is_empty() {
-        return Err(ApiError::bad_request("Training output name is required."));
-    }
 
     Ok(ValidatedTrainingSubmission {
         target: target.clone(),
@@ -3021,26 +2985,7 @@ pub(crate) const SUBJECT_SEGMENTER_MODEL_ID: &str = "sam3_person_segment";
 fn training_plan_error_to_api_error(
     error: sceneworks_core::training::TrainingPlanError,
 ) -> ApiError {
-    match error {
-        sceneworks_core::training::TrainingPlanError::TargetLimit(limit) => {
-            let detail = limit.to_string();
-            let context = serde_json::to_value(&limit).unwrap_or_else(|_| {
-                json!({
-                    "kind": "training_target_limit"
-                })
-            });
-            ApiError::typed(
-                StatusCode::BAD_REQUEST,
-                detail,
-                "training_target_limit",
-                context,
-            )
-        }
-        sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
-            training_field_error(&field, message)
-        }
-        other => ApiError::bad_request(other.to_string()),
-    }
+    sceneworks_core::training::policy_refusal(error).into()
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its
@@ -3542,12 +3487,7 @@ pub(crate) fn training_base_model_label(
 pub(crate) fn training_is_full_finetune(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> bool {
-    config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().eq_ignore_ascii_case("full"))
-        .unwrap_or(false)
+    sceneworks_core::training::config_is_full_finetune(config)
 }
 
 /// GPU selection for a training job, read from the config's advanced bag (the
@@ -3566,18 +3506,7 @@ pub(crate) fn training_requested_gpu(advanced: &JsonObject) -> String {
 /// Defaults to `project` (the target default) and rejects anything other than the
 /// two scopes the LoRA registry understands.
 pub(crate) fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
-    let scope = advanced
-        .get("outputScope")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("project");
-    match scope {
-        "project" | "global" => Ok(scope.to_owned()),
-        other => Err(ApiError::bad_request(format!(
-            "Unsupported training outputScope: {other}. Use project or global."
-        ))),
-    }
+    sceneworks_core::training::training_output_scope(advanced).map_err(ApiError::from)
 }
 
 /// Single source of truth for where a training run's adapter is written and its
