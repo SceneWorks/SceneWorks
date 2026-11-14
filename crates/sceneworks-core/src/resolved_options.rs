@@ -221,6 +221,46 @@ impl RouteOptionFacts {
             angle_set: field(advanced, "angleSet", boolean),
         }
     }
+
+    /// Build the portable companion-source selector from an already-resolved request. A caller
+    /// supplies facts projected from the owner-issued effective payload, never authored input.
+    pub fn auxiliary_selection(&self) -> crate::portable_sources::AuxOptionSelection {
+        use crate::portable_sources::AuxOptionSelection;
+        fn truth(field: &RouteField<bool>) -> bool {
+            matches!(field, RouteField::Valid(true))
+        }
+        fn text(field: &RouteField<String>) -> Option<String> {
+            match field {
+                RouteField::Valid(value) => Some(value.clone()),
+                _ => None,
+            }
+        }
+        AuxOptionSelection {
+            poses_present: matches!(self.poses, RouteField::Valid(count) if count > 0),
+            poses_contain_object: truth(&self.poses_any_object),
+            use_pid: truth(&self.use_pid),
+            decoder: text(&self.decoder),
+            enhance_prompt: truth(&self.enhance_prompt),
+            control_mode: text(&self.control_mode),
+            control_image: text(&self.control_image),
+            veda_enabled: truth(&self.veda_enabled),
+            use_uncensored_enhancer: truth(&self.use_uncensored_enhancer),
+            text_encoder_model: text(&self.text_encoder_model),
+            training: None,
+        }
+    }
+
+    pub fn artifact_selection(
+        &self,
+    ) -> crate::model_artifacts::artifact_selection::PortableArtifactOptions {
+        crate::model_artifacts::artifact_selection::PortableArtifactOptions {
+            conv_rot: matches!(self.conv_rot, RouteField::Valid(true)),
+            yue2_decoder: match &self.decoder {
+                RouteField::Valid(value) => Some(value.clone()),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// A bare training route probe cannot run submission resolution because it may omit the target
@@ -284,6 +324,7 @@ impl TrainingRouteFacts {
 pub struct IrisTrainingOptions {
     pub network_type: Option<Bound<String>>,
     pub mixed_precision: Option<Bound<String>>,
+    pub depth_init: Option<Bound<String>>,
     pub stage: Option<Bound<String>>,
     pub parent_stage: Option<Bound<String>>,
     pub resume_data_policy: Option<Bound<String>>,
@@ -301,6 +342,7 @@ impl IrisTrainingOptions {
         Ok(Self {
             network_type: input.text("training.config.advanced", "networkType")?,
             mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
+            depth_init: input.text("training.config.advanced", "depthInit")?,
             stage: input.text("training.config.advanced.iris", "stage")?,
             parent_stage: input.text("training.config.advanced.iris", "parent_stage")?,
             resume_data_policy: input
@@ -322,6 +364,27 @@ impl IrisTrainingOptions {
         self.repa_weight
             .as_ref()
             .is_some_and(|weight| weight.value > 0.0)
+    }
+
+    pub fn auxiliary_selection(
+        &self,
+        plan: &crate::training::TrainingPlan,
+        entry_id: &str,
+    ) -> crate::portable_sources::TrainingAuxSelection {
+        let matches_entry = plan.target.base_model == entry_id;
+        let iris_kernel =
+            matches_entry && crate::training::iris::is_iris_training_kernel(&plan.target.kernel);
+        crate::portable_sources::TrainingAuxSelection {
+            base_model: plan.target.base_model.clone(),
+            depth_init_parent: matches_entry
+                && entry_id == "iris_3b_depth"
+                && self.depth_init.as_ref().map(|value| value.value.as_str()) == Some("parent"),
+            restore_init_parent: matches_entry
+                && entry_id == "iris_3b_restore"
+                && self.restore_init.as_ref().map(|value| value.value.as_str()) == Some("parent"),
+            iris_repa_enabled: iris_kernel && self.repa_enabled(),
+            iris_kernel,
+        }
     }
 }
 
@@ -619,6 +682,10 @@ mod tests {
         assert_eq!(facts.mlx_quantize, RouteField::Valid(4));
         assert_eq!(facts.veda_enabled, RouteField::Valid(true));
         assert_eq!(facts.hires_fix_enabled, RouteField::Valid(false));
+        let auxiliary = facts.auxiliary_selection();
+        assert!(!auxiliary.poses_present);
+        assert!(!auxiliary.poses_contain_object);
+        assert!(auxiliary.veda_enabled);
 
         let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"advanced": []})));
         assert_eq!(malformed.poses, RouteField::Invalid);
