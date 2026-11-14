@@ -3578,7 +3578,9 @@ fn verify_produced_local_source(
             ))
         }
     }
+    // The whole-tree fingerprint is read at most once per host while every file keeps its stamp.
     sceneworks_worker::verify_produced_artifact_receipt(
+        &verified_source_cache(state),
         &root,
         &producer.id,
         &receipt.source_artifact_id,
@@ -4377,6 +4379,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_first_admission_after_a_download_reads_no_bytes() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, pinned, _) = receipted_install(&state, b"trusted");
+        let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        settle_mtime(&path, settled);
+        // The downloader stamps the blob before its own digest check and records the verdict
+        // afterwards (`verify_file_sha256`), exactly these two calls.
+        let cache = VerifiedSourceCache::for_data_dir(&state.settings.data_dir);
+        let observed = cache
+            .observe(&std::fs::canonicalize(&path).unwrap())
+            .unwrap();
+        assert!(cache.record_hashed(observed, &pinned[0].sha256).unwrap());
+        let start = hashed_source_files();
+        assert_eq!(
+            capture_receipted(&state, &pinned).unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(hashed_source_files(), start, "the first job reads no bytes");
+        // Modified after the download: hashed again and refused.
+        std::fs::write(&path, b"changed").unwrap();
+        settle_mtime(&path, settled);
+        let error = capture_receipted(&state, &pinned).expect_err("modified install is refused");
+        assert!(error.detail.contains("files differ from the pinned source"));
+        assert_eq!(hashed_source_files(), start + 1);
+    }
+
+    /// Windows hashes mutable local files fresh (see `sceneworks_core::verified_source_cache`).
+    #[cfg(not(windows))]
     #[test]
     fn local_source_capture_is_hashed_once_while_its_stamp_is_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -4851,6 +4885,7 @@ mod tests {
     fn allowed_local_roots_include_data_hf_cache_and_external_roots() {
         // SW-7030 (review 4533400131): the configured HF cache is a managed
         // capture root even when it lives outside the data dir.
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
         let data_dir = PathBuf::from("/srv/sceneworks/data");
         let external = vec![PathBuf::from("/mnt/comfyui/models")];
         let roots = allowed_local_roots_for(&data_dir, &external);

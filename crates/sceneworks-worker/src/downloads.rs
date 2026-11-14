@@ -1052,6 +1052,22 @@ pub(crate) async fn verify_file_sha256(
     let Some(expected) = normalize_sha256(expected) else {
         return Ok(None);
     };
+    // Stamp the file's real path (a hub snapshot link resolves to its blob, as admission does)
+    // before hashing, so the verdict below covers exactly the bytes hashed.
+    // Skipped for a `.partial` staging file (renamed after verification, so a verdict under its
+    // path is never looked up) and for a relative data dir (another process can resolve it
+    // elsewhere, so it names no shared host store).
+    let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+        &settings.data_dir,
+    );
+    let observed = (settings.data_dir.is_absolute()
+        && path.extension() != Some(std::ffi::OsStr::new("partial")))
+    .then(|| {
+        std::fs::canonicalize(path)
+            .and_then(|real| cache.observe(&real))
+            .ok()
+    })
+    .flatten();
     let actual = sha256_file(api, settings, job_id, path).await?;
     if actual != expected {
         let _ = tokio::fs::remove_file(path).await;
@@ -1059,6 +1075,12 @@ pub(crate) async fn verify_file_sha256(
             "{label} failed its integrity check (sha256 {actual}, but the source declares {expected}); \
              the download was corrupted. Re-download the file."
         )));
+    }
+    // Hand the verified digest to the host's hash-once record, so the first job admitted after
+    // this download does not read the file again. Recorded only if the file is unchanged since
+    // the stamp above; a failure to record never fails the download.
+    if let Some(observed) = observed {
+        let _ = cache.record_hashed(observed, &format!("sha256:{actual}"));
     }
     Ok(Some(actual))
 }

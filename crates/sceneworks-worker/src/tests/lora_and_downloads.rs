@@ -3777,3 +3777,57 @@ async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision(
         assert_eq!(std::fs::read(&source).unwrap(), original);
     }
 }
+
+/// A Hugging Face hub install: the downloader verifies the blob, and the snapshot file admission
+/// resolves is a link to that blob.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_downloaded_blob_verdict_serves_the_first_admission_check() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    use sha2::{Digest, Sha256};
+
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let repo = temp.path().join("hub/models--owner--model");
+    let blob = repo.join("blobs/etag");
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"weights").unwrap();
+    // A multi-GB download's last write is long past by the time its hash ends; a fixture this
+    // small needs its mtime aged to stand outside the stamp's racy window.
+    let settle = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+    };
+    settle(&blob);
+    let snapshot = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../blobs/etag", &snapshot).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"weights"));
+    let api = ApiClient::new(&settings);
+
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+
+    // Admission checks the snapshot file's real path against the pinned digest: it reads nothing.
+    let cache = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let real = std::fs::canonicalize(&snapshot).unwrap();
+    let pinned = format!("sha256:{digest}");
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap(),
+        SourceVerification::Reused
+    );
+
+    // Modified after the download: hashed again and refused.
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    settle(&blob);
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}

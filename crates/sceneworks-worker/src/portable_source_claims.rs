@@ -1120,6 +1120,9 @@ fn registered_converted_builtin_model_root(settings: &Settings, id: &str) -> Opt
     let receipt: crate::ProducedArtifactReceipt =
         serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
     crate::verify_produced_artifact_receipt(
+        &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &settings.data_dir,
+        ),
         &root,
         &receipt.producer_job_id,
         &receipt.source_artifact_id,
