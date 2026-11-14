@@ -125,8 +125,10 @@ import { usePidState, useStrictControlState } from "./imageStudio/useImageContro
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 import {
   downloadOffersFor,
   imageModelUsable,
@@ -2828,6 +2830,20 @@ export function ImageStudio() {
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
+  let portableDraft = null;
+  if (!batchMode && generateValidity.ready && selectedModel && (!structuredPromptModel || structuredActive)) {
+    try {
+      portableDraft = buildJobRequest({
+        promptToSend: structuredPromptModel ? serializeCaption(caption) : prompt,
+        submitIntent: prompt,
+        sendStructured: Boolean(structuredPromptModel),
+        submitCaption: caption,
+        submitBackend: magicPromptBackend,
+      });
+    } catch { /* Server keeps the authoritative gate. */ }
+  }
+  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
@@ -2866,6 +2882,7 @@ export function ImageStudio() {
   });
   const generateDisabled =
     submitting ||
+    Boolean(portableRefusal) ||
     replayTierUnavailable ||
     Boolean(characterReferenceError) ||
     !mossComponents.ready ||
@@ -3594,7 +3611,9 @@ export function ImageStudio() {
 
           {/* The preset/LoRA problems that used to be three separate .inline-warning
               paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}
-          <ValidationSummary issues={generateValidity.surfaced} label="Generate errors" />
+          <ValidationSummary issues={portableRefusal
+            ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+            : generateValidity.surfaced} label="Generate errors" />
 
         </WorkPanel>
 

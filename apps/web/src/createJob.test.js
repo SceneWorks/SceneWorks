@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "./api.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
+import { validatePortableRequestNow } from "./portableValidation.js";
 import {
   createModelLibraryGate,
   setModelLibraryHandler,
@@ -10,6 +11,9 @@ import {
 
 vi.mock("./api.js", () => ({
   apiFetch: vi.fn(),
+}));
+vi.mock("./portableValidation.js", () => ({
+  validatePortableRequestNow: vi.fn(),
 }));
 
 const project = { id: "project-7", name: "Project Seven" };
@@ -90,6 +94,49 @@ const cases = [
 describe("makeCreateJob", () => {
   beforeEach(() => {
     apiFetch.mockReset();
+    validatePortableRequestNow.mockReset();
+  });
+
+  it("shows a portable typed refusal before submitting a generation job", async () => {
+    const refusal = { code: "invalid_generation_option", field: "width", detail: "width exceeds the model limit" };
+    validatePortableRequestNow.mockReturnValue({ state: "invalid", refusal });
+    const setError = vi.fn();
+    const entry = { id: "model-a", limits: { width: 1024 } };
+    const creator = makeCreateJob({
+      definition: CREATE_JOB_DEFINITIONS.image,
+      token: "token-1",
+      project,
+      requestedGpu: "auto",
+      setJobs: vi.fn(),
+      setError,
+      modelEntryForRequest: () => entry,
+    });
+
+    await expect(creator.withResult([{ model: "model-a", width: 2048 }])).resolves.toMatchObject({
+      error: refusal.detail,
+      validationRefusal: refusal,
+    });
+    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "image", modelEntry: entry,
+    }));
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(setError).toHaveBeenCalledWith(refusal.detail);
+  });
+
+  it("passes the authored video-upscale payload to its own Rust rule kind", async () => {
+    validatePortableRequestNow.mockReturnValue({ state: "server-required", reason: "model-facts-unavailable" });
+    apiFetch.mockResolvedValue({ id: "upscale-job", status: "queued" });
+    const creator = makeCreateJob({
+      definition: CREATE_JOB_DEFINITIONS.videoUpscale,
+      token: "token-1", project, requestedGpu: "auto",
+      setJobs: vi.fn(), setError: vi.fn(), modelEntryForRequest: () => null,
+    });
+    await creator({ sourceAssetId: "clip", factor: 2 });
+    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "videoUpscale",
+      payload: expect.objectContaining({ sourceAssetId: "clip", factor: 2 }),
+    }));
+    expect(apiFetch).toHaveBeenCalledOnce();
   });
 
   it.each(cases)("preserves the $key route and request body", async ({ key, args, path, body }) => {

@@ -7544,6 +7544,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sceneworks-options-wasm"
+version = "0.11.1"
+dependencies = [
+ "sceneworks-options",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "sceneworks-rust-api"
 version = "0.11.1"
 dependencies = [

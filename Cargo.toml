@@ -15,6 +15,7 @@ members = [
     "crates/sceneworks-image-quality",
     "crates/sceneworks-mcp",
     "crates/sceneworks-options",
+    "crates/sceneworks-options-wasm",
     "crates/sceneworks-memory-adapter",
     "crates/sceneworks-worker",
 ]

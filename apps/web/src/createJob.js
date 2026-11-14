@@ -1,6 +1,7 @@
 import { JOB_PATHS, submitJobRequest } from "./api/jobs.js";
 
 import { handleModelLibraryRejection } from "./modelLibrary.js";
+import { validatePortableRequestNow } from "./portableValidation.js";
 import { upsertJobNewest } from "./sorters.js";
 
 function generationBody([payload], project, requestedGpu) {
@@ -15,18 +16,23 @@ function generationBody([payload], project, requestedGpu) {
 export const CREATE_JOB_DEFINITIONS = Object.freeze({
   video: {
     path: JOB_PATHS.video,
+    validationKind: "video",
     buildBody: generationBody,
   },
   audio: {
     path: JOB_PATHS.audio,
+    validationKind: "audio",
     buildBody: generationBody,
   },
   image: {
     path: JOB_PATHS.image,
+    validationKind: "image",
     buildBody: generationBody,
   },
   videoUpscale: {
     path: JOB_PATHS.generic,
+    validationKind: "videoUpscale",
+    validationPayload: (body) => body.payload,
     buildBody: ([payload], project, requestedGpu) => ({
       type: "video_upscale",
       projectId: project.id,
@@ -37,6 +43,7 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
   },
   vqa: {
     path: JOB_PATHS.vqa,
+    validationKind: "vqa",
     buildBody: ([asset, question, maxNewTokens], project, requestedGpu) => ({
       projectId: project.id,
       projectName: project.name,
@@ -48,14 +55,17 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
   },
   interleave: {
     path: JOB_PATHS.interleave,
+    validationKind: "interleave",
     buildBody: generationBody,
   },
   vector: {
     path: JOB_PATHS.vector,
+    validationKind: "vector",
     buildBody: ([payload], project, requestedGpu) => ({ projectId: project.id, projectName: project.name, requestedGpu, ...payload }),
   },
   vectorPrompt: {
     path: JOB_PATHS.vectorPrompt,
+    validationKind: "vectorPrompt",
     buildBody: generationBody,
   },
 });
@@ -72,6 +82,7 @@ export function makeCreateJob({
   setError,
   beforeCreate,
   afterCreate,
+  modelEntryForRequest,
 }) {
   async function execute(args, options = {}) {
     const { shouldContinue = () => true, detailed = false, signal } = options;
@@ -98,9 +109,24 @@ export function makeCreateJob({
       }
       // A batch may be stopped while its shared confirmation is open.
       if (!shouldContinue()) return { cancelled: true };
+      const body = definition.buildBody(args, project, requestedGpu);
+      if (definition.validationKind && modelEntryForRequest) {
+        const payload = definition.validationPayload?.(body) ?? body;
+        const result = validatePortableRequestNow({
+          kind: definition.validationKind,
+          payload,
+          modelEntry: modelEntryForRequest(payload.model ?? payload.modelId),
+        });
+        if (result.state === "invalid") {
+          const message = result.refusal.detail;
+          setError(message);
+          return { error: message, validationRefusal: result.refusal };
+        }
+      }
+      if (!shouldContinue()) return { cancelled: true };
       const job = await submitJobRequest(definition.path, token, {
         method: "POST",
-        body: JSON.stringify(definition.buildBody(args, project, requestedGpu)),
+        body: JSON.stringify(body),
       });
       afterCreate?.(job, ...args);
       setJobs((items) => upsertJobNewest(items, job));

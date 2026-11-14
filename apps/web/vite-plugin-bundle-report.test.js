@@ -146,6 +146,35 @@ describe("bundle report", () => {
     ]);
   });
 
+  it("charges a fetched WASM asset to its lazy owner and route closure", () => {
+    const routeChunks = completeRouteChunks();
+    const imageFile = Object.keys(routeChunks).find((fileName) =>
+      Object.keys(routeChunks[fileName].modules)[0].endsWith("/src/screens/ImageStudio.jsx"),
+    );
+    routeChunks[imageFile].imports = ["assets/validator.js"];
+    const wasmFile = "assets/options-12345678.wasm";
+    const report = buildBundleReport(entryWith({
+      ...routeChunks,
+      "assets/validator.js": chunk("assets/validator.js", {
+        code: `const url = "/${wasmFile}";`,
+      }),
+      [wasmFile]: asset(wasmFile, Buffer.alloc(600, 0x42)),
+    }), {
+      ...roomyBudgets,
+      largestRoute: { rawBytes: 500, gzipBytes: 10000, brotliBytes: 10000 },
+    });
+    expect(report.routes["Image Studio"].chunks).toContain(wasmFile);
+    expect(report.chunks.find((item) => item.fileName === wasmFile)).toMatchObject({ type: "wasm", initial: false });
+    expect(report.violations.some((message) => message.includes("Largest route") && message.includes("rawBytes"))).toBe(true);
+  });
+
+  it("fails closed when emitted WASM is not attributed to a JavaScript chunk", () => {
+    const report = buildBundleReport(entryWith({
+      "assets/orphan-12345678.wasm": asset("assets/orphan-12345678.wasm", Buffer.alloc(10)),
+    }), roomyBudgets);
+    expect(report.violations).toContain("WASM asset assets/orphan-12345678.wasm has no owning JavaScript chunk");
+  });
+
   it("does not count an initial chunk as a lazy chunk", () => {
     const report = buildBundleReport(
       entryWith({

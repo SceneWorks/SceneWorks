@@ -255,6 +255,7 @@ pub(crate) struct HealthResponse {
     pub(crate) service: &'static str,
     pub(crate) runtime: String,
     pub(crate) version: String,
+    pub(crate) options_validator_schema_version: u32,
     pub(crate) auth_required: bool,
     // Absolute host paths are withheld from the public health endpoint when a token is
     // configured, so a LAN client can't map the host filesystem despite auth being on.

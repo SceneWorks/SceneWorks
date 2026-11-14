@@ -1598,6 +1598,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         service: "sceneworks-api",
         runtime: "rust".to_owned(),
         version: state.settings.app_version.clone(),
+        options_validator_schema_version:
+            sceneworks_core::options::request_validation::VALIDATOR_SCHEMA_VERSION,
         auth_required: token_configured,
         // When a token is configured the endpoint is public but the deployment expects
         // auth, so don't leak absolute host paths to unauthenticated LAN callers.

@@ -4,8 +4,8 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 // bundle-budgets.json; every size is measured raw, gzip (level 9) and brotli (q11).
 //
 // Gates (the build fails when exceeded):
-//   - `initial`: every entry chunk, its recursive static imports, and the emitted *.js
-//     assets index.html fetches (theme-init.js). This is what first paint downloads.
+//   - `initial`: every entry chunk, its recursive static imports, emitted *.js
+//     assets index.html fetches, and WASM assets reached by that graph.
 //   - `lazyChunk`: EACH non-initial dynamic-entry chunk (a React.lazy screen, an
 //     `await import()` target) together with its static closure minus the initial chunks,
 //     i.e. what one lazy load actually fetches. Checked per chunk, not summed.
@@ -109,6 +109,14 @@ function collectStaticChunks(startNames, chunks) {
   return collected;
 }
 
+function withWasmAssets(names, wasmOwners) {
+  const closure = new Set(names);
+  for (const name of names) {
+    for (const asset of wasmOwners.get(name) ?? []) closure.add(asset);
+  }
+  return closure;
+}
+
 function summarize(fileNames, chunkSizes) {
   const result = { rawBytes: 0, gzipBytes: 0, brotliBytes: 0 };
   for (const fileName of fileNames) {
@@ -144,6 +152,21 @@ export function buildBundleReport(bundle, budgets) {
       .filter((item) => item.type === "asset" && item.fileName.endsWith(".js"))
       .map((asset) => [asset.fileName, asset]),
   );
+  const wasmAssets = new Map(
+    Object.values(bundle)
+      .filter((item) => item.type === "asset" && item.fileName.endsWith(".wasm"))
+      .map((asset) => [asset.fileName, asset]),
+  );
+  // Vite attaches importedAssets to a chunk when it emits `?url` assets. Inspect
+  // the emitted code as well because some Rolldown versions inline the URL there
+  // without populating that metadata. A WASM asset with no owner fails closed.
+  const wasmOwners = new Map([...chunks].map(([fileName, chunk]) => [
+    fileName,
+    [...wasmAssets.keys()].filter((asset) =>
+      chunk.viteMetadata?.importedAssets?.has?.(asset)
+      || chunk.code.includes(asset),
+    ),
+  ]));
   const chunkSizes = new Map(
     [
       ...[...chunks].map(([fileName, chunk]) => [
@@ -154,19 +177,25 @@ export function buildBundleReport(bundle, budgets) {
         fileName,
         compressedSizes(assetSource(asset)),
       ]),
+      ...[...wasmAssets].map(([fileName, asset]) => [
+        fileName,
+        compressedSizes(assetSource(asset)),
+      ]),
     ],
   );
-  const initialNames = new Set([
+  const initialScripts = new Set([
     ...collectStaticChunks(
       [...chunks.values()].filter((chunk) => chunk.isEntry).map((chunk) => chunk.fileName),
       chunks,
     ),
     ...scriptAssets.keys(),
   ]);
+  const initialNames = withWasmAssets(initialScripts, wasmOwners);
 
   const reportNames = new Set([
     ...chunks.keys(),
     ...scriptAssets.keys(),
+    ...wasmAssets.keys(),
   ]);
   const routeMembership = new Map(
     [...reportNames].map((fileName) => [fileName, []]),
@@ -174,6 +203,11 @@ export function buildBundleReport(bundle, budgets) {
 
   const routeChunks = {};
   const violations = [];
+  for (const asset of wasmAssets.keys()) {
+    if (![...wasmOwners.values()].some((owned) => owned.includes(asset))) {
+      violations.push(`WASM asset ${asset} has no owning JavaScript chunk`);
+    }
+  }
   const initialModuleIds = [...initialNames].flatMap((fileName) =>
     Object.keys(chunks.get(fileName)?.modules ?? {}).map(normalize),
   );
@@ -199,7 +233,7 @@ export function buildBundleReport(bundle, budgets) {
       violations.push(`${route} did not produce a route chunk`);
       continue;
     }
-    const loaded = collectStaticChunks(starts, chunks);
+    const loaded = withWasmAssets(collectStaticChunks(starts, chunks), wasmOwners);
     for (const initialName of initialNames) loaded.delete(initialName);
     for (const fileName of loaded) routeMembership.get(fileName)?.push(route);
     routeChunks[route] = {
@@ -223,7 +257,7 @@ export function buildBundleReport(bundle, budgets) {
   const lazyChunks = {};
   for (const lazy of chunks.values()) {
     if (!lazy.isDynamicEntry || initialNames.has(lazy.fileName)) continue;
-    const loaded = collectStaticChunks([lazy.fileName], chunks);
+    const loaded = withWasmAssets(collectStaticChunks([lazy.fileName], chunks), wasmOwners);
     for (const initialName of initialNames) loaded.delete(initialName);
     lazyChunks[lazy.fileName] = {
       chunks: [...loaded].sort(),
@@ -281,7 +315,7 @@ export function buildBundleReport(bundle, budgets) {
         return {
           fileName,
           name: chunk?.name ?? fileName,
-          type: chunk ? "chunk" : "asset",
+          type: chunk ? "chunk" : fileName.endsWith(".wasm") ? "wasm" : "asset",
           entry: Boolean(chunk?.isEntry),
           initial: initialNames.has(fileName),
           routes: routeMembership.get(fileName).sort(),

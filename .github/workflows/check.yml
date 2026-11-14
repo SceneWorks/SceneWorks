@@ -54,6 +54,14 @@ jobs:
         run: npm --prefix apps/web run lint
       - name: Run web test suite
         run: npm --prefix apps/web run test
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+          targets: wasm32-unknown-unknown
+      - name: Verify portable browser validator artifacts
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.121 --locked
+          node scripts/build-options-wasm.mjs --check
       - name: Build web production bundle
         run: npm --prefix apps/web run build
 
