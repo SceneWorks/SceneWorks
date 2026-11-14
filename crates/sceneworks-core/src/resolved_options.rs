@@ -359,6 +359,8 @@ pub struct IrisTrainingOptions {
     pub dist_share_device: Option<Bound<bool>>,
     pub dist_timeout_secs: Option<Bound<i64>>,
     pub expected_global_batch: Option<Bound<i64>>,
+    /// Portable Iris policy has applied topology defaults once at the binding boundary.
+    pub dist_topology: IrisDistTopology,
     pub repa_weight: Option<Bound<f64>>,
     pub restore_init: Option<Bound<String>>,
     pub restore_resume_data_policy: Option<Bound<String>>,
@@ -366,8 +368,37 @@ pub struct IrisTrainingOptions {
     pub restore_degradation_wire: Option<Bound<JsonObject>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrisDistTopology {
+    pub world_size: u64,
+    pub share_device: bool,
+    pub timeout_secs: u64,
+}
+
+impl Default for IrisDistTopology {
+    fn default() -> Self {
+        let (world_size, share_device, timeout_secs) =
+            crate::training::iris::curricula::iris_dist_world(&JsonObject::new());
+        Self {
+            world_size,
+            share_device,
+            timeout_secs,
+        }
+    }
+}
+
 impl IrisTrainingOptions {
     pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+        let dist_topology = BindingInput::parent(input.effective, "training.config.advanced.iris")
+            .map(crate::training::iris::curricula::iris_dist_world)
+            .map(
+                |(world_size, share_device, timeout_secs)| IrisDistTopology {
+                    world_size,
+                    share_device,
+                    timeout_secs,
+                },
+            )
+            .unwrap_or_default();
         Ok(Self {
             network_type: input.text("training.config.advanced", "networkType")?,
             mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
@@ -392,6 +423,7 @@ impl IrisTrainingOptions {
                 .integer("training.config.advanced.iris.dist.world", "timeout_secs")?,
             expected_global_batch: input
                 .integer("training.config.advanced.iris", "expected_global_batch")?,
+            dist_topology,
             repa_weight: input.number("training.config.advanced.iris.repa", "weight")?,
             restore_init: input.text("training.config.advanced.iris_restore", "init")?,
             restore_resume_data_policy: input.text(
@@ -837,6 +869,9 @@ mod tests {
         assert!(bound.dist_share_device.as_ref().unwrap().value);
         assert_eq!(bound.dist_timeout_secs.as_ref().unwrap().value, 600);
         assert_eq!(bound.expected_global_batch.as_ref().unwrap().value, 8);
+        assert_eq!(bound.dist_topology.world_size, 2);
+        assert!(bound.dist_topology.share_device);
+        assert_eq!(bound.dist_topology.timeout_secs, 600);
         assert!(bound.repa_enabled());
         assert_eq!(bound.restore_init.as_ref().unwrap().value, "parent");
         assert_eq!(
