@@ -234,6 +234,18 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     }
   });
 
+  it("still sends the durable copy when localStorage cannot be written", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    try {
+      await render(<Harness settings={{ prompt: "server only" }} />);
+      expect(persistNavigationPreferences).toHaveBeenCalledOnce();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
   // sc-23000: the YuE2 Song Lab's own snapshot (`yue2lab`) rides the same durable map and is seeded
   // back on launch, and a full-size ABC score stays out of the durable copy (it would push the whole
   // workspace entry past the server's per-entry budget, dropping every studio in it).

@@ -224,8 +224,8 @@ function writeCache(studio, workspaceId, settings) {
     window.localStorage.setItem(storageKey(studio, workspaceId), JSON.stringify(settings));
     return true;
   } catch {
-    // localStorage unavailable — settings just won't persist this session.
-    return false;
+    // localStorage unavailable — preserve the durable write attempt below.
+    return true;
   }
 }
 
