@@ -218,17 +218,10 @@ use crate::engines::{mlx_model, ResolvedModel};
 
 /// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
 /// provider's built-in decoder byte-for-byte; every other value must be a bounded string id.
-fn requested_decoder_id(
-    advanced: &sceneworks_core::contracts::JsonObject,
-) -> WorkerResult<Option<&str>> {
-    match advanced.get("decoder") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.trim().is_empty() || value == "native" => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.as_str())),
-        Some(_) => Err(WorkerError::InvalidPayload(
-            "advanced.decoder must be a decoder id string (or 'native')".to_owned(),
-        )),
-    }
+fn requested_decoder_id(request: &ImageRequest) -> Option<&str> {
+    request
+        .advanced_text("decoder")
+        .filter(|value| !value.trim().is_empty() && *value != "native")
 }
 
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
@@ -240,6 +233,7 @@ fn requested_decoder_id(
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 
+#[cfg(test)]
 fn parse_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
@@ -287,6 +281,52 @@ fn parse_prompt_enhancement_fields(
                 )
             })?;
             if !(1..=max_token_limit).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
+                )));
+            }
+            Ok(value as u32)
+        })
+        .transpose()?;
+    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
+        return Err(WorkerError::InvalidPayload(
+            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
+        ));
+    }
+    Ok((enabled, temperature, max_tokens))
+}
+
+pub(super) fn resolved_prompt_enhancement_fields(
+    request: &ImageRequest,
+) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .ok_or_else(|| WorkerError::InvalidPayload("image options were not resolved".to_owned()))?;
+    let enabled = options
+        .enhance_prompt
+        .as_ref()
+        .is_some_and(|value| value.value);
+    let temperature = options
+        .enhance_temperature
+        .as_ref()
+        .map(|value| value.value)
+        .map(|value| {
+            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+                )));
+            }
+            Ok(value as f32)
+        })
+        .transpose()?;
+    let max_token_limit = crate::prompt_enhancement_max_tokens(&request.model);
+    let max_tokens = options
+        .enhance_max_tokens
+        .as_ref()
+        .map(|value| value.value)
+        .map(|value| {
+            if !(1..=max_token_limit as i64).contains(&value) {
                 return Err(WorkerError::InvalidPayload(format!(
                     "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
                 )));
@@ -438,7 +478,22 @@ fn validate_prompt_enhancement_request(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.model, &request.advanced)?;
+    let (enabled, _, _) = if request.resolved_advanced.is_some() {
+        resolved_prompt_enhancement_fields(request)?
+    } else {
+        // Legacy fixtures still exercise the old pre-resolution refusal contract.
+        // Production must bind the shared resolver's effective request first.
+        #[cfg(test)]
+        {
+            parse_prompt_enhancement_fields(&request.model, &request.advanced)?
+        }
+        #[cfg(not(test))]
+        {
+            return Err(WorkerError::InvalidPayload(
+                "image options were not resolved".to_owned(),
+            ));
+        }
+    };
     if !enabled {
         return Ok(());
     }
@@ -451,14 +506,29 @@ fn validate_prompt_enhancement_request(
                 .to_owned(),
         ));
     }
-    let strict_control = request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-        || request.advanced.contains_key("controlWeights")
-        || request.advanced.contains_key("controlImage")
-        || request.advanced.contains_key("controlMode");
+    let strict_control = if let Some(options) = request.resolved_advanced.as_ref() {
+        options
+            .poses
+            .as_ref()
+            .is_some_and(|poses| !poses.value.is_empty())
+            || options.control_weights.is_some()
+            || options.control_image.is_some()
+            || options.control_mode.is_some()
+    } else {
+        #[cfg(test)]
+        {
+            request
+                .advanced
+                .get("poses")
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty())
+                || request.advanced.contains_key("controlWeights")
+                || request.advanced.contains_key("controlImage")
+                || request.advanced.contains_key("controlMode")
+        }
+        #[cfg(not(test))]
+        unreachable!("unresolved request refused above")
+    };
     if strict_control {
         return Err(WorkerError::InvalidPayload(
             "prompt enhancement cannot be combined with strict control".to_owned(),
@@ -525,12 +595,25 @@ fn resolve_pinned_native_package(
 /// Reject raw queued layout controls before dispatch, including routes that do not use the
 /// generic native render surface. Unsupported models must never silently ignore a box request.
 fn validate_flux3_layout_request(request: &ImageRequest) -> WorkerResult<()> {
-    let has_controls = ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
-        request
-            .advanced
-            .get(*key)
-            .is_some_and(|value| !value.is_null())
-    });
+    let has_controls = if let Some(options) = request.resolved_advanced.as_ref() {
+        options.flux3_layout.is_some() || options.flux3_reference_ids.is_some()
+    } else {
+        #[cfg(test)]
+        {
+            ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
+                request
+                    .advanced
+                    .get(*key)
+                    .is_some_and(|value| !value.is_null())
+            })
+        }
+        #[cfg(not(test))]
+        {
+            return Err(WorkerError::InvalidPayload(
+                "image options were not resolved".to_owned(),
+            ));
+        }
+    };
     if !sceneworks_core::image_request::flux3::is_model(&request.model) {
         if has_controls {
             return Err(WorkerError::InvalidPayload(format!(
@@ -666,7 +749,7 @@ async fn run_image_generate_job_unexplained(
     ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
-    if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
+    if let Some(decoder_id) = requested_decoder_id(&request) {
         #[cfg(native_lane)]
         {
             let backend = if cfg!(target_os = "macos") {
@@ -680,7 +763,7 @@ async fn run_image_generate_job_unexplained(
             )
             .or_else(|| mlx_model(&request.model).map(|model| model.engine_id().to_owned()))
             .unwrap_or_else(|| request.model.clone());
-            validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
+            validate_selected_decoder_request(&provider_id, decoder_id, &request)?;
         }
         #[cfg(not(native_lane))]
         {
@@ -1121,16 +1204,20 @@ fn imported_checkpoint_file_for_share(
         return None;
     }
     let raw_path = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
-        })
-        .and_then(Value::as_str)?;
+                .and_then(Value::as_str)
+        })?;
     let path = crate::paths::normalize_app_managed_model_path(
         settings,
         raw_path,
@@ -2713,7 +2800,7 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 }
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
     // reach the asset or the job result's `prefixKvCache` summary.
     raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
