@@ -259,6 +259,13 @@ export function ConfigureJobPanel({
   subjectMaskReport = null,
   onGenerateSubjectMasks,
 }) {
+  const portableField = trainingRefusal?.field?.replace(/^config\.(advanced\.)?/, "").replace(/^advanced\./, "");
+  const displayValidity = trainingRefusal ? {
+    ...configValidity,
+    ready: false,
+    surfaced: [...configValidity.surfaced, issue.error(portableField, trainingRefusal.detail)],
+    invalidFields: new Set([...configValidity.invalidFields, portableField].filter(Boolean)),
+  } : configValidity;
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
   // branch instead of a LoRA. Surface that so the run reads as ControlNet, not a mislabeled LoRA.
@@ -379,7 +386,7 @@ export function ConfigureJobPanel({
   // Every decoded-x0 / latent auxiliary loss the target supports, in display order: its toggle
   // (label, help text, suggested weight) and the knobs shown while it is on (label stem, help-text
   // noun, bounds, default window and period, loss-specific extras).
-  const draft = { configDraft, configValidity, updateConfigDraft };
+  const draft = { configDraft, configValidity: displayValidity, updateConfigDraft };
   const auxLosses = [
     {
       prefix: "depthAnchoring",
@@ -404,7 +411,7 @@ export function ConfigureJobPanel({
           <select
             onChange={(event) => updateConfigDraft("depthAnchoringModel", event.target.value)}
             value={configDraft.depthAnchoringModel ?? ""}
-            {...invalidProps(configValidity, "depthAnchoringModel")}
+            {...invalidProps(displayValidity, "depthAnchoringModel")}
           >
             {depthAnchoringModelOptions.map((option) => (
               <option key={option} value={option}>
@@ -455,7 +462,7 @@ export function ConfigureJobPanel({
             {selectedTarget?.ui?.subjectRestrictedNormalLoss !== false ? (
               <TechniqueToggle
                 checked={Boolean(configDraft.normalRestrictToSubject)}
-                invalid={invalidProps(configValidity, "normalRestrictToSubject")}
+                invalid={invalidProps(displayValidity, "normalRestrictToSubject")}
                 label="Normals on the subject only"
                 onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
                 title="Average the normal loss over each image's subject mask only (needs a subject mask on every image; missing ones are generated with SAM3 when training starts)."
@@ -501,7 +508,7 @@ export function ConfigureJobPanel({
             <select
               onChange={(event) => updateConfigDraft("identityLossReference", event.target.value)}
               value={configDraft.identityLossReference ?? ""}
-              {...invalidProps(configValidity, "identityLossReference")}
+              {...invalidProps(displayValidity, "identityLossReference")}
             >
               {identityLossReferenceOptions.map((option) => (
                 <option key={option} value={option}>
@@ -615,7 +622,7 @@ export function ConfigureJobPanel({
       type="number"
       value={configDraft[field] ?? ""}
       {...props}
-      {...(validated ? invalidProps(configValidity, field) : {})}
+      {...(validated ? invalidProps(displayValidity, field) : {})}
     />
   );
   return (
@@ -629,7 +636,7 @@ export function ConfigureJobPanel({
             <Icon.Library size={14} />
             Data Sets
           </button>
-          <ReadyPill ready={configValidity.ready} />
+          <ReadyPill ready={displayValidity.ready} />
         </>
       }
     >
@@ -787,7 +794,7 @@ export function ConfigureJobPanel({
             <>
               <IrisTaskOptions
                 configDraft={configDraft}
-                configValidity={configValidity}
+                configValidity={displayValidity}
                 objective={objective}
                 onCheckDataset={activeDataset?.id ? irisContext.checkDataset : undefined}
                 previousRuns={irisContext.previousRuns}
@@ -814,7 +821,7 @@ export function ConfigureJobPanel({
                 <select
                   onChange={(event) => updateLtxWorkflow(event.target.value)}
                   value={configDraft.ltxWorkflow ?? ""}
-                  {...invalidProps(configValidity, "ltxWorkflow")}
+                  {...invalidProps(displayValidity, "ltxWorkflow")}
                 >
                   {ltxWorkflows.map((workflow) => (
                     <option key={workflow} value={workflow}>{optionLabel(workflow)}</option>
@@ -1182,7 +1189,7 @@ export function ConfigureJobPanel({
                 <select
                   onChange={(event) => updateConfigDraft("resolution", event.target.value)}
                   value={configDraft.resolution ?? ""}
-                  {...invalidProps(configValidity, "resolution")}
+                  {...invalidProps(displayValidity, "resolution")}
                 >
                   {visibleResolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
                   {visibleResolutionOptions.map((resolution) => (
@@ -1326,7 +1333,7 @@ export function ConfigureJobPanel({
               {auxLosses.map((loss) => (
                 <TechniqueToggle
                   checked={loss.on}
-                  invalid={invalidProps(configValidity, `${loss.prefix}Weight`)}
+                  invalid={invalidProps(displayValidity, `${loss.prefix}Weight`)}
                   key={loss.prefix}
                   label={loss.toggleLabel}
                   onChange={(event) =>
@@ -1338,7 +1345,7 @@ export function ConfigureJobPanel({
               {subjectMaskLossSupported ? (
                 <TechniqueToggle
                   checked={subjectMaskLossEnabled}
-                  invalid={invalidProps(configValidity, "subjectMaskLoss")}
+                  invalid={invalidProps(displayValidity, "subjectMaskLoss")}
                   label="Subject-masked loss"
                   onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
                   title="Subject-focused loss uses a mask on every image; missing masks are generated with SAM3 at training start. On in Z-Image character presets, otherwise off."
@@ -1354,7 +1361,7 @@ export function ConfigureJobPanel({
                   value={configDraft.flux3 ?? "{}"}
                   onChange={(event) => updateConfigDraft("flux3", event.target.value)}
                   rows={6}
-                  {...invalidProps(configValidity, "flux3")}
+                  {...invalidProps(displayValidity, "flux3")}
                 />
               </label>
             ) : null}
@@ -1362,7 +1369,7 @@ export function ConfigureJobPanel({
               <IrisTrainingOptions
                 captionFieldOptions={irisContext.captionFieldOptions}
                 configDraft={configDraft}
-                configValidity={configValidity}
+                configValidity={displayValidity}
                 fullRuns={irisContext.fullRuns}
                 previousRuns={irisContext.previousRuns}
                 updateConfigDraft={updateConfigDraft}
@@ -1371,7 +1378,7 @@ export function ConfigureJobPanel({
             {iris ? (
               <IrisCurriculaOptions
                 configDraft={configDraft}
-                configValidity={configValidity}
+                configValidity={displayValidity}
                 onApplyPreset={irisContext.applyPreset}
                 planCheck={irisContext.planCheck}
                 presets={irisContext.presets}
@@ -1380,7 +1387,7 @@ export function ConfigureJobPanel({
               />
             ) : null}
             {resolutionBuckets ? (
-              <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
+              <fieldset className="training-resolution-buckets" {...invalidProps(displayValidity, "resolutionBuckets")}>
                 <legend>Resolution buckets</legend>
                 <span className="training-field-hint">
                   Square rows train every image at each listed resolution. Width × height rows assign each image only to its closest-aspect bucket; equal-aspect ties use the first row, not every resolution. Repeats apply within the assigned bucket.
@@ -1532,9 +1539,7 @@ export function ConfigureJobPanel({
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
               as the reason Start training is dead (sc-10501). */}
-          <ValidationSummary issues={trainingRefusal
-            ? [...configValidity.surfaced, issue.error(trainingRefusal.field, trainingRefusal.detail)]
-            : configValidity.surfaced} label="Configuration errors" />
+          <ValidationSummary issues={displayValidity.surfaced} label="Configuration errors" />
 
           <div className="training-config-actions">
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
@@ -1542,7 +1547,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configValidity.ready || Boolean(trainingRefusal) || submittingJob}
+              disabled={!displayValidity.ready || submittingJob}
               onClick={submitTrainingJob}
               type="button"
             >
