@@ -762,6 +762,11 @@ fn shared_person_and_prompt_refusals_precede_worker_parsing() {
             "promptRefine",
             serde_json::json!({"task":"image_caption","imagePaths":vec!["image.png";7]}),
         ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","sourceAssetIds":["asset"],"imagePaths":[]}),
+        ),
     ] {
         let payload = payload.as_object().unwrap();
         let expected =

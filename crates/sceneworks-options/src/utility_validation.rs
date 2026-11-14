@@ -212,11 +212,10 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
         return Err(ValidationRefusal::new("prompt", "Prompt cannot be empty"));
     }
     if vision || rewrite {
-        let count = payload
+        let asset_count = payload
             .get("sourceAssetIds")
             .and_then(Value::as_array)
             .filter(|a| !a.is_empty())
-            .or(image_paths)
             .map(Vec::len)
             .unwrap_or_else(|| {
                 usize::from(
@@ -225,9 +224,15 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
                         .any(|key| !text(key).is_empty()),
                 )
             });
+        // The worker treats any present path array as authoritative, including an empty array.
+        let count = image_paths.map_or(asset_count, Vec::len);
         if count == 0 && vision {
             return Err(ValidationRefusal::new(
-                "sourceAssetIds",
+                if image_paths.is_some() {
+                    "imagePaths"
+                } else {
+                    "sourceAssetIds"
+                },
                 "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
             ));
         }
@@ -237,7 +242,7 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
             MAX_MOOD_BOARD_IMAGES
         };
         // A submitted resolved-path list cannot hide an over-cap execution list behind asset ids.
-        if count.max(image_paths.map_or(0, Vec::len)) > cap {
+        if count.max(asset_count) > cap {
             let field = if image_paths.is_some_and(|paths| paths.len() > cap) {
                 "imagePaths"
             } else {
@@ -564,4 +569,18 @@ fn prompt_reference_paths_refuse_malformed_members_and_enforce_task_caps() {
             "imagePaths"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn present_empty_prompt_paths_keep_worker_precedence_over_asset_ids() {
+    let vision = json!({"task":"image_caption","sourceAssetIds":["asset"],"imagePaths":[]});
+    let error =
+        crate::request_validation::validate_shape("promptRefine", vision.as_object().unwrap())
+            .unwrap_err();
+    assert_eq!(error.field, "imagePaths");
+    let rewrite = json!({"task":"qwen_image_rewrite","prompt":"tree","sourceAssetIds":["asset"],"imagePaths":[]});
+    // Qwen's text-only path is permitted; an empty authoritative list means no image references.
+    crate::request_validation::validate_shape("promptRefine", rewrite.as_object().unwrap())
+        .unwrap();
 }
