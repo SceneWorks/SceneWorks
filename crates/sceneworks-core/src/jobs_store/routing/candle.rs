@@ -10,7 +10,6 @@ use crate::image_request::{
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
     CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
-    CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
     flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
@@ -24,33 +23,6 @@ use crate::jobs_store::routing::{
     has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier,
     krea_edit_has_unsupported_carrier,
 };
-
-/// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
-/// carrying `request.loras` stays on the candle lane instead of being refused. Wan-14B applies
-/// adapters per MoE expert, while base LTX installs additive residuals on its video-attention
-/// projections. Wan-5B now applies dense/packed LoRA and LoKr, and Bernini exposes its provider
-/// slot. 10Eros remains MLX-only after SC-18902's failed Candle acceptance; SVD and Mochi advertise
-/// no adapter slot. Membership is projected from each Candle-routed typed video spec's native
-/// adapter capability; the request-shape gate below still owns carrier validation.
-pub(crate) static CANDLE_VIDEO_LORA_MODELS: std::sync::LazyLock<Vec<&'static str>> =
-    std::sync::LazyLock::new(|| {
-        crate::registry::builtin_model_specs()
-            .filter(|spec| {
-                spec.product.model_type == "video"
-                    && spec
-                        .routing
-                        .as_ref()
-                        .is_some_and(|policy| policy.candle_routed())
-                    && spec.video_routes.get("candle").is_some_and(|routes| {
-                        routes
-                            .iter()
-                            .flat_map(|route| &route.engines)
-                            .any(|engine| engine.supports_lora)
-                    })
-            })
-            .map(|spec| spec.product.id.as_str())
-            .collect()
-    });
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
@@ -826,18 +798,6 @@ pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Optio
         .filter(|bits| *bits > 0)
 }
 
-fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("quantization"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && !value.eq_ignore_ascii_case("auto")
-        })
-}
-
 /// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
 /// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
 /// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
@@ -862,53 +822,18 @@ pub(crate) fn video_request_is_candle_eligible(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> bool {
+    let Some(kind) = sceneworks_options::video_eligibility::VideoJobKind::parse(job_type.as_str())
+    else {
+        return false;
+    };
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    if candle_request_wants_torch_quantization(payload) {
-        // `advanced.quantization` selects a Torch GGUF overlay. Native Candle tiers use
-        // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
-        return false;
-    }
-    // A plan-backed entry is decided HERE, by the only two candle video lanes that load a plan's
-    // bytes — the same order `resolve_candle_video_route` decides it in on the worker. Falling
-    // through to the id-keyed arms below would let a plan forwarded under a BUILTIN id
-    // (`minimax_h3`, `wan_2_2`, …) be claimed by a lane that loads the shipped weights, and the
-    // worker would then refuse the job it was handed (sc-26680; the MLX twin is sc-20651's guard).
-    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload)
-        .is_some()
-    {
-        return *job_type == JobType::VideoGenerate
-            && (plan_backed_wan_video_candle_eligible(payload)
-                || crate::jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible(
-                    model, payload,
-                ));
-    }
-    match job_type {
-        // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
-        // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
-        JobType::VideoGenerate => {
-            video_request_candle_eligible(model, payload)
-                || scail2_animate_candle_eligible(model, payload)
-                // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
-                // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
-                || bernini_video_candle_eligible(model, payload)
-            // Plan-backed entries (epic 20398's Wan T2V lane, sc-26680's imported H3 DiT) were
-            // decided above, before any id-keyed arm.
-        }
-        // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
-        JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, payload, job_type)
-                || scail2_replace_candle_eligible(model, payload)
-                || ltx_replace_candle_eligible(model, payload)
-        }
-        // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
-        JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_eligible(model, payload)
-                || video_request_candle_vace_eligible(model, payload, job_type)
-        }
-        _ => false,
-    }
+    sceneworks_options::video_eligibility::candle_eligible(
+        kind,
+        payload,
+        crate::jobs_store::routing::catalog::video_route_facts(model),
+    )
 }
 
 /// The one video shape a PLAN-BACKED manifest entry (`importPlan.checkpointId`, epic 20398) is
@@ -932,22 +857,7 @@ pub(crate) fn video_request_is_candle_eligible(
 /// This is a claim, not a load: the worker still verifies the plan fail-closed (drift, missing
 /// tier, missing expert role) and raises a typed refusal when it cannot.
 pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>) -> bool {
-    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
-        return false;
-    };
-    if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
-        return false;
-    }
-    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id(entry).is_none() {
-        return false;
-    }
-    if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
-        return false;
-    }
-    !has_nonempty_string(payload, "sourceAssetId")
-        && !has_nonempty_string(payload, "lastFrameAssetId")
-        && !has_nonempty_string(payload, "sourceClipAssetId")
-        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
+    sceneworks_options::video_eligibility::plan_backed_wan_eligible(payload)
 }
 
 /// The exact request shape MiniMax-H3's BASE partition (`transformer/`: t2va + fl2va) serves:
@@ -958,24 +868,7 @@ pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>
 /// candle arm and the imported-DiT claim (sc-26680) on both lanes, so the partition an imported
 /// checkpoint is bound to cannot serve a shape the builtin partition refuses.
 pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> bool {
-    let has_source = has_nonempty_string(payload, "sourceAssetId");
-    let has_last = has_nonempty_string(payload, "lastFrameAssetId");
-    let mode_matches = match payload.get("mode").and_then(Value::as_str) {
-        Some("text_to_video") => !has_source && !has_last,
-        // sc-26691: last-only was admitted by the API and served by the worker but claimed by no
-        // lane, so the no-lane gate refused it at submit ("no backend implements it").
-        Some("image_to_video") => has_source != has_last,
-        Some("first_last_frame") => has_source && has_last,
-        _ => false,
-    };
-    mode_matches
-        && !has_nonempty_string(payload, "sourceClipAssetId")
-        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
-        && !has_nonempty_string(payload, "referenceAssetId")
-        && !has_nonempty_string(payload, "maskAssetId")
-        && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
-        && !has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
-        && !has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
+    sceneworks_options::video_eligibility::h3_base_shape(payload)
 }
 
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
@@ -1004,262 +897,18 @@ pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    if candle_request_wants_torch_quantization(payload) {
-        return false;
-    }
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") {
-        match payload.get("mode").and_then(Value::as_str) {
-            Some("text_to_video") => {
-                if has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                    || has_nonempty_string(payload, "sourceClipAssetId")
-                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("image_to_video") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                    || has_nonempty_string(payload, "sourceClipAssetId")
-                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("first_last_frame") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || !has_nonempty_string(payload, "lastFrameAssetId")
-                    || has_nonempty_string(payload, "sourceClipAssetId")
-                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("extend_clip") => {
-                if !has_nonempty_string(payload, "sourceClipAssetId")
-                    || has_nonempty_string(payload, "bridgeRightClipAssetId")
-                    || has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                    || !payload
-                        .get("loras")
-                        .and_then(Value::as_array)
-                        .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
-                {
-                    return false;
-                }
-            }
-            Some("video_bridge") => {
-                if !has_nonempty_string(payload, "sourceClipAssetId")
-                    || !has_nonempty_string(payload, "bridgeRightClipAssetId")
-                    || has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                    || !payload
-                        .get("loras")
-                        .and_then(Value::as_array)
-                        .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
-                {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    } else if model == "wan_2_2" {
-        match payload.get("mode").and_then(Value::as_str) {
-            Some("text_to_video") => {
-                if has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("image_to_video") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("first_last_frame") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || !has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        if has_nonempty_string(payload, "sourceClipAssetId")
-            || has_nonempty_string(payload, "bridgeRightClipAssetId")
-        {
-            return false;
-        }
-    } else if model == "minimax_h3" {
-        // MiniMax-H3 base partition (sc-20755): t2va with no anchors, or fl2va with one/two
-        // keyframes. Keep this explicit like the MLX twin: the reference partition is a different
-        // catalog entry with its own exact Ref2VA arm below. Shared with the imported-DiT claim
-        // (sc-26680), which serves exactly this partition.
-        if !minimax_h3_base_partition_shape(payload) {
-            return false;
-        }
-    } else if model == "minimax_h3_ref" {
-        // SC-20756: the reference partition serves Ref2VA alone. It must carry at least one
-        // heterogeneous reference and must not inherit the base partition's keyframe surface.
-        if payload.get("mode").and_then(Value::as_str) != Some("reference_to_video")
-            || has_nonempty_string(payload, "sourceAssetId")
-            || has_nonempty_string(payload, "lastFrameAssetId")
-            || has_nonempty_string(payload, "sourceClipAssetId")
-            || has_nonempty_string(payload, "bridgeRightClipAssetId")
-        {
-            return false;
-        }
-        if ![
-            "referenceAssetIds",
-            "sourceClipAssetIds",
-            "referenceAudioAssetIds",
-        ]
-        .iter()
-        .any(|key| {
-            payload
-                .get(*key)
-                .and_then(Value::as_array)
-                .is_some_and(|values| !values.is_empty())
-        }) {
-            return false;
-        }
-    } else if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
-        // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
-        // image. A txt2video shape (no source) is rejected and remains queued.
-        if payload.get("mode").and_then(Value::as_str) != Some("image_to_video") {
-            return false;
-        }
-        if !has_nonempty_string(payload, "sourceAssetId") {
-            return false;
-        }
-    } else {
-        // txt2video only: the base `video_generate` mode defaults to `image_to_video`, so require an
-        // explicit `text_to_video`. Every conditioned mode (i2v / first_last_frame / extend / bridge /
-        // replace) is thereby excluded, as is a stray source image.
-        if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
-            return false;
-        }
-        if has_nonempty_string(payload, "sourceAssetId") {
-            return false;
-        }
-    }
-    // Reference / inpaint-mask conditioning is never in the candle video lane (i2v needs only the
-    // single source image; reference + mask are unsupported character / inpaint shapes).
-    if has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "maskAssetId")
-    {
-        return false;
-    }
-    // User LoRAs on the candle video lane are gated by the provider descriptor. Wan-5B/14B and LTX
-    // apply each `request.loras` entry from its file path. SVD and Mochi still reject rather than
-    // silently dropping an adapter.
-    if !CANDLE_VIDEO_LORA_MODELS.contains(&model)
-        && payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
-    // `advanced.mlxQuantize` is a tier select for the published Wan matrices and LTX's packed
-    // Candle turnkeys. LTX-2.3 intentionally has no dense/bf16 Candle tier. LTX-2.5 routes its
-    // full q4/q8/bf16 ladder: q8 is a first-class promoted Candle tier, symmetric with the MLX
-    // lane — production q8 means the hosted packed `q8/` split bundle (INT8-ConvRot stays a
-    // measurement-only selector on the inference side) — with no residual exclusion or parity
-    // obligation. Other video providers remain dense and fail closed for positive tier requests.
-    if (candle_request_wants_quant(payload) || matches!(model, "ltx_2_3" | "ltx_2_5"))
-        && !candle_video_tier_select_eligible(model, payload)
-    {
-        return false;
-    }
-    true
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CandleLtxTier {
-    Bf16,
-    Q4,
-    Q8,
-}
-
-/// Parse only the exact packed tiers published by the shared LTX bundle.
-fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    let Some(value) = value else {
-        return Some(CandleLtxTier::Q4);
-    };
-    match value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
-    {
-        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
-        4 => Some(CandleLtxTier::Q4),
-        8 => Some(CandleLtxTier::Q8),
-        _ => None,
-    }
-}
-
-fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
-    matches!(
-        (model, candle_ltx_requested_tier(payload)),
-        ("ltx_2_3", Some(CandleLtxTier::Q4 | CandleLtxTier::Q8))
-            | (
-                "ltx_2_5",
-                Some(CandleLtxTier::Bf16 | CandleLtxTier::Q4 | CandleLtxTier::Q8)
-            )
-    ) && matches!(
-        mode,
-        "text_to_video"
-            | "image_to_video"
-            | "first_last_frame"
-            | "extend_clip"
-            | "video_bridge"
-            | "replace_person"
-    )
-}
-
-fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if matches!(
+    sceneworks_options::video_eligibility::candle_base_eligible(
         model,
-        "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3" | "minimax_h3_ref"
-    ) {
-        return true;
-    }
-    let Some(mode) = payload.get("mode").and_then(Value::as_str) else {
-        return false;
-    };
-    candle_ltx_product_tier_eligible(model, mode, payload)
+        payload,
+        crate::jobs_store::routing::catalog::video_route_facts(model),
+    )
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
 /// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
 /// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
 pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    // SC-18902 withdrew the Eros Candle route after the exact-head CUDA render proved that its
-    // undistilled checkpoint is not compatible with Candle's single-pass distilled recipe. Keep
-    // this newer advanced-mode route aligned with the same product decision as the base lane.
-    if !matches!(model, "ltx_2_3" | "ltx_2_5")
-        || !has_nonempty_string(payload, "sourceClipAssetId")
-        || !has_nonempty_string(payload, "personTrackId")
-        || !has_nonempty_string(payload, "characterId")
-        || !payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
-    {
-        return false;
-    }
-    candle_ltx_product_tier_eligible(model, "replace_person", payload)
+    sceneworks_options::video_eligibility::ltx_replace_eligible(model, payload)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
@@ -1273,100 +922,21 @@ pub(crate) fn video_request_candle_vace_eligible(
     payload: &Map<String, Value>,
     job_type: &JobType,
 ) -> bool {
-    if model == "wan_2_2_vace_fun_14b" {
-        if !matches!(job_type, JobType::PersonReplace) {
-            return false;
-        }
-    } else if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
+    let Some(kind) = sceneworks_options::video_eligibility::VideoJobKind::parse(job_type.as_str())
+    else {
         return false;
-    }
-    match job_type {
-        // replace_person: the source control clip + the tracked person + the character references.
-        JobType::PersonReplace => {
-            if !has_nonempty_string(payload, "sourceClipAssetId")
-                || !has_nonempty_string(payload, "personTrackId")
-                || !has_nonempty_string(payload, "characterId")
-            {
-                return false;
-            }
-        }
-        // extend_clip: the source clip whose tail anchors the continuation.
-        JobType::VideoExtend => {
-            if !has_nonempty_string(payload, "sourceClipAssetId") {
-                return false;
-            }
-        }
-        // video_bridge: both clips (the left tail + the right head) are pinned around the gap.
-        JobType::VideoBridge => {
-            if !has_nonempty_string(payload, "sourceClipAssetId")
-                || !has_nonempty_string(payload, "bridgeRightClipAssetId")
-            {
-                return false;
-            }
-        }
-        _ => return false,
-    }
-    // Only the dedicated VACE-Fun provider accepts adapters. On-the-fly quant remains unsupported.
-    if model != "wan_2_2_vace_fun_14b" && has_nonempty_array(payload, "loras") {
-        return false;
-    }
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// The exact hosted tier this SCAIL-2 request can use, or `None` for a malformed/unsupported
-/// precision. Absence retains the established dense bf16 Candle baseline; q4/q8 are exact explicit
-/// package selections. This is deliberately stricter than the historical MLX range mapping: q6
-/// must not silently select q4/q8.
-fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    match value {
-        None | Some(Value::Null) => Some("bf16"),
-        Some(value) => match value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-        {
-            Some(..=0) => Some("bf16"),
-            Some(4) => Some("q4"),
-            Some(8) => Some("q8"),
-            _ => None,
-        },
-    }
+    };
+    sceneworks_options::video_eligibility::candle_vace_eligible(
+        model,
+        payload,
+        kind,
+        crate::jobs_store::routing::catalog::video_route_facts(model),
+    )
 }
 
 /// The request selects one exact tier and never asks a packed provider to merge an adapter.
 pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
-    let has_adapters = payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty());
-    let Some(tier) = scail2_candle_effective_tier(payload) else {
-        return false;
-    };
-    !has_adapters || tier == "bf16"
-}
-
-/// Product admission for a source-ready SCAIL-2 tier.
-///
-/// sc-20969 terminal acceptance admits only SCAIL-2's exact shipped q4/q8/bf16 product packages.
-/// This remains separate from the adapter rule above so packed-plus-adapter combinations stay
-/// fail-closed and stale descriptor summaries cannot silently expand the product surface.
-fn scail2_candle_product_tier_eligible(
-    model: &str,
-    mode: &str,
-    payload: &Map<String, Value>,
-) -> bool {
-    model == "scail2_14b"
-        && matches!(mode, "animate_character" | "replace_person")
-        && matches!(
-            scail2_candle_effective_tier(payload),
-            Some("q4" | "q8" | "bf16")
-        )
+    sceneworks_options::video_eligibility::scail2_source_tier_eligible(payload)
 }
 
 /// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
@@ -1379,23 +949,7 @@ fn scail2_candle_product_tier_eligible(
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if model != "scail2_14b" {
-        return false;
-    }
-    if payload.get("mode").and_then(Value::as_str) != Some("animate_character") {
-        return false;
-    }
-    let has_reference = has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "sourceAssetId")
-        || has_nonempty_string_array(payload, "referenceAssetIds");
-    if !has_reference {
-        return false;
-    }
-    if !has_nonempty_string(payload, "sourceClipAssetId") {
-        return false;
-    }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "animate_character", payload)
+    sceneworks_options::video_eligibility::scail2_animate_eligible(model, payload)
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
@@ -1405,17 +959,7 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
 /// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if model != "scail2_14b" {
-        return false;
-    }
-    if !has_nonempty_string(payload, "sourceClipAssetId")
-        || !has_nonempty_string(payload, "personTrackId")
-        || !has_nonempty_string(payload, "characterId")
-    {
-        return false;
-    }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "replace_person", payload)
+    sceneworks_options::video_eligibility::scail2_replace_eligible(model, payload)
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the
@@ -1433,20 +977,7 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
 /// there is no torch Bernini to fall back to. Factored out so
 /// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
 pub(crate) fn bernini_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if model != "bernini" {
-        return false;
-    }
-    matches!(
-        payload.get("mode").and_then(Value::as_str),
-        Some(
-            "text_to_video"
-                | "video_to_video"
-                | "reference_to_video"
-                | "reference_video_to_video"
-                | "multi_video_to_video"
-                | "ads2v"
-        )
-    )
+    sceneworks_options::video_eligibility::bernini_eligible(model, payload)
 }
 
 /// InstantID candle-routing conditions (sc-5491, epic 5480). The candle `candle-gen-instantid`

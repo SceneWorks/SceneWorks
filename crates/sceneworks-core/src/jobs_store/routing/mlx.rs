@@ -7,7 +7,7 @@ use crate::contracts::{JobSnapshot, JobType};
 use crate::image_request::Flux3Tier;
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
-    MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    MLX_ROUTED_TRAINING_KERNELS,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number,
@@ -989,90 +989,18 @@ pub(crate) fn video_request_is_mlx_eligible(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> bool {
-    // The base `video_generate` job type plus the advanced job types: the clip-conditioning
-    // `video_extend` / `video_bridge` (sc-3522, LTX IC-LoRA) and `person_replace` (sc-3521 →
-    // Wan-VACE). The per-model/per-mode gate below keeps each mode to its capable engines.
-    if !matches!(
-        job_type,
-        JobType::VideoGenerate
-            | JobType::VideoExtend
-            | JobType::VideoBridge
-            | JobType::PersonReplace
-    ) {
+    let Some(kind) = sceneworks_options::video_eligibility::VideoJobKind::parse(job_type.as_str())
+    else {
         return false;
-    }
+    };
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    // **A DELIBERATE, TESTED NEGATIVE (sc-20651), with ONE entry-keyed exception (sc-26680).**
-    // Every MLX Wan/LTX engine loads the builtin snapshot for its model id, so a plan-backed entry
-    // (`importPlan.checkpointId`, epic 20398) that reached one would render BUILTIN weights under
-    // the user's imported checkpoint id — a silent substitution, not a capability.
-    //
-    // The `VIDEO_MLX_ROUTED_MODELS` guard below already excludes every imported id, so this is not
-    // the common path; it is the guard for a plan-backed entry forwarded under a BUILTIN model id,
-    // which that list would happily admit.
-    //
-    // The exception is the imported dense MiniMax-H3 DiT: `resolve_video_route` on macOS has a
-    // plan-backed arm for exactly that entry, which stages the PLAN's DiT directory as the
-    // provider's `transformer` component. Its predicate owns every other refusal — a builtin id, a
-    // shape outside the bound base partition, an adapter — so a plan-backed entry is decided HERE
-    // and never falls through to the id-keyed ladder below. Never add another family without a
-    // worker route that actually loads the plan's bytes.
-    if super::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload).is_some() {
-        return *job_type == JobType::VideoGenerate
-            && super::catalog::plan_backed_minimax_h3_video_eligible(model, payload);
-    }
-    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    // The advanced job types carry their mode by construction (the API maps
-    // `extend_clip`→`VideoExtend` / `video_bridge`→`VideoBridge` / `replace_person`→
-    // `PersonReplace`), so derive it from the job type rather than trusting the payload
-    // `mode` — a missing/stale `mode` on those types must not fall through to the
-    // `image_to_video` default and route incorrectly. The base `video_generate` type reads
-    // the payload `mode` (default `image_to_video`, mirroring `video_request_from_job`).
-    let mode = match job_type {
-        JobType::VideoExtend => "extend_clip",
-        JobType::VideoBridge => "video_bridge",
-        JobType::PersonReplace => "replace_person",
-        _ => payload
-            .get("mode")
-            .and_then(Value::as_str)
-            .unwrap_or("image_to_video"),
-    };
-    if !video_mode_is_mlx_eligible(model, mode) {
-        return false;
-    }
-    if model == "wan_2_2" {
-        let has_source = payload
-            .get("sourceAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty());
-        let has_last = payload
-            .get("lastFrameAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty());
-        let shape_is_exact = match mode {
-            "text_to_video" => !has_source && !has_last,
-            "image_to_video" => has_source && !has_last,
-            "first_last_frame" => has_source && has_last,
-            _ => true,
-        };
-        if !shape_is_exact {
-            return false;
-        }
-    }
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5")
-        && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
-        && !payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
-    {
-        return false;
-    }
-    true
+    sceneworks_options::video_eligibility::mlx_eligible(
+        kind,
+        payload,
+        super::catalog::video_route_facts(model),
+    )
 }
 
 /// Which `video_generate` modes the in-process Rust MLX worker serves for `model`. The Wan/LTX
@@ -1090,151 +1018,7 @@ pub(crate) fn video_request_is_mlx_eligible(
 /// engines have no `Keyframe` path, so those requests are refused. `replace_person` is MLX on the
 /// replace-capable models (→ native Wan-VACE, sc-3521).
 pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
-    if model == "svd" {
-        return mode == "image_to_video";
-    }
-    // The two Wan2.2 14B MoE registrations are specialized descriptors, not interchangeable aliases:
-    // the T2V engine advertises no conditioning, while the I2V engine advertises Reference. Keeping
-    // this split in routing prevents a source image from reaching the text-only engine (or an empty
-    // request from reaching the reference-required engine).
-    if model == "wan_2_2_t2v_14b" {
-        return mode == "text_to_video";
-    }
-    if model == "wan_2_2_i2v_14b" {
-        return mode == "image_to_video";
-    }
-    // VACE-Fun is a shipped, dedicated dual-expert replacement engine. It must not fall into the
-    // generic Wan text/image generation arm: the worker dispatches only `replace_person` to
-    // `wan2_2_vace_fun_14b`.
-    if model == "wan_2_2_vace_fun_14b" {
-        return mode == "replace_person";
-    }
-    // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
-    // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
-    // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a
-    // source-clip edit, `Conditioning::VideoClip`), `reference_to_video` (r2v —
-    // subject reference images, `MultiReference`), and `reference_video_to_video`
-    // (rv2v — source clip + reference images); plus the multi-source modes (sc-5425):
-    // `multi_video_to_video` (mv2v — several source clips) and `ads2v` (source video +
-    // reference video + reference images). The engine selects the matching guidance
-    // mode from `video_mode` + the supplied conditioning.
-    if model == "bernini" {
-        return matches!(
-            mode,
-            "text_to_video"
-                | "video_to_video"
-                | "reference_to_video"
-                | "reference_video_to_video"
-                | "multi_video_to_video"
-                | "ads2v"
-        );
-    }
-    // SCAIL-2 (epic 5439) is a Wan2.1-14B I2V character-animation engine: a reference character
-    // image + a driving video → an animated clip. It serves the standalone `animate_character` mode
-    // (sc-5448, the worker paints the color-coded masks from native SAM3) AND cross-identity
-    // `replace_person` (sc-5452, the integrated backend behind the YOLO11 → ByteTrack → SAM3
-    // person-track pipeline). Both run the same engine; `replace_person` flips the engine
-    // `replace_flag`. It has no classic text/image-to-video.
-    if model == "scail2_14b" {
-        return matches!(mode, "animate_character" | "replace_person");
-    }
-    // Mochi 1 (epic 1788 / sc-11991) is TEXT-conditioned only: both descriptors declare
-    // `conditioning: []`, so the engine has no image/keyframe/clip path at all — not even the classic
-    // still-image-to-video the generic arm below would otherwise grant it. Anything but
-    // `text_to_video` is a gap, so it needs its own arm rather than the `svd`-style inversion.
-    if model == "mochi_1" {
-        return mode == "text_to_video";
-    }
-    // Krea Realtime 14B (epic 8431 / sc-8444) needs its own arm because the generic arm below grants
-    // exactly `text_to_video | image_to_video`, so its `video_to_video` would fall to `_ => false` and
-    // be silently DROPPED — a capability the manifest advertises (in both `capabilities` and
-    // `ui.recommendedFor`), the engine implements (`conditioning: [Reference, VideoClip]`; a
-    // `VideoClip` source drives the strength-controlled AR init), and the worker already maps
-    // (`krea_realtime_video_task` → `"v2v"`, via `krea_realtime_conditioning`'s clip branch). Serving
-    // fewer modes than the catalog advertises is exactly the failure this arm exists to prevent.
-    //
-    // These three and NO more: the descriptor exposes no first/last-frame, clip-extend, bridge,
-    // person-replace or character-animation surface, so those correctly stay false (the generic arm's
-    // `first_last_frame` / `extend_clip` / `replace_person` lists never name it either).
-    if model == "krea_realtime_14b" {
-        return matches!(mode, "text_to_video" | "image_to_video" | "video_to_video");
-    }
-    // Wan2.2 VACE-Fun A14B (epic 3456 / sc-3458), added by sc-17159 together with its missing
-    // `VIDEO_MODEL_CAPS` row. It needs its OWN arm in BOTH directions: the generic arm below would
-    // grant it `text_to_video | image_to_video`, which this dual-expert CONTROL checkpoint does not
-    // do (its manifest deliberately advertises `replace_person` alone —
-    // `builtin_manifest_registers_the_wan_vace_fun_model` pins that), while the generic
-    // `replace_person` list names only ltx/wan_2_2 and so refused the one mode it does do.
-    if model == "wan_2_2_vace_fun_14b" {
-        return mode == "replace_person";
-    }
-    // MiniMax-H3 (epic 17137 / sc-17159). TWO ids, TWO different mode sets, and each needs its own
-    // arm for the opposite reason:
-    //
-    // * `minimax_h3` is the `transformer` checkpoint — t2va + fl2va. The generic arm below grants
-    //   `text_to_video | image_to_video` but lists only LTX + Wan TI2V-5B for `first_last_frame`,
-    //   so fl2va — a mode the manifest advertises in `capabilities` AND `ui.recommendedFor` —
-    //   would fall to `_ => false` and surface disabled in the Video Studio on the ONLY platform
-    //   this family installs on.
-    // * `minimax_h3_ref` is the `transformer_ref` checkpoint and serves Ref2VA ALONE. The generic
-    //   arm would have done the reverse damage: granted it `text_to_video | image_to_video`, which
-    //   its checkpoint does not do, while refusing `reference_to_video`, which is the only thing it
-    //   does. `image_to_video` on the reference partition is not a harmless extra — the two
-    //   partitions are separate 18.78 GB DiTs and routing a t2v request at the reference one loads
-    //   the wrong checkpoint.
-    //
-    // The mode sets are exactly each entry's declared `capabilities`, and
-    // `every_declared_video_capability_is_claimable_by_some_lane` (routing/catalog.rs) reads the
-    // shipped manifest bytes to hold that, so a capability added to either entry without an arm
-    // here is RED at the source rather than at the next user report.
-    if model == "minimax_h3" {
-        return matches!(
-            mode,
-            "text_to_video" | "image_to_video" | "first_last_frame"
-        );
-    }
-    if model == "minimax_h3_ref" {
-        // Ref2VA, ACTIVATED (sc-18650). `reference_to_video` is the ONLY mode this partition
-        // serves — the `transformer_ref` checkpoint. The route was withheld while
-        // `video_mode_conditioning_requirements` demanded `multiReference` alone (the old
-        // sc-17157 condition): the pinned engines deliberately declare the ORDERED omni-reference
-        // surface instead — `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]`, because
-        // gen-core has no heterogeneous-reference variant for this family and the request's own
-        // order carries the semantics (`mlx-gen-minimax-h3/src/model.rs`, measured at the pinned
-        // revision). sc-18650 aligned the requirement to that shipped contract
-        // (`multiReference | reference`), so the declaration here no longer makes
-        // `dump-engine-capabilities` refuse the runtime artifact.
-        //
-        // The refusals below remain load-bearing: the generic arm would grant this partition
-        // `text_to_video | image_to_video`, which its checkpoint does not do — the two partitions
-        // are separate 18.78 GB DiTs, and routing a t2v request at the reference one loads the
-        // wrong checkpoint.
-        return mode == "reference_to_video";
-    }
-    match mode {
-        "text_to_video" | "image_to_video" => true,
-        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
-        // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
-        // and Wan (`wan_2_2`) — the worker prefers native Wan-VACE ControlClip for genuine motion
-        // continuity (sc-3812, tier C: real source frames pinned at the kept positions + a
-        // generated-span mask) and falls back to the TI2V-5B single-frame boundary keyframe path
-        // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
-        // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
-        // path, so extend/bridge on them are refused and remain queued.
-        "extend_clip" | "video_bridge" => {
-            matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2")
-        }
-        // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
-        // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
-        // the models that advertise the capability), so admit those.
-        //
-        // `wan_2_2_vace_fun_14b` also advertises `replace_person` and was unreachable before
-        // sc-17159, but it is served by its OWN arm above rather than added here: it must NOT
-        // inherit this arm's neighbours (`text_to_video | image_to_video`), which the generic arm
-        // would otherwise hand it. (`scail2_14b` has its own arm for the same reason.)
-        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" | "wan_2_2"),
-        _ => false,
-    }
+    sceneworks_options::video_eligibility::mlx_mode_eligible(model, mode)
 }
 
 /// Epic 3039 routing — does this `lora_train` job belong on the in-process Rust MLX

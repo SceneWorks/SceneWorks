@@ -71,68 +71,10 @@ pub use sceneworks_options::video_request::{
     REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 
-/// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
-/// extend, bridge, and native replacement. Routing and execution share this predicate so a job
-/// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
-pub fn loras_contain_ltx_ic_lora(loras: &[Value]) -> bool {
-    loras.iter().any(lora_looks_like_ltx_ic_lora)
-}
-
-/// Recognize the explicit metadata and canonical naming markers used by LTX IC-LoRA packages.
-pub fn lora_looks_like_ltx_ic_lora(lora: &Value) -> bool {
-    let Some(object) = lora.as_object() else {
-        return lora
-            .as_str()
-            .is_some_and(|value| ltx_ic_lora_marker(&value.to_lowercase().replace('_', "-")));
-    };
-    if object.get("icLora") == Some(&Value::Bool(true))
-        || object.get("isIcLora") == Some(&Value::Bool(true))
-    {
-        return true;
-    }
-    if object
-        .get("conditioningRole")
-        .and_then(Value::as_str)
-        .is_some_and(|role| role.trim().to_lowercase().replace('-', "_") == "ic_lora")
-    {
-        return true;
-    }
-    let source = object.get("source").and_then(Value::as_object);
-    let mut values = Vec::new();
-    for key in [
-        "id",
-        "loraId",
-        "name",
-        "displayName",
-        "installedPath",
-        "sourcePath",
-        "path",
-    ] {
-        if let Some(value) = object.get(key).and_then(Value::as_str) {
-            values.push(value);
-        }
-    }
-    if let Some(source) = source {
-        for key in ["repo", "file", "path"] {
-            if let Some(value) = source.get(key).and_then(Value::as_str) {
-                values.push(value);
-            }
-        }
-    }
-    match source
-        .and_then(|value| value.get("files"))
-        .or_else(|| object.get("files"))
-    {
-        Some(Value::Array(files)) => values.extend(files.iter().filter_map(Value::as_str)),
-        Some(Value::String(file)) => values.push(file),
-        _ => {}
-    }
-    ltx_ic_lora_marker(&values.join(" ").to_lowercase().replace('_', "-"))
-}
-
-fn ltx_ic_lora_marker(value: &str) -> bool {
-    value.contains("ic-lora") || value.contains("ltx-2-3-ic-")
-}
+/// Portable IC-LoRA marker shared by routing and the native video request parser.
+pub use sceneworks_options::video_eligibility::{
+    lora_looks_like_ltx_ic_lora, loras_contain_ltx_ic_lora,
+};
 
 /// A typed video-generation request, parsed from a job payload. One job produces a
 /// single video asset (unlike images, which batch `count`).

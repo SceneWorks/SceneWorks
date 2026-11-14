@@ -831,6 +831,20 @@ impl VideoModelCaps {
 // Generated from the schema-validated router product policy in the static ModelSpec build.
 include!(concat!(env!("OUT_DIR"), "/model-route-policy.rs"));
 
+/// Project the same immutable typed ModelSpec facts served to browser validation. Unknown or
+/// imported model ids have no builtin route facts; their declared plan is checked separately.
+pub(crate) fn video_route_facts(
+    model: &str,
+) -> sceneworks_options::video_eligibility::VideoRouteFacts {
+    crate::registry::builtin_model_specs()
+        .find(|spec| spec.product.id == model)
+        .map(|spec| {
+            let facts = spec.option_route_facts();
+            sceneworks_options::video_eligibility::VideoRouteFacts::from_value(Some(&facts))
+        })
+        .unwrap_or_default()
+}
+
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
 /// tables above (sc-9495). Expands to a compile-time-built array of exactly the ids whose column is
 /// `true`, in table-row order, so the generated constant is a drop-in for the hand-written list it
@@ -1116,27 +1130,11 @@ pub(crate) fn plan_backed_minimax_h3_video_eligible(
     model: &str,
     payload: &Map<String, Value>,
 ) -> bool {
-    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
-        return false;
-    };
-    if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
-        return false;
-    }
-    if matches!(
+    sceneworks_options::video_eligibility::imported_h3_eligible(
         model,
-        crate::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
-            | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
-    ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
-        || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
-    {
-        return false;
-    }
-    let has_references = payload.get("mode").and_then(Value::as_str) == Some("reference_to_video");
-    let Ok(partition) = crate::minimax_h3_import::entry_partition_model(entry, has_references)
-    else {
-        return false;
-    };
-    super::candle::video_request_candle_eligible(partition, payload)
+        payload,
+        video_route_facts(model),
+    )
 }
 
 /// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the
