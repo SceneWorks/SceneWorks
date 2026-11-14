@@ -319,7 +319,7 @@ pub(super) fn mlx_raw_settings_for_bundle(
     guidance: Option<f32>,
 ) -> JsonObject {
     let mut raw = if sceneworks_core::image_request::flux3::is_model(&request.model) {
-        flux3_references::caller_raw_settings(&request.effective_advanced_wire())
+        flux3_references::resolved_output_settings(request)
     } else {
         request.effective_advanced_wire()
     };

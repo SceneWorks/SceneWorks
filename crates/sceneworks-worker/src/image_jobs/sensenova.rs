@@ -1,7 +1,6 @@
 use super::artifact_resolution::is_sensenova_model;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
-use super::conditioning::edit_grouping;
 use super::conditioning::load_reference_image;
 use super::conditioning::stage_likeness;
 use super::conditioning::EditGrouping;
@@ -233,7 +232,7 @@ pub(super) async fn generate_sensenova_edit_stream(
     // identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406, sc-4409
     // angles / sc-4411 plain With-Character) is generator-agnostic — SenseNova-U1 produces the FINAL
     // image directly (no face-restore pass), so scoring the generated image scores what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     if matches!(grouping, EditGrouping::Poses(_)) {
         // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
         return Err(WorkerError::InvalidPayload(

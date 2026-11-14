@@ -104,9 +104,6 @@ use super::krea_imported::krea_imported_available;
 ))]
 use super::krea_imported::krea_imported_control_available;
 #[cfg(target_os = "macos")]
-use super::krea_imported::prepare_krea_imported_control_sources;
-use super::krea_imported::prepare_krea_imported_sources;
-#[cfg(target_os = "macos")]
 use super::krea_imported::PreparedKreaImportedControlSources;
 use super::krea_imported::PreparedKreaImportedSources;
 #[cfg(not(target_os = "macos"))]
@@ -157,7 +154,6 @@ use super::sdxl_control::SDXL_CONTROL_ADAPTER_LABEL;
 use super::sdxl_edit_candle;
 #[cfg(not(target_os = "macos"))]
 use super::sdxl_edit_candle_available;
-use super::sdxl_imported::prepare_sdxl_imported_sources;
 #[cfg(test)]
 use super::sdxl_imported::sdxl_imported_available;
 use super::sdxl_imported::PreparedSdxlImportedSources;
@@ -415,6 +411,13 @@ fn flux1_ipadapter_pose_combination(request: &ImageRequest) -> bool {
         && !pose_entries(request).is_empty()
 }
 
+fn flux1_ipadapter_pose_combination_resolved(execution: &ResolvedImageExecution) -> bool {
+    execution.model == "flux_dev"
+        && execution.mode != "edit_image"
+        && non_empty(&execution.reference_asset_id)
+        && !execution.poses().is_empty()
+}
+
 /// The production FLUX strict-control router, expressed as the exact base-model → dedicated
 /// provider mapping used by the two `..._control_available` arms below. Keeping this pure seam next
 /// to [`prepare_image_route`] lets source-bound audits ask the router whether a model really has a
@@ -435,6 +438,7 @@ pub(crate) fn mlx_flux_strict_control_engine_id(model: &str) -> Option<&'static 
 #[allow(clippy::too_many_arguments)]
 fn resolve_image_route_with_imported_availability(
     request: &ImageRequest,
+    execution: Option<&ResolvedImageExecution>,
     settings: &Settings,
     checkpoint_plan_available: bool,
     imported_control_available: bool,
@@ -442,30 +446,54 @@ fn resolve_image_route_with_imported_availability(
     sdxl_imported_available: bool,
     mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
-    if flux1_ipadapter_pose_combination(request) {
+    if execution.map_or_else(
+        || flux1_ipadapter_pose_combination(request),
+        flux1_ipadapter_pose_combination_resolved,
+    ) {
         Some(ImageRoute::FluxIpAdapterPoseReject)
-    } else if zimage_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || zimage_control_available(request, settings),
+        |value| super::zimage::zimage_control_available_resolved(value, settings),
+    ) {
         Some(ImageRoute::ZImageControl)
-    } else if zimage_base_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || zimage_base_control_available(request, settings),
+        |value| super::zimage::zimage_base_control_available_resolved(value, settings),
+    ) {
         // Base (non-distilled, full-CFG) Z-Image strict control (advanced.poses on `z_image`) →
         // base Fun-Controlnet-Union (`z_image_control`). The base mirror of the Turbo control arm
         // above; keyed on the base model id so the Turbo path is untouched (sc-8251).
         Some(ImageRoute::ZImageBaseControl)
-    } else if qwen_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || qwen_control_available(request, settings),
+        |value| super::qwen::qwen_control_available_resolved(value, settings),
+    ) {
         Some(ImageRoute::QwenControl)
-    } else if kolors_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || kolors_control_available(request, settings),
+        |value| super::kolors::kolors_control_available_resolved(value, settings),
+    ) {
         Some(ImageRoute::KolorsControl)
-    } else if krea_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || krea_control_available(request, settings),
+        |value| super::krea_control::krea_control_available_resolved(value, settings),
+    ) {
         // Krea 2 Turbo strict pose (advanced.poses on `krea_2_turbo`) → the trained control-branch
         // overlay (sc-8465, epic 8459 S5). Wins over the generic `mlx_available` arm below — `krea_2_turbo`
         // is in MODEL_TABLE, so `mlx_available` would otherwise render it as plain t2i and silently drop
         // the poses. The MLX twin of the candle `CandleImageRoute::KreaControl` resolver arm.
         Some(ImageRoute::KreaControl)
-    } else if flux1_dev_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || flux1_dev_control_available(request, settings),
+        |value| super::flux1_control::flux1_dev_control_available_resolved(value, settings),
+    ) {
         // FLUX.1-dev strict control (advanced.poses on flux_dev) → Shakker Union-Pro-2.0. Wins over the
         // PuLID-FLUX / generic MLX arms below: a flux_dev pose job is the real ControlNet path (sc-8244).
         Some(ImageRoute::Flux1DevControl)
-    } else if flux2_dev_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || flux2_dev_control_available(request, settings),
+        |value| super::flux2::flux2_dev_control_available_resolved(value, settings),
+    ) {
         // FLUX.2-dev strict pose (advanced.poses) → Fun-Controlnet-Union. Wins over the edit/
         // best-effort pose tier below (`flux2_edit_available` needs a reference; a flux2_dev pose
         // job is the real ControlNet path, with the reference an opt-in img2img-init).
@@ -488,7 +516,10 @@ fn resolve_image_route_with_imported_availability(
         // (epic 10871). Wins over the generic MLX arm below — `krea_2_raw` is in MODEL_TABLE, so
         // `mlx_available` would otherwise render it as plain t2i and silently drop the source.
         Some(ImageRoute::KreaEdit)
-    } else if krea_turbo_on_raw_available(request, settings) {
+    } else if execution.map_or_else(
+        || krea_turbo_on_raw_available(request, settings),
+        |value| super::krea_turbo_raw::krea_turbo_on_raw_available_resolved(value, settings),
+    ) {
         // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the single-phase turbo-on-Raw
         // lane (epic 13879 S3, sc-13883): the Raw base + LoRA additive, sampled as Turbo (fixed mu
         // 1.15 / ~8 steps / CFG-off) by routing to the `krea_2_turbo` engine. Wins over the generic
@@ -526,7 +557,10 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
-    } else if sdxl_control_candidate(request) {
+    } else if execution.map_or_else(
+        || sdxl_control_candidate(request),
+        super::sdxl_control::sdxl_control_candidate_resolved,
+    ) {
         // Keep the generic SDXL ControlNet route after InstantID and before every SDXL edit,
         // IP-Adapter, and generic route. The handler validates conflicts and malformed carriers,
         // so a pose can never be silently discarded by a sibling conditioned path.
@@ -544,7 +578,10 @@ fn resolve_image_route_with_imported_availability(
         // `video_mode` unset, which the engine treats as a multi-frame video request.
         Some(ImageRoute::Bernini)
     } else if request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && execution.map_or_else(
+            || !pose_entries(request).is_empty(),
+            |value| value.pose_source_count() > 0,
+        )
         && (wired_pose_family(&request.model, "mlx") || mlx_available(request, settings))
     {
         // A strict-pose job that fell past every `…_control_available` lane above (and the edit / identity /
@@ -630,6 +667,7 @@ pub(super) fn resolve_image_route(
 ) -> Option<ImageRoute> {
     resolve_image_route_with_imported_availability(
         request,
+        None,
         settings,
         // Loud, not `matches!`: a plan-backed entry that REFUSES is a typed diagnostic, and
         // collapsing it into "route unavailable" would make every refusal look like a missing
@@ -680,16 +718,18 @@ pub(super) fn prepare_image_route(
     // bytes, and refuses outright when it does not. The decline RETAINS its refusal, re-raised
     // below if no lane claims the request at all (sc-20636).
     let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
-    let imported_control = prepare_krea_imported_control_sources(request, settings)?;
+    let imported_control =
+        super::krea_imported::prepare_krea_imported_control_sources_resolved(request, settings)?;
     let imported = if imported_control.is_none() {
-        prepare_krea_imported_sources(request, settings)?
+        super::krea_imported::prepare_krea_imported_sources_resolved(request, settings)?
     } else {
         None
     };
-    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
+    let sdxl = super::sdxl_imported::prepare_sdxl_imported_sources_resolved(request, settings)?;
     let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
+        Some(request),
         settings,
         checkpoint_plan.is_available(),
         imported_control.is_some(),
@@ -822,10 +862,18 @@ impl ImageRoute {
             | ImageRoute::Flux1DevControl
             | ImageRoute::Flux2DevControl
             | ImageRoute::KreaImportedControl => execution.poses().len() as u32,
-            ImageRoute::Flux2Edit | ImageRoute::QwenEdit
-                if matches!(edit_grouping(execution), EditGrouping::Poses(_)) =>
-            {
-                execution.poses().len() as u32
+            ImageRoute::Flux2Edit | ImageRoute::QwenEdit => {
+                match super::conditioning::edit_grouping_resolved(execution) {
+                    EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+                    EditGrouping::Poses(count) => count as u32,
+                    EditGrouping::Plain => execution.count,
+                }
+            }
+            ImageRoute::SensenovaEdit => {
+                match super::conditioning::edit_grouping_resolved(execution) {
+                    EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+                    EditGrouping::Poses(_) | EditGrouping::Plain => execution.count,
+                }
             }
             ImageRoute::InstantId => {
                 super::instantid::instantid_image_count_resolved(execution, settings)
@@ -1087,7 +1135,7 @@ impl CandleImageRoute {
             | CandleImageRoute::KreaControl
             | CandleImageRoute::KreaImportedControl => execution.poses().len() as u32,
             CandleImageRoute::QwenEdit
-                if qwen_edit_candle::qwen_edit_candle_pose_count(execution)
+                if qwen_edit_candle::qwen_edit_candle_pose_count_resolved(execution)
                     .is_some_and(|count| count > 0) =>
             {
                 execution.poses().len() as u32
@@ -1189,6 +1237,7 @@ impl PreparedCandleImageRoute {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
+    execution: Option<&ResolvedImageExecution>,
     settings: &Settings,
     checkpoint_plan_available: bool,
     imported_available: bool,
@@ -1206,11 +1255,17 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
     if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
         Some(CandleImageRoute::MossImageEdit)
-    } else if flux1_ipadapter_pose_combination(request) {
+    } else if execution.map_or_else(
+        || flux1_ipadapter_pose_combination(request),
+        flux1_ipadapter_pose_combination_resolved,
+    ) {
         Some(CandleImageRoute::FluxIpAdapterPoseReject)
     } else if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
-    } else if sdxl_control_candidate(request) {
+    } else if execution.map_or_else(
+        || sdxl_control_candidate(request),
+        super::sdxl_control::sdxl_control_candidate_resolved,
+    ) {
         // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
         // claims every material pose carrier before edit/IP/generic routes can discard it.
         Some(CandleImageRoute::SdxlControl)
@@ -1223,19 +1278,29 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
             | "qwen_image_edit_2509"
             | "qwen_image_edit_2511"
             | "qwen_image_edit_2511_lightning"
-    ) && candle_conditioned_pose_requires_reject(request)
-    {
+    ) && execution.map_or_else(
+        || candle_conditioned_pose_requires_reject(request),
+        candle_conditioned_pose_requires_reject_resolved,
+    ) {
         // Defense in depth for direct worker calls: the scheduler rejects malformed pose carriers
         // and valid pose sets paired with unsupported conditioned modes. The worker must reject the
         // same shapes rather than letting typed parsing erase them or falling through to the stub.
         Some(CandleImageRoute::PoseReject)
-    } else if flux2_control_candle_available(request, settings) {
+    } else if execution.map_or_else(
+        || flux2_control_candle_available(request, settings),
+        |value| {
+            super::flux2_control_candle::flux2_control_candle_available_resolved(value, settings)
+        },
+    ) {
         // Character Studio FLUX.2 pose payloads also carry a reference image. The pose/control lane
         // must win before reference edit so the skeleton is never silently dropped.
         Some(CandleImageRoute::Flux2Control)
     } else if flux2_edit_candle_available(request, settings) {
         Some(CandleImageRoute::Flux2Edit)
-    } else if qwen_edit_candle_available(request, settings) {
+    } else if execution.map_or_else(
+        || qwen_edit_candle_available(request, settings),
+        |value| super::qwen_edit_candle::qwen_edit_candle_available_resolved(value, settings),
+    ) {
         Some(CandleImageRoute::QwenEdit)
     } else if sensenova_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SenseNovaEdit)
@@ -1268,7 +1333,11 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // router's `CandleImageLane::QwenImage21Edit` claims exactly these shapes.
         Some(CandleImageRoute::QwenImage21Edit)
     } else if request.model == "kolors"
-        && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
+        && ((non_empty(&request.reference_asset_id)
+            && execution.map_or_else(
+                || !pose_entries(request).is_empty(),
+                |value| value.pose_source_count() > 0,
+            ))
             || (non_empty(&request.reference_asset_id)
                 && request.advanced_bool("usePid").unwrap_or(false)))
     {
@@ -1276,7 +1345,14 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // separate pose provider. Neither implementation composes IP+Control or IP+PiD, so this
         // must fail before either precedence arm can discard an input.
         Some(CandleImageRoute::KolorsCompositeReject)
-    } else if zimage_identity_candle_available(request, settings) {
+    } else if execution.map_or_else(
+        || zimage_identity_candle_available(request, settings),
+        |value| {
+            super::zimage_identity_candle::zimage_identity_candle_available_resolved(
+                value, settings,
+            )
+        },
+    ) {
         // The registered Z-Image Turbo generator owns both Reference conditioning and adapters.
         Some(CandleImageRoute::CandleTxt2Img)
     } else if sdxl_ipadapter_available(request, settings) {
@@ -1287,17 +1363,34 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         Some(CandleImageRoute::FluxIpAdapter)
     } else if pulid_candle_available(request, settings) {
         Some(CandleImageRoute::Pulid)
-    } else if qwen_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || qwen_control_available(request, settings),
+        |value| super::qwen_control::qwen_control_available_resolved(value, settings),
+    ) {
         Some(CandleImageRoute::QwenControl)
-    } else if kolors_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || kolors_control_available(request, settings),
+        |value| super::kolors_control::kolors_control_available_resolved(value, settings),
+    ) {
         Some(CandleImageRoute::KolorsControl)
     } else if kolors_edit_candle_available(request, settings) {
         Some(CandleImageRoute::KolorsEdit)
-    } else if zimage_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || zimage_control_available(request, settings),
+        |value| super::zimage_control::zimage_control_available_resolved(value, settings),
+    ) {
         Some(CandleImageRoute::ZimageControl)
-    } else if flux1_control_candle_available(request, settings) {
+    } else if execution.map_or_else(
+        || flux1_control_candle_available(request, settings),
+        |value| {
+            super::flux1_control_candle::flux1_control_candle_available_resolved(value, settings)
+        },
+    ) {
         Some(CandleImageRoute::Flux1Control)
-    } else if krea_control_candle_available(request, settings) {
+    } else if execution.map_or_else(
+        || krea_control_candle_available(request, settings),
+        |value| super::krea_control_candle::krea_control_candle_available_resolved(value, settings),
+    ) {
         // Krea 2 pose-ControlNet (sc-8464): `krea_2_turbo` + `advanced.poses` is the bespoke candle
         // `Krea2Control` lane, diverted before the registry txt2img arm (which would render it as plain
         // txt2img and drop the poses). Mirrors `jobs_store::krea_control_candle_eligible`.
@@ -1320,7 +1413,10 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // 9992) so an edit job runs the dual-conditioning Kontext render instead of being flattened to plain
         // txt2img. Mirrors `jobs_store::krea_edit_candle_eligible`.
         Some(CandleImageRoute::KreaEdit)
-    } else if krea_turbo_on_raw_available(request, settings) {
+    } else if execution.map_or_else(
+        || krea_turbo_on_raw_available(request, settings),
+        |value| super::krea_turbo_raw::krea_turbo_on_raw_available_resolved(value, settings),
+    ) {
         // Krea 2 Raw t2i + the accelerator (turbo) LoRA (sc-13882) → the single-phase turbo-on-Raw lane
         // (epic 13879 S3, sc-13883; candle sc-13887): the Raw base + LoRA additive, sampled as Turbo
         // (fixed mu 1.15 / ~8 steps / CFG-off) by routing to the `krea_2_turbo` candle engine
@@ -1336,7 +1432,10 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // A plan-backed user checkpoint (epic 20398, sc-20634): claimed before every bespoke imported
         // lane; the plan store is the route's sole source of truth.
         Some(CandleImageRoute::CheckpointPlan)
-    } else if krea_imported_control_available(request, settings) {
+    } else if execution.map_or_else(
+        || krea_imported_control_available(request, settings),
+        |value| super::krea_imported::krea_imported_control_available_resolved(value, settings),
+    ) {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch rides
         // the file-loaded imported DiT. Checked BEFORE the plain imported arm so a pose set renders one
         // pose-locked image per pose instead of falling into per-image t2i (dropping the poses).
@@ -1375,7 +1474,10 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         Some(CandleImageRoute::Bernini)
     } else if is_candle_engine(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && execution.map_or_else(
+            || !pose_entries(request).is_empty(),
+            |value| value.pose_source_count() > 0,
+        )
     {
         // A strict-pose candle job that reached here was NOT claimed by any `…_control_available` lane
         // above, so it must be REJECTED, not silently rendered as plain txt2img (poses dropped). Two
@@ -1433,6 +1535,32 @@ fn candle_conditioned_pose_requires_reject(request: &ImageRequest) -> bool {
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_pose_requires_reject_resolved(execution: &ResolvedImageExecution) -> bool {
+    if !execution.has_pose_source() {
+        return false;
+    }
+    let pose_count = execution.pose_source_count();
+    if pose_count > sceneworks_core::image_request::MAX_JOB_POSES
+        || !execution.invalid_pose_entries().is_empty()
+    {
+        return true;
+    }
+    if pose_count == 0 {
+        return false;
+    }
+    match execution.model.as_str() {
+        "flux2_dev" => execution.mode == "edit_image",
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => {
+            !qwen_edit_candle::qwen_edit_candle_mode_resolved(execution)
+        }
+        _ => false,
+    }
+}
+
 /// Test-facing pure route probe. Production uses [`prepare_candle_image_route`] so imported File
 /// tokens remain owned across admission and dispatch.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle", test))]
@@ -1442,6 +1570,7 @@ pub(super) fn resolve_candle_image_route(
 ) -> Option<CandleImageRoute> {
     resolve_candle_image_route_with_prepared_availability(
         request,
+        None,
         settings,
         // See the macOS twin: a typed refusal must surface, not read as "route unavailable".
         checkpoint_plan_available_or_panic(request, settings),
@@ -1485,18 +1614,20 @@ pub(super) fn prepare_candle_image_route(
     // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
     // its own sources; skip pinning a second File token for the plain imported bundle in that case
     // (mirrors the macOS `prepare_image_route` guard).
-    let imported = if krea_imported_control_available(request, settings) {
-        None
-    } else {
-        prepare_krea_imported_sources(request, settings)?
-    };
-    let sdxl = prepare_sdxl_imported_sources(request, settings)?;
+    let imported =
+        if super::krea_imported::krea_imported_control_available_resolved(request, settings) {
+            None
+        } else {
+            super::krea_imported::prepare_krea_imported_sources_resolved(request, settings)?
+        };
+    let sdxl = super::sdxl_imported::prepare_sdxl_imported_sources_resolved(request, settings)?;
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
     let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
+        Some(request),
         settings,
         checkpoint_plan.is_available(),
         imported.is_some(),

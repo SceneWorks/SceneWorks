@@ -205,10 +205,19 @@ pub(super) enum EditGrouping {
 /// check. Shared by the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes (sc-8946 moved it from flux2.rs).
 #[cfg(target_os = "macos")]
 pub(super) fn edit_grouping(request: &ImageRequest) -> EditGrouping {
+    edit_grouping_with_pose_count(request, pose_entries(request).len())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn edit_grouping_resolved(execution: &ResolvedImageExecution) -> EditGrouping {
+    edit_grouping_with_pose_count(execution, execution.poses().len())
+}
+
+#[cfg(target_os = "macos")]
+fn edit_grouping_with_pose_count(request: &ImageRequest, poses: usize) -> EditGrouping {
     if request.mode != "character_image" {
         return EditGrouping::Plain;
     }
-    let poses = pose_entries(request).len();
     if poses > 0 {
         return EditGrouping::Poses(poses);
     }

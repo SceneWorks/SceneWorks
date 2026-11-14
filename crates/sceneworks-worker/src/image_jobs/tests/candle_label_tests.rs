@@ -32,7 +32,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
             .unwrap(),
         );
         let route = resolve_candle_image_route_with_prepared_availability(
-            &request, &settings, false, false, false, false, false, false, false,
+            &request, None, &settings, false, false, false, false, false, false, false,
         )
         .unwrap();
         assert_eq!(route, CandleImageRoute::MossImageEdit);
@@ -46,7 +46,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         );
         assert_eq!(
             resolve_candle_image_route_with_prepared_availability(
-                &ordinary, &settings, false, false, false, false, false, false, false
+                &ordinary, None, &settings, false, false, false, false, false, false, false
             ),
             Some(CandleImageRoute::CandleTxt2Img)
         );
@@ -59,7 +59,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
     );
     assert_eq!(
         resolve_candle_image_route_with_prepared_availability(
-            &request, &settings, false, false, false, false, false, false, false
+            &request, None, &settings, false, false, false, false, false, false, false
         ),
         None
     );

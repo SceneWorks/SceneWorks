@@ -199,8 +199,23 @@ const KOLORS_POSE_IMG2IMG_STRENGTH: f32 = 1.0;
 /// base path. Mirrors the torch `_pose_entries` gate (poses ONLY with a reference). The ControlNet /
 /// IP-Adapter checkpoints are validated in the stream so a missing one errors loudly.
 pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    kolors_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn kolors_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    kolors_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn kolors_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == "kolors"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && request
             .reference_asset_id
             .as_deref()

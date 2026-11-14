@@ -117,9 +117,24 @@ fn resolve_kolors_control_base(
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::kolors_control_candle_eligible` so the worker and router agree.
 pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    kolors_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn kolors_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    kolors_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn kolors_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_kolors_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_kolors_control_base(request, settings), Ok(Some(_)))
 }
 
