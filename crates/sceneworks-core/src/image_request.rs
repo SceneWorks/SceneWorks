@@ -521,6 +521,9 @@ impl ImageRequest {
         request.resolved_advanced = Some(ImageAdvanced::bind(&BindingInput::new(
             authored, effective,
         ))?);
+        // Keep exactly what the caller authored for upgrade and persistence. Execution reads
+        // only `resolved_advanced` and other typed fields from the effective request.
+        request.advanced = object_or_empty(authored, "advanced");
         Ok(request)
     }
 
@@ -1161,6 +1164,7 @@ mod tests {
             "advanced": {"steps": 8, "schedulerShift": 2.5, "enhancePrompt": true, "decoder": "native"}
         }));
         let request = ImageRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.advanced.get("steps"), Some(&json!("8")));
         assert_eq!(request.advanced_i64("steps"), Some(8));
         assert_eq!(request.advanced_f64("timestepShift"), Some(2.5));
         assert_eq!(request.advanced_bool("enhancePrompt"), Some(true));
