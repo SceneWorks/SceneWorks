@@ -876,7 +876,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [25.0, 38.0, 64.0]), ("candle", [24.0, 36.0, 58.0])] {
+    for (lane, expect) in [("mlx", [25.0, 38.0, 62.0]), ("candle", [24.0, 36.0, 58.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -887,7 +887,7 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     // A tier with no row falls back to the lane's conservative bf16 floor.
     let job = qwen38_job_payload(&stage, "q4");
     let job = job.as_object().expect("payload");
-    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(64.0));
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(62.0));
     assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
 
     let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
@@ -945,56 +945,6 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     let error =
         qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
     assert!(error.to_string().contains("needs 24 GB"), "{error}");
-}
-
-/// The host size the Model Manager quotes for each tier (the catalog's memory guidance, served
-/// from the same entry on the platform that lane runs on) is the floor this worker admits from.
-#[test]
-fn the_catalog_quotes_the_floor_the_worker_admits_for_every_qwen38_tier() {
-    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
-    let stage = stage("http://127.0.0.1:9".to_owned());
-    let admitted = |lane: &str, tier: &str| {
-        let job = qwen38_job_payload(&stage, tier);
-        qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
-    };
-    for (lane, platforms) in [
-        ("mlx", &["macos"][..]),
-        ("candle", &["linux", "windows"][..]),
-    ] {
-        for platform in platforms {
-            let mut entry = Value::Object(
-                sceneworks_core::builtin_manifests::builtin_model_entry(
-                    QWEN38_27B_DESCRIBER_MODEL_ID,
-                )
-                .expect("the 27B describer is a builtin")
-                .clone(),
-            );
-            sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
-                &mut entry, platform,
-            );
-            let guidance = sceneworks_core::memory_guidance::model_memory_guidance(&entry);
-            for tier in ["q4", "q8", "bf16"] {
-                let floor = admitted(lane, tier).expect("the worker reads a floor");
-                let quoted = &guidance[lane]["tiers"][tier];
-                assert_eq!(
-                    quoted["minHostGb"].as_f64(),
-                    Some(floor),
-                    "{lane} on {platform}, {tier}: {quoted}"
-                );
-                assert_eq!(quoted["floorGb"].as_f64(), Some(floor), "{lane} {tier}");
-            }
-            let suggestion = guidance[lane]["suggestion"].as_array().expect("suggestion");
-            assert_eq!(suggestion.len(), 3, "{lane} suggests every tier");
-            for row in suggestion {
-                let tier = row["tier"].as_str().expect("tier");
-                assert_eq!(
-                    row["minHostGb"].as_f64(),
-                    admitted(lane, tier),
-                    "{lane} on {platform}, suggestion for {tier}"
-                );
-            }
-        }
-    }
 }
 
 /// Stage `tier/config.json` in a re-host snapshot of `hf_cache`, as a finished tier download leaves

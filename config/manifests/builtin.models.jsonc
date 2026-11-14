@@ -15655,15 +15655,13 @@
       //   `candle.measured` stays false: the flag covers the whole block, including the scalar
       //   `minMemoryGb` (the derived bf16 floor), so it cannot claim calibrated evidence.
       //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
-      //     q4 25 — measured describe peak about 22 GiB
-      //     q8 38 — DERIVED peak 34.10 GiB: the q4 peak + 1.05 x the extra file bytes
-      //     bf16 64 — UNMEASURED, derived the same way: peak 56.79 GiB
-      //   Each MLX tier's peak is its download's `footprint.peakMemoryBytes` (registry evidence).
-      //   The catalog's memory guidance reads that peak instead of the image-generation estimate
-      //   (files + a 14 GiB decode transient, which an LLM describe does not have), so the host
-      //   size the Model Manager quotes for each tier equals the floor the worker admits from.
-      //   The 1.05 margin is the catalog's own sibling-extrapolation tolerance; `measuredPixels`
-      //   is the 512x384 scene of the describer smoke (`qwen38_describer_gpu_smoke.rs`).
+      //     q4 25 — measured describe peak about 22 GiB (input image size not recorded)
+      //     q8 38 — DERIVED: 30.15 GiB of files + the 3.38 GiB the q4 peak holds above its files
+      //     bf16 62 — UNMEASURED, derived the same way from 51.76 GiB of files
+      //   These floors are what the worker admits from. The Model Manager's host-size quote for
+      //   this entry does NOT use them: it still comes from the catalog's image-generation estimate
+      //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
+      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 25).
       //
       // The file list names what the loader reads, so a metadata-only revision can never look
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
@@ -15735,8 +15733,7 @@
             "model.safetensors.index.json",
             "model-*.safetensors"
           ],
-          "estimatedSizeBytes": 55575900000,
-          "footprint": { "diskSizeBytes": 55575900000 }
+          "estimatedSizeBytes": 55575900000
         }
       ],
       "paths": {

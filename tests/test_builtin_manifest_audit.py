@@ -1407,15 +1407,8 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     assert mlx_rows, "no download declares a measured peak; the mlx filter selected nothing"
     assert candle_rows, "no model declares vramGbByTier; the candle filter selected nothing"
 
-    # Per-row invariant: every measured MLX peak is priced at the calibrated 1024² workload. The
-    # Qwen3.8 27B describer is the one non-image row: an LLM describe has no output geometry, and its
-    # peaks are priced at the describer smoke's 512x384 input scene (the entry's comment says which
-    # tiers are measured and which derived).
-    image_mlx_rows = [row for row in mlx_rows if row[0] != "vision_describe_qwen3_8_27b"]
-    assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in image_mlx_rows), mlx_rows
-    describer = [row for row in mlx_rows if row[0] == "vision_describe_qwen3_8_27b"]
-    assert {row[1] for row in describer} == {"q4", "q8", "bf16"}, describer
-    assert all(row[2].get("measuredPixels") == 512 * 384 for row in describer), describer
+    # Per-row invariant: every measured MLX peak is priced at the calibrated 1024² workload.
+    assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
