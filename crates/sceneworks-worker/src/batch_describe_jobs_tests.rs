@@ -858,6 +858,127 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     assert!(error.to_string().contains("q8 tier"), "{error}");
 }
 
+/// The shipped 27B catalog entry, as the API attaches it to a describe job.
+fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let mut job = payload(stage, None);
+    job["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    job["variant"] = json!(tier);
+    job["modelManifestEntries"] = json!([sceneworks_core::builtin_manifests::builtin_model_entry(
+        QWEN38_27B_DESCRIBER_MODEL_ID
+    )
+    .expect("the 27B describer is a builtin")]);
+    job
+}
+
+/// Each tier's memory floor is read from the lane block of the carried catalog entry, and a tier
+/// above what the worker has is refused with both numbers; no floor or no budget refuses nothing.
+#[test]
+fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    for (lane, expect) in [("mlx", [25.0, 38.0, 62.0]), ("candle", [24.0, 36.0, 58.0])] {
+        let floors = ["q4", "q8", "bf16"].map(|tier| {
+            let job = qwen38_job_payload(&stage, tier);
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
+                .unwrap_or_else(|| panic!("{lane} {tier} declares a floor"))
+        });
+        assert_eq!(floors, expect, "{lane}");
+    }
+    // A tier with no row falls back to the lane's conservative bf16 floor.
+    let job = qwen38_job_payload(&stage, "q4");
+    let job = job.as_object().expect("payload");
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(62.0));
+    assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
+
+    let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer needs 38 GB of memory, but this worker has \
+             32 GB for it. Choose a smaller tier."
+        ),
+        "{error}"
+    );
+    qwen38_fit_refusal("q4", Some(25.0), Some(32.0)).expect("fits");
+    qwen38_fit_refusal("q4", None, Some(8.0)).expect("no floor refuses nothing");
+    qwen38_fit_refusal("q4", Some(25.0), None).expect("no budget refuses nothing");
+}
+
+/// Stage `tier/config.json` in a re-host snapshot of `hf_cache`, as a finished tier download leaves
+/// it. Marked `cfg(test)` so the model-artifact inventory scan reads it as a test-only item.
+#[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
+    let snapshot = hf_cache
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join("aaa111");
+    std::fs::create_dir_all(snapshot.join(tier)).expect("tier dir");
+    std::fs::write(snapshot.join(tier).join("config.json"), b"{}").expect("tier config");
+}
+
+/// AC3: a tier that is not installed, or that cannot fit, ends the job before any image is
+/// described: no progress post, no stored item, and the job's error says what to do.
+#[tokio::test]
+async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let run = |payload: Value| {
+        let api_client = ApiClient::new(&stage.settings);
+        let mut job: JobSnapshot =
+            serde_json::from_value(job_value("describe-job", false)).expect("job");
+        job.payload = payload.as_object().expect("payload object").clone();
+        let settings = stage.settings.clone();
+        async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
+    };
+
+    // Nothing installed: refused by name, before the first image.
+    let error = {
+        let _env = crate::test_env::EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            hf_cache.path().to_str().expect("utf-8"),
+        )]);
+        run(qwen38_job_payload(&stage, "q8")).await
+    }
+    .expect_err("an uninstalled tier is refused");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+
+    // The installed q4 tier on a Mac emulated at 16 GB: refused for memory, before the first image.
+    #[cfg(target_os = "macos")]
+    {
+        stage_installed_tier(
+            hf_cache.path(),
+            sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MLX_REPO,
+            "q4",
+        );
+        let error = {
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8")),
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16"),
+            ]);
+            run(qwen38_job_payload(&stage, "q4")).await
+        }
+        .expect_err("a tier above the machine is refused");
+        assert!(
+            error.to_string().ends_with(
+                "The q4 tier of the Qwen3.8 27B describer needs 25 GB of memory, but this \
+                 worker has 16 GB for it. Choose a smaller tier."
+            ),
+            "{error}"
+        );
+    }
+
+    assert!(posts(&api).is_empty(), "no progress was posted");
+    assert!(stored_items(&api).is_empty(), "no image was described");
+}
+
 fn one_image_payload(stage: &Stage, model: &str) -> Value {
     let mut one = payload(stage, None);
     one["model"] = json!(model);

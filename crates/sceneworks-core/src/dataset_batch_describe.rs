@@ -15,6 +15,10 @@ pub const JOYCAPTION_REPO: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava
 /// full-precision tier loads from this repository; the quantised tiers load from the re-host.
 pub const QWEN38_27B_DESCRIBER_REPO: &str = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
 
+/// The Qwen3.8 27B describer's catalog id: the entry whose download rows are its tiers and whose
+/// `mlx` / `candle` blocks carry each tier's memory floor.
+pub const QWEN38_27B_DESCRIBER_MODEL_ID: &str = "vision_describe_qwen3_8_27b";
+
 /// The repositories the Qwen3.8 27B describer's quantised tiers are served from, one per engine.
 /// Each holds a `q4/` and a `q8/` snapshot folder quantised ahead of time, so a quantised tier never
 /// downloads or load-quantises the 57 GB full-precision files.
@@ -205,7 +209,7 @@ mod tests {
         use serde_json::Value;
 
         let entry = Value::Object(
-            crate::builtin_manifests::builtin_model_entry("vision_describe_qwen3_8_27b")
+            crate::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)
                 .expect("the 27B describer is a builtin")
                 .clone(),
         );

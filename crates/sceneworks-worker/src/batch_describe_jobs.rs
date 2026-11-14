@@ -133,23 +133,108 @@ pub(crate) fn qwen38_describer_weights_dir(
         QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
     };
     let label = "Qwen3.8 27B describer model path";
+    let not_installed = || {
+        WorkerError::InvalidPayload(format!(
+            "The {tier} tier of the Qwen3.8 27B describer is not installed. Download that tier \
+             in the Model Manager, or choose a tier that is installed."
+        ))
+    };
     if tier == "bf16" {
-        return resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label);
+        return resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label)
+            .map_err(|_| not_installed());
     }
     let repo = if cfg!(target_os = "macos") {
         QWEN38_27B_DESCRIBER_MLX_REPO
     } else {
         QWEN38_27B_DESCRIBER_CANDLE_REPO
     };
-    let dir = resolve_app_managed_model_dir(settings, repo, label)?.join(tier);
+    let dir = resolve_app_managed_model_dir(settings, repo, label)
+        .map_err(|_| not_installed())?
+        .join(tier);
     if dir.join("config.json").is_file() {
         Ok(dir)
     } else {
-        Err(WorkerError::InvalidPayload(format!(
-            "The {tier} tier of the Qwen3.8 27B describer is not installed (no snapshot at {}).",
-            dir.display()
-        )))
+        Err(not_installed())
     }
+}
+
+/// The memory (GB) a Qwen3.8 27B tier needs on `lane` (`mlx` or `candle`): that lane's
+/// `minMemoryGbByTier[tier]` floor in the catalog entry the job carries, else the lane's
+/// `minMemoryGb`. `None` when the job carries no such entry or floor (then nothing is refused).
+/// The MLX lane reads it; the Candle lane reads its floor through the CUDA fit gate instead.
+#[cfg(native_lane)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn qwen38_tier_floor_gb(payload: &JsonObject, lane: &str, tier: &str) -> Option<f64> {
+    let block = qwen38_catalog_entry(payload)?.get(lane)?;
+    block
+        .get("minMemoryGbByTier")
+        .and_then(|floors| floors.get(tier))
+        .and_then(Value::as_f64)
+        .or_else(|| block.get("minMemoryGb").and_then(Value::as_f64))
+}
+
+/// The Qwen3.8 27B catalog entry the API attached to the job.
+#[cfg(native_lane)]
+fn qwen38_catalog_entry(payload: &JsonObject) -> Option<&JsonObject> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    payload
+        .get("modelManifestEntries")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+}
+
+/// Refuse a tier whose memory floor exceeds what this worker has, with the two numbers. A missing
+/// floor or budget refuses nothing, like every other fit gate.
+#[cfg(native_lane)]
+pub(crate) fn qwen38_fit_refusal(
+    tier: &str,
+    needed_gb: Option<f64>,
+    available_gb: Option<f64>,
+) -> WorkerResult<()> {
+    match crate::fit_gate::fit_decision(needed_gb, available_gb) {
+        crate::fit_gate::FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } => Err(WorkerError::InvalidPayload(format!(
+            "The {tier} tier of the Qwen3.8 27B describer needs {needed_gb:.0} GB of memory, but \
+             this worker has {available_gb:.0} GB for it. Choose a smaller tier."
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Whether this worker can hold the job's tier, checked before any image: on MLX the tier's floor
+/// against total unified memory (the catalog's MLX floors are whole-machine sizes), on Candle the
+/// CUDA fit gate's own floor reader against the free VRAM a load would see.
+#[cfg(native_lane)]
+async fn qwen38_memory_admission(
+    settings: &Settings,
+    payload: &JsonObject,
+    tier: &str,
+) -> WorkerResult<()> {
+    #[cfg(target_os = "macos")]
+    let (needed_gb, available_gb) = {
+        let _ = settings;
+        (
+            qwen38_tier_floor_gb(payload, "mlx", tier),
+            crate::fit_gate::unified_total_gb(),
+        )
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (needed_gb, available_gb) = {
+        let needed_gb = qwen38_catalog_entry(payload)
+            .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
+        let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+        let available_gb = crate::vram_gate::live_capped_budget(&settings.gpu_id)
+            .await
+            .map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb).free_gb);
+        (needed_gb, available_gb)
+    };
+    qwen38_fit_refusal(tier, needed_gb, available_gb)
 }
 
 /// The messages one image is described with: the system text is the instruction followed by the
@@ -836,15 +921,18 @@ pub(crate) async fn run_dataset_batch_describe_job(
             )?,
             job_id: job.id.clone(),
         }),
-        DescribeModel::Qwen38 => Box::new(VisionCaptionerDescriber {
-            weights_dir: qwen38_describer_weights_dir(
-                settings,
-                request.tier.unwrap_or(
-                    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
-                ),
-            )?,
-            job_id: job.id.clone(),
-        }),
+        DescribeModel::Qwen38 => {
+            // Both refusals come before any image: the tier must be installed and fit here.
+            let tier = request.tier.unwrap_or(
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
+            );
+            let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
+            qwen38_memory_admission(settings, &job.payload, tier).await?;
+            Box::new(VisionCaptionerDescriber {
+                weights_dir,
+                job_id: job.id.clone(),
+            })
+        }
         DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
             resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
             job.id.clone(),
