@@ -44,6 +44,7 @@ export function ImagePromptComposer({
   batchValidity,
   portableBatchRefusal,
   portableBatchRefusalIndex,
+  portableBatchCheckedCount,
   batchTotal,
   batchRun,
   batchRunProgress,
@@ -200,6 +201,8 @@ export function ImagePromptComposer({
                   <p className="batch-warning" role="alert">Batch item {portableBatchRefusalIndex}: {portableBatchRefusal.detail}</p>
                 ) : batchTotal === 0 ? (
                   <p className="batch-hint">Add at least one prompt to run a batch.</p>
+                ) : portableBatchCheckedCount ? (
+                  <p className="batch-hint" role="status">Options checked for {portableBatchCheckedCount} requests. Live availability is checked when you run.</p>
                 ) : null}
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">

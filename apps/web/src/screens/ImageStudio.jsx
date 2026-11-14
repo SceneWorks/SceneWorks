@@ -2962,6 +2962,7 @@ export function ImageStudio() {
             batchValidity={batchValidity}
             portableBatchRefusal={portableBatchRefusal}
             portableBatchRefusalIndex={portableBatchFeedback?.index}
+            portableBatchCheckedCount={portableBatchFeedback?.result.state === "valid" ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
             batchRun={batchRun}
             batchRunProgress={batchRunProgress}
