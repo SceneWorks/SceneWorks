@@ -76,10 +76,17 @@ impl<T> RouteField<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteOptionFacts {
     pub poses: RouteField<usize>,
+    /// Pose routing also checks each entry's container shape without parsing its keypoints.
+    pub poses_all_objects: RouteField<usize>,
     pub phases: RouteField<usize>,
     pub control_mode: RouteField<String>,
     pub control_image: RouteField<String>,
     pub control_weights: RouteField<()>,
+    pub control_scale: RouteField<f64>,
+    pub true_cfg_scale: RouteField<f64>,
+    pub image_guidance_scale: RouteField<f64>,
+    pub ip_adapter_scale: RouteField<f64>,
+    pub reference_strength: RouteField<f64>,
     pub mlx_quantize: RouteField<i64>,
     pub quant_tier: RouteField<String>,
     pub decoder: RouteField<String>,
@@ -139,10 +146,30 @@ impl RouteOptionFacts {
         let hires_fix = parent(payload, "hiresFix");
         Self {
             poses: field(advanced, "poses", count),
+            poses_all_objects: field(advanced, "poses", |value| {
+                value
+                    .as_array()
+                    .and_then(|items| items.iter().all(Value::is_object).then_some(items.len()))
+            }),
             phases: field(advanced, "phases", count),
             control_mode: field(advanced, "controlMode", text),
             control_image: field(advanced, "controlImage", text),
             control_weights: field(advanced, "controlWeights", |v| v.as_object().map(|_| ())),
+            control_scale: field(advanced, "controlScale", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
+            true_cfg_scale: field(advanced, "trueCfgScale", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
+            image_guidance_scale: field(advanced, "imageGuidanceScale", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
+            ip_adapter_scale: field(advanced, "ipAdapterScale", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
+            reference_strength: field(advanced, "referenceStrength", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
             mlx_quantize: field(advanced, "mlxQuantize", Value::as_i64),
             quant_tier: field(advanced, "quantTier", text),
             decoder: field(advanced, "decoder", text),
@@ -431,6 +458,7 @@ mod tests {
             "hiresFix": {"enabled": false}
         })));
         assert_eq!(facts.poses, RouteField::Valid(0));
+        assert_eq!(facts.poses_all_objects, RouteField::Valid(0));
         assert_eq!(facts.phases, RouteField::Absent);
         assert_eq!(facts.control_mode, RouteField::Null);
         assert_eq!(facts.control_image, RouteField::Invalid);
@@ -440,6 +468,7 @@ mod tests {
 
         let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"advanced": []})));
         assert_eq!(malformed.poses, RouteField::Invalid);
+        assert_eq!(malformed.poses_all_objects, RouteField::Invalid);
         assert_eq!(malformed.control_mode, RouteField::Invalid);
         assert_eq!(malformed.veda_enabled, RouteField::Invalid);
     }
