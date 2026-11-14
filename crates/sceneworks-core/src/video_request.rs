@@ -72,7 +72,7 @@ video_option_fields! {
     scheduler_shift: f64 => number("schedulerShift"),
     sampler: String => text("sampler"),
     scheduler: String => text("scheduler"),
-    mlx_quantize: i64 => integer("mlxQuantize"),
+    mlx_quantize: Option<i64> => nullable_integer("mlxQuantize"),
     text_encoder_model: String => text("textEncoderModel"),
     motion: String => text("motion"),
     ltx_pipeline: String => text("ltxPipeline"),
