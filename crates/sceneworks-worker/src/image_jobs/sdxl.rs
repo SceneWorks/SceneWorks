@@ -179,7 +179,7 @@ fn sdxl_advanced_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -194,15 +194,17 @@ fn sdxl_advanced_generate_one(
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images
                 .pop()
                 .ok_or_else(|| WorkerError::Engine("sdxl advanced produced no image".to_owned()))?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "sdxl advanced returned non-image output".to_owned(),
@@ -501,38 +503,48 @@ pub(super) async fn generate_sdxl_advanced_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
-                let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
-                    generator,
-                    &sampling_controls,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    conditioning.clone(),
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished image against the cached source embedding (sc-4411). Clone paid
-                // ONLY when a scorer exists (an IP character_image job); non-frontal → honest
-                // detected:false N/A; `None` scorer ⇒ field omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx.clone(),
+                seeds,
+                move |index, seed, preview, on_progress| {
+                    let (out_w, out_h, pixels, execution) = sdxl_advanced_generate_one(
+                        generator,
+                        &sampling_controls,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        conditioning.clone(),
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                    // ONLY when a scorer exists (an IP character_image job); non-frontal → honest
+                    // detected:false N/A; `None` scorer ⇒ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 
