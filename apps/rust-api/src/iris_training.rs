@@ -106,19 +106,11 @@ pub(crate) async fn training_data_walk(
     Ok(Json(value))
 }
 
-fn plan_network_type(plan: &TrainingPlan) -> String {
-    let default = match plan_objective(plan) {
-        Some(IrisObjective::Depth | IrisObjective::Restoration) => "full",
-        _ => "lora",
-    };
-    plan.config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_ascii_lowercase()
+fn plan_network_type(plan: &TrainingPlan) -> Result<String, ApiError> {
+    crate::training::resolved_training_options_for_plan(plan)?
+        .network_type
+        .map(|value| value.value)
+        .ok_or_else(|| ApiError::internal("Resolved Iris training network type is missing"))
 }
 
 pub(crate) fn file_stem(file_name: &str) -> Option<String> {
@@ -477,22 +469,13 @@ pub(crate) async fn resolve_iris_run_sources(
     };
     let options_key = objective.options_key();
     let base_model = plan.target.base_model.clone();
-    let resume_job = plan
-        .config
-        .advanced
-        .get(RESUME_FROM_JOB_KEY)
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let load_job = plan
-        .config
-        .advanced
-        .get(LOAD_FROM_JOB_KEY)
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let controls = crate::training::resolved_training_options_for_plan(plan)?;
+    let resume_job = controls.resume_from_job_id.map(|value| value.value);
+    let load_job = controls.load_from_job_id.map(|value| value.value);
     if resume_job.is_none() && load_job.is_none() {
         return Ok(());
     }
-    let network_type = plan_network_type(plan);
+    let network_type = plan_network_type(plan)?;
     let mut options = match plan.config.advanced.remove(options_key) {
         Some(Value::Object(map)) => map,
         _ => JsonObject::new(),
@@ -501,11 +484,12 @@ pub(crate) async fn resolve_iris_run_sources(
     if let Some(job_id) = resume_job {
         let (_, previous, output_dir) =
             previous_iris_run(state, project_id, &job_id, RESUME_FROM_JOB_KEY, &base_model).await?;
-        if plan_network_type(&previous) != network_type {
+        let previous_network_type = plan_network_type(&previous)?;
+        if previous_network_type != network_type {
             return Err(ApiError::bad_request(format!(
                 "advanced.{RESUME_FROM_JOB_KEY}: {job_id} trained a {} run; a resume continues the \
                  same kind of run ({} requested).",
-                plan_network_type(&previous),
+                previous_network_type,
                 network_type
             )));
         }
@@ -533,7 +517,7 @@ pub(crate) async fn resolve_iris_run_sources(
     if let Some(job_id) = load_job {
         let (_, previous, output_dir) =
             previous_iris_run(state, project_id, &job_id, LOAD_FROM_JOB_KEY, &base_model).await?;
-        if plan_network_type(&previous) != "full" {
+        if plan_network_type(&previous)? != "full" {
             return Err(ApiError::bad_request(format!(
                 "advanced.{LOAD_FROM_JOB_KEY}: {job_id} trained an adapter; a full run starts \
                  only from a previous full run's weights."
@@ -578,18 +562,16 @@ pub(crate) async fn resolve_iris_run_sources(
 /// own parser against the run's crop — refused at submit, not after the weights load. Aligned-pair
 /// datasets carry only `use_hflip` (the core dataset contract refuses the rest).
 pub(crate) fn check_restore_degradation_overrides(plan: &TrainingPlan) -> Result<(), ApiError> {
-    let Some(degradation) = plan
-        .config
-        .advanced
-        .get(sceneworks_core::training::iris::restore::RESTORE_OPTIONS_KEY)
-        .and_then(|options| options.get("degradation"))
-        .filter(|value| !value.is_null())
+    let Some(degradation) =
+        crate::training::resolved_training_options_for_plan(plan)?.restore_degradation_wire
     else {
         return Ok(());
     };
-    sceneworks_worker::check_restore_degradation(degradation, plan.config.resolution).map_err(
-        |error| ApiError::bad_request(format!("advanced.iris_restore.degradation: {error}")),
+    sceneworks_worker::check_restore_degradation(
+        &Value::Object(degradation.value),
+        plan.config.resolution,
     )
+    .map_err(|error| ApiError::bad_request(format!("advanced.iris_restore.degradation: {error}")))
 }
 
 /// The exported full model's directory inside a full run's output dir (`<output_dir>/<stem>`).

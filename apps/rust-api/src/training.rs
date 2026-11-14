@@ -2186,10 +2186,52 @@ pub(crate) async fn create_training_job(
 }
 struct ValidatedTrainingSubmission {
     target: TrainingTarget,
+    controls: sceneworks_core::resolved_options::IrisTrainingOptions,
+    training_adapter: Option<&'static sceneworks_core::training::depth_anchoring::AuxTrainingModel>,
+    subject_mask_consumer: Option<&'static str>,
     is_control: bool,
     is_base_checkpoint: bool,
     preset_metadata: Option<TrainingPresetProvenance>,
     output_name: String,
+}
+
+/// Re-resolve a stored plan against the native catalog before an API admission check consumes
+/// training controls. The saved plan remains the authored provenance snapshot.
+fn bind_resolved_training_options(
+    kind: &str,
+    authored: &JsonObject,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    use sceneworks_core::resolved_options::{BindingInput, IrisTrainingOptions};
+
+    let facts =
+        serde_json::to_value(effective_training_targets()).expect("training catalog serializes");
+    let facts = facts.as_object().expect("training catalog object");
+    let resolved = sceneworks_core::request_validation::resolve_request(kind, authored, facts)
+        .map_err(ApiError::from)?;
+    IrisTrainingOptions::bind(&BindingInput::new(authored, resolved.as_payload()))
+        .map_err(|error| ApiError::bad_request(format!("Invalid training control: {error:?}")))
+}
+
+pub(crate) fn resolved_training_options_for_plan(
+    plan: &sceneworks_core::training::TrainingPlan,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    let authored = json!({ "plan": plan });
+    let authored = authored.as_object().expect("training plan wrapper");
+    let kind = if plan.target.kernel == "krea_control" {
+        "control_training"
+    } else {
+        "lora_train"
+    };
+    bind_resolved_training_options(kind, authored)
+}
+
+pub(crate) fn resolved_training_options_for_config(
+    target: &TrainingTarget,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    let authored = json!({ "plan": { "target": target, "config": config } });
+    let authored = authored.as_object().expect("training config wrapper");
+    bind_resolved_training_options("lora_train", authored)
 }
 
 fn validate_training_submission(
@@ -2218,12 +2260,26 @@ fn validate_training_submission(
     // validator used by worker preflight, before malformed controls can enter the queue.
     let submitted = serde_json::to_value(payload).expect("training request serializes");
     let facts = serde_json::to_value(target).expect("training target serializes");
-    sceneworks_core::training::validate(
+    let authored = submitted.as_object().expect("request object");
+    let resolved = sceneworks_core::request_validation::resolve_request(
         "training",
-        submitted.as_object().expect("request object"),
+        authored,
         facts.as_object().expect("target object"),
     )
     .map_err(ApiError::from)?;
+    let controls = sceneworks_core::resolved_options::IrisTrainingOptions::bind(
+        &sceneworks_core::resolved_options::BindingInput::new(authored, resolved.as_payload()),
+    )
+    .map_err(|error| ApiError::bad_request(format!("Invalid training control: {error:?}")))?;
+    let effective_advanced = resolved.as_payload()["config"]["advanced"]
+        .as_object()
+        .expect("validated effective training advanced object");
+    let training_adapter =
+        sceneworks_core::training::training_adapter::training_adapter_model(effective_advanced)
+            .map_err(training_plan_error_to_api_error)?;
+    let subject_mask_consumer =
+        sceneworks_core::training::subject_mask_consumer(effective_advanced)
+            .map_err(training_plan_error_to_api_error)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -2283,6 +2339,9 @@ fn validate_training_submission(
 
     Ok(ValidatedTrainingSubmission {
         target: target.clone(),
+        controls,
+        training_adapter,
+        subject_mask_consumer,
         is_control,
         is_base_checkpoint,
         preset_metadata,
@@ -2307,6 +2366,9 @@ async fn prepare_training_submission(
 ) -> Result<PreparedTrainingSubmission, ApiError> {
     let ValidatedTrainingSubmission {
         target,
+        controls,
+        training_adapter,
+        subject_mask_consumer,
         is_control,
         is_base_checkpoint,
         preset_metadata,
@@ -2363,16 +2425,20 @@ async fn prepare_training_submission(
     };
     let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
     let job_id = format!("job_{}", Uuid::new_v4().simple());
-    let requested_gpu = training_requested_gpu(&payload.config.advanced);
+    let requested_gpu = requested_gpu_or_auto(
+        controls
+            .requested_gpu
+            .as_ref()
+            .map(|value| value.value.clone())
+            .unwrap_or_default(),
+    );
     // The adapter's network parameterization (epic 2193). Recorded on the trained
     // LoRA so generation can route LoKr off the MLX backend (which is LoRA-only)
     // without opening the file — mirrors how `baseModel` gates Wan 5B/14B.
-    let network_type = payload
-        .config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let network_type = controls
+        .network_type
+        .as_ref()
+        .map(|value| value.value.trim())
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "lora".to_owned());
@@ -2384,7 +2450,11 @@ async fn prepare_training_submission(
     // resolves the installed path on either side. The matching manifest path is
     // recomputed from the same trusted inputs at registration time
     // (`register_trained_lora`), never read back from the job payload.
-    let output_scope = training_output_scope(&payload.config.advanced)?;
+    let output_scope = controls
+        .output_scope
+        .as_ref()
+        .map(|value| value.value.clone())
+        .unwrap_or_else(|| "project".to_owned());
     // A control overlay is a distinct artifact class (registered into its own store + manifest, applied at
     // inference on a frozen base via a strict-control lane, not a mergeable adapter), so its output +
     // source path go to `control-overlays/`, never the LoRA tree (sc-10165, epic 10159 B4).
@@ -2409,12 +2479,10 @@ async fn prepare_training_submission(
     };
     // Capture the control kind before `payload.config` is moved into `build_training_plan` below; used
     // only when shaping the control-overlay manifest entry (sc-10165, B4).
-    let control_type = payload
-        .config
-        .advanced
-        .get("controlType")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let control_type = controls
+        .control_type
+        .as_ref()
+        .map(|value| value.value.trim())
         .filter(|value| !value.is_empty())
         .unwrap_or("pose")
         .to_ascii_lowercase();
@@ -2493,11 +2561,7 @@ async fn prepare_training_submission(
         // sc-25213: the de-distill training adapter the plan selects resolves from the installed
         // library only (the worker refuses a missing one too) — refuse it here as a field error on
         // the version the user picked, instead of queueing a job that fails at the worker.
-        if let Some(adapter) = sceneworks_core::training::training_adapter::training_adapter_model(
-            &payload.config.advanced,
-        )
-        .map_err(training_plan_error_to_api_error)?
-        {
+        if let Some(adapter) = training_adapter {
             if sceneworks_worker::installed_aux_training_model_dir(&data_dir, adapter).is_none() {
                 return Err(training_field_error(
                     sceneworks_core::training::training_adapter::TRAINING_ADAPTER_VERSION_KEY,
@@ -2553,7 +2617,7 @@ async fn prepare_training_submission(
         &state,
         &project_id,
         &dataset,
-        &payload.config.advanced,
+        subject_mask_consumer,
         payload.dry_run,
     )
     .await?;
@@ -2865,12 +2929,10 @@ async fn training_subject_mask_prepass(
     state: &AppState,
     project_id: &str,
     dataset: &sceneworks_core::training::TrainingDataset,
-    advanced: &sceneworks_core::contracts::JsonObject,
+    subject_mask_consumer: Option<&'static str>,
     dry_run: bool,
 ) -> Result<Option<Value>, ApiError> {
-    let Some(field) = sceneworks_core::training::subject_mask_consumer(advanced)
-        .map_err(training_plan_error_to_api_error)?
-    else {
+    let Some(field) = subject_mask_consumer else {
         return Ok(None);
     };
     let report = project_call(state.clone(), {
@@ -3490,23 +3552,13 @@ pub(crate) fn training_is_full_finetune(
     sceneworks_core::training::config_is_full_finetune(config)
 }
 
-/// GPU selection for a training job, read from the config's advanced bag (the
-/// request has no top-level field). Defaults to `auto`; `lora_train` is
-/// GPU-required, so a `cpu` value is rejected downstream when the job is created.
-pub(crate) fn training_requested_gpu(advanced: &JsonObject) -> String {
-    let raw = advanced
-        .get("requestedGpu")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    requested_gpu_or_auto(raw)
-}
-
 /// Resolves the output scope for a training run from the config's `advanced` bag.
 /// Defaults to `project` (the target default) and rejects anything other than the
 /// two scopes the LoRA registry understands.
 pub(crate) fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
-    sceneworks_core::training::training_output_scope(advanced).map_err(ApiError::from)
+    sceneworks_core::training::resolve_advanced(advanced)
+        .map(|resolved| resolved.output_scope)
+        .map_err(ApiError::from)
 }
 
 /// Single source of truth for where a training run's adapter is written and its
