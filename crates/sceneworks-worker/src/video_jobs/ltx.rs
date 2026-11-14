@@ -1067,6 +1067,12 @@ struct PortableGemmaFile {
     sha256: String,
 }
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// Gemma members this thread actually read to verify; a reused record reads none.
+    static GEMMA_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Publish a copy of the frozen Gemma closure outside the evictable portable attempt cache.
 #[cfg(target_os = "macos")]
 fn install_portable_gemma(
@@ -1074,7 +1080,12 @@ fn install_portable_gemma(
     data_dir: &Path,
     files: &[PortableGemmaFile],
 ) -> WorkerResult<()> {
-    fn verify_file(path: &Path, expected: &PortableGemmaFile) -> WorkerResult<()> {
+    /// With `store`, an unchanged file already verified on this host is not read again.
+    fn verify_file(
+        store: Option<&sceneworks_core::verified_source_cache::VerifiedSourceCache>,
+        path: &Path,
+        expected: &PortableGemmaFile,
+    ) -> WorkerResult<()> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
         let metadata = std::fs::symlink_metadata(path).map_err(|error| {
@@ -1089,6 +1100,29 @@ fn install_portable_gemma(
                 path.display()
             )));
         }
+        if let Some(store) = store {
+            let real = std::fs::canonicalize(path)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            let verification =
+                store
+                    .verify(&real, &expected.sha256, &|| Ok(()))
+                    .map_err(|error| {
+                        WorkerError::Engine(if error.kind() == std::io::ErrorKind::InvalidData {
+                            format!("frozen Gemma file {} has different bytes", path.display())
+                        } else {
+                            error.to_string()
+                        })
+                    })?;
+            #[cfg(test)]
+            if verification == sceneworks_core::verified_source_cache::SourceVerification::Hashed {
+                GEMMA_FILE_READS.with(|count| count.set(count.get() + 1));
+            }
+            #[cfg(not(test))]
+            let _ = verification;
+            return Ok(());
+        }
+        #[cfg(test)]
+        GEMMA_FILE_READS.with(|count| count.set(count.get() + 1));
         let mut input =
             std::fs::File::open(path).map_err(|error| WorkerError::Engine(error.to_string()))?;
         let mut hasher = Sha256::new();
@@ -1166,6 +1200,7 @@ fn install_portable_gemma(
         }
         members.push((path.to_path_buf(), file));
     }
+    let store = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(data_dir);
     let parent = data_dir.join("models").join("mlx");
     std::fs::create_dir_all(&parent).map_err(|error| WorkerError::Engine(error.to_string()))?;
     let _lock =
@@ -1210,7 +1245,7 @@ fn install_portable_gemma(
             }
         }
         for (relative, file) in &members {
-            verify_file(&plain_member(&target, relative)?, file)?;
+            verify_file(Some(&store), &plain_member(&target, relative)?, file)?;
         }
         return Ok(());
     }
@@ -1229,14 +1264,15 @@ fn install_portable_gemma(
                 input.display()
             ))
         })?;
-        verify_file(&input, file)?;
+        verify_file(Some(&store), &input, file)?;
         let output = staging.path().join(relative);
         if let Some(directory) = output.parent() {
             std::fs::create_dir_all(directory)
                 .map_err(|error| WorkerError::Engine(error.to_string()))?;
         }
         std::fs::copy(&input, &output).map_err(|error| WorkerError::Engine(error.to_string()))?;
-        verify_file(&output, file)?;
+        // A fresh copy: hashed in full; it moves into place afterwards, so it is not recorded.
+        verify_file(None, &output, file)?;
     }
     if !ltx_gemma_dir_is_complete(staging.path()) {
         return Err(WorkerError::Engine(
@@ -1355,7 +1391,25 @@ mod portable_gemma_tests {
         for (name, bytes) in &sources {
             assert_eq!(std::fs::read(target.join(name)).unwrap(), *bytes);
         }
+        // Settled installed members are read once per host, then reused while unchanged.
+        for (name, _) in &sources {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(target.join(name))
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        let reads = || GEMMA_FILE_READS.with(std::cell::Cell::get);
+        let start = reads();
         install_portable_gemma(&source, &data, &files).unwrap();
+        assert_eq!(reads(), start + sources.len());
+        install_portable_gemma(&source, &data, &files).unwrap();
+        assert_eq!(
+            reads(),
+            start + sources.len(),
+            "an unchanged install is not read again"
+        );
         std::fs::write(target.join("unexpected.bin"), b"other").unwrap();
         assert!(install_portable_gemma(&source, &data, &files).is_err());
         std::fs::remove_file(target.join("unexpected.bin")).unwrap();

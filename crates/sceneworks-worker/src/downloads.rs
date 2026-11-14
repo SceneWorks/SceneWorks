@@ -604,6 +604,12 @@ fn partial_download_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+#[cfg(all(test, native_lane))]
+thread_local! {
+    /// Cache-hit checks that actually read the file; a reused record reads none.
+    static CACHED_FILE_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(native_lane)]
 async fn cached_file_matches_expected(
     context: &DownloadContext<'_>,
@@ -620,7 +626,34 @@ async fn cached_file_matches_expected(
     let Some(expected_sha256) = expected_sha256 else {
         return Ok(expected_size.is_some());
     };
-    Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
+    // A cache hit already verified on this host is not read again while its stamp is unchanged;
+    // otherwise the file is stamped, hashed, and its verdict recorded if the stamp held.
+    let store = context.settings.data_dir.is_absolute().then(|| {
+        sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &context.settings.data_dir,
+        )
+    });
+    let real = std::fs::canonicalize(path).ok();
+    let pinned = format!("sha256:{expected_sha256}");
+    let observed = match (&store, &real) {
+        (Some(store), Some(real)) => {
+            if store.recorded(real).as_deref() == Some(pinned.as_str()) {
+                return Ok(true);
+            }
+            store.observe(real).ok()
+        }
+        _ => None,
+    };
+    #[cfg(test)]
+    CACHED_FILE_HASHES.with(|count| count.set(count.get() + 1));
+    let actual = sha256_file(context.api, context.settings, context.job_id, path).await?;
+    if actual != expected_sha256 {
+        return Ok(false);
+    }
+    if let (Some(store), Some(observed)) = (store, observed) {
+        let _ = store.record_hashed(observed, &pinned);
+    }
+    Ok(true)
 }
 
 async fn sync_completed_partial(partial: &Path) -> WorkerResult<()> {
@@ -3162,6 +3195,65 @@ mod atomic_cache_publication_tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A verified cache hit is read once per host while its stamp holds; a same-size rewrite is
+    /// read again and refused.
+    #[tokio::test]
+    async fn a_verified_cache_hit_is_not_read_again_until_it_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("predictor.safetensors");
+        let good = b"correct learned predictor";
+        let (url, server) = fixture_server(good.to_vec()).await;
+        publish_fixture(&target, &url, good).await.expect("publish");
+        server.abort();
+        let settle = |path: &Path, modified: std::time::SystemTime| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        };
+        let settled = std::time::SystemTime::now() - Duration::from_secs(10);
+        settle(&target, settled);
+        let settings = test_settings(dir.path().to_path_buf());
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "cache-hit",
+            cancel_message: "canceled",
+            fresh_download: false,
+        };
+        let expected = format!("{:x}", Sha256::digest(good));
+        let check = || {
+            cached_file_matches_expected(
+                &context,
+                &target,
+                Some(good.len() as u64),
+                Some(&expected),
+            )
+        };
+        let hashes = || CACHED_FILE_HASHES.with(std::cell::Cell::get);
+        let start = hashes();
+        assert!(check().await.unwrap());
+        assert_eq!(hashes(), start + 1, "the first check reads the file");
+        assert!(check().await.unwrap());
+        assert_eq!(
+            hashes(),
+            start + 1,
+            "an unchanged cache hit is not read again"
+        );
+        if cfg!(unix) {
+            // Same size and mtime, different bytes: ctime moves, so it is read and refused.
+            std::fs::write(&target, vec![b'x'; good.len()]).unwrap();
+            settle(&target, settled);
+            assert!(!check().await.unwrap());
+            assert_eq!(hashes(), start + 2);
+        }
     }
 
     /// Required fixture: an interrupted transfer resumes from the durable partial

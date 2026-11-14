@@ -163,6 +163,14 @@ impl VerifiedSourceCache {
         Ok((digest, SourceVerification::Hashed))
     }
 
+    /// The digest recorded for `real_path` (already canonical) while its stamp is unchanged, so a
+    /// caller that hashes on its own (an async, heartbeating hash) can skip that hash. `None` when
+    /// there is no trustworthy record.
+    pub fn recorded(&self, real_path: &Path) -> Option<String> {
+        let current = SourceStampV1::of(real_path, StoreClockV1::SYSTEM).ok()?;
+        self.recorded_sha256(real_path, &current)
+    }
+
     /// Stamp `real_path` (already canonical) before a caller's own hash of it, so the verdict of
     /// that hash can be recorded afterwards with [`Self::record_hashed`].
     pub fn observe(&self, real_path: &Path) -> io::Result<ObservedSource> {
