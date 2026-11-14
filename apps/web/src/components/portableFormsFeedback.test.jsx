@@ -8,6 +8,7 @@ vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: feedbac
 import { RefinePromptControl } from "./RefinePromptControl.jsx";
 import { VqaPanel } from "./assetPanels.jsx";
 import { CharacterTest } from "../screens/characterPanels.jsx";
+import { ReplacePersonPanel } from "../screens/ReplacePersonPanel.jsx";
 import { Yue2ComposePanel } from "../screens/yue2Lab/Yue2ComposePanel.jsx";
 
 const refusal = { state: "invalid", refusal: { code: "invalid_generation_option", field: "prompt", detail: "Prompt is invalid" } };
@@ -78,5 +79,24 @@ describe("portable authored form feedback", () => {
     />));
     expect(host.querySelector("button.prompt-cta").disabled).toBe(true);
     expect(host.querySelector('[role="alert"]').textContent).toContain("Prompt is invalid");
+  });
+
+  it("checks person detection and tracking drafts before their actions", () => {
+    act(() => root.render(<ReplacePersonPanel
+      sourceClipAssetId="clip-1" representativeFrame={{ id: "frame-1" }}
+      selectedDetection={{ id: "person-1" }} trackName="actor"
+      personReadiness={{}} matchingTracks={[]} videoAssets={[]} videoModels={[]}
+      setSourceClipAssetId={vi.fn()} setSelectedDetectionId={vi.fn()}
+      setTrackName={vi.fn()} setPersonTrackId={vi.fn()} setReplacementMode={vi.fn()}
+      createPersonDetectionJob={vi.fn()} createPersonTrackJob={vi.fn()}
+    />));
+    expect(feedback).toHaveBeenCalledWith("personDetect", { sourceAssetId: "clip-1" }, null, true);
+    expect(feedback).toHaveBeenCalledWith("personTrack", {
+      sourceAssetId: "clip-1", representativeFrameAssetId: "frame-1",
+      detection: { id: "person-1" }, trackName: "actor",
+    }, null, true);
+    expect([...host.querySelectorAll("button")].find((button) => button.textContent.includes("Analyze Source")).disabled).toBe(true);
+    expect([...host.querySelectorAll("button")].find((button) => button.textContent.includes("Save Track")).disabled).toBe(true);
+    expect(host.querySelectorAll('[role="alert"]')).toHaveLength(2);
   });
 });

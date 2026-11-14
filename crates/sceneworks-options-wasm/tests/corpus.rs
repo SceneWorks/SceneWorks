@@ -24,6 +24,8 @@ fn native_transport_matches_the_shared_browser_corpus() {
         "training",
         "lora_train",
         "control_training",
+        "personDetect",
+        "personTrack",
     ] {
         for expected_ok in [true, false] {
             assert!(

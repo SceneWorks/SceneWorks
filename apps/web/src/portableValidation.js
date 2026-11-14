@@ -1,7 +1,7 @@
 import { cachedModelFacts, rememberModelFacts } from "./portableModelFacts.js";
 
 export const VALIDATOR_SCHEMA_VERSION = 1;
-const MODEL_FREE_KINDS = new Set(["videoUpscale", "characterTest", "promptRefine", "yue2", "yue2Execution"]);
+const MODEL_FREE_KINDS = new Set(["videoUpscale", "characterTest", "promptRefine", "yue2", "yue2Execution", "personDetect", "personTrack"]);
 let enginePromise;
 let loadedEngine;
 let serverValidatorVersion = null;

@@ -17,6 +17,7 @@ it("runs the same native fixture corpus inside the actual WASM export", () => {
     "image", "video", "audio", "vector", "vectorPrompt", "videoUpscale",
     "vqa", "interleave", "characterTest", "promptRefine", "yue2",
     "yue2Execution", "training", "lora_train", "control_training",
+    "personDetect", "personTrack",
   ]) {
     expect(corpus.cases.some((sample) => sample.kind === kind && sample.expected.ok), kind).toBe(true);
     expect(corpus.cases.some((sample) => sample.kind === kind && !sample.expected.ok), kind).toBe(true);

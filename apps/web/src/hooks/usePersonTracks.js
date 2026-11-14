@@ -2,6 +2,16 @@ import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { personTracksApi } from "../api/personTracksResources.js";
 import { useCallback, useState } from "react";
+import { validatePortableRequestNow } from "../portableValidation.js";
+
+function portablePersonRequest(kind, payload) {
+  const result = validatePortableRequestNow({ kind, payload });
+  if (result.state === "invalid") {
+    const error = new Error(result.refusal.detail);
+    Object.assign(error, result.refusal);
+    throw error;
+  }
+}
 
 // Owns the project's person-track state plus detection/track job creation and manual
 // track corrections. Extracted from App.jsx (sc-1651). personTracks is project-scoped
@@ -28,6 +38,7 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
       try {
+        portablePersonRequest("personDetect", { ...payload, requestedGpu });
         const job = await personTracksApi.detect(activeProject.id, token, {
           method: "POST",
           body: JSON.stringify({ ...payload, requestedGpu }),
@@ -53,6 +64,7 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
       try {
+        portablePersonRequest("personTrack", { ...payload, requestedGpu });
         const job = await personTracksApi.jobs(activeProject.id, token, {
           method: "POST",
           body: JSON.stringify({ ...payload, requestedGpu }),
