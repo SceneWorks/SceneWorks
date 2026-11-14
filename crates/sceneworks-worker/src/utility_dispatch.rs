@@ -181,7 +181,7 @@ async fn run_utility_job_inner(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
-    job: JobSnapshot,
+    mut job: JobSnapshot,
     portable_model_binding: Option<PortableRouteBinding>,
     shutdown: gen_core::CancelFlag,
 ) {
@@ -197,6 +197,18 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
+        job.payload = sceneworks_core::options::upgrade::upgrade_object(
+            &job.payload,
+            sceneworks_core::options::upgrade::Carrier::Request,
+        )
+        .map_err(|error| {
+            (
+                "Request schema upgrade refused.",
+                WorkerError::InvalidPayload(
+                    serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()),
+                ),
+            )
+        })?;
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
