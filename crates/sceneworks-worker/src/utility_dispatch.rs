@@ -199,7 +199,13 @@ async fn run_utility_job_inner(
     let result = with_shutdown_flag(shutdown.clone(), async {
         job.payload = sceneworks_core::options::upgrade::upgrade_object(
             &job.payload,
-            sceneworks_core::options::upgrade::Carrier::Request,
+            sceneworks_core::options::upgrade::request_carrier(
+                if matches!(&job.job_type, JobType::ImageInterleave) {
+                    "interleave"
+                } else {
+                    ""
+                },
+            ),
         )
         .map_err(|error| {
             (

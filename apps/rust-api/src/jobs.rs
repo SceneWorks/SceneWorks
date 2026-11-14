@@ -1428,7 +1428,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let upgrade = |payload: &JsonObject| {
         sceneworks_core::options::upgrade::upgrade_object(
             payload,
-            sceneworks_core::options::upgrade::Carrier::Request,
+            sceneworks_core::options::upgrade::request_carrier(
+                if matches!(&job_type, JobType::ImageInterleave) {
+                    "interleave"
+                } else {
+                    ""
+                },
+            ),
         )
         .map_err(|error| {
             ApiError::typed(

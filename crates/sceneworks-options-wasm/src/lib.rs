@@ -26,7 +26,7 @@ fn upgraded_request(kind: &str, payload_json: &str) -> Result<Value, Value> {
     let payload = decode_object("payload", payload_json)?;
     sceneworks_options::upgrade::upgrade(
         &Value::Object(payload),
-        sceneworks_options::upgrade::Carrier::Request,
+        sceneworks_options::upgrade::request_carrier(kind),
     )
     .map_err(|error| {
         json!({

@@ -4638,7 +4638,13 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let stored_payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
     let upgraded = crate::options::upgrade::upgrade_object(
         &stored_payload,
-        crate::options::upgrade::Carrier::Request,
+        crate::options::upgrade::request_carrier(
+            if matches!(&job_type, JobType::ImageInterleave) {
+                "interleave"
+            } else {
+                ""
+            },
+        ),
     );
     // Reading history must remain possible even when this binary cannot execute its schema.
     // Keep the stored payload intact and expose the typed refusal; dispatch also checks it.

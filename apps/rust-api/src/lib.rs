@@ -540,10 +540,11 @@ where
         let Json(mut value) = Json::<Value>::from_request(request, state)
             .await
             .map_err(json_rejection_response)?;
+        let generation_kind = generation_wire_kind::<T>();
         if value.is_object() {
             value = sceneworks_core::options::upgrade::upgrade(
                 &value,
-                sceneworks_core::options::upgrade::Carrier::Request,
+                sceneworks_core::options::upgrade::request_carrier(generation_kind.unwrap_or("")),
             )
             .map_err(|error| {
                 ApiError::typed(
@@ -555,7 +556,7 @@ where
                 .into_response()
             })?;
         }
-        if let Some(kind) = generation_wire_kind::<T>() {
+        if let Some(kind) = generation_kind {
             let payload = value.as_object().ok_or_else(|| {
                 ApiError::bad_request("Generation request must be an object").into_response()
             })?;
