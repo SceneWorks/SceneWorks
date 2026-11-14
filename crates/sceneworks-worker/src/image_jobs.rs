@@ -2008,14 +2008,24 @@ pub(crate) fn reattach_alpha(
 /// every image of the batch so reopening any one restores the batch.
 pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 
-fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
-    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
-        .map_err(WorkerError::InvalidPayload)?;
-    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
-        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
-            serde_json::from_value(value.clone())
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        for reference in sceneworks_core::moss_image_advanced::references(&options) {
+fn moss_input_parents(request: &ImageRequest) -> WorkerResult<Vec<String>> {
+    let carriers = json!({
+        "referenceAssetIds": request.reference_asset_ids,
+        "sourceAssetId": request.source_asset_id,
+        "referenceAssetId": request.reference_asset_id,
+    });
+    let mut parents = sceneworks_core::moss_image::edit_reference_slots(
+        carriers.as_object().expect("typed carrier object"),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    if let Some(options) = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .moss_image_advanced
+        .as_ref()
+    {
+        for reference in sceneworks_core::moss_image_advanced::references(&options.value) {
             if !parents.contains(&reference.asset_id) {
                 parents.push(reference.asset_id.clone());
             }
@@ -2276,7 +2286,7 @@ pub(crate) fn write_image_asset(
     });
     let mut fact = fact.as_object().cloned().expect("json! object literal");
     if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
-        fact.insert("parents".into(), json!(moss_input_parents(&raw_settings)?));
+        fact.insert("parents".into(), json!(moss_input_parents(request)?));
         fact.insert("batchIndex".into(), json!(index));
     }
     Ok(fact)
