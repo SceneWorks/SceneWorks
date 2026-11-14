@@ -25,7 +25,7 @@ mod imp {
     use super::super::*;
 
     use gen_core::ControlKind;
-    use sceneworks_core::training::{TrainingPlan, TrainingPlanItem};
+    use sceneworks_core::training::TrainingPlanItem;
 
     use crate::control_dataset_prep::{
         prepare_control_dataset, ControlPrepConfig, ControlPrepInput, PersonFilter,
@@ -96,8 +96,17 @@ mod imp {
         // `run_training_execution` after preparation.
         validate_training_plan(settings, &plan)?;
         let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
-        sceneworks_core::request_validation::validate("control_training", &job.payload, &facts)
-            .map_err(WorkerError::Validation)?;
+        let resolved = sceneworks_core::request_validation::resolve_request(
+            "control_training",
+            &job.payload,
+            &facts,
+        )
+        .map_err(WorkerError::Validation)?;
+        let options = sceneworks_core::resolved_options::TrainingExecutionOptions::bind(
+            &job.payload,
+            &resolved,
+        )
+        .map_err(WorkerError::InvalidPayload)?;
         if plan.dataset.items.is_empty() {
             return Err(WorkerError::InvalidPayload(
                 "control_training plan has no dataset items to render conditions from.".to_owned(),
@@ -125,7 +134,14 @@ mod imp {
         )
         .await?;
 
-        let kind = control_kind_from_plan(&plan);
+        let kind = control_kind_from_label(
+            options
+                .iris
+                .control_type
+                .as_ref()
+                .map(|field| field.value.trim())
+                .unwrap_or("pose"),
+        );
         let label = control_kind_label(&kind);
 
         // Resolve the preprocessor resources this control type needs (pose → DWPose weights; canny is
@@ -148,7 +164,12 @@ mod imp {
 
         // Optional person-presence gate (pose/people corpora), resolved through the shared YOLO11
         // detector the person-detect job uses.
-        let person_filter = if plan_advanced_bool(&plan, "personGate") {
+        let person_filter = if options
+            .iris
+            .person_gate
+            .as_ref()
+            .is_some_and(|field| field.value)
+        {
             let weights_path = person_jobs::require_detector_weights(settings)?;
             Some(PersonFilter {
                 weights_path,
@@ -361,19 +382,6 @@ mod imp {
         run_training_execution(api, settings, job, &plan).await
     }
 
-    /// The control type to render, from the plan config's `advanced.controlType` (default pose — the
-    /// only type the `krea_control` target advertises today).
-    fn control_kind_from_plan(plan: &TrainingPlan) -> ControlKind {
-        control_kind_from_label(
-            plan.config
-                .advanced
-                .get("controlType")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .unwrap_or("pose"),
-        )
-    }
-
     /// Map a `controlType` label onto a [`ControlKind`]. Absent/blank defaults to pose (the studio
     /// target's default); an unknown label flows through as [`ControlKind::Other`] and is rejected by
     /// the caller with a precise "not available yet" message rather than silently mis-rendered.
@@ -384,15 +392,6 @@ mod imp {
             "depth" => ControlKind::Depth,
             other => ControlKind::Other(other.to_owned()),
         }
-    }
-
-    /// Read a boolean flag from the plan config's `advanced` bag (absent/non-bool ⇒ false).
-    fn plan_advanced_bool(plan: &TrainingPlan, key: &str) -> bool {
-        plan.config
-            .advanced
-            .get(key)
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
     }
 
     #[cfg(test)]
