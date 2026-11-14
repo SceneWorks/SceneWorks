@@ -12,8 +12,8 @@ use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
 use super::sampling::read_resolved_image_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
@@ -95,13 +95,7 @@ fn resolve_kolors_ipadapter_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "Kolors IP-Adapter modelPath")
             .map(Some);
     }
@@ -130,12 +124,12 @@ pub(super) fn kolors_ipadapter_available(request: &ImageRequest, settings: &Sett
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
 fn kolors_ipadapter_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KOLORS_IPADAPTER_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", KOLORS_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn kolors_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         KOLORS_IPADAPTER_DEFAULT_GUIDANCE,

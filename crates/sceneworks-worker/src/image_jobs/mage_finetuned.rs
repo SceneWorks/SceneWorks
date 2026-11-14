@@ -7,8 +7,8 @@ use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::resolve_seed;
 use super::routing::imported_generate_request_supported;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_with_request_state;
 use super::CancelFlag;
@@ -146,16 +146,22 @@ pub(super) fn resolve_mage_finetuned_transformer(
         return Ok(None);
     }
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -464,10 +470,10 @@ pub(super) async fn generate_mage_finetuned_stream(
 
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", MAGE_FINETUNED_DEFAULT_STEPS, 1..=100);
+        resolved_option_or_manifest_u32(request, "steps", MAGE_FINETUNED_DEFAULT_STEPS, 1..=100);
     // Undistilled Base runs TRUE CFG, so guidance is a live knob: `advanced.guidanceScale`, else
     // the catalog entry's `defaults.guidanceScale`, else the published Base default.
-    let guidance = resolve_advanced_or_manifest_f32(
+    let guidance = resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         MAGE_FINETUNED_DEFAULT_GUIDANCE,

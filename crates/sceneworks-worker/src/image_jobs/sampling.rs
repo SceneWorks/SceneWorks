@@ -99,28 +99,28 @@ pub(super) fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) ->
 /// so the drifting steps bounds (1..=80 / 1..=50 / 1..=100) are preserved byte-for-byte — this is a
 /// dedup-of-mechanism refactor, not a policy change.
 #[cfg(native_lane)]
-pub(super) fn resolve_advanced_or_manifest_u32(
+pub(super) fn resolved_option_or_manifest_u32(
     request: &ImageRequest,
     key: &'static str,
     default: u32,
     range: std::ops::RangeInclusive<u32>,
 ) -> u32 {
-    resolve_advanced_or_manifest_u32_with(request, key, || default, range)
+    resolved_option_or_manifest_u32_with(request, key, || default, range)
 }
 
 /// Resolve an advanced float with manifest fallback. Guidance remains uncapped; other
 /// knobs retain their existing mathematical bounds.
 #[cfg(native_lane)]
-pub(super) fn resolve_advanced_or_manifest_f32(
+pub(super) fn resolved_option_or_manifest_f32(
     request: &ImageRequest,
     key: &'static str,
     default: f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> f32 {
-    resolve_advanced_or_manifest_f32_with(request, key, || default, range)
+    resolved_option_or_manifest_f32_with(request, key, || default, range)
 }
 
-/// Closure-default twin of [`resolve_advanced_or_manifest_u32`] (sc-8825). Identical mechanism —
+/// Closure-default twin of [`resolved_option_or_manifest_u32`] (sc-8825). Identical mechanism —
 /// `advanced[key]` → manifest `[key]` (parsed, clamped to `range`) — except the fallback is a
 /// per-lane `default_fn` closure evaluated **only** when both advanced and manifest are absent (and,
 /// like the const twin, returned **unclamped**). This covers the lanes whose default is model-dependent
@@ -128,7 +128,7 @@ pub(super) fn resolve_advanced_or_manifest_f32(
 /// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
 ///
 #[cfg(any(native_lane, test))]
-pub(super) fn resolve_advanced_or_manifest_u32_with(
+pub(super) fn resolved_option_or_manifest_u32_with(
     request: &ImageRequest,
     key: &'static str,
     default_fn: impl FnOnce() -> u32,
@@ -147,13 +147,13 @@ pub(super) fn resolve_advanced_or_manifest_u32_with(
         .unwrap_or_else(default_fn)
 }
 
-/// Closure-default twin of [`resolve_advanced_or_manifest_f32`] (sc-8825). Identical mechanism —
+/// Closure-default twin of [`resolved_option_or_manifest_f32`] (sc-8825). Identical mechanism —
 /// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
 /// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
 /// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
 /// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
 #[cfg(any(native_lane, test))]
-pub(super) fn resolve_advanced_or_manifest_f32_with(
+pub(super) fn resolved_option_or_manifest_f32_with(
     request: &ImageRequest,
     key: &'static str,
     default_fn: impl FnOnce() -> f32,

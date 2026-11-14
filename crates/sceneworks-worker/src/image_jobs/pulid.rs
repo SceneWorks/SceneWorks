@@ -15,8 +15,8 @@ use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
 use super::sampling::read_resolved_image_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_cached_gen_stream_with_request_state;
@@ -124,13 +124,7 @@ fn resolve_pulid_flux_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "PuLID-FLUX modelPath").map(Some);
     }
     let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
@@ -160,13 +154,13 @@ pub(super) fn pulid_flux_available(request: &ImageRequest, settings: &Settings) 
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG; the engine's fake-CFG single forward consumes it).
 fn pulid_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
+    resolved_option_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
 }
 
 /// The PuLID identity-strength knob → the reference conditioning's `strength` (the engine reads

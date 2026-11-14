@@ -687,11 +687,7 @@ async fn generate_candle_registry_stream_using(
     // the runtime knob under different names (SDXL `set_flash_attn`, Z-Image `set_accel_attn`); the
     // diffusion-transformer families (flux/flux2/qwen) bake it via the build feature with no runtime
     // toggle. No effect unless the crate was built with its flash/accel feature.
-    let flash_attn = request
-        .advanced
-        .get("flashAttn")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let flash_attn = request.advanced_bool("flashAttn").unwrap_or(true);
     match request.model.as_str() {
         // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
         // So do the Illustrious-XL finetunes (epic 10609).
@@ -1027,7 +1023,7 @@ async fn generate_candle_registry_stream_using(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = candle_tier_pick_is_exact(&request.model, &request.advanced);
+    let explicit_pick = candle_resolved_tier_pick_is_exact(request);
     // FLUX 3's package is request-named and is gated as named: rejected before load if it does
     // not fit, never downtiered to a package the request did not choose.
     if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {
@@ -2738,7 +2734,22 @@ async fn generate_candle_registry_stream_using(
 /// whose verified binding froze a tier. The latter is served in place from the hub snapshot, so a
 /// downtier would load a sibling tier the guard never verified; such a job is gated as bound
 /// (fits, or is refused before load).
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolved_tier_pick_is_exact(request: &ImageRequest) -> bool {
+    (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        && request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .mlx_quantize
+            .is_some())
+        || request
+            .advanced_bool("mlxQuantizeExplicit")
+            .unwrap_or(false)
+        || request.portable_aux.bound_tier().is_some()
+}
+
+#[cfg(test)]
 pub(crate) fn candle_tier_pick_is_exact(model: &str, advanced: &crate::JsonObject) -> bool {
     (matches!(model, "flux_schnell" | "flux_dev") && advanced.contains_key("mlxQuantize"))
         || advanced

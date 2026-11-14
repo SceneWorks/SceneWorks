@@ -1842,7 +1842,7 @@ fn checkpoint_plan_bespoke_primary(
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's
 /// `[key]`. `None` means "the provider's own default", which the registry descriptor owns.
-fn checkpoint_plan_u32_override(request: &ImageRequest, key: &str) -> Option<u32> {
+fn checkpoint_plan_u32_override(request: &ImageRequest, key: &'static str) -> Option<u32> {
     let parse = |value: &Value| {
         value
             .as_u64()
@@ -1850,13 +1850,12 @@ fn checkpoint_plan_u32_override(request: &ImageRequest, key: &str) -> Option<u32
             .and_then(|value| u32::try_from(value).ok())
     };
     request
-        .advanced
-        .get(key)
-        .and_then(parse)
+        .advanced_i64(key)
+        .and_then(|value| u32::try_from(value).ok())
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
 }
 
-fn checkpoint_plan_f32_override(request: &ImageRequest, key: &str) -> Option<f32> {
+fn checkpoint_plan_f32_override(request: &ImageRequest, key: &'static str) -> Option<f32> {
     let parse = |value: &Value| {
         value
             .as_f64()
@@ -1864,9 +1863,8 @@ fn checkpoint_plan_f32_override(request: &ImageRequest, key: &str) -> Option<f32
             .map(|value| value as f32)
     };
     request
-        .advanced
-        .get(key)
-        .and_then(parse)
+        .advanced_f64(key)
+        .map(|value| value as f32)
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
 }
 

@@ -686,14 +686,6 @@ use super::sampling::recover_ideogram_placeholder;
 #[cfg(native_lane)]
 use super::sampling::recover_ideogram_placeholder_with;
 #[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_f32;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_f32_with;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_u32;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_u32_with;
-#[cfg(native_lane)]
 use super::sampling::resolve_guidance;
 #[cfg(native_lane)]
 use super::sampling::resolve_negative_prompt;
@@ -701,6 +693,14 @@ use super::sampling::resolve_negative_prompt;
 use super::sampling::resolve_steps;
 #[cfg(target_os = "macos")]
 use super::sampling::resolve_true_cfg;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_f32;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_f32_with;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_u32;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_u32_with;
 #[cfg(target_os = "macos")]
 use super::sampling::uses_true_cfg;
 #[cfg(target_os = "macos")]
@@ -4897,10 +4897,10 @@ fn steps_default_is_family_default_and_clamps() {
 // advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
+fn resolved_option_or_manifest_u32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
             "steps",
             30,
@@ -4909,7 +4909,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
         12
     );
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
             "steps",
             30,
@@ -4918,7 +4918,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
         80
     );
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 0 } })),
             "steps",
             30,
@@ -4928,7 +4928,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     );
     // A numeric string parses just like a JSON int.
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": "24" } })),
             "steps",
             30,
@@ -4938,7 +4938,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     );
     // advanced absent → manifest fallback (also clamped).
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 200 } })),
             "steps",
             30,
@@ -4949,13 +4949,13 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     // Both absent → the default, returned UNCLAMPED (the distilled 4-step default survives a 1..=50
     // range — clamping the default here would be a behavior change).
     assert_eq!(
-        resolve_advanced_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
+        resolved_option_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
         4
     );
     // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
     // garbage advanced value fails the parse and the closure moves on to manifest, then default).
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
             "steps",
             30,
@@ -4967,10 +4967,10 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
 
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
+fn resolved_option_or_manifest_f32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 7.5 } })),
             "guidanceScale",
             5.0,
@@ -4979,7 +4979,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
         7.5
     );
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             5.0,
@@ -4989,7 +4989,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // A numeric string parses just like a JSON float.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "2.5" } })),
             "guidanceScale",
             5.0,
@@ -4999,7 +4999,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // advanced absent → manifest fallback (also clamped).
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             5.0,
@@ -5009,7 +5009,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // Both absent → the per-lane default.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p" })),
             "guidanceScale",
             4.0,
@@ -5020,7 +5020,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
     // default 5.0), then clamps — matching the historical `f32_clamped` call.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
             "guidanceScale",
             5.0,
@@ -5036,13 +5036,13 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
 // advanced and manifest are absent (a present advanced/manifest value must short-circuit it).
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
+fn resolved_option_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
 
     // advanced present wins, clamped — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
             "steps",
             || {
@@ -5061,7 +5061,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     // manifest fallback wins, clamped — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 0 } })),
             "steps",
             || {
@@ -5080,7 +5080,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     // Both absent → default_fn IS invoked, its value returned UNCLAMPED (distilled 4 survives 1..=50).
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p" })),
             "steps",
             || {
@@ -5099,7 +5099,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     // Un-parseable advanced → falls through to the (here absent) manifest, then default_fn.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
             "steps",
             || {
@@ -5115,7 +5115,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
 
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
+fn resolved_option_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
 
     // NOTE: the f32 variant's `default_fn` supplies the MANIFEST fallback (which `f32_clamped` then
@@ -5128,7 +5128,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             || {
@@ -5147,7 +5147,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // manifest supplies the effective default — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             || {
@@ -5166,7 +5166,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // Both absent → default_fn IS invoked (variant default), then f32_clamped applies.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p" })),
             "guidanceScale",
             || {
@@ -5185,7 +5185,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // Un-parseable advanced → the f32 reader falls back to the (default_fn) fallback, then clamps.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
             "guidanceScale",
             || {

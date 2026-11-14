@@ -97,12 +97,7 @@ const PID_DIM_MULTIPLE: u32 = 32;
 /// Resolve the requested PiD output tier from `advanced.pidTarget` (sc-10054). Default + any
 /// unrecognized value → `Res4k` (today's full-resolution behavior); only an explicit `"2k"` opts down.
 pub(crate) fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
-    match request
-        .advanced
-        .get("pidTarget")
-        .and_then(Value::as_str)
-        .map(str::trim)
-    {
+    match request.advanced_text("pidTarget").map(str::trim) {
         Some(tier) if tier.eq_ignore_ascii_case("2k") => PidOutputTier::Res2k,
         _ => PidOutputTier::Res4k,
     }
@@ -235,19 +230,24 @@ pub(super) fn resolve_pid_weights(
     };
 
     let ckpt_cfg = request
-        .advanced
-        .get("pidCheckpoint")
-        .and_then(Value::as_object);
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .pid_checkpoint
+        .as_ref()
+        .map(|bound| &bound.value);
     let repo = ckpt_cfg
-        .and_then(|c| c.get("repo"))
-        .and_then(crate::payload::trimmed_value_str)
+        .and_then(|c| c.repo.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .unwrap_or(default_repo);
     // Validate a per-request filename override EARLY — before the cache check below — so a traversal /
     // non-plain-component filename is rejected with a field-pointed `InvalidPayload` rather than silently
     // ignored when the repo happens not to be cached (sc-8821 / F-019). `None` ⇒ use the tier default.
     let filename_override = ckpt_cfg
-        .and_then(|c| c.get("filename"))
-        .and_then(crate::payload::trimmed_value_str)
+        .and_then(|c| c.filename.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
         .transpose()?;
     let gemma_repo = request

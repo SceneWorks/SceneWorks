@@ -17,8 +17,8 @@ use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
 use super::sampling::read_resolved_image_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
 use super::tier_components_present;
@@ -583,13 +583,7 @@ fn resolve_instantid_sdxl_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "InstantID SDXL modelPath")
             .map(Some);
     }
@@ -731,13 +725,13 @@ fn builtin_angle_presets() -> Vec<sceneworks_core::project_store::ResolvedAngleP
 /// Resolve InstantID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` →
 /// the torch-parity default (30).
 fn instantid_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", INSTANTID_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", INSTANTID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve InstantID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the
 /// RealVisXL-tuned default (3.0). Clamped to a sane CFG range.
 fn instantid_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         INSTANTID_DEFAULT_GUIDANCE,
@@ -750,7 +744,7 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
 /// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
 fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
-    let raw = request.quant_bits().or_else(|| {
+    let raw = request.resolved_quant_bits().or_else(|| {
         request
             .model_manifest_entry
             .get("mlx")

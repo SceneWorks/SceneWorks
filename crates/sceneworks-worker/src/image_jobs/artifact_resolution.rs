@@ -45,7 +45,7 @@ fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String
 /// intentionally excluded because each repo resolves its own receipt independently.
 #[cfg(native_lane)]
 pub(super) fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
-    if let Some(bits) = request.quant_bits() {
+    if let Some(bits) = request.resolved_quant_bits() {
         return Some(crate::payload::tier_for_bits(Some(bits), "q8").to_owned());
     }
     let selectable = request
@@ -181,10 +181,15 @@ const SANA_SPRINT_CANDLE_DIFFUSERS_REVISION: &str = "19683c58b7ea290e55cedd8950a
 #[allow(clippy::question_mark)]
 pub(super) fn model_path_override(request: &ImageRequest) -> Option<String> {
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
     else {
         return None;
     };
@@ -485,7 +490,7 @@ pub(crate) fn resolve_weights_dir(
         // so no on-the-fly quant runs). The packed q4/q8 tiers still resolve from the `-mlx` turnkey below.
         #[cfg(native_lane)]
         {
-            let wants_bf16 = request.quant_bits().is_some_and(|bits| bits <= 0);
+            let wants_bf16 = request.resolved_quant_bits().is_some_and(|bits| bits <= 0);
             if wants_bf16 {
                 if let Some(bf16) = huggingface_snapshot_dir(&settings.data_dir, IDEOGRAM_BF16_REPO)
                     .map(|root| root.join("bf16"))
@@ -656,14 +661,7 @@ pub(super) fn qwen_image_2_1_tier_dir(
             _ => "q8",
         }
     };
-    let explicit = qwen_image_2_1_selected_bits(&request.advanced)
-        .map_err(|value| {
-            WorkerError::InvalidPayload(format!(
-                "{} advanced.mlxQuantize must be an integer bit count, got {value}",
-                request.model
-            ))
-        })?
-        .map(qwen_checkpoint_tier);
+    let explicit = request.resolved_quant_bits().map(qwen_checkpoint_tier);
     let installed = |tier: &'static str| -> Option<(PathBuf, &'static str)> {
         let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
         qwen_image_2_1_has_loadable_transformer(&dir).then_some((dir, tier))
@@ -697,21 +695,6 @@ pub(super) fn qwen_image_2_1_tier_dir(
             .filter(|tier| *tier != default)
             .find_map(installed)
     }))
-}
-
-/// The bits a Qwen-Image 2.1 request selects exactly: an explicit value, else the verified
-/// binding's frozen tier (served in place, so it is never substituted by an installed sibling).
-/// `Ok(None)` leaves the manifest default with its installed fallback; a malformed explicit value
-/// is returned for refusal.
-#[cfg(native_lane)]
-fn qwen_image_2_1_selected_bits(advanced: &JsonObject) -> Result<Option<i64>, String> {
-    use sceneworks_core::payload_util::QuantSelection;
-    match sceneworks_core::payload_util::quant_selection(advanced) {
-        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => Ok(Some(bits)),
-        // A present `null` has always meant "no tier named" here.
-        QuantSelection::Unselected | QuantSelection::Null => Ok(None),
-        QuantSelection::Malformed(value) => Err(value.to_string()),
-    }
 }
 
 /// The "has a loadable backbone" probe the shared resolver applies, spelled for BOTH layouts this
@@ -919,7 +902,24 @@ fn qwen_image_2_1_declared_tier_dir(
 pub(super) fn candle_flux1_packed_requested_tier(
     request: &ImageRequest,
 ) -> WorkerResult<&'static str> {
-    candle_flux1_packed_tier_key(&request.advanced).ok_or_else(|| {
+    use sceneworks_core::payload_util::ResolvedQuantSelection;
+    let requested = match sceneworks_core::payload_util::resolved_quant_selection(
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .mlx_quantize
+            .as_ref(),
+        request.portable_aux.bound_tier(),
+    ) {
+        ResolvedQuantSelection::Unselected
+        | ResolvedQuantSelection::Null
+        | ResolvedQuantSelection::Explicit(4)
+        | ResolvedQuantSelection::Bound(4) => Some("q4"),
+        ResolvedQuantSelection::Explicit(8) | ResolvedQuantSelection::Bound(8) => Some("q8"),
+        _ => None,
+    };
+    requested.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "{} on Candle supports only its hosted packed q4 or q8 tiers",
             request.model
@@ -929,7 +929,7 @@ pub(super) fn candle_flux1_packed_requested_tier(
 
 /// Portable core of [`candle_flux1_packed_requested_tier`]: an explicit value, else the verified
 /// binding's frozen tier, else the q4 default; anything but q4/q8 is `None` (refused).
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(test)]
 pub(crate) fn candle_flux1_packed_tier_key(advanced: &JsonObject) -> Option<&'static str> {
     use sceneworks_core::payload_util::QuantSelection;
     match sceneworks_core::payload_util::quant_selection(advanced) {
@@ -1172,7 +1172,7 @@ pub(super) fn is_anima_model(model: &str) -> bool {
 /// rather than `transformer/`, and — unlike the standard q4-first convention — defaults to q8 (below).
 #[cfg(native_lane)]
 pub(super) fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
@@ -1261,7 +1261,7 @@ pub(super) fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
 /// carries only `q4/`/`q8/` (bf16 is a separate catalog repo), so the clean-tiers fallback here is
 /// q8 ⇆ q4 and a bf16 floor has no in-turnkey tier to land on (it falls through to the best installed).
 pub(super) fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         dir.join("transformer/model.safetensors")
@@ -1315,7 +1315,7 @@ pub(super) fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf
         "boogu_image_edit" => "edit",
         _ => "base",
     };
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     // q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree (SHARDED → only
     // the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
@@ -1388,7 +1388,7 @@ pub(super) fn krea_model_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     // q4/q8 ship a single packed transformer file; the bf16 tier (sc-8513) is the dense diffusers
     // tree (SHARDED → only the `.index.json`). Accept either shape.
     let present = |name: &str| -> Option<PathBuf> {
@@ -1453,12 +1453,9 @@ const KREA_CONVROT_DIT_FILE: &str = "krea2_turbo_int8_convrot.safetensors";
 /// never fires on the MLX path even if a stray flag arrives. Confined to `krea_2_turbo`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn wants_krea_convrot(request: &ImageRequest) -> bool {
-    sceneworks_core::portable_sources::krea_convrot_requested(
-        &request.model,
-        "candle",
-        std::env::consts::OS,
-        request.advanced.get("convRot"),
-    )
+    request.model == "krea_2_turbo"
+        && std::env::consts::OS != "macos"
+        && request.advanced_bool("convRot").unwrap_or(false)
 }
 
 /// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2
@@ -1597,7 +1594,7 @@ pub(super) async fn ensure_boogu_tier_present(
         "boogu_image_edit" => "edit",
         _ => return Ok(()),
     };
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let tier = boogu_tier_subdir(variant, bits);
     let Some(model) = mlx_model(&request.model) else {
         return Ok(());
@@ -1679,7 +1676,7 @@ pub(super) async fn ensure_ideogram_tier_present(
     if request.model != "ideogram_4" && request.model != "ideogram_4_turbo" {
         return Ok(());
     }
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let Some(tier) = ideogram_tier_subdir(bits) else {
         // Default q4 ships in the catalog download — nothing to fetch.
         return Ok(());

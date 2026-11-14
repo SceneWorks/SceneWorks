@@ -83,7 +83,7 @@ pub(super) fn resolve_quant_gated(
     if nvfp4_selected(request, nvfp4_host, tier_dir) {
         return (Some(Quant::Nvfp4), None);
     }
-    let raw = request.quant_bits().or_else(|| {
+    let raw = request.resolved_quant_bits().or_else(|| {
         request
             .model_manifest_entry
             .get("mlx")
@@ -119,7 +119,7 @@ pub(super) fn resolve_quant_gated(
 /// layout), alongside [`tier_quant_from_resolved_dir`].
 #[cfg(target_os = "macos")]
 pub(super) fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
-    match crate::payload::tier_for_bits(request.quant_bits(), "q8") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "q8") {
         "bf16" => None,
         "q4" => Some(4),
         _ => Some(8),
@@ -178,6 +178,34 @@ pub(super) fn gate_tier_key(
     }
     tier_key_for_resolved_dir(manifest_entry, weights_dir)
         .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
+}
+
+/// Size an image attempt from the resolved tier or canonical typed request. The legacy raw
+/// selector remains test-only while existing fixture coverage is migrated.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn gate_tier_key_resolved(
+    convrot_resolved: bool,
+    weights_dir: &Path,
+    request: &ImageRequest,
+    nvfp4: bool,
+) -> &'static str {
+    if convrot_resolved {
+        return INT8_CONVROT_TIER;
+    }
+    if let Some(tier) = tier_key_for_resolved_dir(&request.model_manifest_entry, weights_dir) {
+        return tier;
+    }
+    if nvfp4 {
+        return NVFP4_TIER;
+    }
+    let bits = request.resolved_quant_bits().or_else(|| {
+        request
+            .model_manifest_entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("quantize"))
+            .and_then(crate::payload::quant_int)
+    });
+    crate::payload::tier_for_bits(bits, "q8")
 }
 
 #[cfg(native_lane)]

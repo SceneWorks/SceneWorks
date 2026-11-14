@@ -803,7 +803,7 @@ pub(super) async fn generate_stream_using(
         })
     };
     let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
-    let explicit_pick = flux3_plan.is_some() || mlx_tier_pick_is_exact(&request.advanced);
+    let explicit_pick = flux3_plan.is_some() || mlx_resolved_tier_pick_is_exact(request);
     let tiers = default_tier
         .filter(|_| !explicit_pick)
         .map(|tier| downtier_candidate_tiers(request, settings, tier, min_quality_floor(request)))
@@ -1283,7 +1283,15 @@ mod mlx_request_tier_tests;
 /// (`mlxQuantizeExplicit`), or a portable job whose verified binding froze a tier. The latter is
 /// served in place from the hub snapshot, so a downtier would load a sibling tier the guard never
 /// verified.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
+fn mlx_resolved_tier_pick_is_exact(request: &ImageRequest) -> bool {
+    request
+        .advanced_bool("mlxQuantizeExplicit")
+        .unwrap_or(false)
+        || request.portable_aux.bound_tier().is_some()
+}
+
+#[cfg(test)]
 pub(super) fn mlx_tier_pick_is_exact(advanced: &crate::JsonObject) -> bool {
     advanced
         .get("mlxQuantizeExplicit")

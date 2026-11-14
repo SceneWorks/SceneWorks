@@ -142,12 +142,7 @@ pub(super) fn effective_quant_label_gated(
     nvfp4_host: bool,
     tier_dir: Option<&Path>,
 ) -> (Option<String>, Option<i64>) {
-    if request
-        .advanced
-        .get("convRot")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if request.advanced_bool("convRot").unwrap_or(false) {
         return (Some("int8-convrot".to_owned()), None);
     }
     #[cfg(target_os = "macos")]

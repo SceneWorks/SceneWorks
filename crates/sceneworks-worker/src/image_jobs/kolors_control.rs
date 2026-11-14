@@ -12,8 +12,8 @@ use super::run_candle_strict_control;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
 use super::sampling::read_resolved_image_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 use super::CancelFlag;
@@ -101,13 +101,7 @@ fn resolve_kolors_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath")
             .map(Some);
     }
@@ -131,12 +125,12 @@ pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settin
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
 fn kolors_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KOLORS_CONTROL_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", KOLORS_CONTROL_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn kolors_control_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         KOLORS_CONTROL_DEFAULT_GUIDANCE,
