@@ -982,12 +982,12 @@ async fn apply_training_retry_resume(
         .and_then(|plan| plan.pointer("/target/kernel"))
         .and_then(Value::as_str)
         .is_some_and(|kernel| sceneworks_core::training::flux3::KERNELS.contains(&kernel));
-    let effective_resume = resume.unwrap_or_else(|| {
-        plan.get("config")
-            .and_then(|config| config.pointer("/advanced/resume"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    });
+    let authored_training =
+        sceneworks_core::resolved_options::TrainingRouteFacts::from_plan_syntax(&plan);
+    let effective_resume = resume.unwrap_or(matches!(
+        authored_training.resume,
+        sceneworks_core::resolved_options::RouteField::Valid(true)
+    ));
     if source_is_flux3 && effective_resume {
         let original = job
             .payload

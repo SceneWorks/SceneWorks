@@ -345,18 +345,23 @@ impl RouteOptionFacts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingRouteFacts {
     pub network_type: RouteField<String>,
+    pub resume: RouteField<bool>,
     pub base_model_path: RouteField<String>,
 }
 
 impl TrainingRouteFacts {
     pub fn from_plan_syntax(plan: &JsonObject) -> Self {
-        let network_type = plan
+        let advanced = plan
             .get("config")
             .ok_or(())
             .and_then(|value| value.as_object().ok_or(()))
             .and_then(|config| config.get("advanced").ok_or(()))
             .and_then(|value| value.as_object().ok_or(()));
-        let network_type = match network_type {
+        let missing_advanced = plan
+            .get("config")
+            .and_then(Value::as_object)
+            .is_some_and(|config| !config.contains_key("advanced"));
+        let network_type = match advanced {
             Ok(advanced) => match advanced.get("networkType") {
                 None => RouteField::Absent,
                 Some(Value::Null) => RouteField::Null,
@@ -365,14 +370,17 @@ impl TrainingRouteFacts {
             },
             // An omitted advanced object is ordinary absence; malformed or missing config is
             // invalid because no training route can prove that the plan is well formed.
-            Err(())
-                if plan
-                    .get("config")
-                    .and_then(Value::as_object)
-                    .is_some_and(|config| !config.contains_key("advanced")) =>
-            {
-                RouteField::Absent
-            }
+            Err(()) if missing_advanced => RouteField::Absent,
+            Err(()) => RouteField::Invalid,
+        };
+        let resume = match advanced {
+            Ok(advanced) => match advanced.get("resume") {
+                None => RouteField::Absent,
+                Some(Value::Null) => RouteField::Null,
+                Some(Value::Bool(value)) => RouteField::Valid(*value),
+                Some(_) => RouteField::Invalid,
+            },
+            Err(()) if missing_advanced => RouteField::Absent,
             Err(()) => RouteField::Invalid,
         };
         let base_model_path = match plan.get("target") {
@@ -388,6 +396,7 @@ impl TrainingRouteFacts {
         };
         Self {
             network_type,
+            resume,
             base_model_path,
         }
     }
@@ -991,19 +1000,31 @@ mod tests {
 
     #[test]
     fn training_route_probe_retains_missing_and_malformed_network_intent() {
-        let plan = obj(json!({"config":{"advanced":{"networkType":"LoKr"}}}));
+        let plan = obj(json!({"config":{"advanced":{"networkType":"LoKr","resume":true}}}));
         assert_eq!(
             TrainingRouteFacts::from_plan_syntax(&plan).network_type,
             RouteField::Valid("LoKr".to_owned())
+        );
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&plan).resume,
+            RouteField::Valid(true)
         );
         let absent = obj(json!({"config":{"advanced":{}}}));
         assert_eq!(
             TrainingRouteFacts::from_plan_syntax(&absent).network_type,
             RouteField::Absent
         );
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&absent).resume,
+            RouteField::Absent
+        );
         let malformed = obj(json!({"config":{"advanced":[]}}));
         assert_eq!(
             TrainingRouteFacts::from_plan_syntax(&malformed).network_type,
+            RouteField::Invalid
+        );
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&malformed).resume,
             RouteField::Invalid
         );
     }
