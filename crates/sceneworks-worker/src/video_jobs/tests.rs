@@ -4706,18 +4706,25 @@ fn minimax_h3_reference_resize_mode_maps_onto_the_engine_enum() {
             .cloned()
             .expect("object")
     };
-    assert_eq!(parse(&serde_json::Map::new()).unwrap(), None);
+    let parse_advanced = |advanced: serde_json::Map<String, Value>| -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
+        let payload = json!({ "advanced": advanced });
+        let payload = payload.as_object().expect("request object");
+        let request = VideoRequest::from_resolved(payload, payload)
+            .map_err(|error| WorkerError::InvalidPayload(format!("{error:?}")))?;
+        parse(request.options())
+    };
+    assert_eq!(parse_advanced(serde_json::Map::new()).unwrap(), None);
     for (wire, engine) in [
         ("match", gen_core::ReferenceImageResizeMode::Match),
         ("max", gen_core::ReferenceImageResizeMode::Max),
         ("diffusers", gen_core::ReferenceImageResizeMode::Diffusers),
     ] {
-        assert_eq!(parse(&advanced(json!(wire))).unwrap(), Some(engine));
+        assert_eq!(parse_advanced(advanced(json!(wire))).unwrap(), Some(engine));
         // The wire spelling is gen-core's own serde form, so the two enums cannot drift.
         assert_eq!(serde_json::to_value(engine).unwrap(), json!(wire));
     }
     for invalid in [json!("Match"), json!("crop"), json!(1)] {
-        let error = parse(&advanced(invalid.clone())).expect_err("refused");
+        let error = parse_advanced(advanced(invalid.clone())).expect_err("refused");
         assert!(
             error.to_string().contains("referenceImageResizeMode"),
             "{invalid}: {error}"

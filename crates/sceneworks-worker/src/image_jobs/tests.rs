@@ -1140,6 +1140,27 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+fn bound_request(value: Value) -> ImageRequest {
+    let payload = value.as_object().expect("fixture request object");
+    ImageRequest::from_resolved(payload, payload).expect("fixture options bind")
+}
+
+// Routing fixtures keep their authored request fields, then bind the same advanced map
+// the worker hands to the typed execution context before selecting a provider.
+fn execution(request: &ImageRequest) -> super::conditioning::ResolvedImageExecution {
+    let payload = json!({ "advanced": request.advanced });
+    let map = payload.as_object().unwrap();
+    let mut bound = request.clone();
+    bound.resolved_advanced = Some(
+        sceneworks_core::image_request::ImageAdvanced::bind(
+            &sceneworks_core::resolved_options::BindingInput::new(map, map),
+        )
+        .expect("fixture advanced options bind"),
+    );
+    super::conditioning::ResolvedImageExecution::new(&bound)
+        .expect("fixture execution context resolves")
+}
+
 /// Execute the actual production dispatch/fallback seam, not a copy of its classification.
 /// Mutations: delete require_legacy_fallback_allowed CALL inside it, or remove the root callsite.
 #[tokio::test]
@@ -9717,7 +9738,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
             "modelPath": lexical.display().to_string()
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("imported route selected");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -9852,7 +9873,7 @@ fn prepared_krea_imported_control_route_owns_overlay_and_adapter_tokens() {
             "modelPath": dit.display().to_string()
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("imported control route selected");
     assert_eq!(prepared.kind(), ImageRoute::KreaImportedControl);
@@ -11701,24 +11722,24 @@ fn augment_prompt_for_pose_appends_cue() {
 #[test]
 fn edit_grouping_poses_over_angles_over_plain() {
     // Pose set wins even when angleSet is also set.
-    let poses = request(json!({
+    let poses = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
     assert!(matches!(edit_grouping(&poses), EditGrouping::Poses(2)));
     // angleSet without poses → the 11-angle set.
-    let angles = request(json!({
+    let angles = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true }
     }));
     assert!(matches!(edit_grouping(&angles), EditGrouping::Angles));
     // character_image with neither → plain.
-    let plain = request(json!({
+    let plain = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
     }));
     assert!(matches!(edit_grouping(&plain), EditGrouping::Plain));
     // edit_image never groups, even with angleSet (mode gate).
-    let edit = request(json!({
+    let edit = bound_request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
         "advanced": { "angleSet": true }
     }));
@@ -11741,11 +11762,16 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     };
 
     // Angles: 11 shared seeds, per-angle prompts, no pose inputs, angleSet stamped, scored.
-    let angles = request(json!({
+    let angles = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "seed": 7 }
     }));
-    let batch = plan_edit_batch(&angles, &edit_grouping(&angles), base_settings());
+    let batch = plan_edit_batch(
+        &angles,
+        &execution(&angles),
+        &edit_grouping(&angles),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert_eq!(batch.prompts.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
@@ -11756,11 +11782,16 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Pose set: n shared seeds, pose inputs present, poseLibrary stamped, scored.
-    let poses = request(json!({
+    let poses = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "seed": 7, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
-    let batch = plan_edit_batch(&poses, &edit_grouping(&poses), base_settings());
+    let batch = plan_edit_batch(
+        &poses,
+        &execution(&poses),
+        &edit_grouping(&poses),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 2);
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
     assert_eq!(batch.pose_inputs.as_ref().map(Vec::len), Some(2));
@@ -11772,10 +11803,15 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Plain character_image: per-image seeds, no stamp, scored (sc-4411 plain With-Character).
-    let plain_char = request(json!({
+    let plain_char = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref", "count": 3
     }));
-    let batch = plan_edit_batch(&plain_char, &edit_grouping(&plain_char), base_settings());
+    let batch = plan_edit_batch(
+        &plain_char,
+        &execution(&plain_char),
+        &edit_grouping(&plain_char),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 3);
     assert!(batch.pose_inputs.is_none());
     assert!(batch.raw_settings.get("angleSet").is_none());
@@ -11783,10 +11819,15 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Plain edit_image: per-image seeds, NOT scored (Plain grouping without an identity reference).
-    let plain_edit = request(json!({
+    let plain_edit = bound_request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "count": 2
     }));
-    let batch = plan_edit_batch(&plain_edit, &edit_grouping(&plain_edit), base_settings());
+    let batch = plan_edit_batch(
+        &plain_edit,
+        &execution(&plain_edit),
+        &edit_grouping(&plain_edit),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 2);
     assert!(!batch.score_likeness);
 }
@@ -12835,14 +12876,14 @@ fn multiphase_parse_rejects_malformed_lists() {
 fn multiphase_job_shape_rejects_non_t2i_conditioning() {
     // A plain t2i job passes the shape guard.
     let ok = request(json!({ "model": "krea_2_raw", "advanced": { "phases": [{ "steps": 8 }] } }));
-    assert!(ensure_multiphase_job_shape(&ok).is_ok());
+    assert!(ensure_multiphase_job_shape(&execution(&ok)).is_ok());
 
     // Edit mode.
     let edit = request(json!({
         "model": "krea_2_raw", "mode": "edit_image",
         "advanced": { "phases": [{ "steps": 8 }] }
     }));
-    assert!(ensure_multiphase_job_shape(&edit)
+    assert!(ensure_multiphase_job_shape(&execution(&edit))
         .unwrap_err()
         .to_string()
         .contains("edit mode"));
@@ -12852,7 +12893,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "model": "krea_2_raw",
         "advanced": { "phases": [{ "steps": 8 }], "poses": [{ "keypoints": [] }] }
     }));
-    assert!(ensure_multiphase_job_shape(&pose)
+    assert!(ensure_multiphase_job_shape(&execution(&pose))
         .unwrap_err()
         .to_string()
         .contains("strict-pose"));
@@ -12864,7 +12905,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "referenceAssetId": "asset-1",
         "advanced": { "phases": [{ "steps": 8 }] }
     }));
-    assert!(ensure_multiphase_job_shape(&img2img)
+    assert!(ensure_multiphase_job_shape(&execution(&img2img))
         .unwrap_err()
         .to_string()
         .contains("img2img reference"));
@@ -12874,7 +12915,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "model": "krea_2_raw",
         "advanced": { "phases": [{ "steps": 8 }], "usePid": true }
     }));
-    assert!(ensure_multiphase_job_shape(&pid)
+    assert!(ensure_multiphase_job_shape(&execution(&pid))
         .unwrap_err()
         .to_string()
         .contains("PiD"));
@@ -13414,7 +13455,7 @@ fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
          diverted to a pose lane",
     );
     // The shared shape guard then rejects it loudly before the load (backend-neutral, exercised on both).
-    assert!(ensure_multiphase_job_shape(&phases_and_pose)
+    assert!(ensure_multiphase_job_shape(&execution(&phases_and_pose))
         .unwrap_err()
         .to_string()
         .contains("strict-pose"));
@@ -22302,7 +22343,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
             "paths": { "model": checkpoint.display().to_string() }
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("Mage fine-tuned route selected");
     assert_eq!(prepared.kind(), ImageRoute::MageFinetuned);
@@ -23958,7 +23999,7 @@ impl CheckpointPlanFixture {
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     }
 
     /// Install the pose ControlNet overlay into the isolated hub at the pinned revision the lane
@@ -24433,7 +24474,7 @@ fn a_bespoke_plan_source_declines_another_familys_request_and_still_refuses_a_mi
     );
 
     // End to end through the PRODUCTION seam: the reproduced case is served, not fatal.
-    let prepared = prepare_image_route(&krea_entry, &fx.settings)
+    let prepared = prepare_image_route(&execution(&krea_entry), &fx.settings)
         .expect("the reproduced case must not die in route preparation")
         .expect("a plan-backed Hires.fix request is served by the family's own lane");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -24553,7 +24594,7 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
         // the fatal cross-family `family-mismatch` hid behind a green conformance test (review
         // blocker 1), so the assertion now runs where the error can reach it.
         assert!(
-            prepare_image_route(request, &fx.settings)
+            prepare_image_route(&execution(request), &fx.settings)
                 .unwrap_or_else(|error| panic!(
                     "{label}: route preparation must not fail for a plan-backed request: {error}"
                 ))
@@ -24567,7 +24608,7 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
     // above.
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        prepare_image_route(request, &fx.settings)
+        prepare_image_route(&execution(request), &fx.settings)
             .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
             .map(|prepared| prepared.kind())
     };
@@ -25126,7 +25167,7 @@ fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
     );
 
     // End to end: the job is served by the lane that owns it, not killed in route preparation.
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .expect("route preparation must not fail: this is the reviewer's reproduced crash")
         .expect("a plan-backed Hires.fix request is served by the Krea lane");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -25366,7 +25407,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     };
 
     // The plan route's own availability, and the SDXL lane's two halves (shape gate + a resolvable
@@ -25418,7 +25459,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
         // `*_available` probes `resolve_image_route` consults turn a production error into
         // `false`, so a request that KILLS the job would read here as "declined" (review major 4).
         assert!(
-            prepare_image_route(request, &fx.settings)
+            prepare_image_route(&execution(request), &fx.settings)
                 .unwrap_or_else(|error| panic!(
                     "{label}: route preparation must not fail for a plan-backed request: {error}"
                 ))
@@ -25428,7 +25469,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
     }
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        prepare_image_route(request, &fx.settings)
+        prepare_image_route(&execution(request), &fx.settings)
             .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
             .map(|prepared| prepared.kind())
     };
@@ -26082,16 +26123,20 @@ fn prepare_image_route_on_this_lane(
 ) -> WorkerResult<Option<RoutedImageLane>> {
     #[cfg(target_os = "macos")]
     {
-        Ok(prepare_image_route(request, settings)?.map(|route| {
-            let label = format!("{:?}", route.kind());
-            match route {
-                PreparedImageRoute::CheckpointPlan(sources) => {
-                    RoutedImageLane::CheckpointPlan(sources)
+        Ok(
+            prepare_image_route(&execution(request), settings)?.map(|route| {
+                let label = format!("{:?}", route.kind());
+                match route {
+                    PreparedImageRoute::CheckpointPlan(sources) => {
+                        RoutedImageLane::CheckpointPlan(sources)
+                    }
+                    PreparedImageRoute::KreaImported(sources) => {
+                        RoutedImageLane::KreaImported(sources)
+                    }
+                    _ => RoutedImageLane::Other(label),
                 }
-                PreparedImageRoute::KreaImported(sources) => RoutedImageLane::KreaImported(sources),
-                _ => RoutedImageLane::Other(label),
-            }
-        }))
+            }),
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -26224,7 +26269,7 @@ fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_
         );
     }
 
-    let request = request(json!({
+    let request = bound_request(json!({
         "projectId": "p",
         "model": "linked_communityxl",
         "prompt": "a fox",
@@ -26366,7 +26411,7 @@ fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_
         );
     }
 
-    let request = request(json!({
+    let request = bound_request(json!({
         "projectId": "p",
         "model": "managed_communityxl",
         "prompt": "a fox",
@@ -26986,7 +27031,7 @@ fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_di
         &krea_native_entries(),
         0x5a,
     );
-    let legacy = request(json!({
+    let legacy = bound_request(json!({
         "projectId": "p",
         "model": "imported_kreamania",
         "prompt": "a fox",
@@ -27003,7 +27048,7 @@ fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_di
         "fixture check: this is the pre-epic entry shape — no importPlan key at all"
     );
 
-    let prepared = prepare_image_route(&legacy, &fx.settings)
+    let prepared = prepare_image_route(&execution(&legacy), &fx.settings)
         .expect("a pre-epic entry must not be refused by the plan route")
         .expect("a pre-epic entry still has a route");
     assert_eq!(
@@ -28377,7 +28422,7 @@ fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_st
     payload["modelManifestEntry"] = Value::Object(entry);
     let request = request(payload);
 
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .expect("route preparation succeeds")
         .expect("a plan-backed entry is claimed by a route");
     assert_eq!(
@@ -28429,7 +28474,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
     payload["modelManifestEntry"] = Value::Object(entry);
     let request = request(payload);
     assert_eq!(
-        prepare_image_route(&request, &fx.settings)
+        prepare_image_route(&execution(&request), &fx.settings)
             .unwrap()
             .map(|route| route.kind()),
         Some(ImageRoute::CheckpointPlan)
@@ -28450,7 +28495,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
 
     // Now the route refuses LOUDLY with the plan store's typed diagnostic rather than silently
     // falling through to another lane or the stub.
-    let error = match prepare_image_route(&request, &fx.settings) {
+    let error = match prepare_image_route(&execution(&request), &fx.settings) {
         Err(error) => error.to_string(),
         Ok(route) => panic!(
             "a plan-backed entry whose source is gone is a refusal, not a route miss (got {:?})",
@@ -28472,7 +28517,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
     // Relink the SAME root id at the library's new home: selectable again, same entry, no
     // recompile, and the plan's layer now resolves under the new directory.
     fx.store.relink_root(&fx.root_id, &moved_dir).unwrap();
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .unwrap()
         .expect("the relinked checkpoint is selectable again");
     assert_eq!(prepared.kind(), ImageRoute::CheckpointPlan);
@@ -28616,7 +28661,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     };
 
     // Plain text-to-image: the plan route owns it, and the bespoke lane declines.
@@ -28760,7 +28805,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
             ("context_refiner.0.attention.qkv.weight", "BF16"),
         ],
     );
-    let zimage_managed = request(json!({
+    let zimage_managed = bound_request(json!({
         "projectId": "p",
         "model": "managed_zimage",
         "prompt": "a fox",
@@ -28793,7 +28838,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
         !krea_imported_available(&zimage_managed, &fx.settings),
         "premise: the krea lane must not claim a z-image entry"
     );
-    let message = match prepare_image_route(&zimage_managed, &fx.settings) {
+    let message = match prepare_image_route(&execution(&zimage_managed), &fx.settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
         Err(other) => panic!("expected InvalidPayload, got {other:?}"),
         Ok(None) => panic!(

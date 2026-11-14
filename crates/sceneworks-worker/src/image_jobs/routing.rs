@@ -188,9 +188,6 @@ use super::ImageRequest;
 #[cfg(not(target_os = "macos"))]
 use super::CANDLE_ADAPTER;
 use super::STUB_ADAPTER;
-#[cfg(not(target_os = "macos"))]
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-use crate::Path;
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 use crate::PathBuf;
 use crate::Settings;
@@ -199,6 +196,7 @@ use crate::Value;
 #[cfg(not(target_os = "macos"))]
 use crate::WorkerError;
 use crate::WorkerResult;
+use std::path::Path;
 /// Resolve one exact imported generate surface and reject every request axis the selected provider
 /// cannot execute. Source shape is part of the registry key: a sibling route for the same family is
 /// never unioned in. The ComfyUI lanes are ordinary Generate routes; only a singular Reference is

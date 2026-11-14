@@ -1305,7 +1305,13 @@ async fn direct_moss_edit_worker_refuses_invalid_controls_before_any_api_or_prov
                     "payload":payload,"result":{},"requestedGpu":"auto","progress":0,"stage":"queued","message":"","attempts":1,
                     "cancelRequested":false,"createdAt":"2026-10-23T00:00:00Z","updatedAt":"2026-10-23T00:00:00Z"})).unwrap();
             assert!(matches!(
-                run_image_generate_job_unexplained(&api, &settings, &job).await,
+                run_image_generate_job_unexplained(
+                    &api,
+                    &settings,
+                    &job,
+                    &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+                )
+                .await,
                 Err(WorkerError::InvalidPayload(_))
             ));
         }
