@@ -347,6 +347,8 @@ pub struct IrisTrainingOptions {
     pub person_gate: Option<Bound<bool>>,
     pub resume_from_job_id: Option<Bound<String>>,
     pub load_from_job_id: Option<Bound<String>>,
+    pub output_scope: Option<Bound<String>>,
+    pub requested_gpu: Option<Bound<String>>,
     pub depth_init: Option<Bound<String>>,
     pub stage: Option<Bound<String>>,
     pub parent_stage: Option<Bound<String>>,
@@ -369,6 +371,8 @@ impl IrisTrainingOptions {
             person_gate: input.boolean("training.config.advanced", "personGate")?,
             resume_from_job_id: input.text("training.config.advanced", "resumeFromJobId")?,
             load_from_job_id: input.text("training.config.advanced", "loadFromJobId")?,
+            output_scope: input.text("training.config.advanced", "outputScope")?,
+            requested_gpu: input.text("training.config.advanced", "requestedGpu")?,
             depth_init: input.text("training.config.advanced", "depthInit")?,
             stage: input.text("training.config.advanced.iris", "stage")?,
             parent_stage: input.text("training.config.advanced.iris", "parent_stage")?,
@@ -802,6 +806,7 @@ mod tests {
         let authored = obj(json!({"plan":{"config":{"advanced":{
             "networkType":"full", "mixedPrecision":"fp16", "controlType":"canny",
             "personGate":true, "resumeFromJobId":"job-r", "loadFromJobId":"job-l",
+            "outputScope":"project", "requestedGpu":"auto",
             "iris":{"stage":"S2", "repa":{"weight":0.25},
                 "dist":{"strategy":"ddp"}},
             "iris_restore":{"init":"parent","degradation":{"use_hflip":false}}
@@ -812,6 +817,8 @@ mod tests {
         assert!(bound.person_gate.as_ref().unwrap().value);
         assert_eq!(bound.resume_from_job_id.as_ref().unwrap().value, "job-r");
         assert_eq!(bound.load_from_job_id.as_ref().unwrap().value, "job-l");
+        assert_eq!(bound.output_scope.as_ref().unwrap().value, "project");
+        assert_eq!(bound.requested_gpu.as_ref().unwrap().value, "auto");
         assert_eq!(bound.stage.as_ref().unwrap().value, "S2");
         assert_eq!(bound.dist_strategy.as_ref().unwrap().value, "ddp");
         assert!(bound.repa_enabled());
