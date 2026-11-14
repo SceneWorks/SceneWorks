@@ -1,4 +1,6 @@
 //! Static coverage of option reads. This test parses source; it never loads an engine.
+//! Macro expansion and compiler name resolution are outside this guard. Source-owned
+//! finite tables below cover the specifically documented dynamic training selectors.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
@@ -195,18 +197,23 @@ impl Scanner<'_> {
                 {
                     true
                 } else {
-                    matches!(
-                        method.as_str(),
-                        "as_object"
-                            | "as_object_mut"
-                            | "as_ref"
-                            | "as_mut"
-                            | "unwrap"
-                            | "expect"
-                            | "unwrap_or_default"
-                            | "cloned"
-                            | "clone"
-                    ) && self.map(&it.receiver)
+                    ((method == "and_then"
+                        && it.args.first().is_some_and(|arg| {
+                            matches!(name(arg).as_deref(), Some("as_object" | "as_object_mut"))
+                        }))
+                        || matches!(
+                            method.as_str(),
+                            "as_object"
+                                | "as_object_mut"
+                                | "as_ref"
+                                | "as_mut"
+                                | "unwrap"
+                                | "expect"
+                                | "unwrap_or_default"
+                                | "cloned"
+                                | "clone"
+                        ))
+                        && self.map(&it.receiver)
                 }
             }
             _ => false,
@@ -286,6 +293,17 @@ impl Scanner<'_> {
 
     fn function(&mut self, sig: &syn::Signature, body: &syn::Block) {
         let old_function = std::mem::replace(&mut self.function, sig.ident.to_string());
+        let old_location = self.location;
+        if self.file.contains("iris_curricula")
+            || matches!(
+                self.function.as_str(),
+                "training_job_is_candle_eligible"
+                    | "moss_training_plan_is_supported"
+                    | "training_plan_is_lokr"
+            )
+        {
+            self.location = "training.config.advanced";
+        }
         let old_bindings = std::mem::take(&mut self.bindings);
         let old_delegated = std::mem::take(&mut self.delegated);
         let old_closures = std::mem::take(&mut self.closures);
@@ -308,6 +326,7 @@ impl Scanner<'_> {
         self.visit_block(body);
         self.bindings = old_bindings;
         self.function = old_function;
+        self.location = old_location;
         self.delegated = old_delegated;
         self.closures = old_closures;
     }
@@ -367,6 +386,9 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        if let Some(values) = self.strings(&item.expr) {
+            self.bindings.strings.insert(item.ident.to_string(), values);
+        }
         let keys = if item.ident == "TECHNIQUE_KEYS" && self.file.contains("/training/") {
             self.strings(&item.expr)
         } else if item.ident == "IRIS_MICRO_STEP_FIELDS" {
@@ -513,6 +535,17 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
         }
         if let Some(Expr::Closure(closure)) = expr.args.first() {
+            if matches!(expr.method.to_string().as_str(), "and_then" | "map")
+                && self.map(&expr.receiver)
+            {
+                let old = self.bindings.clone();
+                if let Some(key) = closure.inputs.first().and_then(ident) {
+                    self.bindings.maps.insert(key);
+                }
+                visit::visit_expr_method_call(self, expr);
+                self.bindings = old;
+                return;
+            }
             if let Expr::MethodCall(iter) = unwrapped(&expr.receiver) {
                 if matches!(iter.method.to_string().as_str(), "iter" | "into_iter") {
                     let old = self.bindings.clone();
@@ -661,6 +694,10 @@ fn scan(sources: &[(String, syn::File)]) -> Coverage {
     }
     let mut coverage = Coverage::default();
     for (file, source) in sources {
+        let mut scoped_constants = constants.0.clone();
+        let mut local_constants = Constants(BTreeMap::new());
+        local_constants.visit_file(source);
+        scoped_constants.extend(local_constants.0);
         let mut imports = BTreeMap::new();
         for item in &source.items {
             if let Item::Use(it) = item {
@@ -678,7 +715,7 @@ fn scan(sources: &[(String, syn::File)]) -> Coverage {
             bindings: Bindings::default(),
             delegated: BTreeSet::new(),
             closures: BTreeMap::new(),
-            constants: &constants.0,
+            constants: &scoped_constants,
             imports,
             coverage: &mut coverage,
         }
@@ -845,6 +882,8 @@ fn injecting_an_unseen_production_key_fails_coverage() {
         r#"let alias = &request.advanced; alias.get_mut("__unseen_production_option__");"#,
         r#"request.advanced["__unseen_production_option__"];"#,
         r#"advanced::f32(&request.advanced, "__unseen_production_option__", 0.0);"#,
+        r#"let alias = &request.advanced; let alias = alias.clone(); alias.get("__unseen_production_option__");"#,
+        r#"payload.get("advanced").and_then(Value::as_object).and_then(|knobs| knobs.get("__unseen_production_option__"));"#,
     ] {
         let coverage = fixture(&format!(
             "fn production() {{ {body} }} #[cfg(test)] mod tests {{}}"
@@ -888,6 +927,56 @@ fn adding_an_unregistered_key_to_a_dynamic_domain_fails_coverage() {
         .unwrap(),
     )]);
     assert_eq!(missing(&mutated).len(), 1);
+}
+
+#[test]
+fn common_constant_names_and_training_context_stay_scoped() {
+    let sources = [
+        (
+            "first.rs".into(),
+            syn::parse_file(
+                r#"
+            const KEYS: &[&str] = &["steps"];
+            fn read() { KEYS.iter().any(|key| request.advanced.get(*key).is_some()); }
+        "#,
+            )
+            .unwrap(),
+        ),
+        (
+            "second.rs".into(),
+            syn::parse_file(
+                r#"
+            const KEYS: &[&str] = &["sampler"];
+            fn read() { KEYS.iter().any(|key| request.advanced.get(*key).is_some()); }
+        "#,
+            )
+            .unwrap(),
+        ),
+        (
+            "crates/sceneworks-worker/src/iris_curricula.rs".into(),
+            syn::parse_file(
+                r#"
+            fn read() { request.advanced.get("gradientCheckpointing"); }
+        "#,
+            )
+            .unwrap(),
+        ),
+    ];
+    let coverage = scan(&sources);
+    assert_eq!(coverage.reads.len(), 3);
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file == "first.rs" && read.key == "steps"));
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file == "second.rs" && read.key == "sampler"));
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file.contains("iris_curricula")
+            && read.location == "training.config.advanced"));
 }
 
 // Exact dynamic sites whose finite domain lives in the source-owned declarations above.
