@@ -1681,38 +1681,39 @@ fn windows_source_paths_preserve_scoped_rules_and_reject_unknown_keys() {
     }
 }
 
-#[test]
-fn javascript_advanced_reads_resolve_to_option_specs() {
-    fn files(dir: &Path, sources: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if !matches!(
-                    path.file_name().and_then(|it| it.to_str()),
-                    Some("testUtils" | "__tests__")
-                ) {
-                    files(&path, sources);
-                }
-            } else {
-                let name = path.file_name().unwrap().to_string_lossy();
-                if matches!(
-                    path.extension().and_then(|it| it.to_str()),
-                    Some("js" | "jsx")
-                ) && !name.contains(".test.")
-                    && !name.contains(".spec.")
-                {
-                    sources.push(path);
-                }
+fn javascript_source_files(dir: &Path, sources: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if !matches!(
+                path.file_name().and_then(|it| it.to_str()),
+                Some("testUtils" | "__tests__")
+            ) {
+                javascript_source_files(&path, sources);
+            }
+        } else {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if matches!(
+                path.extension().and_then(|it| it.to_str()),
+                Some("js" | "jsx")
+            ) && !name.contains(".test.")
+                && !name.contains(".spec.")
+            {
+                sources.push(path);
             }
         }
     }
+}
+
+#[test]
+fn javascript_advanced_reads_resolve_to_option_specs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
     let mut sources = Vec::new();
-    files(&root.join("apps/web/src"), &mut sources);
+    javascript_source_files(&root.join("apps/web/src"), &mut sources);
     let mut absent = Vec::new();
     let mut dynamic = Vec::new();
     for path in sources {
@@ -1746,6 +1747,34 @@ fn javascript_advanced_reads_resolve_to_option_specs() {
         dynamic.is_empty(),
         "JavaScript computed accesses need explicit finite coverage:\n{dynamic:#?}"
     );
+}
+
+#[test]
+#[ignore = "temporary SW-7038 web authoring/read inventory"]
+fn print_javascript_binding_inventory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let mut sources = Vec::new();
+    javascript_source_files(&root.join("apps/web/src"), &mut sources);
+    let mut by_file = BTreeMap::new();
+    let mut total = 0;
+    let mut dynamic = 0;
+    for path in sources {
+        let file = source_path(path.strip_prefix(root).unwrap());
+        let coverage = js_coverage(&file, &std::fs::read_to_string(path).unwrap());
+        if !coverage.reads.is_empty() || !coverage.dynamic.is_empty() {
+            total += coverage.reads.len();
+            dynamic += coverage.dynamic.len();
+            by_file.insert(file, (coverage.reads.len(), coverage.dynamic.len()));
+        }
+    }
+    eprintln!("JavaScript advanced property sites: {total}, computed: {dynamic}");
+    for (file, (direct, computed)) in by_file {
+        eprintln!("{direct:>3} direct {computed:>2} computed {file}");
+    }
 }
 
 #[test]
