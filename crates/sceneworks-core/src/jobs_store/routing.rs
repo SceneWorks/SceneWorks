@@ -467,7 +467,6 @@ pub(super) fn has_nonnull_or_malformed_nested_carrier(
     object_key: &str,
     carrier_key: &str,
 ) -> bool {
-    use crate::resolved_options::RouteField;
     debug_assert_eq!(object_key, "advanced");
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     match carrier_key {
@@ -483,7 +482,7 @@ pub(super) fn has_nonnull_or_malformed_nested_carrier(
         "referenceStrength" => facts.reference_strength.is_present_nonnull(),
         "strength" => facts.strength.is_present_nonnull(),
         "convRot" => facts.conv_rot.is_present_nonnull(),
-        _ => matches!(facts.poses, RouteField::Invalid),
+        _ => panic!("undeclared advanced route carrier: {carrier_key}"),
     }
 }
 
@@ -510,6 +509,40 @@ pub(super) fn has_malformed_optional_nested_number(
         },
         RouteField::Invalid
     )
+}
+
+/// Bind the precision carriers of a bare routing probe without running full request validation.
+/// Full submissions bind the same fields through `ImageAdvanced::bind` after shared resolution.
+pub(super) fn probe_image_precision_options(
+    payload: &Map<String, Value>,
+) -> Result<crate::image_request::ImageAdvanced, String> {
+    use crate::resolved_options::{Bound, Origin, RouteField, RouteOptionFacts};
+    let facts = RouteOptionFacts::from_payload_syntax(payload);
+    let mut options = crate::image_request::ImageAdvanced::default();
+    let origin = Origin::Internal("routing-probe");
+    options.quant_tier = match facts.quant_tier {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(Bound { value, origin }),
+        RouteField::Invalid => return Err("advanced.quantTier is malformed".to_owned()),
+    };
+    options.mlx_quantize = match facts.mlx_quantize {
+        RouteField::Absent => None,
+        RouteField::Null => Some(Bound {
+            value: None,
+            origin,
+        }),
+        RouteField::Valid(value) => Some(Bound {
+            value: Some(value),
+            origin,
+        }),
+        RouteField::Invalid => return Err("advanced.mlxQuantize is malformed".to_owned()),
+    };
+    options.conv_rot = match facts.conv_rot {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(Bound { value, origin }),
+        RouteField::Invalid => return Err("advanced.convRot is malformed".to_owned()),
+    };
+    Ok(options)
 }
 
 /// Unsupported structural carriers for Krea's reference edit lane. LoRAs, quant selection,

@@ -4,9 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
-use crate::image_request::{
-    image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES,
-};
+use crate::image_request::{Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES};
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
     CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
@@ -555,10 +553,11 @@ fn candle_refuses_fp8r_tier(model: &str, payload: &Map<String, Value>) -> bool {
 
 /// [`image_quant_tier_refusal`] over a payload's `advanced` block (absent = nothing to refuse).
 fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) -> bool {
-    match payload.get("advanced") {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(advanced)) => image_quant_tier_refusal(model, advanced).is_some(),
-        Some(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
+    match crate::jobs_store::routing::probe_image_precision_options(payload) {
+        Ok(options) => {
+            crate::image_request::image_quant_tier_refusal_resolved(model, &options).is_some()
+        }
+        Err(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
     }
 }
 
@@ -811,15 +810,16 @@ pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Optio
 }
 
 fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("quantization"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| {
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).quantization {
+        crate::resolved_options::RouteField::Valid(value) => {
             let value = value.trim();
             !value.is_empty() && !value.eq_ignore_ascii_case("auto")
-        })
+        }
+        crate::resolved_options::RouteField::Invalid => true,
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            false
+        }
+    }
 }
 
 /// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
@@ -1748,20 +1748,11 @@ fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
 }
 
 fn sana_has_unsupported_quant_carrier(payload: &Map<String, Value>) -> bool {
-    let Some(value) = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-    else {
-        return false;
-    };
-    if value.is_null() {
-        return false;
+    use crate::resolved_options::RouteField;
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+        RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => false,
+        RouteField::Valid(_) | RouteField::Invalid => true,
     }
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
-        .is_none_or(|bits| bits > 0)
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic

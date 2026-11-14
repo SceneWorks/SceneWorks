@@ -1311,25 +1311,23 @@ fn imported_requested_quant(
     payload: &Map<String, Value>,
     ignore_quant_tier: bool,
 ) -> Result<Option<&'static str>, ()> {
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    let named = advanced
-        .and_then(|advanced| {
-            if ignore_quant_tier {
-                advanced.get("quant")
-            } else {
-                advanced.get("quantTier").or_else(|| advanced.get("quant"))
-            }
-        })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
-    let bits = advanced
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        });
+    use crate::resolved_options::{RouteField, RouteOptionFacts};
+    let facts = RouteOptionFacts::from_payload_syntax(payload);
+    let named_field = if ignore_quant_tier || matches!(&facts.quant_tier, RouteField::Absent) {
+        facts.quant
+    } else {
+        facts.quant_tier
+    };
+    let named = match named_field {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(value.trim().to_ascii_lowercase()),
+        RouteField::Invalid => return Err(()),
+    };
+    let bits = match facts.mlx_quantize {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(bits) => Some(bits),
+        RouteField::Invalid => return Err(()),
+    };
     if let Some(named) = named.as_deref() {
         return match named {
             "nvfp4" => Ok(Some("nvfp4")),
@@ -1473,20 +1471,27 @@ pub fn imported_image_request_provider_eligible(
     // An explicit user control map/mode is semantically material. It may only accompany a selected
     // Pose operation; never flatten it into Generate/Edit/MultiPhase. The exact route lookup and
     // Control-conditioning check below then prove that this source/backend can consume the request.
-    if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(imported_control_intent_is_material)
-        && operation != "pose"
-    {
+    let route_options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let control_intent_is_material = route_options.control_image.is_present_nonnull()
+        || match &route_options.control_mode {
+            crate::resolved_options::RouteField::Valid(mode) => !mode.trim().is_empty(),
+            crate::resolved_options::RouteField::Invalid => true,
+            crate::resolved_options::RouteField::Absent
+            | crate::resolved_options::RouteField::Null => false,
+        };
+    if control_intent_is_material && operation != "pose" {
         return false;
     }
-    if operation == "pose"
-        && payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .is_some_and(|advanced| !imported_pose_control_mode_is_supported(advanced))
-    {
+    let pose_control_mode_supported = match &route_options.control_mode {
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            true
+        }
+        crate::resolved_options::RouteField::Valid(mode) => {
+            mode.trim().is_empty() || mode.trim().eq_ignore_ascii_case("pose")
+        }
+        crate::resolved_options::RouteField::Invalid => false,
+    };
+    if operation == "pose" && !pose_control_mode_supported {
         return false;
     }
     let Some(route) = imported_provider_route(backend, family, source, operation) else {
@@ -1497,14 +1502,18 @@ pub fn imported_image_request_provider_eligible(
     }
     let ignore_quant_tier = family == "flux2" && source == "comfy_ui_tree";
     if native_nvfp4 {
-        let advanced = payload.get("advanced").and_then(Value::as_object);
-        let named = advanced
-            .and_then(|advanced| advanced.get("quantTier").or_else(|| advanced.get("quant")))
-            .and_then(Value::as_str)
-            .map(str::trim);
-        if named.is_some_and(|quant| !quant.eq_ignore_ascii_case("nvfp4"))
-            || advanced.is_some_and(|advanced| advanced.contains_key("mlxQuantize"))
-        {
+        use crate::resolved_options::RouteField;
+        let named = if matches!(&route_options.quant_tier, RouteField::Absent) {
+            &route_options.quant
+        } else {
+            &route_options.quant_tier
+        };
+        let valid_named = match named {
+            RouteField::Absent | RouteField::Null => true,
+            RouteField::Valid(quant) => quant.trim().eq_ignore_ascii_case("nvfp4"),
+            RouteField::Invalid => false,
+        };
+        if !valid_named || !matches!(&route_options.mlx_quantize, RouteField::Absent) {
             return false;
         }
     }

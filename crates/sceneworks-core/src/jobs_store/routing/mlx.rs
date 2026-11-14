@@ -57,14 +57,9 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
     // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
     // reaching a per-family predicate that might not read `quantTier` and render dense instead. A
     // malformed named-tier request is refused here too, before any family predicate sees it.
-    if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(|advanced| {
-            crate::image_request::requests_fp8r_tier(advanced)
-                || crate::image_request::image_quant_tier_refusal(model, advanced).is_some()
-        })
-    {
+    if crate::jobs_store::routing::probe_image_precision_options(payload).map_or(true, |options| {
+        crate::image_request::image_quant_tier_refusal_resolved(model, &options).is_some()
+    }) {
         return false;
     }
     if !MLX_ROUTED_MODELS.contains(&model) {
@@ -523,11 +518,8 @@ pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// The FLUX 3 package a payload names ([`crate::image_request::flux3_requested_tier`]); an absent
 /// `advanced` is the dense package, a non-object one is malformed.
 pub(crate) fn flux3_payload_tier(payload: &Map<String, Value>) -> Result<Flux3Tier, String> {
-    match payload.get("advanced") {
-        None | Some(Value::Null) => Ok(Flux3Tier::Bf16),
-        Some(Value::Object(advanced)) => crate::image_request::flux3_requested_tier(advanced),
-        Some(other) => Err(format!("advanced must be an object, not {other}")),
-    }
+    let options = crate::jobs_store::routing::probe_image_precision_options(payload)?;
+    crate::image_request::flux3_requested_tier_resolved(&options)
 }
 
 /// The FLUX 3 request surface other than precision, shared by both lanes: the `flux3_klein`
@@ -546,12 +538,16 @@ pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
         }
         surface.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
     }
-    if let Some(advanced) = surface.get_mut("advanced").and_then(Value::as_object_mut) {
-        for carrier in crate::image_request::FLUX3_PRECISION_CARRIERS {
-            advanced.remove(*carrier);
+    let route_options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let hires_fix_enabled = match route_options.hires_fix_enabled {
+        crate::resolved_options::RouteField::Valid(enabled) => enabled,
+        crate::resolved_options::RouteField::Invalid => return false,
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            false
         }
-    }
-    iris_mlx_eligible(&surface)
+    };
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(&surface)
         && payload.get("loras").is_none_or(|value| {
             value.is_null()
                 || value.as_array().is_some_and(|loras| {
