@@ -3430,6 +3430,24 @@ async fn a_mixed_plan_dispatches_each_shot_on_its_own_partition() {
         let job_id = attempt.job_id.clone().expect("job id");
         let (status, job) = request_job(&harness, &job_id).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{job}");
+        // The film compiler's emitted body reached enqueue as an authored job. Resolve that
+        // stored body with the shared owner and bind the worker's typed video request for every
+        // shot, including both H3 partitions. No film-only option reader is involved.
+        let authored = job["payload"].as_object().expect("stored film job payload");
+        let facts = sceneworks_core::request_validation::facts_for_job(
+            &sceneworks_core::contracts::JobType::VideoGenerate,
+            authored,
+        );
+        let effective =
+            sceneworks_core::request_validation::resolve_request("video", authored, &facts)
+                .expect("film job resolves through shared options");
+        let bound = sceneworks_core::video_request::VideoRequest::from_resolved(
+            authored,
+            effective.as_payload(),
+        )
+        .expect("film job binds for worker execution");
+        assert_eq!(bound.model, job["payload"]["model"].as_str().unwrap());
+        let _ = bound.options();
 
         // EVERY shot, on BOTH partitions: the body that came off the route ends with this shot's
         // own `Audio:` sentence. Asserted on the job payload rather than on `compiled.json`
