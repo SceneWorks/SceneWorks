@@ -131,6 +131,7 @@ describe("VideoStudio — Style Catalog integration (sc-13136)", () => {
   it("no style selected → the outgoing prompt is the untouched user prompt (identity)", async () => {
     const context = baseContext();
     await render(context);
+    await vi.waitFor(() => expect(buttonWithText(container, "Render clip")?.disabled).toBe(false));
     await click(buttonWithText(container, "Render clip"));
 
     expect(context.createVideoJob).toHaveBeenCalledTimes(1);

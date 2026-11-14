@@ -11,7 +11,7 @@ import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";

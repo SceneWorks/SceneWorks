@@ -1,6 +1,6 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";

@@ -5,7 +5,6 @@ import { useCallback, useState } from "react";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { rethrowUnlessPrompted } from "../modelLibrary.js";
 import { upsertJobNewest } from "../sorters.js";
-import { validatePortableRequestNow } from "../portableValidation.js";
 
 // Owns the project's training-dataset state plus dataset CRUD, caption sidecar/job,
 // and training-job creation. Extracted from App.jsx (sc-1651). The training target/
@@ -379,12 +378,6 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     async function submitTrainingJob(request, projectId = activeProject?.id) {
       if (!projectId) {
         throw new Error("Select a workspace before creating a training job.");
-      }
-      const portable = validatePortableRequestNow({ kind: "training", payload: request });
-      if (portable.state === "invalid") {
-        const error = new Error(portable.refusal.detail);
-        Object.assign(error, portable.refusal);
-        throw error;
       }
       let job;
       try {

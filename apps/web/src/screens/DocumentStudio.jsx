@@ -20,7 +20,7 @@ import {
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "../components/generationStudio.jsx";

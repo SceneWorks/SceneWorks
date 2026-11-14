@@ -52,3 +52,34 @@ it("continues the committed project's batch while a different project render sus
   await act(async () => release());
   expect(cancelB.mock.calls.map(([job]) => job.id)).toEqual(["first", "second"]);
 });
+
+it("stops before enqueue when request 257 receives a typed refusal", async () => {
+  vi.mocked(validatePortableRequest).mockClear();
+  const refusal = { code: "invalid_generation_option", field: "width", detail: "Invalid request 257" };
+  vi.mocked(validatePortableRequest).mockImplementation(async ({ payload }) => payload.prompt === "256"
+    ? { state: "invalid", refusal } : { state: "valid" });
+  const createImageJob = vi.fn(async (request) => ({ id: `job-${request.prompt}`, status: "queued" }));
+  const prompts = Array.from({ length: 260 }, (_, index) => String(index));
+  let run;
+  function Owner() {
+    const [batchRun, setBatchRun] = React.useState(null);
+    ({ runBatch: run } = useImageBatchRun({
+      batchRun, setBatchRun, activeProject: { id: "project" }, jobs: [], jobAction: vi.fn(),
+      BATCH_ACTIVE_JOB_LIMIT: 300, preflightError: () => "", setBatchError: vi.fn(),
+      batchTotal: 260, BATCH_RENDER_CAP: 1000, setBatchConfirmPending: vi.fn(),
+      batchPrompts: prompts, batchVariables: {}, resolutionOptions: [],
+      composeJobPrompt: ({ promptToSend }) => ({ composedPrompt: promptToSend }),
+      stylePreviewActive: false, structuredPromptModel: false, batchJobCount: 260,
+      BATCH_PREFLIGHT_YIELD_INTERVAL: 100, selectedModel: null,
+      buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }),
+      onMagicExpand: vi.fn(), createImageJob,
+    }));
+    return null;
+  }
+  await act(async () => root.render(<Owner />));
+  await act(async () => run(true));
+  expect(validatePortableRequest).toHaveBeenCalledTimes(257);
+  expect(createImageJob).toHaveBeenCalledTimes(256);
+  expect(createImageJob.mock.calls.every(([request]) => request.prompt !== "256")).toBe(true);
+  vi.mocked(validatePortableRequest).mockReset();
+});

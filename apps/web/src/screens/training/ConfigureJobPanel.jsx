@@ -1,4 +1,4 @@
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableFeedbackState.js";
 import React from "react";
 
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";

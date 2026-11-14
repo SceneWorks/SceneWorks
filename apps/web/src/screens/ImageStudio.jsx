@@ -126,7 +126,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
 import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { issue } from "../validation/issues.js";
@@ -2860,7 +2860,7 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || portableFeedbackBlocks(portableBatchFeedback?.result) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || ["invalid", "server-required"].includes(portableBatchFeedback?.result.state) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -2953,7 +2953,7 @@ export function ImageStudio() {
             batchValidity={batchValidity}
             portableBatchRefusal={portableBatchRefusal}
             portableBatchRefusalIndex={portableBatchFeedback?.index}
-            portableBatchCheckedCount={portableBatchFeedback?.result.state === "valid" ? portableBatchFeedback.index : null}
+            portableBatchCheckedCount={["valid", "partial"].includes(portableBatchFeedback?.result.state) ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
             batchRun={batchRun}
             batchRunProgress={batchRunProgress}

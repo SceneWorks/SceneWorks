@@ -39,7 +39,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { issue } from "../validation/issues.js";
 

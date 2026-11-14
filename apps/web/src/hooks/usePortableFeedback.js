@@ -38,6 +38,7 @@ export function usePortableFeedback(kind, payload, _modelEntry, enabled = true) 
 }
 
 // Inspect every authored item in bounded server batches; a new edit cancels the old response.
+const BACKGROUND_BATCH_LIMIT = 256;
 export function usePortableBatchFeedback(kind, revision, requests, _modelEntry, enabled = true) {
   const app = useAppStaticOptional();
   const projectId = app?.activeProject?.id;
@@ -74,6 +75,12 @@ export function usePortableBatchFeedback(kind, revision, requests, _modelEntry, 
           if (result.state === "server-required") fallback = result;
         }
         if (fallback) break;
+        if (index >= BACKGROUND_BATCH_LIMIT) {
+          const more = !iterator.next().done;
+          if (current) setFeedback({ kind, revision, projectId,
+            result: more ? { state: "partial" } : { state: "valid" }, index });
+          return;
+        }
       }
       if (current) setFeedback({ kind, revision, projectId, result: fallback ?? { state: "valid" }, index });
     };

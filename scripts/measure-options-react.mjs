@@ -1,4 +1,4 @@
-// Measure the actual Image Studio React input path with the controlled API fixture.
+// Measure the actual Image Studio React input path with the controlled HTTP API fixture.
 // Build with `npm run build -- --config vite.verify.config.mjs`, then start
 // `npm exec -- vite preview --config vite.verify.config.mjs --port 5317` in apps/web.
 // The production bundle and controlled API are both served from that origin.
@@ -27,6 +27,7 @@ const reportedInteractiveRoute = bundleReport.interactiveRoutes?.["Image Studio"
 if (!reportedRoute || !reportedInteractiveRoute) throw new Error("Image Studio route closures are missing from bundle report");
 const bundleChunks = new Map(bundleReport.chunks.map((chunk) => [chunk.fileName, chunk]));
 const fetchedChunks = new Set();
+let validationResponses = 0;
 
 function p95(values) {
   const ordered = [...values].sort((left, right) => left - right);
@@ -44,6 +45,7 @@ try {
     page.on("response", (response) => {
       const fileName = new URL(response.url()).pathname.slice(1);
       if (bundleChunks.has(fileName)) fetchedChunks.add(fileName);
+      if (new URL(response.url()).pathname === "/api/v1/options/validate") validationResponses += 1;
     });
     if (fixtureOrigin) {
       await page.route("**/api/**", async (route) => {
@@ -151,12 +153,14 @@ try {
         brotliBytes: reportedInteractiveRoute.brotliBytes },
       observedInteractiveAssets,
       observedInteractiveBytes,
+      validationResponses,
       observedValidatorWasm: [...fetchedChunks].some((name) => bundleChunks.get(name)?.type === "wasm"),
       singleInputToPaintP95Ms: p95(single), batch32InputToPaintP95Ms: p95(batchTimes),
       inputVisibleBudgetMs: 100,
       interactionBundleBudget: bundleBudget,
       withinBudget: p95(single) <= 100 && p95(batchTimes) <= 100
-        && [...fetchedChunks].some((name) => bundleChunks.get(name)?.type === "wasm")
+        && validationResponses >= samples * 2
+        && ![...fetchedChunks].some((name) => bundleChunks.get(name)?.type === "wasm")
         && withinBundleBudget,
     };
     console.log(JSON.stringify(result, null, 2));

@@ -767,6 +767,7 @@ describe("ImageStudio resolution continuity", () => {
     await act(async () => setSelect(field(container, "Model"), destination.id));
     expect(resolutionSelect().value).toBe(expected);
 
+    await vi.waitFor(() => expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate")?.disabled).toBe(false));
     await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
     expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
 
@@ -2093,6 +2094,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(tierPicker(container)).toBeTruthy();
     expect(precisionLabel(container)).toBeFalsy();
     // Default tier q4 → mlxQuantize 4, NOT the precision-toggle's bf16 sentinel 0.
+    await vi.waitFor(() => expect(generateButton().disabled).toBe(false));
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
@@ -2257,6 +2259,7 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
     // Restore selected the structured model and rehydrated the builder (Generate is
     // enabled, which requires a valid, non-empty caption in the form — not plain text).
     expect(field(container, "Model").value).toBe("ideogram_4");
+    await vi.waitFor(() => expect(generateButton().disabled).toBe(false));
     expect(generateButton().disabled).toBe(false);
 
     await click(generateButton());

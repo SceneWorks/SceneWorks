@@ -1,4 +1,4 @@
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import React from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { AssetPickerField, CharacterImportDialog } from "../components/AssetPicker.jsx";

@@ -1,4 +1,4 @@
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableFeedbackState.js";
 import { Segmented } from "./LabFields.jsx";
 import React from "react";
 import { Icon } from "../../components/Icons.jsx";

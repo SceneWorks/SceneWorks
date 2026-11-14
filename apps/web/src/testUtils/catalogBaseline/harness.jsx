@@ -21,6 +21,9 @@ import { AUDIO_MODES, VIDEO_MODES, audioModelServesMode } from "../../modelEligi
 
 const imageModes = ["text_to_image", "edit_image", "character_image"];
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+// The pinned capture predates typed option feedback. Keep its old surface and
+// submission assertions exact while separate mounted tests assert this new message.
+const oldSurfaceHint = (node) => !node.textContent.includes("[shared request validation]");
 const screens = { image: ImageStudio, video: VideoStudio, audio: AudioStudio, vector: VectorStudio,
   document: DocumentStudio, training: TrainingStudio, character: CharacterStudio,
   simpleImage: SimpleImageStudio, simpleVideo: SimpleVideoStudio, simpleAudio: SimpleAudioStudio };
@@ -287,7 +290,7 @@ export async function observe(catalog, row) {
       const persisted = Object.fromEntries(Object.entries(afterPersisted ?? {}).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(beforePersisted?.[key])));
       changes.push({ control: initial.findIndex((c) => c.label === labelFor(node)), label: labelFor(node), value: next,
         calls: JSON.parse(JSON.stringify(calls)), persisted: Object.keys(persisted).length ? persisted : null,
-        hints: [...container.querySelectorAll("[role=alert],.form-error,.error")].map((n) => clean(n.textContent)) });
+        hints: [...container.querySelectorAll("[role=alert],.form-error,.error")].filter(oldSurfaceHint).map((n) => clean(n.textContent)) });
       if (node.isConnected) { if (node.type === "checkbox") await click(node); else await change(node, before); }
     }
     for (const group of [...container.querySelectorAll(".su-chips")]) {
@@ -302,7 +305,7 @@ export async function observe(catalog, row) {
     }
     return { controls: initial, menus, availability: clean(container.querySelector(".model-availability-gate")?.textContent), submission: { available: Boolean(submit), disabled: submit?.disabled ?? null, calls: defaults }, changes,
       persisted: getPersisted(),
-      hints: [...container.querySelectorAll(".field-hint,[role=alert],.form-error,.error")].map((node) => clean(node.textContent)),
+      hints: [...container.querySelectorAll(".field-hint,[role=alert],.form-error,.error")].filter(oldSurfaceHint).map((node) => clean(node.textContent)),
     };
   } finally { await close(); }
 }

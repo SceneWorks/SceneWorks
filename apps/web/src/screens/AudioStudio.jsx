@@ -6,7 +6,7 @@ import { AudioAdvancedPanel } from "./audioStudio/AudioAdvancedPanel.jsx";
 import { useAudioSettingsWriter } from "./audioStudio/useAudioSettingsWriter.js";
 import { useAudioSubmission } from "./audioStudio/useAudioSubmission.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useAudioModelDefaults } from "./audioStudio/useAudioModelDefaults.js";
 import { useAudioScript } from "./audioStudio/useAudioScript.js";
 import { useAudioVoiceLibrary } from "./audioStudio/useAudioVoiceLibrary.js";

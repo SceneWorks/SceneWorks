@@ -22,7 +22,7 @@ describe("Docker/direct browser CSP (F-269)", () => {
     expect(directive(policy, "connect-src")).toContain("wss://ui.example.test:5173");
     expect(directive(policy, "img-src")).toContain("https://api.example.test:8443");
     expect(directive(policy, "media-src")).toContain("https://api.example.test:8443");
-    expect(directive(policy, "script-src")).toBe("script-src 'self' 'wasm-unsafe-eval'");
+    expect(directive(policy, "script-src")).toBe("script-src 'self'");
     expect(policy).not.toContain("'unsafe-eval'");
     expect(directive(policy, "object-src")).toBe("object-src 'none'");
     expect(policy).not.toContain("*");
@@ -39,7 +39,7 @@ describe("Docker/direct browser CSP (F-269)", () => {
       const response = await globalThis.fetch(`${origin}${path}`);
       expect(response.status).toBe(200);
       const policy = response.headers.get("content-security-policy");
-      expect(directive(policy, "script-src")).toBe("script-src 'self' 'wasm-unsafe-eval'");
+      expect(directive(policy, "script-src")).toBe("script-src 'self'");
       expect(directive(policy, "frame-ancestors")).toBe("frame-ancestors 'none'");
       expect(directive(policy, "connect-src")).toContain(`ws://127.0.0.1:${port}`);
       expect(directive(policy, "connect-src")).toContain("http://localhost:8000");

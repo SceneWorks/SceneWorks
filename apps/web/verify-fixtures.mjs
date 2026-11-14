@@ -307,6 +307,13 @@ export function verifyMiddleware() {
       res.on("error", entry.close);
       return;
     }
+    if (path === "/api/v1/options/validate" && method === "POST") {
+      if (body?.validatorSchemaVersion !== 1 || !Array.isArray(body.requests)) return json(400, { detail: "Invalid preview request" });
+      return json(200, { validatorSchemaVersion: 1, results: body.requests.map((payload) =>
+        body.kind === "image" && (payload.advanced?.steps === 0 || payload.steps === 0)
+          ? { ok: false, refusal: { code: "invalid_generation_option", field: "advanced.steps", detail: "steps must be positive", context: {} } }
+          : { ok: true, resolved: payload }) });
+    }
     if (path === "/api/v1/health") return json(200, {
       status: "ok", authRequired: false, optionsValidatorSchemaVersion: 1,
     });

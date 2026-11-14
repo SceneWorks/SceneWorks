@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
-import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { audioModelServesMode } from "../modelEligibility.js";
 import { audioAssetRunGroups, audioRunGroups } from "../audioTakes.js";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";

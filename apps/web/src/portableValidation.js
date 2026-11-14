@@ -23,12 +23,4 @@ export async function validatePortableRequest(request) {
   return result;
 }
 
-export function portableFeedbackBlocks(feedback) {
-  return feedback != null && feedback.state !== "valid";
-}
-
-export function portableFeedbackStatus(feedback) {
-  if (feedback?.state === "pending") return "Checking options with the server…";
-  if (feedback?.state === "server-required") return "The server must check these options. Reconnect to continue.";
-  return null;
-}
+export { portableFeedbackBlocks, portableFeedbackStatus } from "./portableFeedbackState.js";

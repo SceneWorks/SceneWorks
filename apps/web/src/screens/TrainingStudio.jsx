@@ -1,4 +1,4 @@
-import { portableFeedbackBlocks } from "../portableValidation.js";
+import { portableFeedbackBlocks } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";

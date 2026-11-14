@@ -232,8 +232,13 @@ export function useImageBatchRun({
           kind: "image", payload: { ...request, projectId: owner.projectId }, token, signal: owner.controller.signal,
         });
         if (stopped()) break;
-        if (portable.state === "invalid") throw new Error(portable.refusal.detail);
-        if (portable.state !== "valid") throw new Error("The server must check these options. Reconnect to continue.");
+        if (portable.state !== "valid") {
+          const error = new Error(portable.state === "invalid"
+            ? portable.refusal.detail
+            : "The server must check these options. Reconnect to continue.");
+          error.portableStop = true;
+          throw error;
+        }
         const result = createImageJob.withResult
           ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
           : { job: await createImageJob(request) };
@@ -275,7 +280,7 @@ export function useImageBatchRun({
         const current = batchRunRef.current;
         if (!current) break;
         replaceBatchRun(recordBatchEnqueueFailure(current, n, error?.message || (typeof error === "string" ? error : "Could not enqueue image job.")));
-        if (stopped()) break;
+        if (stopped() || error?.portableStop) break;
       }
     }
     const current = batchRunRef.current;

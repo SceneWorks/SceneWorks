@@ -64,6 +64,7 @@ describe("portable authored form feedback", () => {
       setTestPrompt={vi.fn()} setTestModel={vi.fn()} setTestCount={vi.fn()}
       setTestResolution={vi.fn()} setTestLookId={vi.fn()} submitTest={vi.fn()}
       testRefusal={refusal.refusal}
+      testFeedback={refusal}
     />));
     expect(host.querySelector('button[type="submit"]').disabled).toBe(true);
     expect(host.querySelector('[aria-label="Character test errors"]').textContent).toContain("Prompt is invalid");
@@ -76,6 +77,7 @@ describe("portable authored form feedback", () => {
       preview={{}} restorable={[]} submitting={false} composeProblems={[]}
       readyToRun submit={vi.fn()} kind="create" tierProblem="" composeLabel="Generate song"
       portableRefusal={refusal.refusal}
+      portableFeedback={refusal}
     />));
     expect(host.querySelector("button.prompt-cta").disabled).toBe(true);
     expect(host.querySelector('[role="alert"]').textContent).toContain("Prompt is invalid");

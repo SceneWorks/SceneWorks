@@ -1,7 +1,7 @@
-// A model's last served catalog entry can keep pure option feedback usable offline.
-// Cached facts never establish current installation, device or memory availability.
-const KEY = "sceneworks:validator-model-facts:v1";
-const MAX_ENTRIES = 12;
+// Last served catalog rows are display-only while offline. Cross-field options,
+// current installation, device choice and memory fit still require the server.
+const KEY = "sceneworks:served-model-catalog:v1";
+const MAX_ENTRIES = 200;
 const MAX_BYTES = 1024 * 1024;
 
 function storage() {
@@ -11,22 +11,28 @@ function storage() {
 function read() {
   try {
     const value = JSON.parse(storage()?.getItem(KEY) ?? "null");
-    return value?.schemaVersion === 1 && Array.isArray(value.entries) ? value.entries : [];
-  } catch { return []; }
+    return value?.schemaVersion === 1 && Array.isArray(value.entries) ? value : { entries: [], savedAt: null };
+  } catch { return { entries: [], savedAt: null }; }
 }
 
-export function cachedModelFacts(modelId) {
-  const row = read().find(([id]) => id === modelId);
-  return row?.[1] ?? null;
+export function cachedModelCatalog() {
+  const { savedAt, entries } = read();
+  return { savedAt, entries: entries.map(([, entry]) => entry) };
 }
 
-export function rememberModelFacts(modelId, entry) {
-  if (!modelId || entry?.id !== modelId) return false;
+export function rememberModelCatalog(rows) {
+  if (!Array.isArray(rows)) return false;
+  const entries = rows.filter((row) => typeof row?.id === "string").slice(0, MAX_ENTRIES)
+    .map(({ id, name, type, capabilities, installState, usable }) =>
+      [id, { id, name, type, capabilities, installState, usable }]);
+  return write(entries);
+}
+
+function write(entries) {
   try {
     const target = storage();
     if (!target) return false;
-    const next = [[modelId, entry], ...read().filter(([id]) => id !== modelId)].slice(0, MAX_ENTRIES);
-    const serialized = JSON.stringify({ schemaVersion: 1, entries: next });
+    const serialized = JSON.stringify({ schemaVersion: 1, savedAt: Date.now(), entries });
     if (new TextEncoder().encode(serialized).byteLength > MAX_BYTES) return false;
     target.setItem(KEY, serialized);
     return true;

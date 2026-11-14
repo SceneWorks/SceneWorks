@@ -141,7 +141,7 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     window.localStorage.setItem("sceneworks-simple-studio",JSON.stringify({"project-1":{video:{mode:"image_to_video",model:"minimax_h3",prompt:"A cyclist rides",resolution:"768x768",duration:5.1667,lastFrameAssetId:"last",sourceAssetId:null}}}));
     const context={...baseContext(),assets:[{id:"last",type:"image",displayName:"Last image",file:{path:"last.png",width:768,height:768}}]};
     await openVideo(context);expect(container.textContent).toContain("Last frame");
-    const button=[...container.querySelectorAll("button")].find(b=>/generate|create|render/i.test(b.textContent.trim()));expect(button.disabled).toBe(false);await click(button);
+    const button=[...container.querySelectorAll("button")].find(b=>/generate|create|render/i.test(b.textContent.trim()));await vi.waitFor(() => expect(button.disabled).toBe(false));await click(button);
     expect(context.createVideoJob.mock.calls.at(-1)[0].lastFrameAssetId).toBe("last");expect(context.createVideoJob.mock.calls.at(-1)[0].sourceAssetId).toBeNull();
   });
 
