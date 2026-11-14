@@ -1,15 +1,21 @@
 //! Dataset prompt-batch describe job (SW-7082, feature SW-F362 "Create Prompt Batch from Dataset").
 //!
 //! The `dataset_batch_describe` job runs a vision-language describer over every image of a training
-//! dataset (or a subset of its item ids) and returns, per image in dataset order, six description
-//! fields (`description`, `style`, `camera`, `composition`, `lighting`, `environment`) plus the
-//! image's pixel width and height. Training Studio assembles the prompt-batch text from those fields
-//! in the web app; this job only describes.
+//! dataset (or a subset of its item ids) and returns, per image in dataset order, seven description
+//! fields (`description`, `pose`, `style`, `camera`, `composition`, `lighting`, `environment`) plus
+//! the image's pixel width and height. Training Studio assembles the prompt-batch text from those
+//! fields in the web app; this job only describes.
+//!
+//! **Pose.** The Vision Captioner writes `pose` as one object per person (a `label` and the eleven
+//! [`POSE_SLOTS`]); this job flattens it into one stored line per person,
+//! `<label> — Body line: …; Stance: …; …`, so every stored field is text. JoyCaption writes `pose`
+//! as plain text, stored as written.
 //!
 //! **The describing prompt.** The user edits only the instruction text (the `[SYSTEM]` block of
 //! `image_batch_describe_v1.txt` is the default). The fixed JSON output contract (the asset's
-//! `[OUTPUT]` block) is ALWAYS appended by this job after the instruction, so no edit can remove the
-//! six fields the parser reads.
+//! `[OUTPUT]` block, `[JOYCAPTION_OUTPUT]` for JoyCaption) is ALWAYS appended by this job after the
+//! instruction, so no edit (and no preset saved before a field was added) can remove a field the
+//! parser reads.
 //!
 //! **The describer seam.** The model is a payload field (`model`): the Vision Captioner (Qwen3-VL,
 //! JSON-constrained decode through the resident refine-model cache, the default) or JoyCaption
@@ -26,7 +32,7 @@
 //! [`JOYCAPTION_PARSE_RETRIES`] more times, before it is flagged.
 //!
 //! **Failure and cancel.** An image whose output cannot be produced (unreadable image, generation
-//! error, reply that is not the six-field object) is returned flagged `failed` with its error rather
+//! error, reply that is not the description object) is returned flagged `failed` with its error rather
 //! than dropped, and the job still completes. A model that cannot load fails the whole job. On cancel
 //! the job ends `canceled` and every image already processed stays readable.
 //!
@@ -57,7 +63,7 @@ const IMAGE_BATCH_DESCRIBE_V1: &str = include_str!("image_batch_describe_v1.txt"
 #[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Dataset batch describe canceled by user.";
 
-/// Reply budget. Six fields of detailed prose; a reply that reaches the cap is cut off mid-object
+/// Reply budget. Seven fields of detailed prose; a reply that reaches the cap is cut off mid-object
 /// and so fails to parse, which flags that image. Mirrors the caption tasks' 4096 ceiling: a reply
 /// that has said everything emits EOS far below it.
 #[cfg(native_lane)]
@@ -79,7 +85,7 @@ const MAX_ITEM_ERROR_CHARS: usize = 1_000;
 
 /// Longest text kept in one description field. The reply budgets (4,096 tokens for the Vision
 /// Captioner, 1,024 for JoyCaption) already bound a parsed reply far below this in practice; the cap
-/// makes the bound independent of the tokenizer, so six fields, each JSON-escaped at worst six
+/// makes the bound independent of the tokenizer, so seven fields, each JSON-escaped at worst six
 /// bytes per character, stay well under the store's per-item limit (`MAX_JOB_RESULT_ITEM_BYTES`).
 #[cfg(native_lane)]
 pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize = 16_000;
@@ -113,6 +119,15 @@ impl DescribeModel {
             Self::JoyCaption => JOYCAPTION_REPO,
         }
     }
+
+    /// The asset section holding this model's fixed output contract: the Vision Captioner's asks
+    /// for pose as named slots, JoyCaption's (shorter, to fit its prompt limit) as plain text.
+    pub(crate) fn output_section(self) -> &'static str {
+        match self {
+            Self::VisionCaptioner => "OUTPUT",
+            Self::JoyCaption => "JOYCAPTION_OUTPUT",
+        }
+    }
 }
 
 /// The messages one image is described with: the system text is the instruction followed by the
@@ -141,7 +156,7 @@ impl DescribePrompt {
             instruction: custom.unwrap_or_else(|| default_describe_instruction(model)),
             output_contract: crate::prompt_refine_jobs::magic_section_from(
                 IMAGE_BATCH_DESCRIBE_V1,
-                "OUTPUT",
+                model.output_section(),
             ),
             user: crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, "USER"),
         };
@@ -172,17 +187,41 @@ pub(crate) fn default_describe_instruction(model: DescribeModel) -> String {
     )
 }
 
-/// The six parsed fields of one described image (each may be empty).
+/// The parsed fields of one described image, in [`DESCRIBE_FIELDS`] order (each may be empty).
 #[cfg(native_lane)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DescribedFields {
-    pub(crate) fields: [String; 6],
+    pub(crate) fields: [String; DESCRIBE_FIELDS.len()],
 }
 
-/// Parse a describer reply into the six fields: the outermost JSON object (reasoning blocks and
-/// code fences stripped). A missing or `null` field is an empty string; a field of any other
-/// non-string type, a reply that is not an object, or an object with all six fields empty is an
-/// error (the image is flagged, not dropped).
+/// The named slots of one pose entry, in order: the key the Vision Captioner writes and the label
+/// of its clause in the stored line.
+#[cfg(native_lane)]
+pub(crate) const POSE_SLOTS: [(&str, &str); 11] = [
+    ("body_line", "Body line"),
+    ("stance", "Stance"),
+    ("facing", "Facing"),
+    ("torso", "Torso"),
+    ("head", "Head"),
+    ("left_arm", "Left arm"),
+    ("right_arm", "Right arm"),
+    ("left_leg", "Left leg"),
+    ("right_leg", "Right leg"),
+    ("depth", "Depth"),
+    ("placement", "Placement"),
+];
+
+/// What a pose slot the model left missing or blank is stored as. The prompt tells the model to
+/// write "hidden" for a hidden limb; a missing slot is a model error for that slot only, so the
+/// image keeps the rest of its pose instead of failing.
+#[cfg(native_lane)]
+pub(crate) const POSE_SLOT_NOT_STATED: &str = "not stated";
+
+/// Parse a describer reply into the fields: the outermost JSON object (reasoning blocks and code
+/// fences stripped). A missing or `null` field is an empty string; `pose` may also be a list of
+/// per-person slot objects (see [`flatten_pose`]); a field of any other non-string type, a reply
+/// that is not an object, or an object with every field empty is an error (the image is flagged,
+/// not dropped).
 #[cfg(native_lane)]
 pub(crate) fn parse_described_fields(raw: &str) -> Result<DescribedFields, String> {
     let cleaned = crate::prompt_refine_jobs::clean_json_output(raw);
@@ -197,8 +236,8 @@ pub(crate) fn parse_described_fields(raw: &str) -> Result<DescribedFields, Strin
 /// The lenient parse for a describer without constrained decoding (JoyCaption): reasoning blocks
 /// and code fences stripped, then the FIRST complete JSON object anywhere in the reply (leading
 /// prose, trailing prose, or a second object after it are ignored), with field names matched
-/// ignoring ASCII case. The field rules are the strict parse's: missing or `null` is empty, any
-/// other non-string is an error, all six empty is an error.
+/// ignoring ASCII case. The field rules are the strict parse's: missing or `null` is empty, `pose`
+/// may be plain text or slot objects, any other non-string is an error, all empty is an error.
 #[cfg(native_lane)]
 pub(crate) fn parse_lenient_described_fields(raw: &str) -> Result<DescribedFields, String> {
     let text = crate::text_clean::strip_reasoning_and_fence(raw);
@@ -224,16 +263,19 @@ pub(crate) fn parse_lenient_described_fields(raw: &str) -> Result<DescribedField
     })
 }
 
-/// The six fields of a parsed reply object, each read through `field`.
+/// The fields of a parsed reply object, each read through `field`.
 #[cfg(native_lane)]
 fn described_fields_from<'a>(
     field: impl Fn(&str) -> Option<&'a Value>,
 ) -> Result<DescribedFields, String> {
-    let mut fields: [String; 6] = Default::default();
+    let mut fields: [String; DESCRIBE_FIELDS.len()] = Default::default();
     for (slot, name) in fields.iter_mut().zip(DESCRIBE_FIELDS) {
         *slot = match field(name) {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(text)) => bounded_text(text.trim(), MAX_DESCRIBE_FIELD_CHARS),
+            Some(value @ (Value::Array(_) | Value::Object(_))) if name == "pose" => {
+                bounded_text(&flatten_pose(value)?, MAX_DESCRIBE_FIELD_CHARS)
+            }
             Some(other) => {
                 return Err(format!(
                     "The describer reply's {name:?} field is not a string ({other})."
@@ -242,9 +284,89 @@ fn described_fields_from<'a>(
         };
     }
     if fields.iter().all(String::is_empty) {
-        return Err("The describer reply has none of the six description fields.".to_owned());
+        return Err("The describer reply has none of the description fields.".to_owned());
     }
     Ok(DescribedFields { fields })
+}
+
+/// The stored text of a structured `pose`: one line per entry, in reply order. An entry object is
+/// `<label> — Body line: …; Stance: …; …` with every [`POSE_SLOTS`] clause (a missing or blank slot
+/// reads [`POSE_SLOT_NOT_STATED`]); an entry without a label (an animal) is the clauses alone. A
+/// lone object is one entry, a text entry is kept as written, and an empty entry is skipped, so an
+/// empty list is an empty field.
+#[cfg(native_lane)]
+pub(crate) fn flatten_pose(value: &Value) -> Result<String, String> {
+    let entries = match value {
+        Value::Array(entries) => entries.as_slice(),
+        entry => std::slice::from_ref(entry),
+    };
+    let mut lines = Vec::new();
+    for entry in entries {
+        let line = match entry {
+            Value::Null => String::new(),
+            Value::String(text) => one_line(text),
+            Value::Object(object) => pose_line(object),
+            other => {
+                return Err(format!(
+                    "The describer reply's \"pose\" entry is not an object ({other})."
+                ))
+            }
+        };
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+/// One person's stored pose line; empty when the entry has no label and no slot text at all.
+#[cfg(native_lane)]
+fn pose_line(entry: &JsonObject) -> String {
+    let text = |key: &str| {
+        entry
+            .get(key)
+            .or_else(|| {
+                entry
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                    .map(|(_, value)| value)
+            })
+            .and_then(Value::as_str)
+            .map(one_line)
+            .unwrap_or_default()
+    };
+    let slots: Vec<(&str, String)> = POSE_SLOTS
+        .iter()
+        .map(|(key, name)| (*name, text(key)))
+        .collect();
+    let label = text("label");
+    if label.is_empty() && slots.iter().all(|(_, value)| value.is_empty()) {
+        return String::new();
+    }
+    let clauses = slots
+        .iter()
+        .map(|(name, value)| {
+            let value = if value.is_empty() {
+                POSE_SLOT_NOT_STATED
+            } else {
+                value
+            };
+            format!("{name}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if label.is_empty() {
+        clauses
+    } else {
+        format!("{label} — {clauses}")
+    }
+}
+
+/// `text` with every whitespace run (newlines included) collapsed to one space, so a slot can
+/// never break the one-line-per-person layout.
+#[cfg(native_lane)]
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// What a describer returns for one image. The outer `Err` fails the whole job (the model could not
@@ -266,7 +388,7 @@ pub(crate) trait BatchDescriber: Send + Sync {
         cancel: CancelFlag,
     ) -> DescribeFuture;
 
-    /// Turn a raw reply into the six fields. The default is the strict JSON-object parse the
+    /// Turn a raw reply into the description fields. The default is the strict JSON-object parse the
     /// constrained Vision Captioner needs; a describer without constrained decoding overrides it.
     fn parse(&self, raw: &str) -> Result<DescribedFields, String> {
         parse_described_fields(raw)
@@ -998,7 +1120,7 @@ async fn describe_with_retries(
                 image_progress(index, total),
                 &format!(
                     "Describing image {} of {total} again (attempt {}): the reply was not the \
-                     six-field object.",
+                     description object.",
                     index + 1,
                     attempt + 1
                 ),

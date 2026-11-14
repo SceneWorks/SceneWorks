@@ -8,8 +8,12 @@ const STANDARD_RATIOS = [
   [4, 5], [3, 4], [2, 3], [9, 16], [9, 21],
 ];
 
+// `pose` holds one line per person (the worker writes `<label> — Body line: …; Stance: …; …`),
+// so it becomes one `Pose:` line per person; every other field is one line. A result stored
+// before `pose` existed has no pose and simply emits no Pose line.
 const FIELD_LABELS = [
   ["description", "Description"],
+  ["pose", "Pose"],
   ["style", "Style"],
   ["camera", "Camera"],
   ["composition", "Composition"],
@@ -49,8 +53,10 @@ export function wrapLabels(text) {
     .join("");
 }
 
+const PER_LINE_FIELDS = new Set(["pose"]);
+
 // Returns { text, skipped }. Failed results, ones without usable dimensions, and ones whose
-// six fields are all empty (a ratio with no prompt text) emit no block and are listed in
+// fields are all empty (a ratio with no prompt text) emit no block and are listed in
 // `skipped` (original objects, input order) for the review UI.
 export function formatPromptBatch(results) {
   const blocks = [];
@@ -63,10 +69,13 @@ export function formatPromptBatch(results) {
     }
     const lines = [`[${ratio}]`];
     for (const [key, label] of FIELD_LABELS) {
-      const value = result.fields?.[key];
-      // Newlines collapse so a field can never produce a `---` delimiter line.
-      const flat = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
-      if (flat) lines.push(`${label}: ${wrapLabels(flat)}`);
+      const value = typeof result.fields?.[key] === "string" ? result.fields[key] : "";
+      const parts = PER_LINE_FIELDS.has(key) ? value.split("\n") : [value];
+      for (const part of parts) {
+        // Newlines collapse so a field can never produce a `---` delimiter line.
+        const flat = part.replace(/\s+/g, " ").trim();
+        if (flat) lines.push(`${label}: ${wrapLabels(flat)}`);
+      }
     }
     if (lines.length === 1) {
       skipped.push(result);

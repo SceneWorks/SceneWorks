@@ -21,6 +21,7 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
         "## LABELS — every person",
         "## NO PHYSICAL TRAITS — ever",
         "## DESCRIPTION — the people, in minute detail",
+        "## POSE — the pose field",
         "## ENVIRONMENT — every detail",
         "## STYLE — medium, era, and vintage look",
         "## CAMERA — the apparent gear and settings",
@@ -41,7 +42,7 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
 }
 
 #[test]
-fn the_output_contract_names_all_six_fields_and_is_always_appended() {
+fn the_output_contract_names_every_field_and_is_always_appended() {
     let (default, is_default) =
         DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
     assert!(is_default);
@@ -89,6 +90,64 @@ fn the_output_contract_names_all_six_fields_and_is_always_appended() {
     assert_eq!(blank, default);
 }
 
+#[test]
+fn the_vision_contract_asks_for_pose_as_eleven_named_slots_per_person() {
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    let contract = &prompt.output_contract;
+    assert!(
+        contract.contains("\"pose\": ["),
+        "pose is a list of entries"
+    );
+    assert!(contract.contains("\"label\":"));
+    for (key, _) in POSE_SLOTS {
+        assert!(
+            contract.contains(&format!("\"{key}\":")),
+            "contract names {key}"
+        );
+    }
+    // Pose follows description in the contract, as in DESCRIBE_FIELDS.
+    let at = |field: &str| contract.find(&format!("\"{field}\":")).unwrap();
+    for pair in DESCRIBE_FIELDS.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+    }
+    assert!(contract.contains("write \"hidden\" for a limb that is hidden or out of frame"));
+    assert!(contract.contains("empty list when the image has no people or animals"));
+}
+
+#[test]
+fn the_describing_prompt_keeps_pose_out_of_description_and_labels_off_animals() {
+    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
+    let description = &instruction
+        [instruction.find("## DESCRIPTION").unwrap()..instruction.find("## POSE").unwrap()];
+    assert!(
+        !description.contains("- Pose:"),
+        "description no longer asks for pose"
+    );
+    assert!(description.contains("Do not describe pose in the description"));
+    let pose = &instruction
+        [instruction.find("## POSE").unwrap()..instruction.find("## ENVIRONMENT").unwrap()];
+    // The sides and angles rules and the three-facts check stay.
+    assert!(pose.contains("Never write a bare \"left\" or \"right\""));
+    assert!(pose.contains("about 45°"));
+    assert!(pose.contains("check the three facts most often got wrong"));
+    for (key, _) in POSE_SLOTS {
+        assert!(pose.contains(key), "the POSE rules explain {key}");
+    }
+    assert!(pose.contains("write \"hidden\" in its slot"));
+    assert!(pose.contains("For an animal subject, give one entry with no label"));
+    assert!(instruction.contains("Animals never get a label."));
+    // No animal label anywhere in the asset (every section, every model).
+    for animal in ["dog_", "cat_", "horse_", "animal_"] {
+        assert!(
+            !IMAGE_BATCH_DESCRIBE_V1.contains(animal),
+            "the asset never shows an animal label like {animal}N"
+        );
+    }
+    let joy = default_describe_instruction(DescribeModel::JoyCaption);
+    assert!(joy.contains("Animals get no label"));
+    assert!(joy.contains("demeanor. No pose here."));
+}
+
 // ── Reply parsing ─────────────────────────────────────────────────────────────────────────────
 
 fn reply(fields: &[(&str, Value)]) -> String {
@@ -111,7 +170,7 @@ fn full_reply(tag: &str) -> String {
 }
 
 #[test]
-fn a_constrained_reply_parses_into_the_six_fields_in_order() {
+fn a_constrained_reply_parses_into_every_field_in_order() {
     let parsed = parse_described_fields(&full_reply("img")).expect("parses");
     for (field, text) in DESCRIBE_FIELDS.iter().zip(&parsed.fields) {
         assert_eq!(text, &format!("img {field}"));
@@ -138,20 +197,201 @@ fn unusable_replies_are_errors_not_silent_blanks() {
         ("not json at all", "not a JSON object"),
         ("[1, 2, 3]", "not a JSON object"),
         ("{\"description\": \"cut off mid", "not a JSON object"),
-        ("{}", "none of the six"),
+        ("{}", "none of the description fields"),
         (
             "{\"description\": \"\", \"style\": null}",
-            "none of the six",
+            "none of the description fields",
         ),
         (
             "{\"description\": {\"text\": \"x\"}}",
             "\"description\" field is not a string",
         ),
         ("{\"camera\": 35}", "\"camera\" field is not a string"),
+        ("{\"pose\": 3}", "\"pose\" field is not a string"),
+        (
+            "{\"description\": \"x\", \"pose\": [1]}",
+            "\"pose\" entry is not an object",
+        ),
     ] {
         let error = parse_described_fields(raw).expect_err(raw);
         assert!(error.contains(expect), "{raw}: {error}");
     }
+}
+
+// ── Pose ──────────────────────────────────────────────────────────────────────────────────────
+
+const POSE: usize = 1;
+
+/// A pose entry for `label` whose every slot reads `<label> <slot key>`.
+fn pose_entry(label: &str) -> Value {
+    let mut entry = JsonObject::new();
+    entry.insert("label".to_owned(), json!(label));
+    for (key, _) in POSE_SLOTS {
+        entry.insert(key.to_owned(), json!(format!("{label} {key}")));
+    }
+    Value::Object(entry)
+}
+
+/// The stored line `pose_entry(label)` flattens to.
+fn pose_line_for(label: &str) -> String {
+    format!(
+        "{label} — Body line: {label} body_line; Stance: {label} stance; Facing: {label} facing; \
+         Torso: {label} torso; Head: {label} head; Left arm: {label} left_arm; \
+         Right arm: {label} right_arm; Left leg: {label} left_leg; Right leg: {label} right_leg; \
+         Depth: {label} depth; Placement: {label} placement"
+    )
+}
+
+#[test]
+fn a_two_person_pose_is_one_line_per_label_with_all_eleven_slots() {
+    let parsed = parse_described_fields(&reply(&[
+        ("description", json!("a woman, woman_1, and a man, man_1")),
+        ("pose", json!([pose_entry("woman_1"), pose_entry("man_1")])),
+        ("lighting", json!("soft")),
+    ]))
+    .expect("parses");
+    assert_eq!(parsed.fields[0], "a woman, woman_1, and a man, man_1");
+    assert_eq!(
+        parsed.fields[POSE],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1"))
+    );
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in lines {
+        assert_eq!(line.matches("; ").count(), POSE_SLOTS.len() - 1, "{line}");
+    }
+    assert_eq!(parsed.fields[5], "soft");
+}
+
+#[test]
+fn a_one_person_pose_keeps_slot_order_and_collapses_newlines() {
+    let mut entry = pose_entry("girl_1");
+    entry["left_arm"] = json!("  bent at the elbow,\n hand on their hip  ");
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        pose_line_for("girl_1").replace(
+            "Left arm: girl_1 left_arm",
+            "Left arm: bent at the elbow, hand on their hip"
+        )
+    );
+    // A lone entry object (not wrapped in a list) is the same one line.
+    let lone = parse_described_fields(&reply(&[("pose", pose_entry("girl_1"))])).unwrap();
+    assert_eq!(lone.fields[POSE], pose_line_for("girl_1"));
+}
+
+#[test]
+fn an_empty_pose_is_an_empty_field_not_an_error() {
+    for pose in [json!([]), Value::Null, json!(""), json!([{}, null])] {
+        let parsed = parse_described_fields(&reply(&[
+            ("description", json!("an empty beach")),
+            ("pose", pose.clone()),
+        ]))
+        .expect("parses");
+        assert_eq!(parsed.fields[POSE], "", "{pose}");
+    }
+    // A reply with no pose key at all reads the same.
+    let parsed = parse_described_fields(&reply(&[("description", json!("a chair"))])).unwrap();
+    assert_eq!(parsed.fields[POSE], "");
+}
+
+#[test]
+fn a_missing_or_blank_slot_is_not_stated_and_the_image_still_parses() {
+    let mut entry = pose_entry("woman_1");
+    let object = entry.as_object_mut().unwrap();
+    object.remove("right_leg");
+    object.insert("depth".to_owned(), json!("   "));
+    object.insert("torso".to_owned(), Value::Null);
+    object.insert("left_arm".to_owned(), json!("hidden"));
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    let line = &parsed.fields[POSE];
+    assert!(line.contains("Right leg: not stated;"), "{line}");
+    assert!(line.contains("Depth: not stated;"), "{line}");
+    assert!(line.contains("Torso: not stated;"), "{line}");
+    assert!(line.contains("Left arm: hidden;"), "{line}");
+    assert!(line.contains("Head: woman_1 head;"), "{line}");
+}
+
+#[test]
+fn an_animal_entry_has_no_label_prefix() {
+    let mut animal = pose_entry("");
+    animal["body_line"] = json!("a dog, horizontal, lying on its right side");
+    let parsed = parse_described_fields(&reply(&[("pose", json!([pose_entry("boy_1"), animal]))]))
+        .expect("parses");
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines[0], pose_line_for("boy_1"));
+    assert!(
+        lines[1].starts_with("Body line: a dog, horizontal, lying on its right side; Stance: "),
+        "{}",
+        lines[1]
+    );
+    assert!(!lines[1].contains(" — "));
+}
+
+#[test]
+fn a_joycaption_plain_text_pose_is_stored_as_written() {
+    let raw = "Sure:\n{\"description\": \"a man, man_1, in a coat\", \"Pose\": \"man_1 stands \
+               upright, chest toward frame-left; their left hand is hidden.\", \"lighting\": \"dusk\"}";
+    let parsed = parse_lenient_described_fields(raw).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        "man_1 stands upright, chest toward frame-left; their left hand is hidden."
+    );
+    assert_eq!(parsed.fields[5], "dusk");
+    // JoyCaption may still emit slots; they flatten the same way.
+    let slotted =
+        parse_lenient_described_fields(&reply(&[("pose", json!([pose_entry("woman_1")]))]))
+            .unwrap();
+    assert_eq!(slotted.fields[POSE], pose_line_for("woman_1"));
+}
+
+#[test]
+fn a_six_field_reply_from_before_pose_still_parses() {
+    let legacy: Vec<(&str, Value)> = DESCRIBE_FIELDS
+        .iter()
+        .filter(|field| **field != "pose")
+        .map(|field| (*field, json!(format!("old {field}"))))
+        .collect();
+    assert_eq!(legacy.len(), 6);
+    for parsed in [
+        parse_described_fields(&reply(&legacy)).expect("strict"),
+        parse_lenient_described_fields(&reply(&legacy)).expect("lenient"),
+    ] {
+        assert_eq!(parsed.fields[POSE], "");
+        for (field, text) in DESCRIBE_FIELDS.iter().zip(&parsed.fields) {
+            if *field != "pose" {
+                assert_eq!(text, &format!("old {field}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_structured_pose_is_stored_as_one_text_field_in_the_result_item() {
+    let parsed = parse_described_fields(&reply(&[
+        ("description", json!("two people")),
+        (
+            "pose",
+            json!([pose_entry("woman_1"), pose_entry("woman_2")]),
+        ),
+    ]))
+    .unwrap();
+    let item = DescribedItem {
+        item: DescribeItem {
+            item_id: "item_1".to_owned(),
+            image_path: PathBuf::from("/data/images/item_1.png"),
+            relative_path: "images/item_1.png".to_owned(),
+            asset_id: None,
+        },
+        size: Some((8, 8)),
+        outcome: Ok(parsed),
+    };
+    let stored = stored_item_json(&item);
+    assert_eq!(
+        stored["pose"],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("woman_2"))
+    );
+    assert_eq!(stored["description"], "two people");
 }
 
 #[test]
@@ -214,9 +454,27 @@ fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
         );
     }
     assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
-    // One prompt: instruction, then the contract, then the user line.
+    assert!(instruction.contains("POSE, its own field, plain text"));
+    assert!(instruction.contains("Write hidden for a hidden or out-of-frame limb"));
+    // The built-in default is itself an instruction the API accepts for JoyCaption.
+    assert!(instruction.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    // JoyCaption's own contract: every field, pose as one plain-text string, no slots.
     let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
-    assert_eq!(prompt.output_contract, vision.output_contract);
+    assert_ne!(prompt.output_contract, vision.output_contract);
+    assert!(prompt.output_contract.starts_with(DRAFT_OUTPUT_HEADING));
+    for field in DESCRIBE_FIELDS {
+        assert!(
+            prompt.output_contract.contains(&format!("\"{field}\": \"")),
+            "JoyCaption's contract names {field} as a string"
+        );
+    }
+    for (key, _) in POSE_SLOTS {
+        assert!(
+            !prompt.output_contract.contains(&format!("\"{key}\"")),
+            "JoyCaption's contract has no {key} slot"
+        );
+    }
+    // One prompt: instruction, then the contract, then the user line.
     assert_eq!(
         prompt.single_turn(),
         format!(
@@ -264,9 +522,9 @@ fn the_lenient_parse_finds_the_object_inside_fences_and_prose() {
     )
     .expect("parses");
     assert_eq!(parsed.fields[0], "a man, man_1, waving");
-    assert_eq!(parsed.fields[4], "soft window light");
-    assert!(parsed.fields[1..4].iter().all(String::is_empty));
-    assert!(parsed.fields[5].is_empty());
+    assert_eq!(parsed.fields[5], "soft window light");
+    assert!(parsed.fields[1..5].iter().all(String::is_empty));
+    assert!(parsed.fields[6].is_empty());
 }
 
 #[test]
@@ -278,8 +536,11 @@ fn the_lenient_parse_still_flags_unusable_replies() {
             "{\"description\": \"a woman, woman_1, cut off mid",
             "no complete JSON object",
         ),
-        ("Here: {}", "none of the six"),
-        ("{\"caption\": \"a woman\"}", "none of the six"),
+        ("Here: {}", "none of the description fields"),
+        (
+            "{\"caption\": \"a woman\"}",
+            "none of the description fields",
+        ),
         ("{\"camera\": 35}", "\"camera\" field is not a string"),
     ] {
         let error = parse_lenient_described_fields(raw).expect_err(raw);
@@ -509,7 +770,7 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
     // item_2 has no file, so only item_1 and item_3 reach the describer: item_1 describes, item_3
-    // replies with something that is not the six-field object.
+    // replies with something that is not the description object.
     let describer = StubDescriber::new(vec![
         Ok(Ok(full_reply("first"))),
         Ok(Ok("I cannot describe this image.".to_owned())),
