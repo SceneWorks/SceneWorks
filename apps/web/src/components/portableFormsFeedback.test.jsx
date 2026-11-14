@@ -9,6 +9,7 @@ import { RefinePromptControl } from "./RefinePromptControl.jsx";
 import { VqaPanel } from "./assetPanels.jsx";
 import { CharacterTest } from "../screens/characterPanels.jsx";
 import { ReplacePersonPanel } from "../screens/ReplacePersonPanel.jsx";
+import { VideoUpscalePanel } from "../screens/VideoUpscalePanel.jsx";
 import { Yue2ComposePanel } from "../screens/yue2Lab/Yue2ComposePanel.jsx";
 
 const refusal = { state: "invalid", refusal: { code: "invalid_generation_option", field: "prompt", detail: "Prompt is invalid" } };
@@ -100,5 +101,49 @@ describe("portable authored form feedback", () => {
     expect([...host.querySelectorAll("button")].find((button) => button.textContent.includes("Analyze Source")).disabled).toBe(true);
     expect([...host.querySelectorAll("button")].find((button) => button.textContent.includes("Save Track")).disabled).toBe(true);
     expect(host.querySelectorAll('[role="alert"]')).toHaveLength(2);
+  });
+
+  it.each(["pending", "server-required"])("blocks video upscaling while feedback is %s", (state) => {
+    feedback.mockReturnValue({ state });
+    const createVideoUpscaleJob = vi.fn();
+    const clip = { id: "clip-1", type: "video", displayName: "Clip" };
+    act(() => root.render(<VideoUpscalePanel
+      selectedAsset={clip} videoAssets={[clip]} createVideoUpscaleJob={createVideoUpscaleJob}
+    />));
+    const button = [...host.querySelectorAll("button")].find((item) => item.textContent === "Upscale clip");
+    expect(button.disabled).toBe(true);
+    expect(host.querySelector('[role="status"]').textContent).toContain(state === "pending"
+      ? "Checking options with the server" : "Reconnect to continue");
+    act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(createVideoUpscaleJob).not.toHaveBeenCalled();
+  });
+
+  it.each(["pending", "server-required"])("blocks person detection and tracking while feedback is %s", (state) => {
+    feedback.mockReturnValue({ state });
+    const createPersonDetectionJob = vi.fn();
+    const createPersonTrackJob = vi.fn();
+    act(() => root.render(<ReplacePersonPanel
+      sourceClipAssetId="clip-1" representativeFrame={{ id: "frame-1" }}
+      selectedDetection={{ id: "person-1" }} trackName="actor"
+      personReadiness={{}} matchingTracks={[]} videoAssets={[]} videoModels={[]}
+      setSourceClipAssetId={vi.fn()} setSelectedDetectionId={vi.fn()}
+      setTrackName={vi.fn()} setPersonTrackId={vi.fn()} setReplacementMode={vi.fn()}
+      createPersonDetectionJob={createPersonDetectionJob} createPersonTrackJob={createPersonTrackJob}
+    />));
+    const buttons = [...host.querySelectorAll("button")];
+    const analyze = buttons.find((item) => item.textContent === "Analyze Source");
+    const track = buttons.find((item) => item.textContent === "Save Track");
+    expect(analyze.disabled).toBe(true);
+    expect(track.disabled).toBe(true);
+    expect([...host.querySelectorAll('[role="status"]')].map((item) => item.textContent)).toEqual([
+      expect.stringContaining(state === "pending" ? "Checking options with the server" : "Reconnect to continue"),
+      expect.stringContaining(state === "pending" ? "Checking options with the server" : "Reconnect to continue"),
+    ]);
+    act(() => {
+      analyze.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      track.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(createPersonDetectionJob).not.toHaveBeenCalled();
+    expect(createPersonTrackJob).not.toHaveBeenCalled();
   });
 });
