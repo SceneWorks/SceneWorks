@@ -1832,7 +1832,12 @@ async fn run_job_with_shutdown(
 ) -> JobOutcome {
     let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let project_root = claimed.job.project_id.as_deref().and_then(|project_id| {
+    let project_id = claimed
+        .job
+        .project_id
+        .as_deref()
+        .or_else(|| claimed.job.payload.get("projectId").and_then(Value::as_str));
+    let project_root = project_id.and_then(|project_id| {
         ProjectStore::new(settings.data_dir.clone(), "worker")
             .get_project(project_id)
             .ok()

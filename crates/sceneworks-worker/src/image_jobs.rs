@@ -990,14 +990,23 @@ async fn run_image_generate_job_unexplained(
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
-    let receipt_root = project_path.clone();
-    let receipt_writes = asset_writes.clone();
-    let receipt_count = plan.image_count as usize;
-    let execution_receipt = crate::load_progress::spawn_blocking(move || {
-        image_execution_receipt(&receipt_root, &receipt_writes, receipt_count)
-    })
-    .await
-    .map_err(|error| crate::task_join_error("completed image receipt", error))??;
+    let execution_receipt = if crate::progress::EXECUTION_CLAIM_CAPABILITY
+        .try_with(|capability| capability.is_some())
+        .unwrap_or(false)
+    {
+        let receipt_root = project_path.clone();
+        let receipt_writes = asset_writes.clone();
+        let receipt_count = plan.image_count as usize;
+        Some(
+            crate::load_progress::spawn_blocking(move || {
+                image_execution_receipt(&receipt_root, &receipt_writes, receipt_count)
+            })
+            .await
+            .map_err(|error| crate::task_join_error("completed image receipt", error))??,
+        )
+    } else {
+        None
+    };
     update_job(api, &job.id, {
         let mut terminal = image_progress(
             JobStatus::Completed,
@@ -1007,10 +1016,12 @@ async fn run_image_generate_job_unexplained(
             Some(streaming_result(&plan, &asset_writes)),
             backend,
         );
-        terminal.extra.insert(
-            "executionReceipt".to_owned(),
-            serde_json::to_value(execution_receipt).map_err(WorkerError::Json)?,
-        );
+        if let Some(receipt) = execution_receipt {
+            terminal.extra.insert(
+                "executionReceipt".to_owned(),
+                serde_json::to_value(receipt).map_err(WorkerError::Json)?,
+            );
+        }
         terminal
     })
     .await?;
