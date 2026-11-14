@@ -1241,9 +1241,10 @@ fn js_coverage(file: &str, source: &str) -> Coverage {
             continue;
         }
         let mut next = index + 1;
-        if matches!(tokens.get(next), Some(JsToken::Optional)) {
-            next += 1;
-        } else if tokens.get(next) == Some(&JsToken::Punct('.')) {
+        if matches!(
+            tokens.get(next),
+            Some(JsToken::Optional | JsToken::Punct('.'))
+        ) {
             next += 1;
         } else if tokens.get(next) != Some(&JsToken::Punct('[')) {
             continue;
