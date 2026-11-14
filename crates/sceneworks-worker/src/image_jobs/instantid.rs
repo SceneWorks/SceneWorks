@@ -548,6 +548,18 @@ fn instantid_mode(request: &ImageRequest) -> InstantIdMode {
     }
 }
 
+fn instantid_mode_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> InstantIdMode {
+    if !execution.poses().is_empty() {
+        InstantIdMode::PoseSet(execution.poses().len())
+    } else if instantid_angle_set(execution) {
+        InstantIdMode::AngleSet
+    } else {
+        InstantIdMode::Identity
+    }
+}
+
 /// Per-image InstantID action (the engine entry point this iteration calls). `Send` (it is moved
 /// into the blocking task): `BodyPoint = Option<(f64, f64)>`, `&'static str`, and the unit variant
 /// are all `Send`.
@@ -680,9 +692,10 @@ pub(super) fn instantid_image_count_resolved(
     execution: &super::conditioning::ResolvedImageExecution,
     settings: &Settings,
 ) -> u32 {
-    match instantid_mode(execution) {
+    match instantid_mode_resolved(execution) {
         InstantIdMode::PoseSet(_) => execution.poses().len() as u32,
-        _ => instantid_image_count(execution, settings),
+        InstantIdMode::AngleSet => active_angle_collection(execution, settings).1.len() as u32,
+        InstantIdMode::Identity => execution.count,
     }
 }
 
@@ -1183,7 +1196,7 @@ pub(super) async fn generate_instantid_stream(
         INSTANTID_IP_SCALE,
         0.0..=1.0,
     );
-    let mode = instantid_mode(request);
+    let mode = instantid_mode_resolved(execution);
     let angle_set = matches!(mode, InstantIdMode::AngleSet);
     let pose_set = matches!(mode, InstantIdMode::PoseSet(_));
     // The angle set runs a softer landmark lock by default (sc-8354) so the off-axis views clear the
