@@ -176,7 +176,7 @@ fn krea_turbo_on_raw_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         // CFG off — no negative branch (the distilled regime baked guidance into the weights).
@@ -196,15 +196,17 @@ fn krea_turbo_on_raw_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("Krea turbo-on-Raw generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("Krea turbo-on-Raw generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea turbo-on-Raw generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "Krea turbo-on-Raw generator returned non-image output".to_owned(),
@@ -320,13 +322,13 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let (out_w, out_h, pixels) = krea_turbo_on_raw_generate_one(
+                    let (out_w, out_h, pixels, execution) = krea_turbo_on_raw_generate_one(
                         generator,
                         &prompt,
                         width,
@@ -339,6 +341,12 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },
             )

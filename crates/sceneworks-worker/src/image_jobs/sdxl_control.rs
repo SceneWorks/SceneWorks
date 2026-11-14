@@ -568,7 +568,7 @@ fn sdxl_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -585,15 +585,17 @@ fn sdxl_control_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("SDXL pose-control generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("SDXL pose-control generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("SDXL pose-control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "SDXL pose-control generator returned non-image output".to_owned(),
@@ -736,34 +738,44 @@ pub(super) async fn generate_sdxl_control_stream(
             })
         },
         move |generator, tx, cancel| {
-            drive_gen_items(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &ControlKind::Pose,
-                    None,
-                    Some(&pose),
-                    None,
-                    width,
-                    height,
-                    stickwidth,
-                    None,
-                )?;
-                let conditioning =
-                    build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-                let (out_w, out_h, pixels) = sdxl_control_generate_one(
-                    generator.as_ref(),
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    &sampling,
-                    conditioning,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
-            })
+            drive_gen_items(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let control = preprocess_control_entry(
+                        &ControlKind::Pose,
+                        None,
+                        Some(&pose),
+                        None,
+                        width,
+                        height,
+                        stickwidth,
+                        None,
+                    )?;
+                    let conditioning =
+                        build_control_conditioning(control, ControlKind::Pose, control_scale, None);
+                    let (out_w, out_h, pixels, execution) = sdxl_control_generate_one(
+                        generator.as_ref(),
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        &sampling,
+                        conditioning,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
         },
     );
 

@@ -5424,7 +5424,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = sensenova_edit_generate_one(
+    let (w, h, pixels, _) = sensenova_edit_generate_one(
         generator.as_ref(),
         "make it a watercolor painting",
         512,
@@ -5514,7 +5514,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
     mlx_rs::memory::reset_peak_memory();
 
     // Image 0 — succeeds today (the bug was image 1).
-    let (w0, h0, px0) = gen_one(42);
+    let (w0, h0, px0, _) = gen_one(42);
     assert_eq!((w0, h0), (dim, dim));
     assert_eq!(px0.len() as u32, dim * dim * 3);
 
@@ -5550,7 +5550,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
 
     // Image 1 — the image that OOM-killed the worker pre-fix. Completing proves the
     // count=2 batch path is sound once the cache is released between images.
-    let (w1, h1, px1) = gen_one(43);
+    let (w1, h1, px1, _) = gen_one(43);
     assert_eq!((w1, h1), (dim, dim));
     assert_eq!(px1.len() as u32, dim * dim * 3);
     assert!(px1.windows(2).any(|w| w[0] != w[1]));
@@ -8646,7 +8646,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = qwen_control_generate_one(
+    let (w, h, pixels, _) = qwen_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -15450,7 +15450,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15517,7 +15517,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -18500,7 +18500,7 @@ fn matrix_qwen_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = qwen_control_generate_one(
+    let (_, _, pixels, _) = qwen_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
