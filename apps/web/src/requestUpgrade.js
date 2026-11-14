@@ -36,17 +36,18 @@ function aliasesEqual(left, right, rule) {
   const leftNumber = aliasNumber(left);
   return leftNumber !== null && leftNumber === aliasNumber(right);
 }
-function aliases(value, location, path) {
+function aliases(value, location, path, interleave) {
   for (const rule of metadata.aliases.filter((rule) => rule.location === location)) {
+    if (interleave && location === "advanced" && metadata.interleaveIndependentAdvancedKeys.includes(rule.key)) continue;
     const names = [rule.key, ...rule.aliases].filter((key) => Object.hasOwn(value, key));
     if (!names.length) continue;
     if (names.some((name) => !aliasesEqual(value[name], value[names[0]], rule))) throw new UpgradeError("ConflictingAliases", `${path}${rule.key}`, `${names.join(" and ")} contain different authored values`);
     value[rule.key] = value[names[0]];
   }
 }
-function walk(value, path = "", depth = 0) {
+function walk(value, path = "", depth = 0, interleave = false) {
   if (depth > 64) throw new UpgradeError("CarrierTooDeep", path, "Option carrier exceeds 64 nested levels");
-  if (Array.isArray(value)) { value.forEach((v, i) => walk(v, `${path}${i}.`, depth + 1)); return; }
+  if (Array.isArray(value)) { value.forEach((v, i) => walk(v, `${path}${i}.`, depth + 1, interleave)); return; }
   if (!object(value)) return;
   version(value, "optionsSchemaVersion", metadata.optionsSchemaVersion, path);
   if (Object.hasOwn(value, "planVersion") && Object.hasOwn(value, "target") && Object.hasOwn(value, "dataset")) {
@@ -59,12 +60,12 @@ function walk(value, path = "", depth = 0) {
       if (!Object.hasOwn(child, "version")) throw new UpgradeError("MissingRecipeVersion", `${childPath}version`, `${key} requires an explicit recipe version`);
       version(child, "version", metadata.recipeVersions[key], childPath);
     } else if (["advanced", "rawAdapterSettings"].includes(key)) {
-      if (object(child)) aliases(child, "advanced", childPath);
-      walk(child, childPath, depth + 1);
+      if (object(child)) aliases(child, "advanced", childPath, interleave);
+      walk(child, childPath, depth + 1, interleave);
     } else if (key === "payload") {
-      if (object(child)) aliases(child, "image", childPath);
-      walk(child, childPath, depth + 1);
-    } else if (["plan", "normalizedSettings", "settings", "recipe", "config", "model", "shots", "scenes", "segments", "generationSet"].includes(key)) walk(child, childPath, depth + 1);
+      if (object(child)) aliases(child, "image", childPath, interleave);
+      walk(child, childPath, depth + 1, interleave);
+    } else if (["plan", "normalizedSettings", "settings", "recipe", "config", "model", "shots", "scenes", "segments", "generationSet"].includes(key)) walk(child, childPath, depth + 1, interleave);
   }
 }
 export function upgradeCarrier(input, carrier = "request") {
@@ -72,8 +73,9 @@ export function upgradeCarrier(input, carrier = "request") {
   const versions = { filmPlan: 3, compiledFilmPlan: 7, trainingPlan: 1, shareEnvelope: 2 };
   if (versions[carrier]) version(input, "schemaVersion", versions[carrier], "");
   const result = JSON.parse(JSON.stringify(input));
-  if (["request", "job"].includes(carrier)) aliases(result, "image", "");
-  if (carrier === "studioSettings") aliases(result, "advanced", "");
-  walk(result);
+  const interleave = carrier === "interleaveRequest" || carrier === "interleaveJob";
+  if (["request", "interleaveRequest", "job", "interleaveJob"].includes(carrier)) aliases(result, "image", "", interleave);
+  if (carrier === "studioSettings") aliases(result, "advanced", "", interleave);
+  walk(result, "", 0, interleave);
   return result;
 }

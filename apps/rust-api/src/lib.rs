@@ -496,7 +496,7 @@ struct ApiJson<T>(T);
 #[axum::async_trait]
 impl<S, T> FromRequest<S> for ApiJson<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
     S: Send + Sync,
 {
     type Rejection = Response;
@@ -505,19 +505,37 @@ where
         match Json::<Value>::from_request(request, state).await {
             Ok(Json(value)) => {
                 let value = if value.is_object() {
-                    sceneworks_core::options::upgrade::upgrade(
-                        &value,
-                        sceneworks_core::options::upgrade::Carrier::Request,
-                    )
-                    .map_err(|error| {
-                        ApiError::typed(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            error.to_string(),
-                            error.code,
-                            json!({ "field": error.field }),
-                        )
-                        .into_response()
-                    })?
+                    let carrier = if std::any::TypeId::of::<T>()
+                        == std::any::TypeId::of::<JobCreateRequest>()
+                    {
+                        let interleave = value
+                            .get("type")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<JobType>(value).ok())
+                            == Some(JobType::ImageInterleave);
+                        sceneworks_core::options::upgrade::job_carrier(if interleave {
+                            "interleave"
+                        } else {
+                            ""
+                        })
+                    } else if std::any::TypeId::of::<T>()
+                        == std::any::TypeId::of::<InterleaveJobRequest>()
+                    {
+                        sceneworks_core::options::upgrade::Carrier::InterleaveRequest
+                    } else {
+                        sceneworks_core::options::upgrade::Carrier::Request
+                    };
+                    sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(
+                        |error| {
+                            ApiError::typed(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                error.to_string(),
+                                error.code,
+                                json!({ "field": error.field }),
+                            )
+                            .into_response()
+                        },
+                    )?
                 } else {
                     value
                 };

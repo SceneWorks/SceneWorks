@@ -44,6 +44,13 @@ describe("historical option carriers",()=>{
     expect(()=>upgradeCarrier({advanced:{schedulerShift:3,timestepShift:"4"}}))
       .toThrow(/different authored values/);
   });
+  it("preserves interleave's independent scheduler and timestep controls",()=>{
+    const request={model:"sensenova_u1_8b",prompt:"tree",advanced:{schedulerShift:9,timestepShift:1.5}};
+    expect(upgradeCarrier(request,"interleaveRequest")).toEqual(request);
+    expect(upgradeCarrier({payload:request},"interleaveJob")).toEqual({payload:request});
+    expect(()=>upgradeCarrier(request,"request")).toThrow(/different authored values/);
+    expect(()=>upgradeCarrier({payload:request},"job")).toThrow(/different authored values/);
+  });
   it("regenerates with fresh seed policy and removes prior machine decisions",()=>{
     const recipe={model:"z_image_turbo",prompt:"fox",seed:42,normalizedSettings:{count:1},rawAdapterSettings:{memoryStrategy:{rung:2},memoryEvidenceRevision:3,moss_image_execution_report:{provider:"old"},steps:9}};
     const request=imageRecipeRequest({recipe});
