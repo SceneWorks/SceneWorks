@@ -73,7 +73,94 @@ pub fn reference_ids(payload: &JsonObject) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
+/// Legacy authoring parser. Execution calls `parse_resolved` after the portable resolver.
 pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    parse_with_advanced(
+        payload,
+        |key| {
+            advanced
+                .and_then(|advanced| advanced.get(key))
+                .is_some_and(|value| !value.is_null())
+        },
+        || {
+            parse_reference_ids_wire(
+                advanced.and_then(|advanced| advanced.get("flux3_reference_ids")),
+            )
+        },
+        || {
+            advanced
+                .and_then(|advanced| advanced.get("flux3_layout"))
+                .filter(|value| !value.is_null())
+                .cloned()
+        },
+    )
+}
+
+/// Execution boundary lowering from registered, resolved options. No authored option map is read.
+pub fn parse_resolved(
+    payload: &JsonObject,
+    options: &super::ImageAdvanced,
+) -> Result<ReferenceRequest, String> {
+    parse_with_advanced(
+        payload,
+        |key| match key {
+            "strength" => authored(&options.strength),
+            "referenceStrength" => authored(&options.reference_strength),
+            "denoisingStrength" => authored(&options.denoising_strength),
+            "imageStrength" => authored(&options.image_strength),
+            "ip_adapter_scale" => authored(&options.ip_adapter_scale_legacy),
+            "ipAdapterScale" => authored(&options.ip_adapter_scale),
+            _ => false,
+        },
+        || {
+            Ok(options
+                .flux3_reference_ids
+                .as_ref()
+                .map(|bound| bound.value.clone()))
+        },
+        || {
+            options
+                .flux3_layout
+                .as_ref()
+                .map(|bound| Value::Object(bound.value.clone()))
+        },
+    )
+}
+
+fn authored<T>(value: &Option<crate::resolved_options::Bound<T>>) -> bool {
+    value.as_ref().is_some_and(|bound| {
+        matches!(
+            bound.origin,
+            crate::resolved_options::Origin::Authored { .. }
+        )
+    })
+}
+
+fn parse_reference_ids_wire(value: Option<&Value>) -> Result<Option<Vec<String>>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| "FLUX.3 reference identities must be nonempty text.".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        _ => Err("FLUX.3 reference identities must be an ordered list.".into()),
+    }
+}
+
+fn parse_with_advanced(
+    payload: &JsonObject,
+    advanced_has: impl Fn(&str) -> bool,
+    advanced_reference_ids: impl FnOnce() -> Result<Option<Vec<String>>, String>,
+    layout: impl FnOnce() -> Option<Value>,
+) -> Result<ReferenceRequest, String> {
     let asset_ids = reference_ids(payload)?;
     let mode = payload
         .get("mode")
@@ -90,7 +177,6 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
     }
     // Conditioning is not img2img initialization. Even an explicit 1.0 is unsupported, matching
     // the native request validator rather than silently accepting an ineffective control.
-    let advanced = payload.get("advanced").and_then(Value::as_object);
     for key in [
         "strength",
         "referenceStrength",
@@ -99,11 +185,7 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
         "ip_adapter_scale",
         "ipAdapterScale",
     ] {
-        if payload.get(key).is_some_and(|value| !value.is_null())
-            || advanced
-                .and_then(|advanced| advanced.get(key))
-                .is_some_and(|value| !value.is_null())
-        {
+        if payload.get(key).is_some_and(|value| !value.is_null()) || advanced_has(key) {
             return Err(format!("FLUX.3 references are conditioning, not img2img noise initialization; `{key}` is unsupported, including 1.0. Remove this control."));
         }
     }
@@ -119,20 +201,12 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
                 .ok_or_else(|| format!("FLUX.3 explicit {key} must be a multiple of 16 in {min_output_side}..=4096; omit it for reference-derived sizing.")),
         }
     };
-    let reference_ids = match advanced.and_then(|a| a.get("flux3_reference_ids")) {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(values)) => {
-            let ids = values
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| {
-                            "FLUX.3 reference identities must be nonempty text.".to_owned()
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+    let reference_ids = match advanced_reference_ids()? {
+        None => None,
+        Some(ids) => {
+            if ids.iter().any(String::is_empty) {
+                return Err("FLUX.3 reference identities must be nonempty text.".into());
+            }
             if ids.len() != asset_ids.len()
                 || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
             {
@@ -140,12 +214,8 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
             }
             Some(ids)
         }
-        _ => return Err("FLUX.3 reference identities must be an ordered list.".into()),
     };
-    let layout = advanced
-        .and_then(|a| a.get("flux3_layout"))
-        .filter(|v| !v.is_null())
-        .cloned();
+    let layout = layout();
     if let Some(layout) = &layout {
         validate_layout(layout, asset_ids.len(), reference_ids.as_deref())?;
     }

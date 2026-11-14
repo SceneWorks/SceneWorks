@@ -266,6 +266,9 @@ pub struct ImageAdvanced {
     pub true_cfg_scale: Option<Bound<f64>>,
     pub strength: Option<Bound<f64>>,
     pub reference_strength: Option<Bound<f64>>,
+    pub denoising_strength: Option<Bound<f64>>,
+    pub image_strength: Option<Bound<f64>>,
+    pub ip_adapter_scale_legacy: Option<Bound<f64>>,
     pub text_style_gain: Option<Bound<f64>>,
     pub view_angle: Option<Bound<String>>,
     pub view_angles: Option<Bound<Vec<String>>>,
@@ -348,6 +351,9 @@ impl ImageAdvanced {
         put!(true_cfg_scale, "trueCfgScale");
         put!(strength, "strength");
         put!(reference_strength, "referenceStrength");
+        put!(denoising_strength, "denoisingStrength");
+        put!(image_strength, "imageStrength");
+        put!(ip_adapter_scale_legacy, "ip_adapter_scale");
         put!(text_style_gain, "textStyleGain");
         put!(view_angle, "viewAngle");
         put!(view_angles, "viewAngles");
@@ -417,6 +423,9 @@ impl ImageAdvanced {
             true_cfg_scale: input.number("advanced", "trueCfgScale")?,
             strength: input.number("advanced", "strength")?,
             reference_strength: input.number("advanced", "referenceStrength")?,
+            denoising_strength: input.number("advanced", "denoisingStrength")?,
+            image_strength: input.number("advanced", "imageStrength")?,
+            ip_adapter_scale_legacy: input.number("advanced", "ip_adapter_scale")?,
             text_style_gain: input.number("advanced", "textStyleGain")?,
             view_angle: input.text("advanced", "viewAngle")?,
             view_angles: input.structured("advanced", "viewAngles")?,
@@ -597,6 +606,9 @@ impl ImageRequest {
             "trueCfgScale" => &options.true_cfg_scale,
             "strength" => &options.strength,
             "referenceStrength" => &options.reference_strength,
+            "denoisingStrength" => &options.denoising_strength,
+            "imageStrength" => &options.image_strength,
+            "ip_adapter_scale" => &options.ip_adapter_scale_legacy,
             "textStyleGain" => &options.text_style_gain,
             "controlScale" => &options.control_scale,
             "openPoseScale" => &options.open_pose_scale,
@@ -645,10 +657,16 @@ impl ImageRequest {
         authored: &JsonObject,
         effective: &JsonObject,
     ) -> Result<Self, BindingError> {
-        let mut request = Self::from_payload(effective);
+        let mut request = Self::from_payload_internal(effective, false);
         request.resolved_advanced = Some(ImageAdvanced::bind(&BindingInput::new(
             authored, effective,
         ))?);
+        if flux3::is_model(&request.model) {
+            request.flux3_reference_request = Some(flux3::parse_resolved(
+                effective,
+                request.resolved_advanced.as_ref().expect("bound above"),
+            ));
+        }
         // Keep exactly what the caller authored for upgrade and persistence. Execution reads
         // only `resolved_advanced` and other typed fields from the effective request.
         request.advanced = object_or_empty(authored, "advanced");
@@ -733,6 +751,10 @@ impl ImageRequest {
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
     pub fn from_payload(payload: &JsonObject) -> Self {
+        Self::from_payload_internal(payload, true)
+    }
+
+    fn from_payload_internal(payload: &JsonObject, parse_flux3: bool) -> Self {
         // Hoisted above the struct literal because the geometry now depends on it — the same shape
         // `VideoRequest::from_payload` uses, and the reason the field is read here rather than in
         // field order below.
@@ -770,11 +792,8 @@ impl ImageRequest {
             source_asset_id: optional_id(payload, "sourceAssetId"),
             reference_asset_id: optional_id(payload, "referenceAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
-            flux3_reference_request: flux3::is_model(&nonempty_string_or(
-                payload,
-                "model",
-                DEFAULT_MODEL,
-            ))
+            flux3_reference_request: (parse_flux3
+                && flux3::is_model(&nonempty_string_or(payload, "model", DEFAULT_MODEL)))
             .then(|| flux3::parse(payload)),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
@@ -1543,6 +1562,41 @@ mod tests {
                 flux3_requested_tier(&request.advanced)
             );
         }
+    }
+
+    #[test]
+    fn flux3_reference_request_uses_bound_advanced_fields() {
+        let valid = payload(json!({
+            "model": "flux3_klein", "mode": "edit_image",
+            "referenceAssetId": "asset-a",
+            "advanced": {"flux3_reference_ids": ["slot-a"]}
+        }));
+        let request = ImageRequest::from_resolved(&valid, &valid).unwrap();
+        let references = request.flux3_reference_request.unwrap().unwrap();
+        assert_eq!(references.asset_ids, vec!["asset-a"]);
+        assert_eq!(references.reference_ids, Some(vec!["slot-a".to_owned()]));
+
+        let unsupported = payload(json!({
+            "model": "flux3_klein", "referenceAssetId": "asset-a",
+            "advanced": {"strength": 1.0}
+        }));
+        let request = ImageRequest::from_resolved(&unsupported, &unsupported).unwrap();
+        assert!(request
+            .flux3_reference_request
+            .unwrap()
+            .unwrap_err()
+            .contains("strength"));
+
+        let authored =
+            payload(json!({"model":"flux3_klein","referenceAssetId":"asset-a","advanced":{}}));
+        let effective = payload(
+            json!({"model":"flux3_klein","referenceAssetId":"asset-a","advanced":{"strength":0.5}}),
+        );
+        assert!(ImageRequest::from_resolved(&authored, &effective)
+            .unwrap()
+            .flux3_reference_request
+            .unwrap()
+            .is_ok());
     }
 
     #[test]

@@ -3453,7 +3453,7 @@ use routing::{candle_adapter_label, is_candle_engine, prepare_candle_image_route
 // Retain the existing crate-visible interface on every original cfg lane.
 pub(crate) use sampling::{
     curated_image_menu, emit_load_event, emit_sampling_knob_unsupported, normalize_sampling_knob,
-    read_advanced_guidance_method, read_advanced_sampling_knobs,
+    read_advanced_guidance_method,
 };
 
 #[cfg(target_os = "macos")]
