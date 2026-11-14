@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
 import { useImageBatchRun } from "./useImageBatchRun.js";
+import { validatePortableRequest } from "../../portableValidation.js";
 vi.mock("../../portableValidation.js", () => ({
   validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
 }));
@@ -38,9 +39,14 @@ it("continues the committed project's batch while a different project render sus
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector("button").click());
   await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
+  expect(validatePortableRequest).toHaveBeenCalledWith({
+    kind: "image", payload: { prompt: "one", count: 1, projectId: "A" }, modelEntry: null,
+  });
   await act(async () => React.startTransition(() => changeProject("B")));
   await act(async () => { resolveFirst({ id: "first", status: "queued" }); await running; });
   expect(createImageJob).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(validatePortableRequest).mock.calls.map(([request]) => request.payload.projectId))
+    .toEqual(["A", "A"]);
   expect(cancelA).not.toHaveBeenCalled();
   expect(cancelB).not.toHaveBeenCalled();
   await act(async () => release());

@@ -227,7 +227,9 @@ export function useImageBatchRun({
         if (stopped()) break;
         // Structured captions exist only after refinement. Validate the exact resolved
         // request here, including a cold browser module, before admitting this batch item.
-        const portable = await validatePortableRequest({ kind: "image", payload: request, modelEntry: selectedModel });
+        const portable = await validatePortableRequest({
+          kind: "image", payload: { ...request, projectId: owner.projectId }, modelEntry: selectedModel,
+        });
         if (stopped()) break;
         if (portable.state === "invalid") throw new Error(portable.refusal.detail);
         const result = createImageJob.withResult
