@@ -10,6 +10,9 @@
 # comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
 # the end of the job; the model hub is never written or deleted and nothing is downloaded.
 #
+# No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
+# selector's trusted-ref rule), and their builds and processes receive no credential.
+#
 # CI_IMPACT: manual only. Ordinary CI runs only scripts/tier2-ab.test.mjs (pure functions and
 # static workflow contracts) through `npm run check`.
 name: Tier 2 A/B (base vs head)
@@ -47,9 +50,6 @@ on:
         required: false
         type: boolean
         default: true
-    secrets:
-      HF_TOKEN:
-        required: false
 
 permissions:
   contents: read
@@ -134,8 +134,6 @@ jobs:
         run: node tier2-ab-driver/scripts/tier2-ab.mjs --build-only
       - name: Run base#1, head and (if needed) base#2 per route under the shared Metal lock
         if: ${{ !inputs.preflight_only }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           echo "[tier2-ab] $(date -u +%Y-%m-%dT%H:%M:%SZ) phase=waiting_for_metal_lock wait_s=7200"
           source tier2-ab-driver/scripts/ci/metal_execution_entry.sh
@@ -252,8 +250,6 @@ jobs:
       - name: Run base#1, head and (if needed) base#2 per route under the physical GPU1 lease
         if: ${{ !inputs.preflight_only }}
         working-directory: tier2-ab-driver
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           # Physical GPU1 (nvidia-smi index 1, PCI C1:00.0) is the host's display GPU, so it is never
           # strictly idle. This profile alone uses shared-display admission: after the exact-UUID

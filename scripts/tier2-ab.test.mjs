@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  childEnvironments, childStdio, exitCodeFor, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -90,6 +90,49 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   assert.equal(exitCodeFor({ ...report([{ status: "ran", verdict: "equal" }]), fatal: "x" }), 1);
 });
 
+test("trusted-ref rule: only commits reachable from main, release/* or feature/* of this repository", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-refs-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const git = (...args) => { const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); return result.stdout.trim(); };
+  git("init", "-q"); await writeFile(path.join(dir, "f"), "1"); git("add", "f"); git("commit", "-qm", "a"); const onMain = git("rev-parse", "HEAD");
+  await writeFile(path.join(dir, "f"), "2"); git("commit", "-qam", "b"); const mainTip = git("rev-parse", "HEAD");
+  git("checkout", "-q", "-b", "work"); await writeFile(path.join(dir, "f"), "3"); git("commit", "-qam", "c"); const featureTip = git("rev-parse", "HEAD");
+  await writeFile(path.join(dir, "f"), "4"); git("commit", "-qam", "d"); const storyOnly = git("rev-parse", "HEAD");
+  git("checkout", "-q", "--orphan", "loose"); await writeFile(path.join(dir, "f"), "5"); git("add", "f"); git("commit", "-qm", "e"); const unreferenced = git("rev-parse", "HEAD");
+  git("update-ref", "refs/remotes/origin/main", mainTip); git("update-ref", "refs/remotes/origin/feature/sw-f1-x", featureTip);
+  git("update-ref", "refs/remotes/origin/story/sw-1-x", storyOnly); git("update-ref", "refs/remotes/origin/mainline", storyOnly);
+  git("checkout", "-q", "--detach", mainTip); git("branch", "-q", "-D", "loose"); git("branch", "-q", "-D", "work");
+  assert.equal(trustedRefFor(onMain, { cwd: dir }), "refs/remotes/origin/main", "an ancestor of main is admitted");
+  assert.equal(trustedRefFor(mainTip, { cwd: dir }), "refs/remotes/origin/main");
+  assert.equal(trustedRefFor(featureTip, { cwd: dir }), "refs/remotes/origin/feature/sw-f1-x", "the tip of a feature branch is admitted");
+  assert.equal(trustedRefFor(storyOnly, { cwd: dir }), null, "story/* and look-alike names are not trusted lines");
+  assert.equal(trustedRefFor(unreferenced, { cwd: dir }), null, "a commit on no branch is refused");
+  assert.equal(trustedRefFor("0".repeat(40), { cwd: dir }), null, "an absent commit is refused");
+  assert.deepEqual(assertTrustedShas({ base_sha: onMain, head_sha: featureTip }, { cwd: dir }), { base_sha: { sha: onMain, trustedBy: "origin/main" }, head_sha: { sha: featureTip, trustedBy: "origin/feature/sw-f1-x" } });
+  assert.throws(() => assertTrustedShas({ base_sha: onMain, head_sha: storyOnly }, { cwd: dir }), new RegExp(`head_sha ${storyOnly} is not reachable from origin/main, origin/release/\\* or origin/feature/\\*`));
+  assert.deepEqual([...TRUSTED_REF_PATTERNS], ["refs/remotes/origin/main", "refs/remotes/origin/release/", "refs/remotes/origin/feature/"]);
+});
+
+test("no credential reaches the compared builds or their processes", async () => {
+  const host = { PATH: "/usr/bin", HOME: "/h", HF_TOKEN: "hf_x", HUGGING_FACE_HUB_TOKEN: "hf_y", HF_HUB_TOKEN: "hf_z", GITHUB_TOKEN: "ghs", AWS_SECRET_ACCESS_KEY: "k", OPENAI_API_KEY: "k", SIGNING_KEY: "k", NPM_PASSWORD: "p", GIT_CREDENTIALS: "c", CUDA_VISIBLE_DEVICES: "1", KEYCHAIN_PATH: "/k" };
+  const clean = scrubSecrets(host);
+  assert.deepEqual(Object.keys(clean).sort(), ["CUDA_VISIBLE_DEVICES", "HOME", "KEYCHAIN_PATH", "PATH"]);
+  const envs = childEnvironments(host, { backend: "cuda", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null });
+  const secretKeys = Object.keys(host).filter((key) => !(key in clean)), secretValues = secretKeys.map((key) => host[key]);
+  for (const child of [envs.api, envs.worker("http://127.0.0.1:1")]) {
+    for (const key of secretKeys) assert.equal(child[key], undefined, key);
+    for (const value of Object.values(child)) assert.ok(!secretValues.includes(value), "no secret value is passed under another name");
+    // The only credential-named key is the app's own (empty) credential store directory path.
+    assert.deepEqual(Object.keys(child).filter((key) => /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$/i.test(key)), ["SCENEWORKS_CREDENTIALS_DIR"]);
+  }
+  const source = await readFile(path.join(root, "scripts", "tier2-ab.mjs"), "utf8");
+  assert.match(source, /env: \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/, "the cargo build gets the scrubbed environment");
+  assert.doesNotMatch(source, /base\.HF_TOKEN\s*=/);
+  // A gated repository needs a credential for head's pinned-metadata admission, so it is skipped.
+  const models = await readCatalog(root);
+  const planned = await planRoutes({ routes: [ROUTES["mlx-flux3-klein-t2i"]], hubs: ["/nonexistent-tier2-hub"], baseCatalog: models, headCatalog: models, platform: "darwin" });
+  assert.equal(planned[0].status, "skipped"); assert.match(planned[0].skipReason, /gated repository/);
+});
+
 test("win32 launch: API and worker hold a stdin pipe and the worker gets the candle GPU1 environment", () => {
   // The real worker shuts down on stdin EOF when SCENEWORKS_WORKER_CHILD=1 (Windows); stdin "ignore"
   // is immediate EOF from NUL, which is what took every worker offline in run 43427303870.
@@ -97,8 +140,8 @@ test("win32 launch: API and worker hold a stdin pipe and the worker gets the can
   const host = { Path: "C:\\Windows", CUDA_VISIBLE_DEVICES: "1", NVIDIA_VISIBLE_DEVICES: "1", CUDA_DEVICE_ORDER: "PCI_BUS_ID", SCENEWORKS_GPU_ID: "1", SCENEWORKS_STALE: "x", HF_TOKEN: "hf_secret_token", GITHUB_TOKEN: "ghs_secret" };
   const envs = childEnvironments(host, { backend: "cuda", state: "D:\\t\\state", hub: "E:\\huggingface\\hub", xet: "D:\\t\\xet", workerId: "w1", metallib: null });
   const worker = envs.worker("http://127.0.0.1:5555"), api = envs.api;
-  for (const [key, value] of Object.entries({ SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true", SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_RUN_UTILITY_INPROCESS: "0", SCENEWORKS_WORKER_ID: "w1", SCENEWORKS_API_URL: "http://127.0.0.1:5555", SCENEWORKS_API_PORT: "5555", CUDA_VISIBLE_DEVICES: "1", NVIDIA_VISIBLE_DEVICES: "1", CUDA_DEVICE_ORDER: "PCI_BUS_ID", HF_HUB_OFFLINE: "1", HF_HUB_CACHE: "E:\\huggingface\\hub", HF_TOKEN: "hf_secret_token" })) assert.equal(worker[key], value, key);
-  for (const key of ["SCENEWORKS_MLX_REQUIRED", "SCENEWORKS_MLX_UNSUPPORTED_MODE", "SCENEWORKS_STALE", "SCENEWORKS_RUST_WORKER_GPU_ID", "GITHUB_TOKEN"]) assert.equal(worker[key], undefined, key);
+  for (const [key, value] of Object.entries({ SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true", SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_RUN_UTILITY_INPROCESS: "0", SCENEWORKS_WORKER_ID: "w1", SCENEWORKS_API_URL: "http://127.0.0.1:5555", SCENEWORKS_API_PORT: "5555", CUDA_VISIBLE_DEVICES: "1", NVIDIA_VISIBLE_DEVICES: "1", CUDA_DEVICE_ORDER: "PCI_BUS_ID", HF_HUB_OFFLINE: "1", HF_HUB_CACHE: "E:\\huggingface\\hub" })) assert.equal(worker[key], value, key);
+  for (const key of ["SCENEWORKS_MLX_REQUIRED", "SCENEWORKS_MLX_UNSUPPORTED_MODE", "SCENEWORKS_STALE", "SCENEWORKS_RUST_WORKER_GPU_ID", "GITHUB_TOKEN", "HF_TOKEN"]) assert.equal(worker[key], undefined, key);
   for (const [key, value] of Object.entries({ SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu", SCENEWORKS_WORKER_ID: "w1-utility", SCENEWORKS_API_PORT: "0", SCENEWORKS_WORKER_CHILD: "1" })) assert.equal(api[key], value, key);
   assert.equal(api.SCENEWORKS_API_URL, undefined);
   assert.deepEqual(processState({ label: "worker", pid: 9, exitCode: 3, signalCode: null }), { pid: 9, alive: false, exitCode: 3, signal: null, stdin: "pipe" });
@@ -572,7 +615,8 @@ test("tier2-ab is reachable only as a dispatched campaign profile and keeps the 
   const caller = job(dispatcher, "tier2-ab");
   assert.match(caller, /if: \$\{\{ needs\.moss-selector-preflight\.outputs\.enabled != 'true' && inputs\.profile == 'tier2-ab' \}\}/);
   assert.match(caller, /uses: \.\/\.github\/workflows\/tier2-ab\.yml/);
-  assert.match(caller, /HF_TOKEN: \$\{\{ secrets\.HF_TOKEN \}\}/);
+  assert.doesNotMatch(caller, /secrets[.:]/, "the A/B caller passes no secrets");
+  assert.match(selector, /fetch-depth: 0\n\s+filter: tree:0/); assert.match(selector, /assertTrustedShas\(\{base_sha:options\.base_sha,head_sha:options\.head_sha\}/);
   for (const catalogJob of ["mlx", "candle"]) assert.doesNotMatch(job(dispatcher, catalogJob).split("\n").find((line) => line.startsWith("    if:")), /tier2-ab/);
   const reusable = await workflowText("tier2-ab.yml");
   const triggers = reusable.slice(reusable.indexOf("\non:"), reusable.indexOf("\npermissions:"));
@@ -607,4 +651,5 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   assert.match(cuda, /vcvars64\.bat/);
   assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);
+  assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
 });

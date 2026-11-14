@@ -23,7 +23,7 @@
 //   or a JSON array / comma list of route ids), TIER2_AB_HUBS (empty = backend defaults, or a JSON
 //   array / ';'-separated list of hub roots), TIER2_AB_INFERENCE_SHA (optional cross-check).
 import assert from "node:assert/strict";
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn, spawnSync } from "node:child_process";
 import { chmod, copyFile, cp, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -170,6 +170,33 @@ export function dispatchOptions(inputs, dispatchedSha) {
   return { base_sha: options.base_sha, head_sha: options.head_sha, backend, routes: options.routes ? JSON.stringify(routes) : "", hubs: options.hubs ? JSON.stringify(options.hubs) : "", preflight_only: options.preflight_only ?? true, inference_sha: inputs.inference_sha || "" };
 }
 
+// ---- trusted-ref rule ----------------------------------------------------------------------------
+// base_sha and head_sha are built and run on a self-hosted runner, so each must be reachable from a
+// branch of THIS repository that only its writers can update: main, release/* or feature/*. Only
+// main carries a ruleset (FEATURE_DEVELOPMENT.md, "Current repository state"); release/* and
+// feature/* have none but can only be written by repository writers, who can already dispatch.
+// The rule's effect is to refuse commits reachable only from fork pull-request refs or not from
+// any branch at all. Checked by the selector job against a treeless full-history clone.
+export const TRUSTED_REF_PATTERNS = Object.freeze(["refs/remotes/origin/main", "refs/remotes/origin/release/", "refs/remotes/origin/feature/"]);
+export function trustedRefFor(sha, { cwd, patterns = TRUSTED_REF_PATTERNS, run = (args) => spawnGit(cwd, args) } = {}) {
+  fact(SHA.test(sha ?? ""), "trusted-ref check needs an exact 40-hex SHA");
+  if (run(["cat-file", "-e", `${sha}^{commit}`]).status !== 0) return null;
+  const refs = run(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/"]).stdout.split(/\r?\n/).filter(Boolean)
+    .filter((ref) => patterns.some((pattern) => (pattern.endsWith("/") ? ref.startsWith(pattern) && ref.length > pattern.length : ref === pattern)))
+    .sort((a, b) => Number(b.endsWith("/main")) - Number(a.endsWith("/main")));
+  return refs.find((ref) => run(["merge-base", "--is-ancestor", sha, ref]).status === 0) ?? null;
+}
+export function assertTrustedShas(shas, options) {
+  const result = {};
+  for (const [label, sha] of Object.entries(shas)) {
+    const ref = trustedRefFor(sha, options);
+    fact(ref, `${label} ${sha} is not reachable from origin/main, origin/release/* or origin/feature/* of this repository; refusing to build or run it`);
+    result[label] = { sha, trustedBy: ref.replace("refs/remotes/", "") };
+  }
+  return result;
+}
+function spawnGit(cwd, args) { return spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }); }
+
 // ---- catalog rows and hub presence (metadata only: stat/readdir, no hashing, no model reads) ----
 const PLATFORM_NAMES = { darwin: "macos", win32: "windows", linux: "linux" };
 export function routeDownloadRows(model, { platform, tier }) {
@@ -225,6 +252,9 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     let rows, baseRows;
     try { rows = routeDownloadRows(headModel, { platform, tier: route.tier }); baseRows = routeDownloadRows(baseModel, { platform, tier: route.tier }); } catch (error) { planned.push({ ...entry, status: "skipped", skipReason: error.message }); continue; }
     if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { planned.push({ ...entry, status: "skipped", skipReason: `pinned download rows for ${route.model} differ between base and head catalogs`, rows: { base: baseRows, head: rows } }); continue; }
+    // Head's admission reads a repository's pinned file metadata from Hugging Face; a gated one
+    // needs a credential, which this harness deliberately never passes to the compared builds.
+    if (headModel.gated === true) { planned.push({ ...entry, status: "skipped", skipReason: `${route.model} is a gated repository (${headModel.credentialHost ?? "credential required"}); this harness passes no credential to the compared builds` }); continue; }
     if (route.group && ranGroups.has(route.group)) { planned.push({ ...entry, tier: rows.tier, status: "skipped", skipReason: `alternative ${ranGroups.get(route.group)} of group ${route.group} is selected` }); continue; }
     const checks = [];
     for (const hub of hubs) { const result = await routePresence(hub, rows, fs); checks.push(result); if (result.complete) break; }
@@ -688,7 +718,8 @@ async function build(env, cfg, report) {
   for (const [label, dir, sha] of [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]]) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
-    const result = await runLogged("cargo", args, { cwd: dir, env: { ...env, CARGO_TARGET_DIR: target }, log });
+    // Build scripts of the compared commits run here: they get no credential the runner may hold.
+    const result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
     let metallib = null;
@@ -749,6 +780,11 @@ export async function hubFingerprint(hub, repos) {
 export const CHILD_STDIN = Object.freeze({ sentinel: "pipe", api: "pipe", worker: "pipe" });
 export const processState = (child) => ({ pid: child.pid ?? null, alive: Boolean(child.pid) && child.exitCode === null && child.signalCode === null, exitCode: child.exitCode ?? null, signal: child.signalCode ?? null, stdin: CHILD_STDIN[child.label] ?? "ignore" });
 export function childStdio(name, logFd) { return [CHILD_STDIN[name] ?? "ignore", logFd, logFd]; }
+// Credentials never reach the compared API/worker processes (they run code from operator-chosen
+// commits). Removes every *TOKEN*, *SECRET*, *PASSWORD*, *CREDENTIAL* and *_KEY variable, including
+// HF_TOKEN, HUGGING_FACE_HUB_TOKEN and HF_HUB_TOKEN.
+export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/i;
+export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
 export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
@@ -757,9 +793,9 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
     delete base.SCENEWORKS_MLX_REQUIRED; delete base.SCENEWORKS_MLX_UNSUPPORTED_MODE;
   }
   if (metallib) base.PMETAL_METALLIB_PATH = metallib;
-  // Head's admission resolves pinned file metadata once per fresh data dir; a gated repository
-  // needs the runner credential. Both sides receive the identical environment.
-  if (env.HF_TOKEN) base.HF_TOKEN = env.HF_TOKEN;
+  // No credential reaches the compared builds: every default route reads public repositories and
+  // gated ones are skipped at planning, so the API and worker get no token of any kind.
+  base = scrubSecrets(base);
   return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1" }) };
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

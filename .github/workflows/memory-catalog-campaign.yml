@@ -502,11 +502,15 @@ jobs:
     outputs:
       options: ${{ steps.select.outputs.options }}
     steps:
+      # Full history of every branch, commits only (treeless), so the trusted-ref rule can ask
+      # `git merge-base --is-ancestor` without downloading trees or blobs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
+          filter: tree:0
           persist-credentials: false
-      - name: Validate the SW-7033 Tier 2 A/B selector without native setup
+      - name: Validate the SW-7033 Tier 2 A/B selector and require trusted base/head SHAs
         id: select
         env:
           SELECTORS: ${{ toJSON(inputs) }}
@@ -514,8 +518,9 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import {appendFileSync} from 'node:fs';
-          import {dispatchOptions} from './scripts/tier2-ab.mjs';
+          import {assertTrustedShas,dispatchOptions} from './scripts/tier2-ab.mjs';
           const options=dispatchOptions(JSON.parse(process.env.SELECTORS),process.env.DISPATCH_SHA);
+          console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
           appendFileSync(process.env.GITHUB_OUTPUT,'options='+JSON.stringify(options)+'\n');
           JS
   tier2-ab:
@@ -526,9 +531,8 @@ jobs:
     # SW-7033: base/head A/B over the production API/worker path. options come from
     # moss_options_json ({"base_sha","head_sha","routes","hubs","preflight_only"}; preflight_only
     # defaults to true). No catalog walk, measurement publication, branch, push or PR.
+    # Passes no credentials: the compared builds come from operator-chosen commits and need none.
     uses: ./.github/workflows/tier2-ab.yml
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     with:
       base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
       head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}

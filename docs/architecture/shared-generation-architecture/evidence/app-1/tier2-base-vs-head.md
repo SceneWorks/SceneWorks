@@ -21,6 +21,11 @@ The driver is `scripts/tier2-ab.mjs`, run by `.github/workflows/tier2-ab.yml`, w
 only by the `tier2-ab` profile of `.github/workflows/memory-catalog-campaign.yml`
 (`workflow_dispatch`). No push, pull-request or merge event reaches it.
 
+- Trusted refs and credentials: the selector refuses a base or head SHA that is not reachable from
+  `origin/main`, `origin/release/*` or `origin/feature/*` of this repository, and the compared
+  builds and processes receive no credential (gated repositories are skipped). The recorded runs
+  predate both rules and passed the runner's `HF_TOKEN` to the API/worker; their bases and heads
+  are all ancestors of `origin/main`, and no gated route ran.
 - One job per backend checks out the driver commit, the base SHA and the head SHA into separate
   directories, verifies each checkout's HEAD and clean tree, and builds each side's release
   API/worker into one shared scratch target.
