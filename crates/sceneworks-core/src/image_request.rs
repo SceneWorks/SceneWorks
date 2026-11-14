@@ -808,6 +808,10 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
             "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
         );
     }
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("Hires.fix execution options must be resolved");
     let advertises_img2img = request
         .model_manifest_entry
         .get("ui")
@@ -826,43 +830,34 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
         || request.mask_asset_id.is_some()
         || request.character_id.is_some()
         || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("poses")
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
-        || request
-            .advanced
-            .get("controlImage")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
+        || options
+            .poses
+            .as_ref()
+            .is_some_and(|poses| !poses.value.is_empty())
+        || options
+            .control_image
+            .as_ref()
+            .is_some_and(|id| !id.value.trim().is_empty());
     if has_edit_or_control_input {
         return Some(
             "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
                 .to_owned(),
         );
     }
-    if request
-        .advanced
-        .get("usePid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if options.use_pid.as_ref().is_some_and(|value| value.value) {
         return Some("Hires.fix and PiD super-resolution are mutually exclusive.".to_owned());
     }
-    if request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty())
+    if options
+        .phases
+        .as_ref()
+        .is_some_and(|phases| !phases.value.is_empty())
     {
         return Some("Hires.fix cannot be combined with multi-phase sampling.".to_owned());
     }
-    let acceleration_sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let acceleration_sampler = options
+        .sampler
+        .as_ref()
+        .map(|sampler| sampler.value.trim())
         .map(str::to_ascii_lowercase)
         .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
     if !model_supports_hires_fix(request) || acceleration_sampler {
@@ -1519,7 +1514,7 @@ mod tests {
     #[test]
     fn hires_fix_refusal_follows_the_immutable_supports_hires_fix_fact() {
         let hires = |model: &str, entry: Value| {
-            ImageRequest::from_payload(&payload(json!({
+            let payload = payload(json!({
                 "projectId": "p",
                 "model": model,
                 "mode": "text_to_image",
@@ -1527,7 +1522,8 @@ mod tests {
                 "height": 1024,
                 "modelManifestEntry": entry,
                 "hiresFix": { "enabled": true, "upscaleBy": 1.5 }
-            })))
+            }));
+            ImageRequest::from_resolved(&payload, &payload).unwrap()
         };
         let lightning = crate::registry::builtin_model_spec("realvisxl_lightning").unwrap();
         assert!(!lightning.product.supports_hires_fix());
