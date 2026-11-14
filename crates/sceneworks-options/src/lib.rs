@@ -276,3 +276,30 @@ pub fn by_wire(location: &str, key: &str) -> Option<&'static OptionSpec> {
         option.location == location && (option.key == key || option.aliases.contains(&key))
     })
 }
+
+pub mod validate;
+
+pub mod contracts;
+pub mod generation_contracts;
+pub mod h3_keyframes;
+pub mod ids;
+pub mod image_limits;
+pub mod image_restoration;
+pub mod image_sampling_controls;
+pub mod limits;
+pub mod payload_util;
+pub mod request_validation;
+pub mod video_request;
+pub const MAX_PROMPT_CHARS: usize = 4000;
+pub const MAX_JOB_POSES: usize = 64;
+pub const MAX_JOB_LORAS: usize = 10;
+pub fn is_moss_image(model: &str) -> bool {
+    matches!(model, "moss_image_base" | "moss_image_sft")
+}
+
+pub mod admission_geometry;
+pub mod image_request;
+
+pub mod h3_veda;
+pub mod jsonc;
+pub mod minimax_h3_turbo;

@@ -79,6 +79,10 @@ macro_rules! nested {
 }
 
 pub(crate) const SPECS: &[OptionSpec] = &[
+    opt!("lowResStart", Object("LowResStartV1"), Absent, Feature("low_res_start"), WhatToMake, "GenerationOptions.low_res_start"),
+    nested!("lowResStart", "version", Integer, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.version").limits(&["1"]),
+    nested!("lowResStart", "k", Integer, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.k").limits(&["positive"]),
+    nested!("lowResStart", "scale", Number, Required, Feature("low_res_start"), WhatToMake, "LowResStartV1.scale").limits(&["0 < scale < 1"]),
 
     nested!("mossImage", "acceleration", OneOf("off | unmerged_bf16 | full_fp32"), Literal("\"off\""), MOSS, WhatToMake, "MossImageOptions.acceleration")
         .effects(&[effect("DMD", "exclude", "advanced.sampler"),effect("DMD", "exclude", "advanced.scheduler"),effect("DMD", "exclude", "advanced.schedulerShift"),effect("DMD", "exclude", "advanced.mossImage.training_shift"),effect("DMD", "exclude", "image.negativePrompt"),effect("DMD", "override", "advanced.steps"),effect("DMD", "override", "advanced.guidanceScale")])

@@ -1428,7 +1428,24 @@ fn json_result(value: Value) -> Result<CallToolResult, ErrorData> {
 /// Surface an API failure as a JSON-RPC internal error; the Display impl already
 /// includes the upstream status + detail, and never the token.
 fn api_error(error: ApiClientError) -> ErrorData {
-    ErrorData::internal_error(error.to_string(), None)
+    let data = match &error {
+        ApiClientError::Api { detail, .. } => serde_json::from_str::<Value>(detail)
+            .ok()
+            .filter(Value::is_object),
+        _ => None,
+    };
+    let message = data
+        .as_ref()
+        .and_then(|body| body.get("detail"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    match &error {
+        ApiClientError::Api { status, .. } if status.is_client_error() => {
+            ErrorData::invalid_params(message, data)
+        }
+        _ => ErrorData::internal_error(message, data),
+    }
 }
 
 /// A domain failure (failed/canceled job, timeout) as a tool-level error result

@@ -28,12 +28,13 @@ export function isAbortError(err) {
 // existing `setError(err.message)` call sites are untouched; the status just rides
 // along for the few places that want it.
 export class ApiError extends Error {
-  constructor(message, { status, detail, authRequired, code, context } = {}) {
+  constructor(message, { status, detail, authRequired, code, field, context } = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.code = code;
+    this.field = field ?? context?.field ?? null;
     // Typed machine-readable payload for the codes whose client must ACT on the rejection
     // rather than print it (`apps/rust-api/src/error.rs`, sc-19709). The unavailable-model-library
     // prompt is driven entirely from these named fields — never by matching on `message`.
@@ -117,6 +118,7 @@ export async function apiFetch(path, token, options = {}) {
       detail,
       authRequired: payload?.authRequired,
       code: payload?.code,
+      field: payload?.field,
       context: payload?.context,
     });
     // `token` matters: a 401 on a request that deliberately presented NO credential says

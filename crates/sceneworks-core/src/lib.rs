@@ -181,3 +181,6 @@ pub mod test_env;
 
 pub mod appearance;
 pub mod worker_proof;
+
+pub mod generation_contracts;
+pub mod request_validation;

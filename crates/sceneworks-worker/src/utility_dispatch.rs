@@ -197,6 +197,22 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
+        if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job.job_type) {
+            let empty = JsonObject::new();
+            let entry = job
+                .payload
+                .get("modelManifestEntry")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
+            sceneworks_core::request_validation::validate(kind, &job.payload, entry).map_err(
+                |error| {
+                    (
+                        "Invalid generation options.",
+                        WorkerError::Validation(error),
+                    )
+                },
+            )?;
+        }
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
@@ -596,6 +612,22 @@ async fn handle_job_failure(
 ) {
     match error {
         WorkerError::Canceled(_) => {}
+        WorkerError::Validation(error) => {
+            let result = JsonObject::from_iter([(
+                "validationRefusal".to_owned(),
+                serde_json::to_value(&error).expect("serializable refusal"),
+            )]);
+            let payload = progress_payload(
+                JobStatus::Failed,
+                ProgressStage::Failed,
+                1.0,
+                message,
+                Some(error.detail),
+                Some(result),
+                None,
+            );
+            let _ = update_job(api, &job.id, payload).await;
+        }
         error => {
             // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
             // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`

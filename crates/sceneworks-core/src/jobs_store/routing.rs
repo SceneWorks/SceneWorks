@@ -333,50 +333,7 @@ fn image_family_selectors_include_shipped_variants_without_claiming_neighbors() 
 /// so the routing layer cannot hold a second opinion about what "too many" means. A stored job that
 /// somehow carries more is refused by the worker's resolver with the engine's own wording, which is
 /// a loud failure rather than a job nothing can claim (the sc-10523 defect).
-pub fn qwen_image_2_1_reference_ids(payload: &Map<String, Value>) -> Option<Vec<String>> {
-    fn scalar<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
-        match payload.get(key) {
-            None | Some(Value::Null) => Some(None),
-            Some(Value::String(value)) => Some(Some(value.trim()).filter(|id| !id.is_empty())),
-            Some(_) => None,
-        }
-    }
-
-    let mut ids: Vec<String> = Vec::new();
-    for key in ["sourceAssetId", "maskAssetId"] {
-        if let Some(id) = scalar(payload, key)? {
-            ids.push(id.to_owned());
-        }
-    }
-    match payload.get("referenceAssetIds") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(values)) => {
-            for value in values {
-                let id = value.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                ids.push(id.to_owned());
-            }
-        }
-        Some(_) => return None,
-    }
-    if let Some(id) = scalar(payload, "referenceAssetId")? {
-        ids.push(id.to_owned());
-    }
-    // DEDUPE by asset id, keeping the FIRST occurrence — and this is a correctness fix, not tidying.
-    //
-    // The web's `editReferenceIds` leads `referenceAssetIds` with the working image while
-    // `buildEditJobBody` also sets `sourceAssetId`, so the ordinary Image-Editor payload names the
-    // same asset twice. On this engine every entry occupies one of the model's slots AND gets its
-    // own number in the prompt template, so sending it twice silently costs a slot and renumbers
-    // every reference after it — a duplicate is not a harmless repeat, it changes the render and
-    // the count the cap is measured against. First occurrence wins because the earlier slot is the
-    // one the prompt refers to.
-    let mut seen = std::collections::HashSet::with_capacity(ids.len());
-    ids.retain(|id| seen.insert(id.clone()));
-    Some(ids)
-}
+pub use sceneworks_options::image_request::ordered_image_reference_ids as qwen_image_2_1_reference_ids;
 
 /// Validate the mutually-exclusive image-reference carriers used by native conditioned-image
 /// routes and return the selected reference count. Missing, null, blank strings, and an empty plural

@@ -47,6 +47,10 @@ pub(super) async fn create_generation_job_with_binding(
         .get("modelManifestEntry")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
+    if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job_type) {
+        sceneworks_core::request_validation::validate(kind, &payload, entry)
+            .map_err(ApiError::from)?;
+    }
     validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
     // Freeze the admitted selection for retry/duplicate too, including requests that were not
     // themselves replays. A later same-id catalog rebind must not change their weights.
@@ -654,85 +658,9 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-const MIN_VECTOR_SVG_BYTES: u32 = 1_024;
-const MAX_VECTOR_SVG_BYTES: u32 = 256 * 1_024;
 fn validate_vector_request(payload: &VectorRequest) -> Result<(), ApiError> {
-    if payload.project_id.trim().is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    validate_model_id(&payload.model)?;
-    let prompt = payload.prompt.trim();
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must not exceed {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    match payload.mode {
-        VectorMode::ImageToSvg => {
-            if payload
-                .source_asset_id
-                .as_deref()
-                .is_none_or(|id| id.trim().is_empty())
-            {
-                return Err(ApiError::bad_request(
-                    "sourceAssetId is required for image_to_svg",
-                ));
-            }
-        }
-        VectorMode::TextToSvg => {
-            if prompt.is_empty() {
-                return Err(ApiError::bad_request("prompt is required for text_to_svg"));
-            }
-            if payload.source_asset_id.is_some() {
-                return Err(ApiError::bad_request(
-                    "sourceAssetId is not accepted for text_to_svg",
-                ));
-            }
-        }
-    }
-    let sampling = &payload.sampling;
-    if !sampling.temperature.is_finite() || !(0.0..=2.0).contains(&sampling.temperature) {
-        return Err(ApiError::bad_request(
-            "sampling.temperature must be between 0 and 2",
-        ));
-    }
-    if !sampling.top_p.is_finite() || !(0.0 < sampling.top_p && sampling.top_p <= 1.0) {
-        return Err(ApiError::bad_request(
-            "sampling.topP must be greater than 0 and at most 1",
-        ));
-    }
-    if sampling.top_k > 1_000 {
-        return Err(ApiError::bad_request("sampling.topK must be at most 1000"));
-    }
-    if !sampling.repetition_penalty.is_finite()
-        || !(0.1..=2.0).contains(&sampling.repetition_penalty)
-    {
-        return Err(ApiError::bad_request(
-            "sampling.repetitionPenalty must be between 0.1 and 2",
-        ));
-    }
-    if sampling.repetition_context > 32_768 {
-        return Err(ApiError::bad_request(
-            "sampling.repetitionContext must be at most 32768",
-        ));
-    }
-    let budget = &payload.detail_budget;
-    if !(16..=32_768).contains(&budget.max_new_tokens) {
-        return Err(ApiError::bad_request(
-            "detailBudget.maxNewTokens must be between 16 and 32768",
-        ));
-    }
-    if !(MIN_VECTOR_SVG_BYTES..=MAX_VECTOR_SVG_BYTES).contains(&budget.max_svg_bytes) {
-        return Err(ApiError::bad_request(format!(
-            "detailBudget.maxSvgBytes must be between {MIN_VECTOR_SVG_BYTES} and {MAX_VECTOR_SVG_BYTES}"
-        )));
-    }
-    if !(1_000..=MAX_VECTOR_WALL_TIME_MS).contains(&budget.max_wall_time_ms) {
-        return Err(ApiError::bad_request(format!(
-            "detailBudget.maxWallTimeMs must be between 1000 and {MAX_VECTOR_WALL_TIME_MS}"
-        )));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_request(payload)
+        .map_err(ApiError::from)
 }
 
 fn validate_vector_model_manifest(
@@ -740,36 +668,10 @@ fn validate_vector_model_manifest(
     mode: VectorMode,
     manifest: &Value,
 ) -> Result<(), ApiError> {
-    if manifest.get("type").and_then(Value::as_str) != Some("vector") {
-        return Err(ApiError::bad_request(format!(
-            "Model {model_id} is not a vector model (type: \"vector\" required)"
-        )));
-    }
-    let adapter = manifest
-        .get("adapter")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|adapter| !adapter.is_empty())
-        .ok_or_else(|| {
-            ApiError::bad_request(format!(
-                "Model {model_id} has no declared vector provider adapter"
-            ))
-        })?;
-    let supported = manifest
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|capability| capability.as_str() == Some(mode.as_str()))
-        });
-    if !supported {
-        return Err(ApiError::bad_request(format!(
-            "Model {model_id} provider {adapter} does not declare the {} capability; the request was not queued",
-            mode.as_str()
-        )));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_model_manifest(
+        model_id, mode, manifest,
+    )
+    .map_err(ApiError::from)
 }
 
 fn validate_vector_model_availability(
@@ -834,42 +736,8 @@ fn validate_vector_provider_request(
     payload: &VectorRequest,
     model: &Value,
 ) -> Result<(), ApiError> {
-    let vector = model.get("vector").and_then(Value::as_object);
-    if payload.mode == VectorMode::ImageToSvg
-        && !payload.prompt.trim().is_empty()
-        && vector
-            .and_then(|value| value.get("acceptsTextGuidance"))
-            .and_then(Value::as_bool)
-            == Some(false)
-    {
-        return Err(ApiError::bad_request(format!(
-            "Model {} does not accept text guidance for image_to_svg",
-            payload.model
-        )));
-    }
-    for (field, requested) in [
-        (
-            "maxNewTokens",
-            u64::from(payload.detail_budget.max_new_tokens),
-        ),
-        (
-            "maxSvgBytes",
-            u64::from(payload.detail_budget.max_svg_bytes),
-        ),
-        ("maxWallTimeMs", payload.detail_budget.max_wall_time_ms),
-    ] {
-        if let Some(limit) = vector
-            .and_then(|value| value.get(field))
-            .and_then(Value::as_u64)
-        {
-            if requested > limit {
-                return Err(ApiError::bad_request(format!(
-                    "detailBudget.{field} exceeds the selected provider limit of {limit}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_provider_request(payload, model)
+        .map_err(ApiError::from)
 }
 
 async fn validate_vector_source_asset(
@@ -2235,25 +2103,7 @@ pub(crate) async fn create_vqa_job(
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    if payload.source_asset_id.trim().is_empty() {
-        return Err(ApiError::bad_request("sourceAssetId is required"));
-    }
-    let question = payload.question.trim();
-    if question.is_empty() || question.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "question must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    validate_prompt_extras("", &payload.advanced)?;
-    if !(16..=2048).contains(&payload.max_new_tokens) {
-        return Err(ApiError::bad_request(
-            "maxNewTokens must be between 16 and 2048",
-        ));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vqa_job(payload).map_err(ApiError::from)
 }
 
 pub(crate) async fn create_interleave_job(
@@ -2279,31 +2129,8 @@ pub(crate) async fn create_interleave_job(
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    validate_prompt_extras("", &payload.advanced)?;
-    // Upstream interleave_gen caps the run at 10 generated images.
-    if !(1..=10).contains(&payload.max_images) {
-        return Err(ApiError::bad_request("maxImages must be between 1 and 10"));
-    }
-    if payload
-        .source_asset_ids
-        .iter()
-        .any(|id| id.trim().is_empty())
-    {
-        return Err(ApiError::bad_request(
-            "sourceAssetIds must not contain blank ids",
-        ));
-    }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_interleave_job(payload)
+        .map_err(ApiError::from)
 }
 
 /// Request-scoped, lazily-memoized snapshot of the model and LoRA catalogs (sc-8819,
@@ -2927,6 +2754,10 @@ pub(crate) async fn create_video_job(
     // direct API client must not be able to send additional references to an older engine that
     // cannot consume them. The catalog flag is absent today and will be set only with the paired
     // descriptor/pin evidence.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::request_validation::validate("video", &job_payload, entry)
+            .map_err(ApiError::from)?;
+    }
     validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
     validate_selected_decoder_for_manifest(
         enqueue_backend(&state),
@@ -3270,6 +3101,10 @@ pub(crate) async fn create_audio_job(
     // Segmented-song / ICL / tier fields vs the model's declared capabilities (sc-19384): an ICL
     // mode on a non-`_icl` checkpoint (or a missing one on an `_icl` checkpoint) is a validation
     // error here, not a failed job.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::request_validation::validate("audio", &job_payload, entry)
+            .map_err(ApiError::from)?;
+    }
     crate::validate_audio_job_for_model(&payload, &model_manifest_entry)?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     // Voice Clone (sc-13411 C4): the two-call chain runs a SECOND model — the base TTS (Kokoro) whose

@@ -7,6 +7,7 @@ use syn::visit::{self, Visit};
 use syn::{Expr, FnArg, Item, Lit, Meta, Pat};
 
 const ROOTS: &[&str] = &[
+    "crates/sceneworks-options/src",
     "crates/sceneworks-core/src",
     "crates/sceneworks-worker/src",
     "crates/sceneworks-mcp/src",
