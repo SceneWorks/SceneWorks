@@ -807,6 +807,33 @@ impl ImageRoute {
         }
     }
 
+    pub(super) fn image_count_resolved(
+        self,
+        execution: &ResolvedImageExecution,
+        settings: &Settings,
+    ) -> u32 {
+        match self {
+            ImageRoute::ZImageControl
+            | ImageRoute::ZImageBaseControl
+            | ImageRoute::SdxlControl
+            | ImageRoute::QwenControl
+            | ImageRoute::KolorsControl
+            | ImageRoute::KreaControl
+            | ImageRoute::Flux1DevControl
+            | ImageRoute::Flux2DevControl
+            | ImageRoute::KreaImportedControl => execution.poses().len() as u32,
+            ImageRoute::Flux2Edit | ImageRoute::QwenEdit
+                if matches!(edit_grouping(execution), EditGrouping::Poses(_)) =>
+            {
+                execution.poses().len() as u32
+            }
+            ImageRoute::InstantId => {
+                super::instantid::instantid_image_count_resolved(execution, settings)
+            }
+            _ => self.image_count(execution, settings),
+        }
+    }
+
     /// The label written by this route's per-asset stream. Bespoke routes that do not map directly
     /// to the request's registry row are named explicitly; the remaining MLX routes use the same
     /// descriptor label their stream resolves.
@@ -1042,6 +1069,33 @@ impl CandleImageRoute {
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
+        }
+    }
+
+    pub(super) fn image_count_resolved(
+        self,
+        execution: &ResolvedImageExecution,
+        settings: &Settings,
+    ) -> u32 {
+        match self {
+            CandleImageRoute::QwenControl
+            | CandleImageRoute::SdxlControl
+            | CandleImageRoute::KolorsControl
+            | CandleImageRoute::ZimageControl
+            | CandleImageRoute::Flux2Control
+            | CandleImageRoute::Flux1Control
+            | CandleImageRoute::KreaControl
+            | CandleImageRoute::KreaImportedControl => execution.poses().len() as u32,
+            CandleImageRoute::QwenEdit
+                if qwen_edit_candle::qwen_edit_candle_pose_count(execution)
+                    .is_some_and(|count| count > 0) =>
+            {
+                execution.poses().len() as u32
+            }
+            CandleImageRoute::InstantId => {
+                super::instantid::instantid_image_count_resolved(execution, settings)
+            }
+            _ => self.image_count(execution, settings),
         }
     }
 

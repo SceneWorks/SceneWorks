@@ -676,6 +676,16 @@ pub(super) fn instantid_image_count(request: &ImageRequest, settings: &Settings)
     }
 }
 
+pub(super) fn instantid_image_count_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> u32 {
+    match instantid_mode(execution) {
+        InstantIdMode::PoseSet(_) => execution.poses().len() as u32,
+        _ => instantid_image_count(execution, settings),
+    }
+}
+
 /// Resolve the active angle-set collection for this job (sc-4450): the per-generation override
 /// (`advanced.keypointCollectionId`) → the user default → the built-in 11. Built-in fallback on
 /// any store error so angle generation never hard-fails on a Key Point Library hiccup.
