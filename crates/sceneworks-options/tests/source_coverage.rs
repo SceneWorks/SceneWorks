@@ -1032,3 +1032,429 @@ fn production_advanced_reads_resolve_to_option_specs() {
     assert!(unresolved.is_empty(), "Dynamic reads require structural coverage or a documented narrow exception:\n{unresolved:#?}");
     assert!(!coverage.reads.is_empty());
 }
+
+// A small lexical guard keeps Rust-only CI independent of Node/npm. It recognizes
+// literal member accesses, optional chaining, same-file string constants, and simple
+// local aliases. It does not claim JavaScript name resolution or macro expansion.
+// Reassignment/destructuring aliases and imported computed keys require a guard update;
+// regex literals are not parsed (an apparent access in one fails conservatively).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum JsToken {
+    Word(String),
+    Text(String),
+    Punct(char),
+    Optional,
+}
+
+fn js_tokens(source: &str) -> Vec<JsToken> {
+    fn quoted(chars: &[char], at: &mut usize, quote: char) -> String {
+        *at += 1;
+        let mut value = String::new();
+        while *at < chars.len() {
+            let ch = chars[*at];
+            *at += 1;
+            if ch == quote {
+                break;
+            }
+            if ch == '\\' && *at < chars.len() {
+                let escaped = chars[*at];
+                *at += 1;
+                value.push(match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+            } else {
+                value.push(ch);
+            }
+        }
+        value
+    }
+    fn template(chars: &[char], at: &mut usize, out: &mut Vec<JsToken>) {
+        *at += 1;
+        while *at < chars.len() {
+            match chars[*at] {
+                '\\' => *at = (*at + 2).min(chars.len()),
+                '`' => {
+                    *at += 1;
+                    break;
+                }
+                '$' if chars.get(*at + 1) == Some(&'{') => {
+                    *at += 2;
+                    code(chars, at, out, true);
+                }
+                _ => *at += 1,
+            }
+        }
+    }
+    fn code(chars: &[char], at: &mut usize, out: &mut Vec<JsToken>, interpolation: bool) {
+        let mut braces = 0;
+        while *at < chars.len() {
+            let ch = chars[*at];
+            if ch.is_whitespace() {
+                *at += 1;
+                continue;
+            }
+            if ch == '/' && chars.get(*at + 1) == Some(&'/') {
+                *at += 2;
+                while *at < chars.len() && chars[*at] != '\n' {
+                    *at += 1;
+                }
+                continue;
+            }
+            if ch == '/' && chars.get(*at + 1) == Some(&'*') {
+                *at += 2;
+                while *at + 1 < chars.len() && !(chars[*at] == '*' && chars[*at + 1] == '/') {
+                    *at += 1;
+                }
+                *at = (*at + 2).min(chars.len());
+                continue;
+            }
+            if ch == '\'' || ch == '"' {
+                out.push(JsToken::Text(quoted(chars, at, ch)));
+                continue;
+            }
+            if ch == '`' {
+                template(chars, at, out);
+                continue;
+            }
+            if ch == '?' && chars.get(*at + 1) == Some(&'.') {
+                out.push(JsToken::Optional);
+                *at += 2;
+                continue;
+            }
+            if ch.is_alphabetic() || ch == '_' || ch == '$' {
+                let start = *at;
+                *at += 1;
+                while *at < chars.len()
+                    && (chars[*at].is_alphanumeric() || matches!(chars[*at], '_' | '$'))
+                {
+                    *at += 1;
+                }
+                out.push(JsToken::Word(chars[start..*at].iter().collect()));
+                continue;
+            }
+            if interpolation && ch == '}' && braces == 0 {
+                *at += 1;
+                return;
+            }
+            if ch == '{' {
+                braces += 1;
+            }
+            if ch == '}' {
+                braces -= 1;
+            }
+            out.push(JsToken::Punct(ch));
+            *at += 1;
+        }
+    }
+    let mut tokens = Vec::new();
+    code(
+        &source.chars().collect::<Vec<_>>(),
+        &mut 0,
+        &mut tokens,
+        false,
+    );
+    tokens
+}
+
+fn js_word(token: Option<&JsToken>) -> Option<&str> {
+    match token {
+        Some(JsToken::Word(word)) => Some(word),
+        _ => None,
+    }
+}
+
+fn js_coverage(file: &str, source: &str) -> Coverage {
+    let tokens = js_tokens(source);
+    let mut constants = BTreeMap::new();
+    for part in tokens.windows(4) {
+        if matches!(js_word(part.first()), Some("const" | "let")) && part[2] == JsToken::Punct('=')
+        {
+            if let (JsToken::Word(name), JsToken::Text(value)) = (&part[1], &part[3]) {
+                constants.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    let location = if file.to_ascii_lowercase().contains("training") {
+        "training.config.advanced"
+    } else {
+        "advanced"
+    };
+    let mut coverage = Coverage::default();
+    let mut aliases = BTreeSet::from(["advanced".to_owned()]);
+    let mut scopes = Vec::new();
+    let mut function = "<javascript>".to_owned();
+    let mut pending_function = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if js_word(Some(token)) == Some("function") {
+            pending_function = js_word(tokens.get(index + 1)).map(str::to_owned);
+        }
+        match token {
+            JsToken::Punct('{') => {
+                scopes.push((aliases.clone(), function.clone()));
+                if let Some(name) = pending_function.take() {
+                    function = name;
+                }
+            }
+            JsToken::Punct('}') => {
+                if let Some(outer) = scopes.pop() {
+                    (aliases, function) = outer;
+                }
+            }
+            _ => {}
+        }
+        if matches!(js_word(Some(token)), Some("const" | "let" | "var"))
+            && tokens.get(index + 2) == Some(&JsToken::Punct('='))
+        {
+            if let Some(binding) = js_word(tokens.get(index + 1)) {
+                let start = index + 3;
+                let mut end = start;
+                // A simple alias ends at a separator or nullish/default operator; calls and
+                // arbitrary expressions are deliberately not inferred as map aliases.
+                while end < tokens.len()
+                    && matches!(
+                        &tokens[end],
+                        JsToken::Word(_) | JsToken::Punct('.') | JsToken::Optional
+                    )
+                {
+                    end += 1;
+                }
+                let simple = end > start
+                    && end - start <= 9
+                    && !matches!(tokens.get(end), Some(JsToken::Punct('(')));
+                let last = end.checked_sub(1).and_then(|at| js_word(tokens.get(at)));
+                let map_alias = simple && last.is_some_and(|name| aliases.contains(name));
+                if binding != "advanced" {
+                    aliases.remove(binding);
+                }
+                if map_alias {
+                    aliases.insert(binding.into());
+                }
+            }
+        }
+        let Some(receiver) = js_word(Some(token)) else {
+            continue;
+        };
+        if !aliases.contains(receiver) {
+            continue;
+        }
+        let mut next = index + 1;
+        if matches!(tokens.get(next), Some(JsToken::Optional)) {
+            next += 1;
+        } else if tokens.get(next) == Some(&JsToken::Punct('.')) {
+            next += 1;
+        } else if tokens.get(next) != Some(&JsToken::Punct('[')) {
+            continue;
+        }
+        let key = if tokens.get(next) == Some(&JsToken::Punct('[')) {
+            match (tokens.get(next + 1), tokens.get(next + 2)) {
+                (Some(JsToken::Text(key)), Some(JsToken::Punct(']'))) => Some(key.clone()),
+                (Some(JsToken::Word(key)), Some(JsToken::Punct(']'))) => {
+                    constants.get(key).cloned()
+                }
+                _ => None,
+            }
+        } else {
+            js_word(tokens.get(next)).map(str::to_owned)
+        };
+        if let Some(key) = key {
+            // This hook's return value is UI state; these properties never belong to the
+            // request's advanced map. Match exact path/key rather than excluding the file.
+            if file == "apps/web/src/screens/characterPanels.jsx"
+                && matches!(
+                    key.as_str(),
+                    "buildAdvanced" | "seedValue" | "supportsNegativePrompt"
+                )
+            {
+                continue;
+            }
+            coverage.reads.insert(Read {
+                file: file.into(),
+                function: function.clone(),
+                location,
+                key,
+            });
+        } else {
+            let expression = tokens[next..]
+                .iter()
+                .take_while(|it| **it != JsToken::Punct(']'))
+                .map(|it| match it {
+                    JsToken::Word(word) | JsToken::Text(word) => word.clone(),
+                    JsToken::Punct(ch) => ch.to_string(),
+                    JsToken::Optional => "?.".into(),
+                })
+                .collect::<String>();
+            coverage
+                .dynamic
+                .insert((file.into(), function.clone(), expression));
+        }
+    }
+    if file == "apps/web/src/training/trainingConfig.js" {
+        // The computed read concatenates source-owned loss prefixes with auxLossKnobs.
+        // Derive both inputs instead of approving the expression alone.
+        let prefixes: BTreeSet<_> = tokens
+            .windows(3)
+            .filter_map(|part| match part {
+                [JsToken::Word(name), JsToken::Punct(':'), JsToken::Text(value)]
+                    if name == "prefix" =>
+                {
+                    Some(value.clone())
+                }
+                [JsToken::Word(name), JsToken::Punct('('), JsToken::Text(value)]
+                    if name == "faceLossSpec" =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let start = tokens.windows(4).position(|part| {
+            js_word(part.first()) == Some("const")
+                && js_word(part.get(1)) == Some("auxLossKnobs")
+                && part[2] == JsToken::Punct('=')
+                && part[3] == JsToken::Punct('[')
+        });
+        if let Some(start) = start {
+            let knobs: Vec<_> = tokens[start + 4..]
+                .iter()
+                .take_while(|it| **it != JsToken::Punct(']'))
+                .filter_map(|it| match it {
+                    JsToken::Text(value) => Some(value),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !prefixes.is_empty() && !knobs.is_empty(),
+                "training computed selector lost its finite domain"
+            );
+            for prefix in prefixes {
+                for knob in &knobs {
+                    coverage.reads.insert(Read {
+                        file: file.into(),
+                        function: "auxLossesDraft".into(),
+                        location,
+                        key: format!("{prefix}{knob}"),
+                    });
+                }
+            }
+            coverage.domains.insert(
+                file.into(),
+                coverage
+                    .reads
+                    .iter()
+                    .filter(|read| read.function == "auxLossesDraft")
+                    .map(|read| read.key.clone())
+                    .collect(),
+            );
+        }
+    }
+    coverage
+}
+
+#[test]
+fn javascript_mutations_require_registered_options() {
+    for read in [
+        r#"request.advanced.__unseen_production_option__"#,
+        r#"request?.advanced?.__unseen_production_option__"#,
+        r#"request.advanced['__unseen_production_option__']"#,
+        r#"request.advanced?.["__unseen_production_option__"]"#,
+        r#"const knobs = request.advanced; knobs.__unseen_production_option__"#,
+        r#"const s = `${request.advanced.__unseen_production_option__}`"#,
+    ] {
+        assert_eq!(missing(&js_coverage("fixture.js", read)).len(), 1, "{read}");
+    }
+    let valid = js_coverage(
+        "fixture.js",
+        r#"
+        // request.advanced.unseen
+        /* advanced['unseen'] */
+        const prose = "advanced.unseen";
+        const template = `advanced.unseen`;
+        const KEY = 'sampler';
+        request.advanced.steps;
+        const knobs = request?.advanced;
+        knobs?.[KEY];
+    "#,
+    );
+    assert_eq!(valid.reads.len(), 2);
+    assert!(missing(&valid).is_empty());
+    assert_eq!(js_coverage("fixture.js", "advanced[key]").dynamic.len(), 1);
+    let mutated = js_coverage(
+        "apps/web/src/training/trainingConfig.js",
+        r#"
+        const losses = [{prefix: "__unseen_production_option__"}];
+        const auxLossKnobs = ["Weight"];
+        function auxLossesDraft(advanced) { return advanced?.[prefix + knob]; }
+    "#,
+    );
+    assert_eq!(missing(&mutated).len(), 1);
+}
+
+#[test]
+fn javascript_advanced_reads_resolve_to_option_specs() {
+    fn files(dir: &Path, sources: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|it| it.to_str()),
+                    Some("testUtils" | "__tests__")
+                ) {
+                    files(&path, sources);
+                }
+            } else {
+                let name = path.file_name().unwrap().to_string_lossy();
+                if matches!(
+                    path.extension().and_then(|it| it.to_str()),
+                    Some("js" | "jsx")
+                ) && !name.contains(".test.")
+                    && !name.contains(".spec.")
+                {
+                    sources.push(path);
+                }
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let mut sources = Vec::new();
+    files(&root.join("apps/web/src"), &mut sources);
+    let mut absent = Vec::new();
+    let mut dynamic = Vec::new();
+    for path in sources {
+        let file = path.strip_prefix(root).unwrap().to_string_lossy();
+        let coverage = js_coverage(&file, &std::fs::read_to_string(&path).unwrap());
+        absent.extend(missing(&coverage));
+        for (file, function, expression) in coverage.dynamic {
+            match (file.as_str(), function.as_str(), expression.as_str()) {
+                ("apps/web/src/training/trainingConfig.js", "auxLossesDraft", "[prefix+knob") => {
+                    assert!(coverage
+                        .domains
+                        .get(&file)
+                        .is_some_and(|domain| !domain.is_empty()));
+                    eprintln!("Reviewed JavaScript computed read {file}::{function}: prefix × knob source domain checked against registry");
+                }
+                ("apps/web/src/workflowShare.js", "workflowSettingRows", "[key") => {
+                    // This inspector deliberately displays arbitrary imported keys, including
+                    // unknown names, as unrestored. It never applies them to a generation request.
+                    eprintln!("Reviewed JavaScript computed read {file}::{function}: Object.keys(settings) enumerates arbitrary imported settings for display");
+                }
+                _ => dynamic.push((file, function, expression)),
+            }
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "JavaScript accesses lack OptionSpec declarations:\n{}",
+        absent.join("\n")
+    );
+    assert!(
+        dynamic.is_empty(),
+        "JavaScript computed accesses need explicit finite coverage:\n{dynamic:#?}"
+    );
+}
