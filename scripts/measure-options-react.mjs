@@ -1,5 +1,7 @@
 // Measure the actual Image Studio React input path with the controlled API fixture.
-// Start `npm exec -- vite --config vite.verify.config.mjs` in apps/web first, then run:
+// Build with `npm run build -- --config vite.verify.config.mjs`, then start
+// `npm exec -- vite preview --config vite.verify.config.mjs --port 5317` in apps/web.
+// The production bundle and controlled API are both served from that origin.
 // node scripts/measure-options-react.mjs --origin http://127.0.0.1:5317 --samples 30
 import { chromium } from "playwright";
 
