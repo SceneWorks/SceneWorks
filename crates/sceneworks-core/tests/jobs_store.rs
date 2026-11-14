@@ -3646,7 +3646,9 @@ fn generator_abort_receipt_persists_specific_terminal_failure_once() {
     let store = store("generator-abort-receipt");
     register_image_worker(&store);
     let first = store.create_job(image_job(Map::new())).unwrap();
-    store.claim_next_job("worker-1").unwrap().unwrap();
+    // A model-bearing job is claimable only through a portable-binding claim.
+    let claimed = store.claim_portable("worker-1").unwrap().unwrap();
+    assert_eq!(claimed.id, first.id);
     // Claim routing admits one GPU job per worker. Inject an out-of-band stale
     // active row to prove abnormal-exit cleanup cannot leave it stuck or attach
     // the current job's panic cause to it.
