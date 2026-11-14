@@ -174,6 +174,30 @@ describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
     ]);
   });
 
+  it("submits image-only SVD with no authored prompt", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "image_to_video", model: "svd", prompt: "", sourceAssetId: "still",
+    }));
+    const context = baseContext({ videoModels: [SVD], assets: [
+      { id: "still", projectId: "project_1", type: "image", displayName: "Start frame", status: {} },
+    ] });
+    await render(context);
+    const renderClip = buttonWithText(container, "Render clip");
+    expect(renderClip.disabled).toBe(false);
+    await click(renderClip);
+    expect(context.createVideoJob).toHaveBeenCalledWith(expect.objectContaining({
+      model: "svd", mode: "image_to_video", prompt: "", sourceAssetId: "still",
+    }));
+  });
+
+  it("keeps an ordinary blank text video request blocked", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "text_to_video", model: "ltx_2_3", prompt: "",
+    }));
+    await render(baseContext({ videoModels: [LTX] }));
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+  });
+
   it("hides Quality for an adapter that never reads the key", async () => {
     await render(baseContext({ videoModels: [LTX] }));
     await openAdvanced(container);

@@ -46,6 +46,12 @@ const MINIMAX = {
   supportsLastOnlyImageToVideo: true,
   usable: true,
 };
+const SVD = {
+  ...manifestModels.find((model) => model.id === "svd"),
+  ...servedCatalogFacts("svd"),
+  installState: "installed",
+  usable: true,
+};
 
 /// The shipped 768p turbo entry as the catalog route serves it — the manifest entry (so the step
 /// count and the declared `modelIds` partition are the real ones) plus the install state
@@ -137,6 +143,28 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     await openVideo(context);expect(container.textContent).toContain("Last frame");
     const button=[...container.querySelectorAll("button")].find(b=>/generate|create|render/i.test(b.textContent.trim()));expect(button.disabled).toBe(false);await click(button);
     expect(context.createVideoJob.mock.calls.at(-1)[0].lastFrameAssetId).toBe("last");expect(context.createVideoJob.mock.calls.at(-1)[0].sourceAssetId).toBeNull();
+  });
+
+  it("submits image-only SVD with an empty prompt", async () => {
+    window.localStorage.setItem("sceneworks-simple-studio", JSON.stringify({ "project-1": { video: {
+      mode: "image_to_video", model: "svd", prompt: "", resolution: "1024x576", duration: 4,
+      sourceAssetId: "source-image",
+    } } }));
+    const context = { ...baseContext(), videoModels: [SVD], models: [SVD], assets: [
+      { id: "source-image", type: "image", projectId: "project-1", displayName: "Source image", file: { path: "source.png", width: 1024, height: 576 } },
+    ] };
+    await openVideo(context);
+    const generate = container.querySelector(".su-generate");
+    expect(generate.disabled).toBe(false);
+    await click(generate);
+    expect(context.createVideoJob).toHaveBeenCalledWith(expect.objectContaining({
+      model: "svd", mode: "image_to_video", prompt: "", sourceAssetId: "source-image",
+    }));
+  });
+
+  it("keeps an ordinary text video run blocked until a prompt is written", async () => {
+    await openVideo(baseContext());
+    expect(container.querySelector(".su-generate").disabled).toBe(true);
   });
 
   it("carries the licence-required attribution", async () => {

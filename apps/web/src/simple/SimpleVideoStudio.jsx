@@ -164,19 +164,20 @@ export function SimpleVideoStudio() {
 
   const latestJob = newestLocalJob(videoLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
+  const promptless = selectedModel?.promptless === true;
   const supportsLastFrame = selectedModel?.supportsLastOnlyImageToVideo === true && mode === "image_to_video";
   const needsSource = mode === "image_to_video" && !sourceAssetId && !(supportsLastFrame && lastFrameAssetId);
   const canGenerate =
-    Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
+    (promptless || Boolean(prompt.trim())) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
   const portableDraft = buildSimpleVideoRequest({
     prompt: prompt.trim(), mode, model, resolution, duration, styleId,
     sourceAssetId, lastFrameAssetId, selectedModel, loras: lora.serializedLoras,
   });
-  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel, canGenerate);
+  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel, Boolean(selectedModel && (promptless || prompt.trim())));
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
-    if (!canGenerate) {
+    if (!canGenerate || portableRefusal) {
       return;
     }
     if (!activeProject) {
