@@ -542,19 +542,30 @@ where
             .map_err(json_rejection_response)?;
         let generation_kind = generation_wire_kind::<T>();
         if value.is_object() {
-            value = sceneworks_core::options::upgrade::upgrade(
-                &value,
-                sceneworks_core::options::upgrade::request_carrier(generation_kind.unwrap_or("")),
-            )
-            .map_err(|error| {
-                ApiError::typed(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    error.to_string(),
-                    error.code,
-                    json!({ "field": error.field }),
-                )
-                .into_response()
-            })?;
+            let carrier = if std::any::TypeId::of::<T>()
+                == std::any::TypeId::of::<JobCreateRequest>()
+            {
+                let kind = value
+                    .get("type")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<JobType>(value).ok())
+                    .and_then(|job_type| {
+                        sceneworks_core::request_validation::kind_for_job(&job_type)
+                    });
+                sceneworks_core::options::upgrade::job_carrier(kind.unwrap_or(""))
+            } else {
+                sceneworks_core::options::upgrade::request_carrier(generation_kind.unwrap_or(""))
+            };
+            value =
+                sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(|error| {
+                    ApiError::typed(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        error.to_string(),
+                        error.code,
+                        json!({ "field": error.field }),
+                    )
+                    .into_response()
+                })?;
         }
         if let Some(kind) = generation_kind {
             let payload = value.as_object().ok_or_else(|| {

@@ -310,6 +310,36 @@ async fn sensenova_http_extractor_preserves_authored_numbers_and_shared_effectiv
 }
 
 #[tokio::test]
+async fn interleave_distinct_shifts_survive_typed_and_raw_http_ingress() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (_, project) = create_project(app.clone(), "Interleave shift carriers").await;
+    let payload = json!({
+        "projectId": project["id"],
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "advanced": { "schedulerShift": 9, "timestepShift": 1.5 },
+    });
+    for (path, body) in [
+        ("/api/v1/image/interleave/jobs", payload.clone()),
+        (
+            "/api/v1/jobs",
+            json!({
+                "type": "image_interleave",
+                "projectId": project["id"],
+                "requestedGpu": "auto",
+                "payload": payload,
+            }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", path, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{path}: {response}");
+        assert_eq!(response["payload"]["advanced"]["schedulerShift"], 9);
+        assert_eq!(response["payload"]["advanced"]["timestepShift"], 1.5);
+    }
+}
+
+#[tokio::test]
 async fn image_detail_registered_controls_match_raw_http_and_worker_kind() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
