@@ -15,8 +15,13 @@ use sceneworks_options::{by_wire, DefaultRule, OptionSpec, Shape};
 /// value that happens to equal the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    Authored { spelling: &'static str },
+    Authored {
+        spelling: &'static str,
+    },
     Default(DefaultRule),
+    /// A worker-owned probe derived from already-validated values. It is never persisted as an
+    /// authored choice or substituted into a public request.
+    Internal(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq)]
