@@ -36,7 +36,7 @@ export function snapRatio(width, height) {
   return `${best[0]}:${best[1]}`;
 }
 
-// The describer writes labels as `<lowercase noun>_<digits>` (man_1, dog_2, ...), so any
+// The describer writes labels as `<lowercase noun>_<digits>` (man_1, woman_2, ...), so any
 // such whole token is wrapped; there is no noun whitelist. Tradeoff: legible text that
 // happens to read like `item_3` is wrapped too. Existing `{{...}}` spans are left alone,
 // which also prevents double-wrapping `{{woman_1}}`.

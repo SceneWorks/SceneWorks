@@ -18,7 +18,7 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
     let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
     assert!(instruction.starts_with("You are a meticulous scene describer."));
     for rule in [
-        "## LABELS — every person and animal",
+        "## LABELS — every person",
         "## NO PHYSICAL TRAITS — ever",
         "## DESCRIPTION — the people, in minute detail",
         "## ENVIRONMENT — every detail",
