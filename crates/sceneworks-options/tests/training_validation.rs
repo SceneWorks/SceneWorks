@@ -209,8 +209,64 @@ fn iris_fp16_survives_effective_submission_and_worker_plan() {
         "fp16"
     );
     assert_eq!(training::train_dtype_for_kernel("other", "fp16"), "f32");
+    let advanced = serde_json::json!({"mixedPrecision":"fp16"});
+    assert_eq!(
+        training::resolve_advanced_for_kernel(
+            advanced.as_object().unwrap(),
+            iris::IRIS_TRAINING_KERNEL
+        )
+        .unwrap()
+        .train_dtype,
+        "fp16"
+    );
+    assert_eq!(
+        training::resolve_advanced_for_kernel(advanced.as_object().unwrap(), "other")
+            .unwrap()
+            .train_dtype,
+        "f32"
+    );
+
     assert_eq!(
         training::train_dtype_for_kernel(iris::IRIS_TRAINING_KERNEL, " FP16 "),
         "fp16"
     );
+}
+
+#[test]
+fn iris_legacy_task_network_defaults_are_full_at_submit_plan_and_bare_config() {
+    for target in [
+        iris::depth::iris_depth_target(),
+        iris::restore::iris_restore_target(),
+        iris::iris_generation_target(),
+    ] {
+        let expected = if target.base_model == "iris_3b" {
+            "lora"
+        } else {
+            "full"
+        };
+        for blank in [None, Some(json!("  "))] {
+            let mut submit = submission(&target);
+            let advanced = submit["config"]["advanced"].as_object_mut().unwrap();
+            advanced.remove("networkType");
+            if let Some(value) = blank {
+                advanced.insert("networkType".into(), value);
+            }
+            let bare =
+                training::resolve_advanced_for_model(advanced, &target.kernel, &target.base_model)
+                    .unwrap();
+            assert_eq!(bare.network_type, expected);
+            assert_eq!(bare.full_finetune, expected == "full");
+            let plan = job(&target, submit["config"].clone());
+            assert_eq!(
+                training::resolve_payload("training", &submit, &facts(&target)).unwrap()["config"]
+                    ["advanced"]["networkType"],
+                expected
+            );
+            assert_eq!(
+                training::resolve_payload("lora_train", &plan, &facts(&target)).unwrap()["plan"]
+                    ["config"]["advanced"]["networkType"],
+                expected
+            );
+        }
+    }
 }

@@ -766,6 +766,20 @@ pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
+    // Legacy task plans may omit networkType. Resolve the same objective default used by
+    // execution before support checks inspect the config; keep the authored object intact.
+    let mut effective_config;
+    let config = if iris::is_iris_training_kernel(&target.kernel) {
+        effective_config = config.clone();
+        let network = network_type_for_model(&config.advanced, &target.kernel, &target.base_model)
+            .map_err(|error| TrainingPlanError::InvalidConfig(error.detail))?;
+        effective_config
+            .advanced
+            .insert("networkType".into(), json!(network));
+        &effective_config
+    } else {
+        config
+    };
     if flux3::KERNELS.contains(&target.kernel.as_str()) {
         flux3::validate(target, config)?;
     }
@@ -2238,6 +2252,52 @@ pub fn train_dtype_for_kernel(kernel: &str, value: &str) -> String {
     }
 }
 
+/// Resolve the same typed execution controls when a native caller has a bare config and kernel.
+pub fn resolve_advanced_for_kernel(
+    advanced: &JsonObject,
+    kernel: &str,
+) -> Result<ResolvedTrainingAdvanced, ValidationRefusal> {
+    let mut resolved_advanced = resolve_advanced(advanced)?;
+    resolved_advanced.train_dtype = train_dtype_for_kernel(
+        kernel,
+        &preflight_string(advanced, "mixedPrecision", "bf16")?,
+    );
+    if kernel == "moss_image_lora" {
+        resolved_advanced.timestep_type =
+            moss_timestep_type(advanced, resolved_advanced.timestep_type);
+    }
+    Ok(resolved_advanced)
+}
+
+/// Iris task objectives default to full training; generation and other models default to LoRA.
+pub fn network_type_for_model(
+    advanced: &JsonObject,
+    kernel: &str,
+    base_model: &str,
+) -> Result<String, ValidationRefusal> {
+    let default = if iris::is_iris_training_kernel(kernel)
+        && matches!(
+            iris::IrisObjective::from_base_model(base_model),
+            Some(iris::IrisObjective::Depth | iris::IrisObjective::Restoration)
+        ) {
+        "full"
+    } else {
+        "lora"
+    };
+    preflight_string(advanced, "networkType", default).map(|value| value.to_ascii_lowercase())
+}
+
+pub fn resolve_advanced_for_model(
+    advanced: &JsonObject,
+    kernel: &str,
+    base_model: &str,
+) -> Result<ResolvedTrainingAdvanced, ValidationRefusal> {
+    let mut result = resolve_advanced_for_kernel(advanced, kernel)?;
+    result.network_type = network_type_for_model(advanced, kernel, base_model)?;
+    result.full_finetune = result.network_type == "full";
+    Ok(result)
+}
+
 /// Resolve legacy omissions and common scalar coercions once for previews and native mapping.
 pub fn resolve_advanced(
     advanced: &JsonObject,
@@ -2361,15 +2421,8 @@ pub fn resolve_payload(
     let advanced = carrier["config"]["advanced"]
         .as_object()
         .expect("validated advanced object");
-    let mut resolved_advanced = resolve_advanced(advanced)?;
-    resolved_advanced.train_dtype = train_dtype_for_kernel(
-        &target.kernel,
-        &preflight_string(advanced, "mixedPrecision", "bf16")?,
-    );
-    if target.kernel == "moss_image_lora" {
-        resolved_advanced.timestep_type =
-            moss_timestep_type(advanced, resolved_advanced.timestep_type);
-    }
+    let resolved_advanced =
+        resolve_advanced_for_model(advanced, &target.kernel, &target.base_model)?;
     let resolved =
         serde_json::to_value(resolved_advanced).expect("resolved training config serializes");
     let mut result = Value::Object(payload.clone());
