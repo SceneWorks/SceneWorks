@@ -290,6 +290,7 @@ pub mod limits;
 pub mod payload_util;
 pub mod request_validation;
 pub mod video_request;
+pub mod yue2_validation;
 pub const MAX_PROMPT_CHARS: usize = 4000;
 pub const MAX_JOB_POSES: usize = 64;
 pub const MAX_JOB_LORAS: usize = 10;
