@@ -1545,6 +1545,14 @@ fn production_execution_has_no_raw_advanced_reads() {
             && read.location == "advanced"
             && read.key == "controlWeights"
     };
+    // API authoring removes forged private authorization fields before it projects the same
+    // carrier into RouteOptionFacts for policy checks. The get_mut is only the scrub target.
+    let authored_control_weights_scrub = |read: &Read| {
+        read.file == "apps/rust-api/src/control_overlays.rs"
+            && read.function == "validate_raw_control_weights"
+            && read.location == "advanced"
+            && read.key == "controlWeights"
+    };
     let direct = coverage
         .reads
         .iter()
@@ -1554,6 +1562,7 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !persisted_film_attempt_read(read)
                 && !authored_image_metadata_read(read)
                 && !trusted_control_weights_write(read)
+                && !authored_control_weights_scrub(read)
         })
         .map(|read| {
             format!(

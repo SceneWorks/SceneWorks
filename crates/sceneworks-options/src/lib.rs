@@ -316,6 +316,7 @@ pub mod utility_validation;
 pub mod training_validation;
 
 mod effective_values;
+pub use effective_values::{legacy_image_flag, legacy_integer, legacy_number};
 
 pub mod supra2;
 

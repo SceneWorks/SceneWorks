@@ -24,6 +24,37 @@ pub(crate) async fn list_jobs(
     Ok(Json(public_job_snapshots(jobs)))
 }
 
+#[cfg(test)]
+mod typed_image_detail_tier_tests {
+    use super::*;
+
+    fn payload(advanced: Value) -> JsonObject {
+        json!({"advanced":advanced}).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn candle_detail_preserves_numeric_string_and_explicit_dense_semantics() {
+        for advanced in [
+            json!({"mlxQuantize":" 4 "}),
+            json!({"mlxQuantize":"4.5"}),
+            json!({"convRot":true}),
+            json!({"convRot":"true"}),
+            json!({"quantTier":"q8"}),
+        ] {
+            assert!(reject_image_detail_packed_tier_for_candle(&payload(advanced)).is_err());
+        }
+        for advanced in [
+            json!({"mlxQuantize":" 0 "}),
+            json!({"mlxQuantize":null}),
+            json!({"convRot":false}),
+            json!({"quantTier":" Bf16 "}),
+            json!({}),
+        ] {
+            assert!(reject_image_detail_packed_tier_for_candle(&payload(advanced)).is_ok());
+        }
+    }
+}
+
 /// Worker → API write of a job's structured generation metrics (epic 10402).
 /// Posted once on completion; upserts (merges) into the `generation_metrics`
 /// table and echoes the stored block back.
@@ -2346,43 +2377,39 @@ fn canonicalize_image_detail_dense_tier(payload: &mut JsonObject) -> Result<(), 
 
 #[cfg(not(target_os = "macos"))]
 fn reject_image_detail_packed_tier(payload: &JsonObject) -> Result<(), ApiError> {
-    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+    reject_image_detail_packed_tier_for_candle(payload)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn reject_image_detail_packed_tier_for_candle(payload: &JsonObject) -> Result<(), ApiError> {
+    let Some(Value::Object(_)) = payload.get("advanced") else {
         return Ok(());
     };
-    if let Some(value) = advanced.get("mlxQuantize") {
-        let bits = if value.is_null() {
-            0
-        } else {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
-                .ok_or_else(|| {
-                    ApiError::bad_request("image_detail advanced.mlxQuantize must be an integer")
-                })?
-        };
-        if bits > 0 {
-            return Err(dense_image_detail_error());
+    use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
+    let options = RouteOptionFacts::from_payload_syntax(payload);
+    match options.mlx_quantize {
+        RouteField::Valid(bits) if bits > 0 => return Err(dense_image_detail_error()),
+        RouteField::Invalid => {
+            return Err(ApiError::bad_request(
+                "image_detail advanced.mlxQuantize must be an integer",
+            ));
         }
+        RouteField::Absent | RouteField::Null | RouteField::Valid(_) => {}
     }
-    if let Some(value) = advanced.get("convRot") {
-        match value {
-            Value::Bool(false) | Value::Null => {}
-            Value::Bool(true) => return Err(dense_image_detail_error()),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "image_detail advanced.convRot must be a boolean",
-                ))
-            }
+    match options.conv_rot {
+        RouteField::Valid(true) => return Err(dense_image_detail_error()),
+        RouteField::Invalid => {
+            return Err(ApiError::bad_request(
+                "image_detail advanced.convRot must be a boolean",
+            ));
         }
+        RouteField::Absent | RouteField::Null | RouteField::Valid(false) => {}
     }
-    if let Some(value) = advanced.get("quantTier") {
-        let dense = value.is_null()
-            || value.as_str().is_some_and(|tier| {
-                tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16")
-            });
-        if !dense {
-            return Err(dense_image_detail_error());
-        }
+    match options.quant_tier {
+        RouteField::Valid(tier)
+            if tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16") => {}
+        RouteField::Absent | RouteField::Null => {}
+        RouteField::Valid(_) | RouteField::Invalid => return Err(dense_image_detail_error()),
     }
 
     Ok(())
@@ -2399,7 +2426,7 @@ fn reject_image_detail_packed_tier(_payload: &JsonObject) -> Result<(), ApiError
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn dense_image_detail_error() -> ApiError {
     ApiError::bad_request(
         "Candle image_detail requires the dense bf16 model tier; packed quant selectors are unsupported",

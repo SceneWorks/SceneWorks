@@ -246,10 +246,10 @@ impl RouteOptionFacts {
             value.as_array().map(Vec::len)
         }
         fn legacy_integer(value: &Value) -> Option<i64> {
-            sceneworks_options::effective_values::legacy_integer(value)?.as_i64()
+            sceneworks_options::legacy_integer(value)?.as_i64()
         }
         fn legacy_number(value: &Value) -> Option<f64> {
-            sceneworks_options::effective_values::legacy_number(value)
+            sceneworks_options::legacy_number(value)
         }
         let advanced = parent(payload, "advanced");
         let veda = match advanced {
@@ -310,9 +310,7 @@ impl RouteOptionFacts {
             yue2_decoder: field(yue2, "decoder", text),
             conv_rot: field(advanced, "convRot", boolean),
             angle_set: field(advanced, "angleSet", |value| {
-                Some(sceneworks_options::effective_values::legacy_image_flag(
-                    value,
-                ))
+                Some(sceneworks_options::legacy_image_flag(value))
             }),
         }
     }
@@ -586,6 +584,144 @@ impl IrisTrainingOptions {
             iris_repa_enabled: iris_kernel && self.repa_enabled(),
             iris_kernel,
         }
+    }
+}
+
+/// The complete, validated advanced object handed to the native trainer ABI. Its JSON shape is
+/// an engine contract; execution policy reads the named fields on `TrainingExecutionOptions`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedModelOptionsWire(JsonObject);
+
+impl ValidatedModelOptionsWire {
+    pub fn into_json(self) -> JsonObject {
+        self.0
+    }
+
+    pub fn as_json_for_engine(&self) -> &JsonObject {
+        &self.0
+    }
+}
+
+/// One-time native training binding from the portable owner's effective request. The shared
+/// owner resolves common defaults; its existing technique parsers supply the named native
+/// settings, so no worker repeats their policy or reads the authored advanced bag.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingExecutionOptions {
+    pub common: crate::training::ResolvedTrainingAdvanced,
+    pub iris: IrisTrainingOptions,
+    pub subject_mask_loss_weights: Option<(f64, f64)>,
+    pub depth_anchoring: Option<crate::training::depth_anchoring::DepthAnchoringSettings>,
+    pub body_losses: crate::training::body_losses::BodyLossSettings,
+    pub vae_anchor: Option<crate::training::latent_perceptual::LatentLossSettings>,
+    pub latent_lpips: Option<crate::training::latent_perceptual::LatentLossSettings>,
+    pub identity_loss: Option<crate::training::face_losses::IdentityLossSettings>,
+    pub face_landmark_loss: Option<crate::training::face_losses::FaceLossSchedule>,
+    pub training_adapter: Option<&'static crate::training::depth_anchoring::AuxTrainingModel>,
+    pub buckets: Option<crate::training::ResolutionBucketConfig>,
+    pub model_options_wire: ValidatedModelOptionsWire,
+}
+
+impl TrainingExecutionOptions {
+    pub fn bind(
+        authored: &JsonObject,
+        resolved: &crate::request_validation::ResolvedRequest,
+    ) -> Result<Self, String> {
+        let effective = resolved.as_payload();
+        let carrier = effective
+            .get("plan")
+            .and_then(Value::as_object)
+            .unwrap_or(effective);
+        let advanced = carrier
+            .get("config")
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("advanced"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| "resolved training request has no config.advanced object".to_owned())?;
+        let target = carrier.get("target").and_then(Value::as_object);
+        let kernel = target
+            .and_then(|target| target.get("kernel"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let base_model = target
+            .and_then(|target| target.get("baseModel"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let common = crate::training::resolve_advanced_for_model(advanced, kernel, base_model)
+            .map_err(|error| error.to_string())?;
+        Self::from_effective(authored, effective, advanced, common)
+    }
+
+    /// Preview and Iris helpers sometimes have a validated bare config rather than a plan.
+    /// Resolve its common fields through the same portable owner before binding techniques.
+    pub fn for_config(
+        config: &crate::training::TrainingConfig,
+        kernel: &str,
+        base_model: &str,
+    ) -> Result<Self, String> {
+        let common =
+            crate::training::resolve_advanced_for_model(&config.advanced, kernel, base_model)
+                .map_err(|error| error.to_string())?;
+        let mut effective_advanced = config.advanced.clone();
+        let lowered = serde_json::to_value(&common).map_err(|error| error.to_string())?;
+        effective_advanced.extend(
+            lowered
+                .as_object()
+                .ok_or_else(|| "resolved training controls are not an object".to_owned())?
+                .clone(),
+        );
+        let mut effective = JsonObject::new();
+        effective.insert(
+            "config".to_owned(),
+            serde_json::json!({ "advanced": effective_advanced }),
+        );
+        let mut authored = JsonObject::new();
+        authored.insert(
+            "config".to_owned(),
+            serde_json::json!({ "advanced": config.advanced }),
+        );
+        let advanced = effective["config"]["advanced"]
+            .as_object()
+            .expect("constructed training advanced object");
+        Self::from_effective(&authored, &effective, advanced, common)
+    }
+
+    fn from_effective(
+        authored: &JsonObject,
+        effective: &JsonObject,
+        advanced: &JsonObject,
+        common: crate::training::ResolvedTrainingAdvanced,
+    ) -> Result<Self, String> {
+        let iris = IrisTrainingOptions::bind(&BindingInput::new(authored, effective))
+            .map_err(|error| error.to_string())?;
+        let technique_error = |error: crate::training::TrainingPlanError| error.to_string();
+        Ok(Self {
+            common,
+            iris,
+            subject_mask_loss_weights: crate::training::subject_mask_loss_weights(advanced)
+                .map_err(technique_error)?,
+            depth_anchoring: crate::training::depth_anchoring::depth_anchoring_settings(advanced)
+                .map_err(technique_error)?,
+            body_losses: crate::training::body_losses::body_loss_settings(advanced)
+                .map_err(technique_error)?,
+            vae_anchor: crate::training::latent_perceptual::latent_loss_settings(
+                &crate::training::latent_perceptual::VAE_ANCHOR,
+                advanced,
+            )
+            .map_err(technique_error)?,
+            latent_lpips: crate::training::latent_perceptual::latent_loss_settings(
+                &crate::training::latent_perceptual::LATENT_LPIPS,
+                advanced,
+            )
+            .map_err(technique_error)?,
+            identity_loss: crate::training::face_losses::identity_loss_settings(advanced)
+                .map_err(technique_error)?,
+            face_landmark_loss: crate::training::face_losses::face_landmark_loss_settings(advanced)
+                .map_err(technique_error)?,
+            training_adapter: crate::training::training_adapter::training_adapter_model(advanced)
+                .map_err(technique_error)?,
+            buckets: crate::training::parse_training_bucket_config(advanced)?,
+            model_options_wire: ValidatedModelOptionsWire(advanced.clone()),
+        })
     }
 }
 
