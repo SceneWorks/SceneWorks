@@ -49,6 +49,25 @@ pub enum BindingError {
     },
 }
 
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undeclared { location, key } => {
+                write!(formatter, "undeclared option {location}.{key}")
+            }
+            Self::WrongShape { id, expected } => {
+                write!(formatter, "option {id} is not declared as {expected}")
+            }
+            Self::MissingRequired { id } => write!(formatter, "required option {id} is missing"),
+            Self::InvalidEffectiveValue { id, expected } => {
+                write!(formatter, "resolved option {id} must be {expected}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BindingError {}
+
 /// The syntactic state of an option in a saved request or a bare routing probe. Routing must
 /// retain malformed intent so a different provider cannot silently claim the request. Policy,
 /// coercion, and defaults are applied by the shared resolver for full submissions.
