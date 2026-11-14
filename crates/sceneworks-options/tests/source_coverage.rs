@@ -1628,7 +1628,7 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "computed expression",
         ),
         (
-            "apps/rust-api/src/generation.rs",
+            "crates/sceneworks-options/src/video_request.rs",
             "normalize_ltx25_generation_controls",
             "key",
         ),
@@ -1693,9 +1693,14 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "computed expression",
         ),
         (
-            "crates/sceneworks-core/src/video_request.rs",
+            "crates/sceneworks-options/src/video_request.rs",
             "stamp_replayed_reference_image_resize_mode",
             "REFERENCE_IMAGE_RESIZE_MODE_KEY",
+        ),
+        (
+            "crates/sceneworks-options/src/sensenova_validation.rs",
+            "materialize_interleave",
+            "computed expression",
         ),
         (
             "crates/sceneworks-worker/src/external_library_runtime.rs",
