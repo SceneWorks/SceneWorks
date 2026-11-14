@@ -139,6 +139,25 @@ describe("makeCreateJob", () => {
     expect(apiFetch).toHaveBeenCalledOnce();
   });
 
+  it("passes both catalog rows for vector prompt validation", async () => {
+    validatePortableRequestNow.mockReturnValue({ state: "valid" });
+    apiFetch.mockResolvedValue({ id: "vector-job", status: "queued" });
+    const raster = { id: "raster-a" };
+    const vector = { id: "vector-b" };
+    const lookup = vi.fn((id) => ({ "raster-a": raster, "vector-b": vector })[id]);
+    const creator = makeCreateJob({
+      definition: CREATE_JOB_DEFINITIONS.vectorPrompt,
+      token: "token-1", project, requestedGpu: "auto",
+      setJobs: vi.fn(), setError: vi.fn(), modelEntryForRequest: lookup,
+    });
+    await creator({ rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo" });
+    expect(lookup.mock.calls).toEqual([["raster-a"], ["vector-b"]]);
+    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "vectorPrompt", modelEntry: { raster, vector },
+    }));
+    expect(apiFetch).toHaveBeenCalledOnce();
+  });
+
   it.each(cases)("preserves the $key route and request body", async ({ key, args, path, body }) => {
     const job = { id: `job-${key}`, status: "queued", createdAt: "2026-07-25T12:00:00Z" };
     apiFetch.mockResolvedValue(job);

@@ -112,10 +112,13 @@ export function makeCreateJob({
       const body = definition.buildBody(args, project, requestedGpu);
       if (definition.validationKind && modelEntryForRequest) {
         const payload = definition.validationPayload?.(body) ?? body;
+        const modelEntry = definition.validationKind === "vectorPrompt"
+          ? { raster: modelEntryForRequest(payload.rasterModel), vector: modelEntryForRequest(payload.vectorModel) }
+          : modelEntryForRequest(payload.model ?? payload.modelId);
         const result = validatePortableRequestNow({
           kind: definition.validationKind,
           payload,
-          modelEntry: modelEntryForRequest(payload.model ?? payload.modelId),
+          modelEntry,
         });
         if (result.state === "invalid") {
           const message = result.refusal.detail;
