@@ -57,7 +57,9 @@
 //! channels as an RGBA PNG. An alpha-carrying reference travels as `Conditioning::ReferenceRgba`
 //! (see `image_jobs::build_qwen_image_2_1_conditioning`).
 
-use serde_json::{Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::Value;
 
 use crate::{WorkerError, WorkerResult};
 

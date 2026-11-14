@@ -1515,12 +1515,11 @@ fn print_production_binding_inventory() {
     }
 }
 
-// SW-7038 migration gate. Keep this explicit zero assertion next to the live inventory
-// while family execution paths are converted. Only the exact one-time typed binder functions,
+// SW-7038 production gate. Keep this explicit zero assertion next to the live inventory.
+// Only the exact one-time typed binder functions,
 // authored persistence, and the historical upgrader may be excluded after site review.
 // No path, directory, option family, or dynamic-accessor blanket exemption is permitted.
 #[test]
-#[ignore = "SW-7038 production binding migration in progress"]
 fn production_execution_has_no_raw_advanced_reads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

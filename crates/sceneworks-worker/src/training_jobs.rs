@@ -2811,9 +2811,10 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// into a dense-backward OOM. Those safety overrides are Candle-only. Both backends receive the
 /// same owner-resolved MOSS options bag and adapter-training sampler default.
 #[cfg(native_lane)]
-fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
+fn finalize_training_config(config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
+        let mut config = config;
         if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
             tracing::info!(
                 event = "candle_training_force_gradient_checkpointing",
@@ -2828,8 +2829,13 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
         if plan.target.kernel == "ltx_mlx_lora" {
             config.train_dtype = "f32".to_owned();
         }
+        return config;
     }
-    config
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        let _ = plan;
+        config
+    }
 }
 
 /// The shared plan-to-engine config mapping of a bare SceneWorks config (no backend finalization):

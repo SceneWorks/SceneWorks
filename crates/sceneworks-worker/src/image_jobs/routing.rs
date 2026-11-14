@@ -196,6 +196,7 @@ use crate::Value;
 #[cfg(not(target_os = "macos"))]
 use crate::WorkerError;
 use crate::WorkerResult;
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 use std::path::Path;
 /// Resolve one exact imported generate surface and reject every request axis the selected provider
 /// cannot execute. Source shape is part of the registry key: a sibling route for the same family is
