@@ -148,9 +148,8 @@ pub(super) fn resolved_option_or_manifest_u32_with(
 }
 
 /// Closure-default twin of [`resolved_option_or_manifest_f32`] (sc-8825). Identical mechanism —
-/// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
-/// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
-/// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
+/// the resolved option wins over the manifest value or per-lane `default_fn` closure; the selected
+/// value is clamped to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
 /// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
 #[cfg(any(native_lane, test))]
 pub(super) fn resolved_option_or_manifest_f32_with(
