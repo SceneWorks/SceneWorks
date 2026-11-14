@@ -23,7 +23,7 @@ use sceneworks_core::model_artifacts::portable_binding::{
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
 };
-use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
+use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts, TrainingRouteFacts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -699,12 +699,16 @@ pub(crate) fn portable_authored_options(payload: &JsonObject) -> Value {
                 selected.insert(authored_key.to_owned(), Value::String(value.to_owned()));
             }
         }
-        if let Some(weight) = payload
+        let repa_selected = payload
             .get("plan")
-            .and_then(|plan| plan.pointer("/config/advanced/iris/repa/weight"))
-            .and_then(Value::as_f64)
-        {
-            selected.insert("irisRepaSelected".to_owned(), Value::Bool(weight > 0.0));
+            .and_then(Value::as_object)
+            .map(TrainingRouteFacts::from_plan_syntax)
+            .and_then(|facts| match facts.repa_weight {
+                RouteField::Valid(weight) => Some(weight > 0.0),
+                _ => None,
+            });
+        if let Some(repa_selected) = repa_selected {
+            selected.insert("irisRepaSelected".to_owned(), Value::Bool(repa_selected));
         }
     }
     options
@@ -4926,6 +4930,29 @@ mod tests {
         assert_eq!(options["trainingKernel"], "iris_mlx_lora");
         assert_eq!(options["irisRepaSelected"], true);
         assert!(!options.to_string().contains("/host/private"));
+    }
+
+    #[test]
+    fn archived_training_repa_projection_preserves_numeric_presence() {
+        let project = |repa: Value| {
+            let payload = json!({"plan":{
+                "target":{"baseModel":"iris_3b"},
+                "config":{"advanced":{"iris":{"repa":repa}}}
+            }});
+            portable_authored_options(payload.as_object().unwrap())
+        };
+        assert_eq!(project(json!({"weight":0.5}))["irisRepaSelected"], true);
+        assert_eq!(project(json!({"weight":0}))["irisRepaSelected"], false);
+        assert_eq!(project(json!({"weight":-0.5}))["irisRepaSelected"], false);
+        for repa in [
+            json!({}),
+            json!({"weight":null}),
+            json!({"weight":"0.5"}),
+            json!({"weight":[]}),
+            json!("malformed"),
+        ] {
+            assert!(project(repa).get("irisRepaSelected").is_none());
+        }
     }
 
     #[test]
