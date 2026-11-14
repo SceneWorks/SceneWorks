@@ -19,6 +19,14 @@ const samples = args.samples === undefined ? 30 : Number(args.samples);
 if (!origin || !Number.isInteger(samples) || samples < 5 || samples > 50) {
   throw new Error("Pass --origin <controlled fixture origin> and --samples 5..50");
 }
+const reportResponse = await fetch(`${origin}/bundle-report.json`, { signal: AbortSignal.timeout(10000) });
+if (!reportResponse.ok) throw new Error(`Bundle report unavailable (${reportResponse.status})`);
+const bundleReport = await reportResponse.json();
+const reportedRoute = bundleReport.routes?.["Image Studio"];
+const reportedInteractiveRoute = bundleReport.interactiveRoutes?.["Image Studio"];
+if (!reportedRoute || !reportedInteractiveRoute) throw new Error("Image Studio route closures are missing from bundle report");
+const bundleChunks = new Map(bundleReport.chunks.map((chunk) => [chunk.fileName, chunk]));
+const fetchedChunks = new Set();
 
 function p95(values) {
   const ordered = [...values].sort((left, right) => left - right);
@@ -33,6 +41,10 @@ try {
   const context = await browser.newContext({ serviceWorkers: "block" });
   try {
     const page = await context.newPage();
+    page.on("response", (response) => {
+      const fileName = new URL(response.url()).pathname.slice(1);
+      if (bundleChunks.has(fileName)) fetchedChunks.add(fileName);
+    });
     if (fixtureOrigin) {
       await page.route("**/api/**", async (route) => {
         const request = route.request();
@@ -117,12 +129,35 @@ try {
       batchTimes.push(await measureEdit('[aria-label="Batch prompts"]', prompts,
         '.batch-run .batch-hint[role="status"]', "Options checked for 32 requests"));
     }
+    const observedInteractiveAssets = [...fetchedChunks]
+      .filter((name) => !bundleReport.initial.chunks.includes(name)).sort();
+    const observedInteractiveBytes = observedInteractiveAssets.reduce((size, name) => {
+      const chunk = bundleChunks.get(name);
+      for (const metric of ["rawBytes", "gzipBytes", "brotliBytes"]) size[metric] += chunk[metric];
+      return size;
+    }, { rawBytes: 0, gzipBytes: 0, brotliBytes: 0 });
+    const bundleBudget = bundleReport.budgets.largestRoute;
+    const withinBundleBudget = [reportedInteractiveRoute, observedInteractiveBytes].every((size) =>
+      size.rawBytes <= bundleBudget.rawBytes && size.gzipBytes <= bundleBudget.gzipBytes
+      && size.brotliBytes <= bundleBudget.brotliBytes);
     const result = {
       origin, fixtureOrigin: fixtureOrigin ?? origin, browser: `Chromium ${browser.version()}`, samples,
       surface: "React Image Studio with controlled API fixture",
+      routeStaticClosure: { chunks: reportedRoute.chunks.length,
+        rawBytes: reportedRoute.rawBytes, gzipBytes: reportedRoute.gzipBytes,
+        brotliBytes: reportedRoute.brotliBytes },
+      reportedInteractiveClosure: { chunks: reportedInteractiveRoute.chunks.length,
+        rawBytes: reportedInteractiveRoute.rawBytes, gzipBytes: reportedInteractiveRoute.gzipBytes,
+        brotliBytes: reportedInteractiveRoute.brotliBytes },
+      observedInteractiveAssets,
+      observedInteractiveBytes,
+      observedValidatorWasm: [...fetchedChunks].some((name) => bundleChunks.get(name)?.type === "wasm"),
       singleInputToPaintP95Ms: p95(single), batch32InputToPaintP95Ms: p95(batchTimes),
       inputVisibleBudgetMs: 100,
-      withinBudget: p95(single) <= 100 && p95(batchTimes) <= 100,
+      interactionBundleBudget: bundleBudget,
+      withinBudget: p95(single) <= 100 && p95(batchTimes) <= 100
+        && [...fetchedChunks].some((name) => bundleChunks.get(name)?.type === "wasm")
+        && withinBundleBudget,
     };
     console.log(JSON.stringify(result, null, 2));
     if (!result.withinBudget) process.exitCode = 1;
