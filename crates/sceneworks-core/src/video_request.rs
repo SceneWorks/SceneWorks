@@ -23,7 +23,8 @@ pub use crate::h3_veda::{
 };
 
 use crate::contracts::JsonObject;
-use crate::resolved_options::{BindingError, BindingInput, Bound};
+use crate::portable_aux_bindings::PortableAuxBindings;
+use crate::resolved_options::{BindingError, BindingInput, Bound, Origin};
 // Compatibility exports preserve established callers while canonical image/neutral
 // request code imports its own owner. No image implementation remains in this module.
 pub use crate::image_limits::{
@@ -110,9 +111,87 @@ video_option_fields! {
     noise_aug_strength: f64 => number("noiseAugStrength"),
     decode_chunk_size: i64 => integer("decodeChunkSize"),
     enhance_prompt: bool => boolean("enhancePrompt"),
+    enhance_max_tokens: i64 => integer("enhanceMaxTokens"),
+    enhance_temperature: f64 => number("enhanceTemperature"),
 }
 
 impl VideoOptions {
+    pub fn ltx25_vae_decoder(&self) -> Result<&str, String> {
+        let decoder = self
+            .vae_decoder
+            .as_ref()
+            .map(|bound| bound.value.as_str())
+            .unwrap_or(LTX25_VAE_DECODER_CONV);
+        match decoder {
+            LTX25_VAE_DECODER_CONV | LTX25_VAE_DECODER_DIFFUSION => Ok(decoder),
+            _ => {
+                Err("advanced.vaeDecoder must be \"conv\" or \"diffusion\" when present".to_owned())
+            }
+        }
+    }
+
+    pub fn temporal_upsample_rounds(&self) -> Result<u32, String> {
+        let rounds = self
+            .temporal_upsample_rounds
+            .as_ref()
+            .map(|bound| bound.value)
+            .unwrap_or(0);
+        u32::try_from(rounds)
+            .ok()
+            .filter(|rounds| *rounds <= LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS)
+            .ok_or_else(|| format!("advanced.temporalUpsampleRounds must be from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}, got {rounds}"))
+    }
+
+    pub fn auto_duration_range(&self) -> Result<Option<VideoAutoDurationRange>, String> {
+        if !self.auto_duration.as_ref().is_some_and(|bound| bound.value) {
+            return Ok(None);
+        }
+        let number = |key: &str, bound: &Option<Bound<f64>>| {
+            bound
+                .as_ref()
+                .map(|bound| bound.value as f32)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    format!("advanced.{key} must be a finite number when auto-duration is enabled")
+                })
+        };
+        let min_seconds = number("autoDurationMinSeconds", &self.auto_duration_min_seconds)?;
+        let max_seconds = number("autoDurationMaxSeconds", &self.auto_duration_max_seconds)?;
+        if min_seconds <= 0.0 || max_seconds <= 0.0 {
+            return Err("advanced auto-duration min/max seconds must both be positive".to_owned());
+        }
+        if min_seconds > max_seconds {
+            return Err(format!("advanced.autoDurationMinSeconds {min_seconds} exceeds advanced.autoDurationMaxSeconds {max_seconds}"));
+        }
+        Ok(Some(VideoAutoDurationRange {
+            min_seconds,
+            max_seconds,
+        }))
+    }
+
+    pub fn requested_reference_image_short_edge(&self) -> Result<Option<u32>, String> {
+        let Some(edge) = self.reference_image_short_edge.as_ref() else {
+            return Ok(None);
+        };
+        if !matches!(edge.origin, Origin::Authored { .. }) {
+            return Ok(None);
+        }
+        u32::try_from(edge.value)
+            .ok()
+            .filter(|edge| (REFERENCE_IMAGE_SHORT_EDGE_MIN..=REFERENCE_IMAGE_SHORT_EDGE_MAX).contains(edge))
+            .map(Some)
+            .ok_or_else(|| format!("advanced.referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {}", edge.value))
+    }
+
+    pub fn reference_image_resize_mode(&self) -> Result<ReferenceImageResizeMode, String> {
+        match self.reference_image_resize_mode.as_ref().map(|bound| bound.value.as_str()) {
+            None | Some("match") => Ok(ReferenceImageResizeMode::Match),
+            Some("max") => Ok(ReferenceImageResizeMode::Max),
+            Some("diffusers") => Ok(ReferenceImageResizeMode::Diffusers),
+            Some(_) => Err("advanced.referenceImageResizeMode must be one of \"match\", \"max\" or \"diffusers\"".to_owned()),
+        }
+    }
+
     pub fn h3_veda_settings(
         &self,
         model: &str,
@@ -709,6 +788,11 @@ pub struct VideoRequest {
     /// carries any is refused at enqueue unless the model declares
     /// `limits.maxReferenceAudioAssets`.
     pub reference_audio_asset_ids: Vec<String>,
+    /// Bound only by the worker after the source guard verifies its private dispatch clone.
+    pub portable_aux: PortableAuxBindings,
+    /// Effective advanced controls from the shared static resolver. The legacy parser leaves
+    /// this absent; execution must construct the request with `from_resolved`.
+    pub options: Option<VideoOptions>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -717,6 +801,21 @@ pub struct VideoRequest {
 }
 
 impl VideoRequest {
+    pub fn from_resolved(
+        authored: &JsonObject,
+        effective: &JsonObject,
+    ) -> Result<Self, BindingError> {
+        let mut request = Self::from_payload(effective);
+        request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
+        Ok(request)
+    }
+
+    pub fn options(&self) -> &VideoOptions {
+        self.options
+            .as_ref()
+            .expect("video execution requires resolved advanced options")
+    }
+
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
@@ -766,6 +865,8 @@ impl VideoRequest {
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
             reference_audio_asset_ids: string_list(payload, "referenceAudioAssetIds"),
+            portable_aux: PortableAuxBindings::default(),
+            options: None,
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }

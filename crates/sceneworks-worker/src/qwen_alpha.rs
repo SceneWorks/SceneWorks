@@ -148,7 +148,15 @@ pub(crate) fn resolve_output_channels(
     model_id: &str,
     advanced: &Map<String, Value>,
 ) -> WorkerResult<u8> {
-    if !transparency_requested(advanced) {
+    resolve_output_channels_typed(model_id, transparency_requested(advanced))
+}
+
+/// Resolve from the already-bound effective transparency control.
+pub(crate) fn resolve_output_channels_typed(
+    model_id: &str,
+    transparent_requested: bool,
+) -> WorkerResult<u8> {
+    if !transparent_requested {
         return Ok(CHANNELS_RGB);
     }
     if engine_advertises_alpha_output(model_id) {

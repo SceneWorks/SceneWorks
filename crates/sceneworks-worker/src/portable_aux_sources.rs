@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use sceneworks_core::contracts::JsonObject;
+use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
 use serde_json::Value;
 
 /// Only the verified dispatch clone carries this private map. The worker guard removes every
@@ -40,6 +41,27 @@ pub(crate) fn selected_krea_control_override(
         .filter(|path| path.is_file()))
 }
 
+/// Select from the verified attempt context without re-reading the dispatch JSON.
+#[cfg(any(test, native_lane))]
+pub(crate) fn selected_krea_control_override_typed(
+    bindings: &PortableAuxBindings,
+    env_override: Option<&str>,
+) -> crate::WorkerResult<Option<PathBuf>> {
+    if bindings.has_paths() {
+        return bindings
+            .path("strict_control")
+            .map(Path::to_path_buf)
+            .map(Some)
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound strict_control source".to_owned())
+            });
+    }
+    Ok(env_override
+        .map(str::trim)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file()))
+}
+
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
@@ -49,6 +71,33 @@ pub(crate) fn bound_pulid_weights(
 ) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
     let required = |id| {
         bound_aux_path(advanced, id)
+            .ok_or_else(|| crate::WorkerError::InvalidPayload(format!("missing bound {id} source")))
+    };
+    let adapter = required("pulid_adapter")?;
+    let eva = required("pulid_eva")?;
+    let bisenet = required("pulid_bisenet")?;
+    let scrfd = required("pulid_scrfd")?;
+    let arcface = required("pulid_arcface")?;
+    let staged = tempfile::tempdir()?;
+    for (source, file) in [
+        (&bisenet, "bisenet_parsing.safetensors"),
+        (&scrfd, "scrfd_10g.safetensors"),
+        (&arcface, "arcface_iresnet100.safetensors"),
+    ] {
+        std::fs::copy(source, staged.path().join(file))?;
+    }
+    Ok((adapter, eva, staged.path().to_path_buf(), staged))
+}
+
+/// Assemble PuLID components from the guard's typed route context.
+#[cfg(native_lane)]
+pub(crate) fn bound_pulid_weights_typed(
+    bindings: &PortableAuxBindings,
+) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
+    let required = |id| {
+        bindings
+            .path(id)
+            .map(Path::to_path_buf)
             .ok_or_else(|| crate::WorkerError::InvalidPayload(format!("missing bound {id} source")))
     };
     let adapter = required("pulid_adapter")?;

@@ -54,6 +54,7 @@ use sceneworks_core::model_artifacts::ModelArtifactResolver;
 use sceneworks_core::model_artifacts::{
     ArtifactContractError, ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
 };
+use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
 use sceneworks_core::portable_sources::{
     portable_aux_source_shape, required_portable_aux_source_ids, PortableAuxSourceShape,
 };
@@ -70,6 +71,7 @@ pub(crate) struct RuntimeSourceGuard {
     /// Worker-only request copy. Every user-supplied binding hint is removed before dispatch;
     /// a verified route may replace it with its frozen tier and later with pinned local paths.
     dispatch_payload: JsonObject,
+    portable_aux: PortableAuxBindings,
     portable_scope: Option<ActiveLocalArtifacts>,
     _portable_snapshot: Option<PortableAttemptSnapshot>,
     plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
@@ -620,8 +622,11 @@ impl RuntimeSourceGuard {
                     );
             }
         }
+        let portable_aux = PortableAuxBindings::from_trusted_dispatch(&dispatch_payload)
+            .map_err(invalid_binding)?;
         Ok(Self {
             dispatch_payload,
+            portable_aux,
             portable_scope,
             _portable_snapshot: portable_snapshot,
             plan_layers,
@@ -654,6 +659,7 @@ impl RuntimeSourceGuard {
         }
         Self {
             dispatch_payload,
+            portable_aux: PortableAuxBindings::default(),
             portable_scope: None,
             _portable_snapshot: None,
             plan_layers: None,
@@ -668,6 +674,10 @@ impl RuntimeSourceGuard {
 
     pub(crate) fn dispatch_payload(&self) -> &JsonObject {
         &self.dispatch_payload
+    }
+
+    pub(crate) fn portable_aux(&self) -> &PortableAuxBindings {
+        &self.portable_aux
     }
 
     pub(crate) fn plan_layers(&self) -> Option<std::sync::Arc<VerifiedPlanLayers>> {
