@@ -953,7 +953,14 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
         steps: advanced_int(request, "numInferenceSteps", 50, 1, 100) as usize,
         cfg_scale: advanced_float(request, "guidanceScale", 4.0),
         img_cfg_scale: advanced_float(request, "imageGuidanceScale", 1.0),
-        timestep_shift: advanced_float(request, "timestepShift", 3.0),
+        timestep_shift: request
+            .resolved_advanced
+            .as_ref()
+            .expect("interleave options must be resolved")
+            .interleave_timestep_shift
+            .as_ref()
+            .map(|bound| bound.value as f32)
+            .unwrap_or(3.0),
         max_new_tokens: advanced_int(request, "maxNewTokens", 2048, 64, 8192) as usize,
         max_images: advanced_int(request, "maxImages", 6, 1, 10) as usize,
         // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.

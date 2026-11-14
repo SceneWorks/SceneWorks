@@ -246,6 +246,8 @@ pub struct ImageAdvanced {
     pub sampler: Option<Bound<String>>,
     pub scheduler: Option<Bound<String>>,
     pub scheduler_shift: Option<Bound<f64>>,
+    /// SenseNova interleave reads the legacy alias itself, independently of schedulerShift.
+    pub interleave_timestep_shift: Option<Bound<f64>>,
     pub steps: Option<Bound<i64>>,
     pub guidance_scale: Option<Bound<f64>>,
     pub guidance_method: Option<Bound<String>>,
@@ -331,6 +333,7 @@ impl ImageAdvanced {
         put!(sampler, "sampler");
         put!(scheduler, "scheduler");
         put!(scheduler_shift, "schedulerShift");
+        put!(interleave_timestep_shift, "timestepShift");
         put!(steps, "steps");
         put!(guidance_scale, "guidanceScale");
         put!(guidance_method, "guidanceMethod");
@@ -402,6 +405,7 @@ impl ImageAdvanced {
             sampler: input.text("advanced", "sampler")?,
             scheduler: input.text("advanced", "scheduler")?,
             scheduler_shift: input.number("advanced", "schedulerShift")?,
+            interleave_timestep_shift: input.number_exact_alias("advanced", "timestepShift")?,
             steps: input.integer("advanced", "steps")?,
             guidance_scale: input.number("advanced", "guidanceScale")?,
             guidance_method: input.text("advanced", "guidanceMethod")?,

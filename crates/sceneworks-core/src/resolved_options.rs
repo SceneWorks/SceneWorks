@@ -556,6 +556,39 @@ impl<'a> BindingInput<'a> {
         .transpose()
     }
 
+    /// Bind an alias that the portable owner deliberately retains as a separate provider input.
+    /// SenseNova interleave uses `timestepShift` itself, even when `schedulerShift` is also present.
+    /// The ordinary `number` accessor follows the canonical key and would lose that distinction.
+    pub fn number_exact_alias(
+        &self,
+        location: &str,
+        alias: &'static str,
+    ) -> Result<Option<Bound<f64>>, BindingError> {
+        let spec = by_wire(location, alias)
+            .filter(|spec| spec.shape == Shape::Number && spec.aliases.contains(&alias))
+            .ok_or_else(|| BindingError::Undeclared {
+                location: location.to_owned(),
+                key: alias.to_owned(),
+            })?;
+        let Some(value) = Self::parent(self.effective, location).and_then(|map| map.get(alias))
+        else {
+            return Ok(None);
+        };
+        let value = value.as_f64().filter(|value| value.is_finite()).ok_or(
+            BindingError::InvalidEffectiveValue {
+                id: spec.id,
+                expected: "finite number",
+            },
+        )?;
+        let origin =
+            if Self::parent(self.authored, location).is_some_and(|map| map.contains_key(alias)) {
+                Origin::Authored { spelling: alias }
+            } else {
+                Origin::Default(spec.default)
+            };
+        Ok(Some(Bound { value, origin }))
+    }
+
     pub fn text(&self, location: &str, key: &str) -> Result<Option<Bound<String>>, BindingError> {
         self.entry(location, key, "text", |shape| {
             matches!(shape, Shape::Text | Shape::OneOf(_))
@@ -675,6 +708,33 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn sense_nova_interleave_alias_keeps_its_own_value() {
+        let authored = obj(json!({"advanced":{"schedulerShift":1.25,"timestepShift":2.5}}));
+        let input = BindingInput::new(&authored, &authored);
+        assert_eq!(
+            input
+                .number("advanced", "schedulerShift")
+                .unwrap()
+                .unwrap()
+                .value,
+            1.25
+        );
+        assert_eq!(
+            input
+                .number_exact_alias("advanced", "timestepShift")
+                .unwrap()
+                .unwrap()
+                .value,
+            2.5
+        );
+        let canonical_only = obj(json!({"advanced":{"schedulerShift":1.25}}));
+        assert!(BindingInput::new(&canonical_only, &canonical_only)
+            .number_exact_alias("advanced", "timestepShift")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
