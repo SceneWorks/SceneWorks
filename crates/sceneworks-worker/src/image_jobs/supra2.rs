@@ -1922,6 +1922,7 @@ mod tests {
                         gen_core::PromptEnhancementSink::default(),
                         preview,
                         &lane::LaneRgbaSurface {
+                            execution_report: None,
                             warnings: Some(&warnings),
                             prompt_batch: Some(&batch),
                             ..Default::default()

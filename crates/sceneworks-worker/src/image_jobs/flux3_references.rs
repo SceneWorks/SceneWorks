@@ -66,7 +66,7 @@ pub(crate) fn render_reference_request(
     references: &ResolvedReferences,
     context: Option<&gen_core::MemoryRunContext>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
-) -> gen_core::Result<gen_core::GenerationReport> {
+) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
     let context = context
         .filter(|context| {
             context.reference_resources.as_ref() == Some(&references.resources)
@@ -84,7 +84,7 @@ pub(crate) fn render_reference_request(
         })?;
     request.conditioning = references.conditioning.clone();
     request.flux3_reference_output = Some(references.output_size);
-    crate::memory_strategy::generate_with_scope_report(
+    crate::memory_strategy::generate_with_scope_execution_report(
         generator,
         request,
         Some(context),
@@ -445,6 +445,7 @@ mod tests {
             denoiser_output_latent_space: None,
         });
         let surface = super::super::LaneRgbaSurface {
+            execution_report: None,
             flux3_layout: Some(&layout),
             ..Default::default()
         };

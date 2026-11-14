@@ -129,6 +129,10 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// with no cache reports none.
     pub(crate) prefix_kv_cache:
         Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
+    /// Request-local completed provider report; a caller forwards it with the
+    /// output instead of reading mutable generator state after another render.
+    pub(crate) execution_report:
+        Option<&'a std::cell::RefCell<Option<gen_core::generator::ExecutionIdentity>>>,
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
@@ -294,7 +298,7 @@ pub(super) fn render_on_surface(
             on_progress,
         )
     } else {
-        crate::memory_strategy::generate_with_scope_report(
+        crate::memory_strategy::generate_with_scope_execution_report(
             generator,
             &mut request,
             memory_strategy_context,
@@ -302,6 +306,10 @@ pub(super) fn render_on_surface(
         )
     }
     .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    if let Some(sink) = surface.execution_report {
+        *sink.borrow_mut() = Some(report.execution);
+    }
+    let report = report.generation;
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
     }
@@ -666,6 +674,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         controls: surface.controls,
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
+        execution_report: None,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -734,6 +743,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         controls: surface.controls,
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
+        execution_report: surface.execution_report,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };

@@ -1029,9 +1029,9 @@ async fn run_image_generate_job_unexplained(
 }
 
 /// Build the output map from files already written by this worker, after all
-/// inline variants are appended and before the terminal POST. Provider reports
-/// are unavailable until the matching completed-report route supplies them;
-/// request settings and sidecars never stand in for engine observations.
+/// inline variants are appended and before the terminal POST. A provider report
+/// belongs to the asset's producing render; request settings and sidecars never
+/// stand in for engine observations.
 fn image_execution_receipt(
     project_path: &Path,
     asset_writes: &[Value],
@@ -1088,21 +1088,50 @@ fn image_execution_receipt(
         outputs[output_index]
             .artifact_sha256
             .push(sceneworks_core::hashing::hex(&digest.finalize()));
+        if let Some(report) = fact.get("workerExecutionReport") {
+            let slot = &mut outputs[output_index].execution;
+            if slot.as_ref().is_some_and(|previous| previous != report) {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has conflicting provider reports".into(),
+                ));
+            }
+            *slot = Some(report.clone());
+        }
     }
     if outputs.iter().any(|output| output.artifact_ids.is_empty()) {
         return Err(WorkerError::InvalidPayload(
             "completed image output has no artifact".into(),
         ));
     }
+    let shared = outputs
+        .first()
+        .and_then(|output| output.execution.as_ref())
+        .cloned();
+    let shared = shared.filter(|report| {
+        report
+            .pointer("/identity/output_units")
+            .and_then(Value::as_u64)
+            == Some(image_count as u64)
+            && outputs
+                .iter()
+                .all(|output| output.execution.as_ref() == Some(report))
+    });
+    if shared.is_some() {
+        for output in &mut outputs {
+            output.execution = None;
+        }
+    }
     Ok(WorkerExecutionReceipt {
         version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
-        execution: serde_json::json!({
-            "state":"unavailable",
-            "reason":{
-                "code":"provider_report_unavailable",
-                "detail":"completed image route has not supplied a provider execution report",
-                "missing_facts":["provider_resolved_execution"]
-            }
+        execution: shared.unwrap_or_else(|| {
+            serde_json::json!({
+                "state":"unavailable",
+                "reason":{
+                    "code":"provider_report_unavailable",
+                    "detail":"completed image route has not supplied a provider execution report",
+                    "missing_facts":["provider_resolved_execution"]
+                }
+            })
         }),
         outputs,
     })
@@ -1134,6 +1163,39 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
         "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
     })];
     assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn completed_image_receipt_keeps_reports_with_their_outputs() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("first.png"), b"first").unwrap();
+    std::fs::write(project.path().join("second.png"), b"second").unwrap();
+    let reports = [
+        serde_json::json!({"state":"unavailable","reason":{"code":"one"}}),
+        serde_json::json!({"state":"unavailable","reason":{"code":"two"}}),
+    ];
+    let facts = vec![
+        serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":reports[1]}),
+        serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":reports[0]}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 2).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["first"]);
+    assert_eq!(receipt.outputs[1].artifact_ids, ["second"]);
+    assert_eq!(receipt.outputs[0].execution, Some(reports[0].clone()));
+    assert_eq!(receipt.outputs[1].execution, Some(reports[1].clone()));
+
+    let batch_report = serde_json::json!({"state":"resolved","identity":{"output_units":2}});
+    let batch_facts = vec![
+        serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":batch_report}),
+        serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":batch_report}),
+    ];
+    let batch = image_execution_receipt(project.path(), &batch_facts, 2).unwrap();
+    assert_eq!(batch.execution, batch_report);
+    assert!(batch
+        .outputs
+        .iter()
+        .all(|output| output.execution.is_none()));
 }
 
 /// Procedural stub generation (sc-3020): a deterministic per-seed gradient per image.

@@ -280,6 +280,8 @@ pub(super) async fn consume_gen_events_with_disclosure(
     // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
     let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
         std::collections::HashMap::new();
+    let mut pending_execution_reports: std::collections::HashMap<usize, Value> =
+        std::collections::HashMap::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -427,7 +429,10 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 // newest event always describes the most recent read.
                 measured_checkpoint_facts = Some(facts);
             }
-            GenEvent::ImageFacts { index, facts } => {
+            GenEvent::ImageFacts { index, mut facts } => {
+                if let Some(report) = facts.remove("workerExecutionReport") {
+                    pending_execution_reports.insert(index, report);
+                }
                 pending_image_facts.entry(index).or_default().extend(facts);
             }
             GenEvent::AssetWritten { index, fact } => {
@@ -526,7 +531,7 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 let plan_for_task = plan.clone();
                 let adapter_for_task = adapter_label.to_owned();
                 let project_path_for_task = project_path.to_owned();
-                let fact = crate::load_progress::spawn_blocking(move || {
+                let mut fact = crate::load_progress::spawn_blocking(move || {
                     write_image_asset(
                         &plan_for_task,
                         index,
@@ -541,6 +546,9 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 })
                 .await
                 .map_err(|error| crate::task_join_error("image asset write task", error))??;
+                if let Some(report) = pending_execution_reports.remove(&index) {
+                    fact.insert("workerExecutionReport".into(), report);
+                }
                 asset_writes.push(Value::Object(fact));
                 emit_event(
                     "image_inference_complete",
