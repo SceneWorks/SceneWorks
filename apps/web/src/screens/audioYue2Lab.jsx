@@ -21,6 +21,8 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { durableTextFits } from "../hooks/useStudioSettings.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { buildYue2JobRequest } from "../yue2Lab.js";
 
 import { terminalStatuses } from "../jobTypes.js";
 import { YUE2_MODEL_ID, isCoverComponentDownload, composeKind, yue2ModelIdentity, yue2ModelInstalled, yue2PlanRequest, yue2FieldDisabledReason, yue2RequestProblems, yue2RunView, yue2TierRows } from "../yue2Lab.js";
@@ -144,6 +146,18 @@ export function Yue2SongLab({ header }) {
   setSettings
   });
 
+  const kind = composeKind(settings);
+  const composeDraft = buildYue2JobRequest(kind, settings, kind === "fromPlan" ? {
+    plan: yue2PlanRequest(runs.map(yue2RunView).find((view) => view.id === settings.restorePlanJobId)),
+  } : {}, requestedGpu);
+  const composeFeedback = usePortableFeedback("yue2", composeDraft, null, enabled && settings.tab === "compose");
+  const composeRefusal = composeFeedback?.state === "invalid" ? composeFeedback.refusal : null;
+  const coverFeedback = usePortableFeedback(
+    "yue2", buildYue2JobRequest("cover", settings, {}, requestedGpu), null,
+    enabled && settings.tab === "cover",
+  );
+  const coverRefusal = coverFeedback?.state === "invalid" ? coverFeedback.refusal : null;
+
   if (!model) {
     return (
       <WorkPanel className="studio-work-panel yue2-lab">
@@ -166,7 +180,6 @@ export function Yue2SongLab({ header }) {
       !terminalStatuses.has(job.status) &&
       !isCoverComponentDownload(job, model),
   );
-  const kind = composeKind(settings);
   const hasProject = problemContext;
   const composeProblems = yue2RequestProblems(kind, settings, {}, hasProject);
   const coverProblems = yue2RequestProblems("cover", settings, {}, hasProject);
@@ -308,6 +321,7 @@ export function Yue2SongLab({ header }) {
             restorable={restorable}
             submitting={submitting}
             composeProblems={composeProblems}
+            portableRefusal={composeRefusal}
             readyToRun={readyToRun}
             submit={submit}
             kind={kind}
@@ -344,6 +358,7 @@ export function Yue2SongLab({ header }) {
             reviewedTranscriptionVersionId={reviewedTranscriptionVersionId}
             setReviewedTranscriptionVersionId={setReviewedTranscriptionVersionId}
             coverProblems={coverProblems}
+            portableRefusal={coverRefusal}
             readyToRun={readyToRun}
             tierProblem={tierProblem}
           />
@@ -383,6 +398,7 @@ export function Yue2SongLab({ header }) {
                       ? "Submitting…"
                       : renderProblems.join(" ")
                 }
+                requestedGpu={requestedGpu}
                 seedSettings={settings}
                 setDraft={(next) =>
                   setSettings((current) => ({
@@ -440,6 +456,8 @@ export function Yue2SongLab({ header }) {
             submit={submit}
             fetchVersionAbc={fetchVersionAbc}
             update={update}
+            seedSettings={settings}
+            requestedGpu={requestedGpu}
           />
       ) : null}
 

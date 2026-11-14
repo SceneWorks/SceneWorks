@@ -30,6 +30,7 @@ export function Yue2CoverPanel({
   reviewedTranscriptionVersionId,
   setReviewedTranscriptionVersionId,
   coverProblems,
+  portableRefusal,
   readyToRun,
   tierProblem
 }) {
@@ -166,7 +167,7 @@ export function Yue2CoverPanel({
                 <div className="prompt-cta-stack yue2-cta">
                   <button
                     className="prompt-cta"
-                    disabled={submitting || coverProblems.length > 0 || !readyToRun}
+                    disabled={submitting || coverProblems.length > 0 || Boolean(portableRefusal) || !readyToRun}
                     onClick={() => submit("cover")}
                     title={coverProblems.join(" ") || tierProblem || undefined}
                     type="button"
@@ -174,6 +175,7 @@ export function Yue2CoverPanel({
                     <Icon.Sparkle size={14} /> Generate cover
                   </button>
                   {coverProblems.length ? <span className="yue2-muted">{coverProblems.join(" ")}</span> : null}
+                  {portableRefusal ? <span className="yue2-muted" role="alert">{portableRefusal.detail}</span> : null}
                 </div>
               </div>
   );

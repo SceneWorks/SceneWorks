@@ -2,6 +2,17 @@ import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { JOB_PATHS } from "../api/jobs.js";
 import { useCallback } from "react";
 import { pollJobToCompletion } from "../pollJob.js";
+import { validatePortableRequestNow } from "../portableValidation.js";
+
+function portablePromptBody(body) {
+  const feedback = validatePortableRequestNow({ kind: "promptRefine", payload: body });
+  if (feedback.state === "invalid") {
+    const error = new Error(feedback.refusal.detail);
+    Object.assign(error, feedback.refusal);
+    throw error;
+  }
+  return body;
+}
 
 // F-189: extracted from App along its existing concern boundary.
 export function usePromptRunners({
@@ -15,7 +26,7 @@ export function usePromptRunners({
     ({ prompt, modelId, workflow, guide, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
-        body: { prompt, modelId, workflow, guide },
+        body: portablePromptBody({ prompt, modelId, workflow, guide }),
         // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
         // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
         // old 120 s deadline could time out a decode that was still going to succeed.
@@ -57,14 +68,14 @@ export function usePromptRunners({
     ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
-        body: {
+        body: portablePromptBody({
           prompt,
           modelId,
           projectId,
           task: "qwen_image_rewrite",
           workflow: "image",
           sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
-        },
+        }),
         deadlineMs: 180000,
         resolveResult: (job) => {
           const refinedPrompt = job.result?.refinedPrompt;
@@ -92,7 +103,7 @@ export function usePromptRunners({
     ({ prompt, modelId, aspectRatio, guide, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
-        body: { prompt, modelId, task: "magic_prompt", aspectRatio, guide },
+        body: portablePromptBody({ prompt, modelId, task: "magic_prompt", aspectRatio, guide }),
         deadlineMs: 180000,
         resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
@@ -123,7 +134,7 @@ export function usePromptRunners({
         createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // caption from the shared aesthetic. A single reference keeps the scalar `sourceAssetId`.
-        body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model },
+        body: portablePromptBody({ task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model }),
         deadlineMs: 180000,
         resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
@@ -153,7 +164,7 @@ export function usePromptRunners({
         createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // prompt from the aesthetic they share. A single reference keeps the scalar `sourceAssetId`.
-        body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle },
+        body: portablePromptBody({ task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle }),
         deadlineMs: 180000,
         resolveResult: (job) => {
           const description = job.result?.refinedPrompt;

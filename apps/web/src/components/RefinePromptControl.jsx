@@ -3,6 +3,9 @@ import { fetchPromptGuide } from "../promptGuides.js";
 import { isModelMissing } from "../modelMissing.js";
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 
 
 // Detect the "refinement model isn't provisioned" failure (sc-5605) so we can offer a
@@ -46,8 +49,12 @@ export function RefinePromptControl({
   const refineControllerRef = useRef(null);
 
   const trimmed = (prompt ?? "").trim();
+  const portableFeedback = usePortableFeedback(
+    "promptRefine", { prompt: trimmed, modelId, workflow }, null, Boolean(trimmed),
+  );
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const busy = status === "loading";
-  const disabled = busy || !trimmed || typeof refinePrompt !== "function";
+  const disabled = busy || !trimmed || Boolean(portableRefusal) || typeof refinePrompt !== "function";
 
   const modelMissing = status === "error" && isModelMissing(refineModel, error);
   const installState = refineModel?.installState;
@@ -79,6 +86,7 @@ export function RefinePromptControl({
   }, []);
 
   async function handleRefine() {
+    if (portableRefusal) return;
     refineControllerRef.current?.abort();
     const controller = new AbortController();
     refineControllerRef.current = controller;
@@ -178,6 +186,7 @@ export function RefinePromptControl({
           {error}
         </p>
       ) : null}
+      <ValidationSummary issues={portableRefusal ? [issue.error(portableRefusal.field, portableRefusal.detail)] : []} label="Prompt refinement errors" />
 
       {status === "review" ? (
         <div className="refine-review">

@@ -22,6 +22,9 @@ import {
   extractFamilies,
 } from "../presetUtils.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 
 // Curated negative prompts seeded into the advanced panel for each Character
 // Studio flow (sc-3857). These are the baseline the editable Negative prompt
@@ -375,6 +378,7 @@ export function CharacterTest({
   testModel,
   testPrompt,
   testResolution,
+  testRefusal,
   updateAssetStatus,
   createModelDownloadJob,
 }) {
@@ -449,7 +453,8 @@ export function CharacterTest({
           <strong>Preset-only test</strong>
           <span>Outputs use the prompt and record this character in metadata; image-reference conditioning and LoRA loading are not active yet.</span>
         </div>
-        <button className="primary-action" disabled={!testPrompt.trim()} type="submit">
+        <ValidationSummary issues={testRefusal ? [issue.error(testRefusal.field, testRefusal.detail)] : []} label="Character test errors" />
+        <button className="primary-action" disabled={!testPrompt.trim() || Boolean(testRefusal)} type="submit">
           Test Character
         </button>
       </form>
@@ -580,6 +585,17 @@ export function CharacterGenerationPanel({
   const characterId = selectedCharacter?.id;
   // Mode-specific controls (JSX) + advanced payload + readiness/labels.
   const controller = mode.useController({ activeModel, loraSelection, createLoraDownloadJob });
+  const imageRequest = activeModel && selectedCharacter ? {
+    mode: "character_image", model: activeModel.id, characterId,
+    referenceAssetId, prompt: prompt.trim(),
+    negativePrompt: advanced.supportsNegativePrompt ? advanced.negativePrompt : "",
+    count: 1, seed: advanced.seedValue,
+    width: CHARACTER_PANEL_BASE_DIMENSION, height: CHARACTER_PANEL_BASE_DIMENSION,
+    loras: loraSelection.serializedLoras,
+    advanced: advanced.buildAdvanced(controller.advancedExtras),
+  } : null;
+  const imageFeedback = usePortableFeedback("image", imageRequest, activeModel, Boolean(imageRequest && referenceAssetId));
+  const imageRefusal = imageFeedback?.state === "invalid" ? imageFeedback.refusal : null;
 
   // Keep the picked reference valid without clobbering the user's choice. A refetch
   // (e.g. the panel's own upload flow via addCharacterReference) hands a fresh
@@ -651,28 +667,13 @@ export function CharacterGenerationPanel({
   }
 
   async function generate() {
-    if (!referenceAssetId || !controller.canSubmit || submitting || !activeModel) {
+    if (!referenceAssetId || !controller.canSubmit || submitting || !activeModel || imageRefusal) {
       return;
     }
     setSubmitting(true);
     setStatus("");
     try {
-      const job = await createImageJob({
-        mode: "character_image",
-        model: activeModel.id,
-        characterId,
-        referenceAssetId,
-        prompt: prompt.trim(),
-        negativePrompt: advanced.supportsNegativePrompt ? advanced.negativePrompt : "",
-        // angleSet/poses make the worker emit one image per angle/pose regardless of
-        // count; count must satisfy the API's 1-8 guard, so send 1 (worker overrides).
-        count: 1,
-        seed: advanced.seedValue,
-        width: CHARACTER_PANEL_BASE_DIMENSION,
-        height: CHARACTER_PANEL_BASE_DIMENSION,
-        loras: loraSelection.serializedLoras,
-        advanced: advanced.buildAdvanced(controller.advancedExtras),
-      });
+      const job = await createImageJob(imageRequest);
       if (job?.id) {
         rememberLocalGenerationJob?.("image", job);
         setStatus("");
@@ -733,10 +734,11 @@ export function CharacterGenerationPanel({
           Upload reference
         </button>
         <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
-        <button disabled={!referenceAssetId || !controller.isReady || submitting} onClick={generate} type="button">
+        <button disabled={!referenceAssetId || !controller.isReady || submitting || Boolean(imageRefusal)} onClick={generate} type="button">
           {submitting ? "Starting…" : controller.submitLabel}
         </button>
       </div>
+      <ValidationSummary issues={imageRefusal ? [issue.error(imageRefusal.field, imageRefusal.detail)] : []} label="Character image errors" />
       <label>
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />

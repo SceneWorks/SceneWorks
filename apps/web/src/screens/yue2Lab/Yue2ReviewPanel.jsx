@@ -10,7 +10,9 @@ export function Yue2ReviewPanel({
   tierProblem,
   submit,
   fetchVersionAbc,
-  update
+  update,
+  seedSettings,
+  requestedGpu,
 }) {
   return (
 <div className="studio-results yue2-runs" data-testid="yue2-runs">
@@ -27,6 +29,8 @@ export function Yue2ReviewPanel({
                 job={job}
                 key={job.id}
                 model={model}
+                seedSettings={seedSettings}
+                requestedGpu={requestedGpu}
                 onCancel={(target) => jobAction?.(target, "cancel")}
                 decodeBlocked={readyToRun ? null : tierProblem || "Install YuE2 first."}
                 onDecodeAgain={(sourceJobId, decoder) => submit("decode", { sourceJobId, decoder })}

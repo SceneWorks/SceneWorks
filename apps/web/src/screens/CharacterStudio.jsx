@@ -20,6 +20,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { angleModelUsable, downloadOffersFor, poseModelUsable } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../modelEligibility.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 
 const characterTypes = [
   ["person", "Person"],
@@ -220,6 +221,11 @@ export function CharacterStudio() {
   const [testLookId, setTestLookId] = useState("");
   const [testCount, setTestCount] = useState(4);
   const [testResolution, setTestResolution] = useState("1024x1024");
+  const [testWidth, testHeight] = testResolution.split("x").map(Number);
+  const testRequest = {
+    prompt: testPrompt, model: testModel, count: Number(testCount),
+    width: testWidth, height: testHeight, lookId: testLookId || null,
+  };
   const [creatingDataset, setCreatingDataset] = useState(false);
   // Archived-characters view (sc-6066). Archived characters aren't in the active
   // `characters` roster (it's fetched without them), so this view lazily fetches
@@ -239,6 +245,10 @@ export function CharacterStudio() {
   const [activeTab, setActiveTab] = useState(() =>
     CHARACTER_TAB_IDS.includes(savedSettings.activeTab) ? savedSettings.activeTab : DEFAULT_CHARACTER_TAB,
   );
+  const testFeedback = usePortableFeedback(
+    "characterTest", testRequest, null, Boolean(selectedCharacterId && activeTab === "test"),
+  );
+  const testRefusal = testFeedback?.state === "invalid" ? testFeedback.refusal : null;
   // Gated on ui-preferences hydration (sc-15425): this writer had no gate because the tab is
   // not catalog-derived, but it still must not persist the DEFAULT tab over a stored one during
   // the window before the durable copy has arrived.
@@ -623,18 +633,10 @@ export function CharacterStudio() {
 
   async function submitTest(event) {
     event.preventDefault();
-    if (!selectedCharacter) {
+    if (!selectedCharacter || testRefusal) {
       return;
     }
-    const [width, height] = testResolution.split("x").map((value) => Number(value));
-    await createCharacterTestJob(selectedCharacter.id, {
-      prompt: testPrompt,
-      model: testModel,
-      count: Number(testCount),
-      width,
-      height,
-      lookId: testLookId || null,
-    });
+    await createCharacterTestJob(selectedCharacter.id, testRequest);
   }
 
   return (
@@ -940,6 +942,7 @@ export function CharacterStudio() {
                 testModel={testModel}
                 testPrompt={testPrompt}
                 testResolution={testResolution}
+                testRefusal={testRefusal}
                 updateAssetStatus={updateAssetStatus}
               />
             </div>

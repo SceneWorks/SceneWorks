@@ -10,6 +10,7 @@ import { IrisTaskOptions } from "./IrisTaskOptions.jsx";
 import { IrisTrainingOptions } from "./IrisTrainingOptions.jsx";
 import { IrisCurriculaOptions } from "./IrisCurriculaOptions.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
+import { issue } from "../../validation/issues.js";
 import { numberFromDraft } from "../../training/drafts.js";
 import {
   choiceOptionsForTarget,
@@ -216,6 +217,7 @@ export function ConfigureJobPanel({
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
   submittingJob,
+  trainingRefusal,
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
@@ -1530,7 +1532,9 @@ export function ConfigureJobPanel({
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
               as the reason Start training is dead (sc-10501). */}
-          <ValidationSummary issues={configValidity.surfaced} label="Configuration errors" />
+          <ValidationSummary issues={trainingRefusal
+            ? [...configValidity.surfaced, issue.error(trainingRefusal.field, trainingRefusal.detail)]
+            : configValidity.surfaced} label="Configuration errors" />
 
           <div className="training-config-actions">
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
@@ -1538,7 +1542,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configValidity.ready || submittingJob}
+              disabled={!configValidity.ready || Boolean(trainingRefusal) || submittingJob}
               onClick={submitTrainingJob}
               type="button"
             >
