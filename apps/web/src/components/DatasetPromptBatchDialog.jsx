@@ -19,6 +19,7 @@ import {
 import { joyCaptionModel } from "../training/joyCaptionPrompts.js";
 import { missingRequiredModels, modelInstallComplete } from "../modelEligibility.js";
 import { installedTiers } from "../quantTier.js";
+import { formatTierBytes } from "../formatting.js";
 import { formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
@@ -210,15 +211,16 @@ export function keepVariableValues(variables, existing) {
 // "mixed" when rows came from runs with different models (each `sourceImages` entry then names its
 // own), or null when no row recorded one. A single string keeps `source.model` the same shape it
 // has always had for the common one-model case; the per-row detail lives beside each image.
-export function describedByModel(rows) {
-  const models = new Set(rows.map((row) => row.model ?? null));
+// `key` picks the recorded value: "model", or "variant" for the describer's tier (same rule).
+export function describedByModel(rows, key = "model") {
+  const models = new Set(rows.map((row) => row[key] ?? null));
   if (models.size === 1) return [...models][0];
   return models.size ? "mixed" : null;
 }
 
 // The prompt-batch create payload for the reviewed rows: one formatter block per usable row, and
-// each block's exact source pixel size and describing model in `sourceImages` (same order as
-// `prompts`).
+// each block's exact source pixel size, describing model and (when recorded) tier in
+// `sourceImages` (same order as `prompts`).
 export function promptBatchPayload({ rows, name, dataset }) {
   const inputs = rows.map((row) => ({ ...row }));
   const { text, skipped } = formatPromptBatch(inputs);
@@ -235,6 +237,7 @@ export function promptBatchPayload({ rows, name, dataset }) {
       height: row.height,
       ratio: snapRatio(row.width, row.height),
       model: row.model ?? null,
+      ...(row.variant ? { variant: row.variant } : {}),
     })),
     source: {
       kind: "training_dataset",
@@ -242,6 +245,7 @@ export function promptBatchPayload({ rows, name, dataset }) {
       datasetName: dataset?.name ?? "",
       datasetVersion: dataset?.version ?? null,
       model: describedByModel(included),
+      variant: describedByModel(included, "variant"),
     },
   };
 }
@@ -276,7 +280,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Whether the editor shows the selected model's untouched default, so a model switch swaps it
   // for the other model's default; an edited text stays as typed.
   const [followDefault, setFollowDefault] = useState(true);
-  const [promptError, setPromptError] = useState("");
+  // A failed default load's message, by repo.
+  const [promptErrors, setPromptErrors] = useState({});
   const [rows, setRows] = useState([]);
   const [job, setJob] = useState(null);
   const [rerunItemId, setRerunItemId] = useState(null);
@@ -310,39 +315,56 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const defaultPrompt = modelDefault ? modelDefault.prompt : null;
 
   // The describer and tier that wrote a row (its re-run uses them), or the selected ones when the
-  // row records no known describer.
+  // row records no known describer. A row with no recorded tier uses the model's default tier; a
+  // recorded tier the model does not offer is kept as `unknownTier` (its re-run is blocked), never
+  // replaced by another tier.
   const rowDescriber = (row) => {
     const entry = DESCRIBE_MODELS.find((candidate) => candidate.repo === row.model);
-    return entry ? { entry, tier: describerTier(entry, row.variant) } : { entry: model, tier };
+    if (!entry) return { entry: model, tier };
+    const unknownTier = Boolean(entry.tiers && row.variant && !entry.tiers.some(([key]) => key === row.variant));
+    return { entry, tier: unknownTier ? row.variant : describerTier(entry, row.variant), unknownTier };
   };
 
-  // The models whose default instruction and limit are not loaded yet: the selected one, and each
-  // row's describer (a re-run checks the prompt against that model's limit). Joined into a string
-  // so the effect below depends on the set by value.
-  const unloadedRepos = [...new Set([model.repo, ...rows.map((row) => rowDescriber(row).entry.repo)])]
-    .filter((repo) => !defaults[repo])
-    .join("\u0000");
-
-  // Load those defaults (served by the API from the worker's own prompt asset and core's limits, so
-  // the web app holds no second copy).
+  // The models whose default instruction and limit are needed: the selected one, and each row's
+  // describer (a re-run checks the prompt against that model's limit). Joined into a string so the
+  // effect below depends on the set by value.
+  const neededRepos = [...new Set([model.repo, ...rows.map((row) => rowDescriber(row).entry.repo)])].join("\u0000");
+  // The repos whose default is loading or loaded, and the signal that aborts their requests: both
+  // live until unmount or a token change, so one repo's load never cancels another's.
+  const defaultsRequested = useRef(new Set());
+  const defaultsAbort = useRef(null);
   useEffect(() => {
-    if (!unloadedRepos) return undefined;
     const controller = new AbortController();
-    for (const repo of unloadedRepos.split("\u0000")) {
+    defaultsAbort.current = controller;
+    defaultsRequested.current = new Set();
+    return () => controller.abort();
+  }, [token]);
+
+  // Load each needed default once (served by the API from the worker's own prompt asset and core's
+  // limits, so the web app holds no second copy). A failed load is retried the next time the needed
+  // set or the selected model changes.
+  useEffect(() => {
+    const { signal } = defaultsAbort.current;
+    for (const repo of neededRepos.split("\u0000")) {
+      if (defaultsRequested.current.has(repo)) continue;
+      defaultsRequested.current.add(repo);
       trainingApi
-        .defaultDescribePrompt(token, { signal: controller.signal }, repo)
+        .defaultDescribePrompt(token, { signal }, repo)
         .then((body) => {
           const text = typeof body?.prompt === "string" ? body.prompt : "";
           const maxChars = Number(body?.maxChars) || 0;
-          setPromptError("");
+          setPromptErrors(({ [repo]: _cleared, ...rest }) => rest);
           setDefaults((current) => ({ ...current, [repo]: { prompt: text, maxChars } }));
         })
         .catch((error) => {
-          if (!isAbortError(error)) setPromptError(errorMessage(error, "Could not load the default describing prompt."));
+          if (isAbortError(error) || signal.aborted) return;
+          defaultsRequested.current.delete(repo);
+          const message = errorMessage(error, "Could not load the default describing prompt.");
+          setPromptErrors((current) => ({ ...current, [repo]: message }));
         });
     }
-    return () => controller.abort();
-  }, [unloadedRepos, token]);
+  }, [neededRepos, token]);
+  const promptError = promptErrors[model.repo] ?? "";
 
   // Show the selected model's default while the text is untouched.
   useEffect(() => {
@@ -383,9 +405,20 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const selectedAvailable = modelAvailable(model.id, tier);
   // What the not-installed notice offers: the model, or for a tiered describer the selected tier
   // (named with its tier), whose download installs only that tier.
+  // The tier's own size, as the Model Manager's tier panel reads it; none rather than the model-level
+  // size, which describes the default tier.
+  const tierVariant = tier ? selectedEntry?.variants?.find((variant) => variant?.variant === tier) : null;
+  const tierBytes = tierVariant?.footprint?.diskSizeBytes ?? tierVariant?.downloadSizeBytes;
   const missingModels = tier
     ? selectedEntry && !selectedAvailable
-      ? [{ ...selectedEntry, name: `${selectedEntry.name ?? model.label} ${tierLabel}` }]
+      ? [
+          {
+            ...selectedEntry,
+            name: `${selectedEntry.name ?? model.label} ${tierLabel}`,
+            downloadSizeLabel: typeof tierBytes === "number" && tierBytes > 0 ? formatTierBytes(tierBytes) : null,
+            downloadSizeEstimated: false,
+          },
+        ]
       : []
     : missingRequiredModels(models, [model.id]);
   const downloadJobs = useMemo(
@@ -758,11 +791,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Why a row's re-run, which runs the row's own describer and tier, cannot start: that model or
   // tier is not installed, or an edited prompt is over that model's limit. "" when it can.
   function rerunIssue(row) {
-    const { entry, tier: rowTier } = rowDescriber(row);
+    const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+    if (unknownTier) return `${entry.label} has no tier “${rowTier}”, the tier that described this image.`;
     const name = rowTier ? `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}` : entry.label;
     if (!modelAvailable(entry.id, rowTier)) return `${name} is not installed.`;
     const rowDefault = defaults[entry.repo];
-    if (!rowDefault) return "Loading the describing prompt…";
+    if (!rowDefault) return promptErrors[entry.repo] || "Loading the describing prompt…";
     const sendsPrompt = prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim();
     return sendsPrompt ? (describePromptIssues(prompt, rowDefault.maxChars, entry.label)[0]?.message ?? "") : "";
   }
@@ -828,6 +862,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         {!selectedAvailable ? (
           missingModels.length ? (
             <RequiredModelsNotice
+              // Every tier's entry shares the model id, so each tier gets its own notice state.
+              key={tier ?? model.id}
               downloadJobs={downloadJobs}
               feature="Describing the dataset"
               models={missingModels}
