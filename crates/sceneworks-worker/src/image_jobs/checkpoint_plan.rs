@@ -1321,6 +1321,7 @@ pub(super) fn checkpoint_plan_candle_companion_dirs(
 /// retained refusal happens only when the entry is not plan-backed; a plan-backed entry that cannot
 /// be served either refuses here or retains its refusal for the router's fall-through, never a
 /// silent fall-through to the stub.
+#[cfg(test)]
 pub(super) fn prepare_checkpoint_plan_sources(
     request: &ImageRequest,
     settings: &Settings,

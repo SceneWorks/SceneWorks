@@ -6,6 +6,7 @@ use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
+#[cfg(test)]
 use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 use super::geometry::fit_engine_image;
@@ -154,6 +155,7 @@ pub(super) fn resolve_imported_sdxl_pin(
         .transpose()
 }
 
+#[cfg(test)]
 pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
     sdxl_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
 }
@@ -249,14 +251,6 @@ pub(super) fn resolve_imported_sdxl_file(
 pub(super) fn sdxl_imported_available(request: &ImageRequest, settings: &Settings) -> bool {
     sdxl_imported_request_shape_available(request)
         && matches!(resolve_imported_sdxl_file(request, settings), Ok(Some(_)))
-}
-
-pub(super) fn sdxl_imported_available_resolved(
-    execution: &super::conditioning::ResolvedImageExecution,
-    settings: &Settings,
-) -> bool {
-    sdxl_imported_request_shape_available_resolved(execution)
-        && matches!(resolve_imported_sdxl_pin(execution, settings), Ok(Some(_)))
 }
 
 /// Resolve imported SDXL img2img/edit/inpaint/outpaint conditioning. The exact registered provider
@@ -373,6 +367,7 @@ fn resolve_imported_sdxl_conditioning(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn prepare_sdxl_imported_sources(
     request: &ImageRequest,
     settings: &Settings,

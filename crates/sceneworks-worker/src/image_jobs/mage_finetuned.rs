@@ -1,11 +1,13 @@
 #[cfg(not(target_os = "macos"))]
 use super::admit_candle_load_spec_floor;
 use super::checkpoint_plan::checkpoint_plan_bespoke_primary_dir;
+#[cfg(test)]
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::events::consume_gen_events;
 use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::resolve_seed;
+#[cfg(test)]
 use super::routing::imported_generate_request_supported;
 use super::sampling::resolved_option_or_manifest_f32;
 use super::sampling::resolved_option_or_manifest_u32;
@@ -312,6 +314,7 @@ pub(super) fn mage_finetuned_available(request: &ImageRequest, settings: &Settin
 /// Validate the exact registered Mage generate shape and retain its pinned transformer files for
 /// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
 /// cannot retarget the payload-selected directory between route selection and provider load.
+#[cfg(test)]
 pub(super) fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,

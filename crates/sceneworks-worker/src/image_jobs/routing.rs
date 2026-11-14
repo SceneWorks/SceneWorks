@@ -236,6 +236,7 @@ fn imported_generate_request_has_unsupported_shape_with_pose_count(
             .is_some_and(|mode| !mode.trim().is_empty())
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 pub(super) fn imported_generate_request_supported(
     request: &ImageRequest,
     family: &str,

@@ -7,6 +7,7 @@ use super::checkpoint_plan::checkpoint_plan_operation;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
+#[cfg(test)]
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_img2img_init_generic;
@@ -444,14 +445,9 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// Deliberately does NOT gate on base-tier presence: a missing base surfaces as the loud
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
+#[cfg(test)]
 pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
     krea_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
-}
-
-pub(super) fn krea_imported_request_shape_available_resolved(
-    execution: &super::conditioning::ResolvedImageExecution,
-) -> bool {
-    krea_imported_request_shape_available_with_pose_count(execution, execution.pose_source_count())
 }
 
 fn krea_imported_request_shape_available_with_pose_count(
@@ -783,6 +779,7 @@ pub(super) fn resolve_krea_imported_control_overlay(
 /// Prepare every File identity the ordinary imported route selects, once, before the async job
 /// preamble. The returned tokens are moved through dispatch and finalized on the eventual `LoadSpec`;
 /// handlers must not resolve the same source again.
+#[cfg(test)]
 pub(super) fn prepare_krea_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
@@ -823,6 +820,7 @@ fn prepare_krea_imported_sources_with_pose_count(
 /// Prepared strict-pose counterpart: primary DiT, control overlay, and the complete ordered adapter
 /// stack are all selected exactly once and carried through dispatch.
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn prepare_krea_imported_control_sources(
     request: &ImageRequest,
     settings: &Settings,
