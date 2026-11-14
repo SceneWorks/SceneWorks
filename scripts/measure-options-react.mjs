@@ -3,6 +3,8 @@
 // `npm exec -- vite preview --config vite.verify.config.mjs --port 5317` in apps/web.
 // The production bundle and controlled API are both served from that origin.
 // node scripts/measure-options-react.mjs --origin http://127.0.0.1:5317 --samples 30
+// For a deployed proxy, keep the fixture preview running locally and add
+// `--fixture-origin http://127.0.0.1:5317`. Assets still load from --origin.
 import { chromium } from "playwright";
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => {
@@ -12,6 +14,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, inde
   return pairs;
 }, []));
 const origin = args.origin && new URL(args.origin).origin;
+const fixtureOrigin = args["fixture-origin"] && new URL(args["fixture-origin"]).origin;
 const samples = args.samples === undefined ? 30 : Number(args.samples);
 if (!origin || !Number.isInteger(samples) || samples < 5 || samples > 50) {
   throw new Error("Pass --origin <controlled fixture origin> and --samples 5..50");
@@ -30,6 +33,40 @@ try {
   const context = await browser.newContext({ serviceWorkers: "block" });
   try {
     const page = await context.newPage();
+    if (fixtureOrigin) {
+      await page.route("**/api/**", async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (request.method() === "OPTIONS") {
+          await route.fulfill({ status: 204, headers: {
+            "access-control-allow-origin": origin,
+            "access-control-allow-credentials": "true",
+            "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "access-control-allow-headers": request.headers()["access-control-request-headers"] ?? "authorization, content-type",
+          } });
+          return;
+        }
+        if (url.pathname === "/api/v1/jobs/events") {
+          await route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+          return;
+        }
+        const response = await fetch(`${fixtureOrigin}${url.pathname}${url.search}`, {
+          method: request.method(),
+          headers: request.headers(),
+          ...(request.method() === "GET" || request.method() === "HEAD"
+            ? {} : { body: request.postDataBuffer() }),
+        });
+        await route.fulfill({
+          status: response.status,
+          headers: {
+            "content-type": response.headers.get("content-type") ?? "application/json",
+            "access-control-allow-origin": origin,
+            "access-control-allow-credentials": "true",
+          },
+          body: Buffer.from(await response.arrayBuffer()),
+        });
+      });
+    }
     await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 10000 });
     await page.getByRole("button", { name: "Image", exact: true }).first().click();
     await page.locator(".advanced-section-toggle").first().click();
@@ -80,7 +117,7 @@ try {
         '.batch-run .batch-hint[role="status"]', "Options checked for 32 requests"));
     }
     const result = {
-      origin, browser: `Chromium ${browser.version()}`, samples,
+      origin, fixtureOrigin: fixtureOrigin ?? origin, browser: `Chromium ${browser.version()}`, samples,
       surface: "React Image Studio with controlled API fixture",
       singleInputToPaintP95Ms: p95(single), batch32InputToPaintP95Ms: p95(batchTimes),
       inputVisibleBudgetMs: 100,

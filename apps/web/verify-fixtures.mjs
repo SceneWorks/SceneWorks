@@ -307,7 +307,9 @@ export function verifyMiddleware() {
       res.on("error", entry.close);
       return;
     }
-    if (path === "/api/v1/health") return json(200, { status: "ok", authRequired: false });
+    if (path === "/api/v1/health") return json(200, {
+      status: "ok", authRequired: false, optionsValidatorSchemaVersion: 1,
+    });
     if (path === "/api/v1/access") return json(200, { authRequired: false });
     if (path === "/api/v1/jobs/events/ticket") return json(200, { ticket: "stream-ticket" });
     if (path === "/api/v1/files/ticket") return json(200, { ticket: "media-ticket" });
