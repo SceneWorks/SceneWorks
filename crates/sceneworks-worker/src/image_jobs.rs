@@ -2915,6 +2915,7 @@ pub(crate) async fn apply_inline_iris_restore(
             },
         )
         .await?;
+        let execution_report = outcome.execution;
         // A cancel requested after the last per-tile reply trips no flag; re-check the job before
         // writing the restored variant so a canceled pass publishes nothing new.
         check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
@@ -2940,8 +2941,7 @@ pub(crate) async fn apply_inline_iris_restore(
         .map_err(|error| crate::task_join_error("restored asset write task", error))??;
         fact.insert(
             "workerChildExecutionReport".into(),
-            serde_json::to_value(crate::upscale_jobs::iris_restore_execution_unavailable())
-                .map_err(WorkerError::Json)?,
+            serde_json::to_value(execution_report).map_err(WorkerError::Json)?,
         );
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;

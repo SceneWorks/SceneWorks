@@ -12074,7 +12074,7 @@ fn inline_iris_restore_of_a_budget_downscaled_render_is_not_named_4x() {
     use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "iris_3b", "prompt": "Mist over hills",
         "count": 1, "width": 2048, "height": 1536, "seed": 7,
     }));
@@ -30828,7 +30828,7 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
     );
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 320, "height": 256, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
@@ -30868,13 +30868,30 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
         &project_path,
         "mlx",
         &mut asset_writes,
-        iris::stub_loader,
+        iris::reporting_stub_loader,
     )
     .await
     .expect("inline restore completes");
 
     assert_eq!(asset_writes.len(), 2, "one restored variant per base image");
     let restored = asset_writes[1].as_object().unwrap();
+    assert_eq!(restored["workerChildExecutionReport"]["state"], "resolved");
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["provider_id"],
+        "iris_3b_restore"
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["backend"],
+        "stub"
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["output_units"],
+        1
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["deterministic_replay"]["kind"],
+        "non_deterministic"
+    );
     // 320x256 at 1.5x, original input → 480x384.
     assert_eq!(restored["width"], json!(480));
     assert_eq!(restored["height"], json!(384));
@@ -30923,7 +30940,7 @@ async fn inline_iris_restore_with_a_trained_model_records_the_trained_model() {
     iris::stage_trained_restore(&data_dir, "finetune_restore1");
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 64, "height": 48, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1, "irisModel": "finetune_restore1" },
@@ -30989,7 +31006,7 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
     );
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 320, "height": 256, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
@@ -31027,7 +31044,7 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
         &project_path,
         "mlx",
         &mut asset_writes,
-        iris::stub_loader,
+        iris::reporting_stub_loader,
     )
     .await
     .unwrap_err();

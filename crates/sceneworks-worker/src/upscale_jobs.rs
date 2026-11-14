@@ -501,16 +501,6 @@ pub(crate) fn real_esrgan_execution_unavailable() -> gen_core::generator::Execut
     )
 }
 
-pub(crate) fn iris_restore_execution_unavailable() -> gen_core::generator::ExecutionIdentity {
-    gen_core::generator::ExecutionIdentity::unavailable(
-        gen_core::generator::ExecutionUnavailable {
-            code: "iris_transform_execution_unavailable".into(),
-            detail: "Iris restoration uses the Transform apply path without a completed transform execution report".into(),
-            missing_facts: vec!["transform_execution_recipe".into(), "deterministic_runtime_scope".into()],
-        },
-    )
-}
-
 /// Upscale one in-memory RGB image with the selected engine, returning the upscaled image.
 /// Shared by the standalone `image_upscale` job and the Image Studio inline "Upscale" toggle
 /// (sc-8091): Real-ESRGAN runs via the cached `ort` session on a blocking thread; SeedVR2 runs
@@ -1231,6 +1221,7 @@ pub(crate) async fn run_iris_restore_job_using(
     )
     .await?;
     let plan = outcome.plan;
+    let execution_report = outcome.execution;
     let (out_w, out_h) = (outcome.image.width(), outcome.image.height());
     let record = crate::iris_restore::applied_settings_record(&plan, trained_model.as_deref());
 
@@ -1296,7 +1287,7 @@ pub(crate) async fn run_iris_restore_job_using(
                 "loras": [],
                 "stylePreset": "",
                 "sourceAssetId": source_asset_id,
-                "workerExecutionReport": iris_restore_execution_unavailable(),
+                "workerExecutionReport": execution_report,
                 "rawAdapterSettings": { "upscale": record },
                 "parents": [source_asset_id],
                 "extra": {
