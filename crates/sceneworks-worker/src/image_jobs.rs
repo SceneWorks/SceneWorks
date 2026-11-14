@@ -728,9 +728,8 @@ async fn run_image_generate_job_unexplained(
     validate_prompt_enhancement_request(&request, settings)?;
     // sc-26241: a named precision tier is honored only on the model and lane that can load it;
     // raw queue writes and stored jobs never passed the API validator.
-    flux3_precision::validate_image_quant_tier_request(
-        &request.model,
-        &request.advanced,
+    flux3_precision::validate_image_quant_tier_request_resolved(
+        &request,
         flux3_precision::ImageLane::current(),
     )?;
     // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
@@ -2092,8 +2091,12 @@ pub(crate) fn write_image_asset(
     // egress below is channel-driven — `from_engine_buffer` types whatever arrives — so those four
     // channels become an RGBA PNG with no second decision here. The count is deliberately not
     // compared against the buffer: the stub render (no weights installed) is always three-channel.
-    let requested_channels =
-        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
+    let requested_channels = crate::qwen_alpha::resolve_output_channels_typed(
+        &request.model,
+        request
+            .advanced_bool("transparentBackground")
+            .unwrap_or(false),
+    )?;
     crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
     // A native prompt batch (sc-25681): THIS image's prompt is `prompts[index % len]`, and the
     // whole list is recorded (worker-owned — a replayed `advanced` can never forge it) so the
