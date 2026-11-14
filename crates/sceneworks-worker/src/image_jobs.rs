@@ -637,8 +637,9 @@ pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
-    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    let result = run_image_generate_job_unexplained(api, settings, job, portable_aux).await;
     let result = result.map_err(|error| explain_image_reference_error(&job.payload, error));
     crate::converted_install::explain_job_result(settings, &job.payload, result).await
 }
@@ -686,6 +687,7 @@ async fn run_image_generate_job_unexplained(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     sceneworks_core::moss_image::native_request(
         &job.payload,
@@ -717,7 +719,15 @@ async fn run_image_generate_job_unexplained(
             .unwrap_or_default(),
     )
     .map_err(WorkerError::InvalidPayload)?;
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("image", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let mut request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    // The dispatcher supplies this only after RuntimeSourceGuard has verified and stamped the
+    // private source paths. Client-authored advanced fields never populate this slot.
+    request.portable_aux = portable_aux.clone();
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
