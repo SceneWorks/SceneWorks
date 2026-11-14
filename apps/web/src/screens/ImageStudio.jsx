@@ -2832,7 +2832,9 @@ export function ImageStudio() {
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
   let portableDraft = null;
-  if (!batchMode && generateValidity.ready && selectedModel && (!structuredPromptModel || structuredActive)) {
+  // Build the outgoing request even when a separate form requirement is unmet. The portable
+  // validator owns option refusals, including model geometry and reference limits.
+  if (!batchMode && selectedModel && (!structuredPromptModel || structuredActive)) {
     try {
       portableDraft = buildJobRequest({
         promptToSend: structuredPromptModel ? serializeCaption(caption) : prompt,
@@ -2846,7 +2848,7 @@ export function ImageStudio() {
   const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   let portableBatchRevision = null;
-  if (batchMode && batchValidity.ready && selectedModel && !structuredPromptModel) {
+  if (batchMode && selectedModel && !structuredPromptModel && batchTotal > 0) {
     try {
       portableBatchRevision = JSON.stringify({
         common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions,

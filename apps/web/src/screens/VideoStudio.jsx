@@ -1184,7 +1184,8 @@ export function VideoStudio() {
   onLocalJobCreated
   });
 
-  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel, videoValidity.ready);
+  // The request has already been built; form readiness must not hide an option refusal.
+  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel);
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const generateDisabled = submitting || !videoValidity.ready || Boolean(portableRefusal);
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";

@@ -486,7 +486,8 @@ export function SimpleImageStudio() {
     transparentBackground,
     ...tier,
   });
-  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel, canGenerate);
+  // Pure option feedback still belongs beside its fields when another input is incomplete.
+  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
