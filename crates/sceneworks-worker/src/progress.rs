@@ -625,6 +625,15 @@ tokio::task_local! {
     /// Immutable receipt supplied only by the exact-replay claim. Route
     /// preflight compares this with the chosen plan before inference starts.
     pub(crate) static EXACT_REPLAY_EXPECTED: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>;
+    /// Project root resolved by the worker rather than an output fact.
+    pub(crate) static EXECUTION_PROJECT_ROOT: Option<PathBuf>;
+}
+
+pub(crate) async fn with_execution_project_root<F>(root: Option<PathBuf>, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXECUTION_PROJECT_ROOT.scope(root, future).await
 }
 
 pub(crate) async fn with_exact_replay_expected<F>(
@@ -718,12 +727,16 @@ pub(crate) async fn post_job_progress(
             if payload.status == JobStatus::Completed
                 && !payload.extra.contains_key("executionReceipt")
             {
-                if let Some(receipt) = payload
-                    .result
-                    .as_ref()
-                    .and_then(unavailable_completed_receipt)
-                {
-                    payload.extra.insert("executionReceipt".to_owned(), receipt);
+                if let Some(result) = payload.result.clone() {
+                    let root = EXECUTION_PROJECT_ROOT.try_with(Clone::clone).ok().flatten();
+                    let receipt = crate::load_progress::spawn_blocking(move || {
+                        unavailable_completed_receipt(&result, root.as_deref())
+                    })
+                    .await
+                    .map_err(|error| crate::task_join_error("completed media receipt", error))??;
+                    if let Some(receipt) = receipt {
+                        payload.extra.insert("executionReceipt".to_owned(), receipt);
+                    }
                 }
             }
         }
@@ -736,8 +749,12 @@ pub(crate) async fn post_job_progress(
 /// attempt and output association. It cannot qualify for exact replay. Native
 /// routes replace this with their actual completed provider report and file
 /// digests at their terminal boundary.
-fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
+fn unavailable_completed_receipt(
+    result: &JsonObject,
+    project_root: Option<&Path>,
+) -> WorkerResult<Option<Value>> {
     use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
+    use std::io::Read;
     let writes = result.get("assetWrites").and_then(Value::as_array);
     let output_count = result
         .get("expectedCount")
@@ -746,7 +763,7 @@ fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
         .or_else(|| writes.map(|writes| writes.len()))
         .unwrap_or(1);
     if output_count == 0 || output_count > 10_000 {
-        return None;
+        return Ok(None);
     }
     let mut outputs = (0..output_count)
         .map(|output_index| OutputExecutionBinding {
@@ -757,17 +774,49 @@ fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
         })
         .collect::<Vec<_>>();
     if let Some(writes) = writes {
+        let confined_root = project_root.map(Path::canonicalize).transpose()?;
         for (position, fact) in writes.iter().enumerate() {
-            let id = fact.get("assetId").and_then(Value::as_str)?;
+            let Some(id) = fact.get("assetId").and_then(Value::as_str) else {
+                return Ok(None);
+            };
             let output_index = fact
                 .get("index")
                 .and_then(Value::as_u64)
                 .and_then(|index| usize::try_from(index).ok())
                 .unwrap_or(position);
-            outputs
-                .get_mut(output_index)?
-                .artifact_ids
-                .push(id.to_owned());
+            let Some(output) = outputs.get_mut(output_index) else {
+                return Ok(None);
+            };
+            output.artifact_ids.push(id.to_owned());
+            if let Some(relative) = fact.get("mediaPath").and_then(Value::as_str) {
+                let root = confined_root.as_ref().ok_or_else(|| {
+                    WorkerError::InvalidPayload("completed media has no project root".into())
+                })?;
+                let path = root.join(relative).canonicalize()?;
+                if !path.starts_with(root) || !path.is_file() {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed media escapes the project".into(),
+                    ));
+                }
+                let mut file = std::fs::File::open(path)?;
+                let mut digest = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                }
+                output
+                    .artifact_sha256
+                    .push(sceneworks_core::hashing::hex(&digest.finalize()));
+            }
+        }
+    }
+    for output in &mut outputs {
+        if output.artifact_sha256.len() != output.artifact_ids.len() {
+            output.artifact_sha256.clear();
         }
     }
     let receipt = WorkerExecutionReceipt {
@@ -782,8 +831,10 @@ fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
         }),
         outputs,
     };
-    sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).ok()?;
-    serde_json::to_value(receipt).ok()
+    if sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).is_err() {
+        return Ok(None);
+    }
+    Ok(serde_json::to_value(receipt).ok())
 }
 
 #[cfg(test)]
@@ -797,7 +848,9 @@ fn unavailable_receipt_keeps_each_completed_output_association() {
             {"assetId":"variant-a","index":0}
         ]
     });
-    let receipt = unavailable_completed_receipt(result.as_object().unwrap()).unwrap();
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
     assert_eq!(receipt["execution"]["state"], "unavailable");
     assert_eq!(
         receipt["outputs"][0]["artifactIds"],
@@ -806,6 +859,43 @@ fn unavailable_receipt_keeps_each_completed_output_association() {
     assert_eq!(
         receipt["outputs"][1]["artifactIds"],
         serde_json::json!(["base-b"])
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn terminal_media_receipt_hashes_audio_video_vector_and_document_files() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let names = ["clip.mp4", "track.wav", "vector.svg", "document.json"];
+    for name in names {
+        std::fs::write(project.path().join(name), name.as_bytes()).unwrap();
+    }
+    std::fs::write(outside.path().join("elsewhere.mp4"), b"escape").unwrap();
+    let writes = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            serde_json::json!({
+                "assetId":format!("asset-{index}"), "index":index, "mediaPath":name
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"expectedCount":4,"assetWrites":writes});
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(
+            receipt["outputs"][index]["artifactSha256"][0],
+            sceneworks_core::hashing::hex(&Sha256::digest(name.as_bytes()))
+        );
+    }
+    let escaped = serde_json::json!({"expectedCount":1,"assetWrites":[{
+        "assetId":"escape", "index":0, "mediaPath":outside.path().join("elsewhere.mp4")
+    }]});
+    assert!(
+        unavailable_completed_receipt(escaped.as_object().unwrap(), Some(project.path())).is_err()
     );
 }
 

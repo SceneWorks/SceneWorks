@@ -1832,17 +1832,26 @@ async fn run_job_with_shutdown(
 ) -> JobOutcome {
     let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = with_execution_claim_capability(
-        claimed.execution_claim_capability,
-        with_exact_replay_expected(
-            claimed.exact_replay_expected,
-            run_utility_job(
-                api,
-                settings,
-                http_client,
-                claimed.job,
-                claimed.portable_model_binding,
-                shutdown.clone(),
+    let project_root = claimed.job.project_id.as_deref().and_then(|project_id| {
+        ProjectStore::new(settings.data_dir.clone(), "worker")
+            .get_project(project_id)
+            .ok()
+            .map(|project| PathBuf::from(project.path))
+    });
+    let job_future = with_execution_project_root(
+        project_root,
+        with_execution_claim_capability(
+            claimed.execution_claim_capability,
+            with_exact_replay_expected(
+                claimed.exact_replay_expected,
+                run_utility_job(
+                    api,
+                    settings,
+                    http_client,
+                    claimed.job,
+                    claimed.portable_model_binding,
+                    shutdown.clone(),
+                ),
             ),
         ),
     );
