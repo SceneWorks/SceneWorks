@@ -1342,6 +1342,9 @@ fn print_production_binding_inventory() {
         eprintln!("whole-map read: {site:?}");
     }
     eprintln!("Raw-map mutations: {}", coverage.mutations.len());
+    for site in &coverage.mutations {
+        eprintln!("raw-map mutation: {site:?}");
+    }
     for (file, count) in by_file {
         eprintln!("{count:>3} {file}");
     }
