@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { REQUEST, SCOPE, digest, sourceIdentity, validateDispatch, validatePlan, verifyMembers,
+import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch, validatePlan, verifyMembers,
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
   finalizeEvidence } from './sdxl-exact-replay-proof.mjs';
 
@@ -133,9 +133,9 @@ test('task DB uses supported read-only SQLite and cannot mutate worker/receipt r
 test('workflow only dispatches manually and uploads bounded evidence, never private state', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/server-candle-linux.yml', import.meta.url), 'utf8');
   assert.match(workflow, /on:\n  workflow_dispatch:/);
-  assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*proof == 'sdxl-exact-replay'.*ownerGo == true/);
-  assert.match(workflow, /  build-candle:\n    if:.*proof != 'sdxl-exact-replay'/);
-  assert.match(workflow, /cancel-in-progress:.*proof != 'sdxl-exact-replay'/);
+  assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*ownerGo == true/);
+  assert.match(workflow, /  build-candle:\n    if:.*!startsWith/);
+  assert.match(workflow, /cancel-in-progress:.*!startsWith/);
   assert.doesNotMatch(workflow, /options:.*sdxl-exact-replay/);
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
@@ -162,6 +162,8 @@ test('replay candidate requires actual provider declaration and unchanged qualif
 test('registered dispatcher accepts only the fixed proof fields, never a script or command', () => {
   const input = { proof: 'sdxl-exact-replay', phase: 'qualify', planPath: 'C:\\private\\sdxl-plan.json', deviceUuid: uuid, ownerGo: true };
   validateDispatch(input);
+  assert.deepEqual(parseDispatch(JSON.stringify(input)), input);
+  for (const raw of ['plain-campaign', '{"proof":"sdxl-exact-replay",', JSON.stringify(input, null, 2)]) assert.throws(() => parseDispatch(raw));
   for (const extra of [{ command: 'anything' }, { script: 'anything' }, { sourceRef: 'anything' }])
     assert.throws(() => validateDispatch({ ...input, ...extra }), /unknown dispatch fields/);
   for (const bad of [{ proof: 'other' }, { phase: 'other' }, { planPath: 'relative.json' }, { ownerGo: false }, { ownerGo: 'true' }])
@@ -171,8 +173,8 @@ test('registered dispatcher accepts only the fixed proof fields, never a script 
 test('standard marker selects no unrelated model job and malformed plans fail before execution', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/server-candle-linux.yml', import.meta.url), 'utf8');
   const condition = (job) => workflow.slice(workflow.indexOf(`  ${job}:\n`)).split('\n').find((line) => line.startsWith('    if:')).trim().slice(8, -3);
-  const evaluate = (job, plan, event = 'workflow_dispatch') => Function('github', 'inputs', 'fromJSON', `return (${condition(job)});`)(
-    { event_name: event, repository: 'SceneWorks/SceneWorks' }, { starvector_terminal_operation: 'standard', campaign_run_id: plan }, JSON.parse);
+  const evaluate = (job, plan, event = 'workflow_dispatch') => Function('github', 'inputs', 'fromJSON', 'startsWith', `return (${condition(job)});`)(
+    { event_name: event, repository: 'SceneWorks/SceneWorks' }, { starvector_terminal_operation: 'standard', campaign_run_id: plan }, JSON.parse, (value, prefix) => String(value ?? '').toLowerCase().startsWith(prefix.toLowerCase()));
   const marker = JSON.stringify({ proof: 'sdxl-exact-replay', ownerGo: true });
   assert.equal(evaluate('sdxl-exact-replay', marker), true);
   assert.equal(evaluate('build-candle', marker), false);
@@ -180,14 +182,14 @@ test('standard marker selects no unrelated model job and malformed plans fail be
   const noGo = JSON.stringify({ proof: 'sdxl-exact-replay', ownerGo: false });
   assert.equal(evaluate('sdxl-exact-replay', noGo), false);
   assert.equal(evaluate('build-candle', noGo), false);
-  for (const plan of ['', '{}', '{"proof":"other"}']) {
+  for (const plan of ['', '{}', '{"proof":"other"}', 'starvector-campaign-2026-11', '{', 'not-json']) {
     assert.equal(evaluate('sdxl-exact-replay', plan), false);
     assert.equal(evaluate('build-candle', plan), true);
     assert.equal(evaluate('h3-cuda-memory', plan), false);
   }
-  for (const plan of ['{', 'not-json']) {
+  for (const plan of ['{"proof":"sdxl-exact-replay",', '{"proof":"sdxl-exact-replay","ownerGo":']) {
     assert.throws(() => evaluate('sdxl-exact-replay', plan));
-    assert.throws(() => evaluate('build-candle', plan));
+    assert.equal(evaluate('build-candle', plan), false);
     assert.equal(evaluate('h3-cuda-memory', plan), false);
   }
   for (const event of ['push', 'pull_request', 'schedule']) assert.equal(evaluate('sdxl-exact-replay', marker, event), false);

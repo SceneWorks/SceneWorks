@@ -54,9 +54,14 @@ export function validateDispatch(input) {
   assert(typeof input.planPath === 'string' && path.win32.isAbsolute(input.planPath), 'absolute private Windows plan required');
   assert(/^GPU-[a-f0-9-]{36}$/i.test(input.deviceUuid), 'physical UUID missing');
 }
-function dispatchInput() {
-  const input = JSON.parse(process.env.SDXL_REPLAY_DISPATCH);
+export function parseDispatch(raw) {
+  assert(typeof raw === 'string' && raw.startsWith('{"proof":"sdxl-exact-replay",'), 'canonical SDXL dispatch prefix required');
+  const input = JSON.parse(raw);
   validateDispatch(input);
+  return input;
+}
+function dispatchInput() {
+  const input = parseDispatch(process.env.SDXL_REPLAY_DISPATCH);
   assert.equal(input.planPath, process.env.SDXL_REPLAY_PLAN, 'dispatch plan changed');
   assert.equal(input.phase, process.env.SDXL_REPLAY_PHASE, 'dispatch phase changed');
   assert.equal(input.deviceUuid, process.env.CUDA_VISIBLE_DEVICES, 'dispatch UUID changed');

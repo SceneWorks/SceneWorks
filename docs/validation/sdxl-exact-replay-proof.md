@@ -35,8 +35,11 @@ On the **reviewed candidate ref**, that existing choice carries a JSON object wi
 This is a shape example, not approved host data. The ordinary Linux compile job explicitly excludes
 this marker, including when `ownerGo` is false. The selector is `standard`, so an old or
 default-branch workflow can only perform its ordinary compile; it cannot select H3 or any
-other learned model operation. Malformed JSON on the candidate fails workflow expression
-parsing before model work; missing/unknown markers can only select the ordinary compile. The SDXL job requires the marker and owner
+other learned model operation. Root routing checks only the string prefix
+`{"proof":"sdxl-exact-replay",` and never parses ordinary campaign IDs as JSON. A recognized
+prefix with malformed JSON fails the SDXL condition before model work while excluding the
+ordinary compile. Other inputs, including plain StarVector campaign IDs, keep ordinary
+compile behavior. The SDXL job requires the marker and owner
 go, and its parser refuses extra keys, unknown phases and any command/script/ref field.
 Other H3/StarVector selections retain their existing jobs and queues. If a candidate lacks
 this bridge, do not dispatch it. Never substitute a different operation to get a run.
@@ -44,7 +47,9 @@ this bridge, do not dispatch it. Never substitute a different operation to get a
 After independent review, required candidate CI, coordinator publication, final pin/plan
 preflight and the owner's GPU go window, prepare a local `dispatch-inputs.json` containing
 `starvector_terminal_operation: "standard"` and `campaign_run_id` as the serialized
-five-field JSON object above. The following is the concrete dispatch route, **not permission
+five-field JSON object above, compactly encoded with `proof` first (for example,
+`JSON.stringify({proof:"sdxl-exact-replay",phase,planPath,deviceUuid,ownerGo:true})`).
+Whitespace before/inside the prefix or reordered keys do not select the SDXL job. The following is the concrete dispatch route, **not permission
 to execute it now**:
 
 ```sh

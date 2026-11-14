@@ -77,18 +77,19 @@ concurrency:
   # Preserve StarVector's non-canceling bridge and ordinary ref-keyed builds.
   # Explicit CPU, import and terminal runs have separate per-run caller groups,
   # distinct from reusable callees and the unchanged native-device queues below.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'standard' && fromJSON(inputs.campaign_run_id || '{}').proof == 'sdxl-exact-replay' && format('sdxl-exact-replay-bridge-{0}-{1}', github.run_id, github.run_attempt) || github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' && format('h3-cuda-memory-bridge-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt)) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
-  cancel-in-progress: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && fromJSON(inputs.campaign_run_id || '{}').proof != 'sdxl-exact-replay' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && format('sdxl-exact-replay-bridge-{0}-{1}', github.run_id, github.run_attempt) || github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' && format('h3-cuda-memory-bridge-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt)) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
+  cancel-in-progress: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && !startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') }}
 
 jobs:
 
   # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
   # on main; reuse its existing standard (compile-only) choice plus an exact marker so dispatch does
-  # not depend on GitHub accepting a newly added branch-only choice value. The ordinary
-  # compile job excludes this marker even when ownerGo is false. On an old/default ref this
+  # not depend on GitHub accepting a newly added branch-only choice value.
+  # Routing only inspects the compact JSON prefix; plain campaign IDs never enter fromJSON.
+  # The compile job excludes this prefix even when ownerGo is false. On an old/default ref this
   # selector can only compile; it never selects an unrelated model job. No command input.
   sdxl-exact-replay:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && fromJSON(inputs.campaign_run_id || '{}').proof == 'sdxl-exact-replay' && fromJSON(inputs.campaign_run_id).ownerGo == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).ownerGo == true }}
     permissions:
       contents: read
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
@@ -435,7 +436,7 @@ jobs:
           retention-days: 30
 
   build-candle:
-    if: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && fromJSON(inputs.campaign_run_id || '{}').proof != 'sdxl-exact-replay' }}
+    if: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && !startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') }}
     runs-on: ubuntu-22.04
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
