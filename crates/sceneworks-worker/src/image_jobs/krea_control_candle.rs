@@ -38,9 +38,11 @@ use super::memory::gate_with_evict_reclaim;
 use super::metrics::lora_label;
 use super::nvfp4_host_eligible;
 use super::nvfp4_selected;
+#[cfg(test)]
 use super::quantization::gate_tier_key;
+use super::quantization::gate_tier_key_resolved;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::strict_control::trusted_control_weight_revision;
 use super::AdapterSpec;
 use super::CancelFlag;
@@ -140,6 +142,7 @@ pub(super) const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb4
 /// Standard turnkey basenames are authoritative because `krea_model_subdir` can clamp/fall back away
 /// from the requested bits. Opaque dense roots deliberately fall through to the request key; NVFP4 is
 /// likewise used only when no standard tier basename resolved.
+#[cfg(test)]
 fn krea_control_gate_tier(
     convrot_resolved: bool,
     resolved_base: &Path,
@@ -290,10 +293,15 @@ pub(super) fn resolve_krea_control_base(
         }
     }
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Krea control modelPath").map(Some);
@@ -345,7 +353,7 @@ pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &S
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
 fn krea_control_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
+    resolved_option_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
 }
 
 /// The (repo, filename) of the hosted control overlay — `advanced.controlWeights.{repo,filename}`
@@ -355,15 +363,15 @@ fn krea_control_candle_steps(request: &ImageRequest) -> u32 {
 pub(super) fn krea_control_overlay_repo_file(
     request: &ImageRequest,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", KREA_CONTROL_OVERLAY_REPO);
     let file = safe_weight_filename(
@@ -386,12 +394,8 @@ pub(super) fn krea_control_payload_overlay_path(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(path) = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("path"))
-        .and_then(crate::payload::trimmed_value_str)
+    let Some(path) = super::strict_control::resolved_control_weights(request)
+        .and_then(|fields| fields.path.valid_trimmed())
     else {
         return Ok(None);
     };
@@ -417,8 +421,8 @@ async fn ensure_krea_control_weights(
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
     let env_override = std::env::var(KREA_CONTROL_WEIGHTS_ENV).ok();
-    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override(
-        &request.advanced,
+    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override_typed(
+        &request.portable_aux,
         env_override.as_deref(),
     )? {
         return Ok(path);
@@ -471,7 +475,7 @@ fn krea_control_candle_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -701,6 +705,7 @@ pub(super) async fn generate_candle_krea_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -739,8 +744,8 @@ pub(super) async fn generate_candle_krea_control_stream(
             })?;
 
     let steps = krea_control_candle_steps(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_CONTROL_SCALE_CAP,
@@ -751,7 +756,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         })
         .to_owned();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     let raw_settings =
         krea_control_candle_raw_settings(request, &repo, steps, control_scale, pose_count);
 
@@ -776,11 +781,10 @@ pub(super) async fn generate_candle_krea_control_stream(
     // resolver clamps/falls back to an installed tier, so request bits can disagree with the directory
     // that loads (for example, requested q4 with only q8 installed). Dense/opaque roots have no tier
     // basename and deliberately retain the request/NVFP4 fallback.
-    let tier = krea_control_gate_tier(
+    let tier = gate_tier_key_resolved(
         convrot_dit.is_some(),
         &base,
-        &request.advanced,
-        &request.model_manifest_entry,
+        request,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(&base)),
     );
     // Tier integrity (sc-15799): the control branch's tier is derived from the resolved BASE tier, NOT
@@ -1072,6 +1076,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

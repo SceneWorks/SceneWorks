@@ -36,7 +36,6 @@ use super::Progress;
 use super::Quant;
 use super::ResolvedModel;
 use super::WeightsSource;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -112,7 +111,10 @@ pub(super) fn sdxl_advanced_available(request: &ImageRequest, settings: &Setting
 /// Resolve the IP-Adapter snapshot directory (`advanced.ipAdapterRepo` override, else the
 /// h94 default). The engine loader finds the ViT-H encoder + plus/plus-face weights inside.
 fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
-    let repo = crate::payload::trimmed_string(request.advanced.get("ipAdapterRepo"))
+    let repo = request
+        .advanced_text("ipAdapterRepo")
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
         .unwrap_or(SDXL_IP_ADAPTER_REPO);
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }
@@ -289,8 +291,8 @@ pub(super) async fn generate_sdxl_advanced_stream(
                     "SDXL IP-Adapter weights not found (download {SDXL_IP_ADAPTER_REPO})."
                 ))
             })?;
-            let scale = advanced::f32_clamped(
-                &request.advanced,
+            let scale = super::sampling::resolved_f32_clamped(
+                request,
                 "ipAdapterScale",
                 SDXL_IP_SCALE,
                 0.0..=1.0,
@@ -325,8 +327,8 @@ pub(super) async fn generate_sdxl_advanced_stream(
             // stretch — torch parity with `load_source_image` + `fit_image`.
             let source = fit_engine_image(source, width, height, &request.fit_mode)?;
             let is_inpaint = matches!(sub_mode, SdxlSubMode::Inpaint);
-            let strength = advanced::f32_clamped(
-                &request.advanced,
+            let strength = super::sampling::resolved_f32_clamped(
+                request,
                 "strength",
                 if is_inpaint {
                     SDXL_INPAINT_STRENGTH
@@ -406,8 +408,8 @@ pub(super) async fn generate_sdxl_advanced_stream(
                     WorkerError::Engine(format!("outpaint mask union failed: {error}"))
                 })?;
             }
-            let strength = advanced::f32_clamped(
-                &request.advanced,
+            let strength = super::sampling::resolved_f32_clamped(
+                request,
                 "strength",
                 SDXL_INPAINT_STRENGTH,
                 0.0..=1.0,
@@ -452,6 +454,7 @@ pub(super) async fn generate_sdxl_advanced_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         matches!(likeness, Some(Some(_))),
         "character_image face-stack staging failed; likeness scores omitted",
     )

@@ -140,7 +140,7 @@ fn krea_turbo_on_raw_raw_settings(
     steps: u32,
     quant_bits: Option<i64>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -296,12 +296,10 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     let spec = spec.with_offload_policy(offload_policy);
 
     let (sampler, scheduler, scheduler_shift) =
-        super::sampling::read_advanced_sampling_knobs(&request.advanced);
-    let guidance = sceneworks_core::image_sampling_controls::effective_guidance(
-        &request.advanced,
-        &JsonObject::new(),
-    )
-    .map(|value| value as f32);
+        super::sampling::read_resolved_image_sampling_knobs(request);
+    let guidance = request
+        .advanced_f64("guidanceScale")
+        .map(|value| value as f32);
     let sampling = GenerationRequest {
         sampler,
         scheduler,

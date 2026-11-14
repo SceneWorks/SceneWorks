@@ -107,17 +107,10 @@ pub(super) fn resolve_qwen_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    let control = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
-    let override_field = |key: &str| -> Option<String> {
-        control
-            .and_then(|control| control.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .map(str::to_owned)
-    };
-    let repo = override_field("repo")
+    let control = super::strict_control::resolved_control_weights(request);
+    let repo = control
+        .and_then(|fields| fields.repo.valid_trimmed())
+        .map(str::to_owned)
         .unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
     let default_revision =
         (repo == strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)).then(|| {
@@ -131,7 +124,10 @@ pub(super) fn resolve_qwen_control_weights(
     // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize` — whose DEFAULT tier is
     // clamped to the installed overlay (`snapshot`) so a plain default job never forces a new fetch
     // (sc-10726).
-    let rel = match override_field("filename") {
+    let rel = match control
+        .and_then(|fields| fields.filename.valid_trimmed())
+        .map(str::to_owned)
+    {
         Some(name)
             if sceneworks_core::control_weights::shipped_control_weight(
                 QWEN_CONTROL_ENGINE_ID,
@@ -273,6 +269,7 @@ pub(super) async fn generate_qwen_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -311,11 +308,11 @@ pub(super) async fn generate_qwen_control_stream(
     // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
     // first depth job (sc-8242).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = qwen_control_raw_settings(
         request,
@@ -339,6 +336,7 @@ pub(super) async fn generate_qwen_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
@@ -647,15 +645,9 @@ pub(super) fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -
 /// Advanced guidance overrides the prompt-strength default; legacy aliases remain supported.
 pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
     request
-        .advanced
-        .get("guidanceScale")
-        .or_else(|| request.advanced.get("trueCfgScale"))
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
+        .or_else(|| request.advanced_f64("trueCfgScale"))
+        .or_else(|| request.advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance())
 }
@@ -669,7 +661,7 @@ fn qwen_edit_raw_settings(
     guidance: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -757,6 +749,7 @@ pub(super) async fn generate_qwen_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -844,6 +837,7 @@ pub(super) async fn generate_qwen_edit_stream(
         score_likeness,
     } = plan_edit_batch(
         request,
+        execution,
         &grouping,
         qwen_edit_raw_settings(
             request,
@@ -878,6 +872,7 @@ pub(super) async fn generate_qwen_edit_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )

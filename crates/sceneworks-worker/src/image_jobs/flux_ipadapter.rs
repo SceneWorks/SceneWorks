@@ -9,8 +9,8 @@ use super::load_spec::candle_artifact_path_matches;
 use super::load_spec::candle_certified_artifact_path;
 use super::load_spec::candle_pinned_hf_artifact_path;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_f32_with;
-use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::sampling::resolved_option_or_manifest_f32_with;
+use super::sampling::resolved_option_or_manifest_u32_with;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
@@ -124,10 +124,15 @@ fn resolve_flux_ipadapter_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX IP-Adapter modelPath")
@@ -153,7 +158,7 @@ pub(super) fn flux_ipadapter_available(request: &ImageRequest, settings: &Settin
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → variant default.
 fn flux_ipadapter_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32_with(
+    resolved_option_or_manifest_u32_with(
         request,
         "steps",
         || flux_ipadapter_default_steps(&request.model),
@@ -163,7 +168,7 @@ fn flux_ipadapter_steps(request: &ImageRequest) -> u32 {
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → variant default, clamped.
 fn flux_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32_with(
+    resolved_option_or_manifest_f32_with(
         request,
         "guidanceScale",
         || flux_ipadapter_default_guidance(&request.model),
@@ -271,7 +276,7 @@ fn flux_ipadapter_raw_settings(
     guidance: f32,
     ip_scale: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -334,6 +339,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -344,8 +350,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
     let sampling = super::sampling::explicit_sampling_request(request);
     let steps = flux_ipadapter_steps(request);
     let guidance = flux_ipadapter_guidance(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         FLUX_IPADAPTER_IP_SCALE,
         0.0..=1.0,

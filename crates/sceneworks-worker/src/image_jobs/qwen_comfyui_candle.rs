@@ -4,7 +4,7 @@ use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::ColdLoadAdmission;
@@ -276,7 +276,7 @@ fn qwen_comfyui_raw_settings(
     steps: u32,
     guidance: Option<f32>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
@@ -347,13 +347,7 @@ pub(super) fn prepare_qwen_comfyui_load_spec_for_request(
 /// this reads the same `advanced` knob directly.
 fn qwen_comfyui_guidance(request: &ImageRequest) -> Option<f32> {
     request
-        .advanced
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
         .map(|value| value as f32)
 }
 
@@ -413,7 +407,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
 
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", QWEN_COMFYUI_DEFAULT_STEPS, 1..=50);
+        resolved_option_or_manifest_u32(request, "steps", QWEN_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = qwen_comfyui_guidance(request);
     let negative_prompt = {
         let trimmed = request.negative_prompt.trim();

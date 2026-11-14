@@ -5,8 +5,8 @@ use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
 #[cfg(target_os = "macos")]
 use super::artifact_resolution::resolved_mlx_artifact_tier;
-use super::conditioning::pose_entries;
 use super::conditioning::resolve_text_style_gain;
+use super::conditioning::ResolvedImageExecution;
 use super::events::consume_gen_events;
 use super::krea_turbo_raw::request_carries_img2img_reference;
 use super::krea_turbo_raw::KREA_RAW_MODEL_ID;
@@ -41,7 +41,6 @@ use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
 use super::Quant;
-use crate::advanced;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::JsonObject;
@@ -143,7 +142,12 @@ pub(super) struct PhaseLoraRef {
 /// so a malformed `phases` still routes HERE and fails loudly rather than being silently dropped by
 /// falling through to another lane.
 pub(super) fn request_has_multiphase(request: &ImageRequest) -> bool {
-    matches!(request.advanced.get("phases"), Some(value) if !value.is_null())
+    request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .phases
+        .is_some()
 }
 
 /// True when this is a Krea 2 **Raw** job carrying an explicit `advanced.phases` list and its Raw
@@ -173,7 +177,8 @@ pub(super) fn krea_multiphase_available(request: &ImageRequest, settings: &Setti
 /// against silently dropping a Raw conditioning source. Any future Raw conditioning entry point
 /// (a new img2img/edit/mask/reference shape that reaches multi-phase) MUST add its reject here, or it
 /// will be dropped with no error.
-pub(super) fn ensure_multiphase_job_shape(request: &ImageRequest) -> WorkerResult<()> {
+pub(super) fn ensure_multiphase_job_shape(execution: &ResolvedImageExecution) -> WorkerResult<()> {
+    let request: &ImageRequest = execution;
     if request.mode == "edit_image" {
         return Err(WorkerError::InvalidPayload(
             "Krea multi-phase denoise renders from pure noise — edit mode (edit_image) is not \
@@ -181,7 +186,7 @@ pub(super) fn ensure_multiphase_job_shape(request: &ImageRequest) -> WorkerResul
                 .to_owned(),
         ));
     }
-    if !pose_entries(request).is_empty() {
+    if execution.pose_source_count() > 0 {
         return Err(WorkerError::InvalidPayload(
             "Krea multi-phase denoise renders from pure noise — strict-pose conditioning is not \
              supported (sc-13884)."
@@ -195,7 +200,7 @@ pub(super) fn ensure_multiphase_job_shape(request: &ImageRequest) -> WorkerResul
                 .to_owned(),
         ));
     }
-    if advanced::flag(&request.advanced, "usePid") {
+    if request.advanced_bool("usePid").unwrap_or(false) {
         return Err(WorkerError::InvalidPayload(
             "Krea multi-phase denoise does not support the PiD decoder yet (sc-13884 follow-on)."
                 .to_owned(),
@@ -214,14 +219,18 @@ pub(super) fn ensure_multiphase_job_shape(request: &ImageRequest) -> WorkerResul
 /// non-finite lora `weight`, or a total step budget over [`MAX_MULTIPHASE_TOTAL_STEPS`]. `steps` and
 /// numeric fields accept a JSON number or a numeric string (matching the rest of the `advanced` knobs).
 pub(super) fn parse_multiphase_specs(request: &ImageRequest) -> WorkerResult<Vec<MultiPhaseSpec>> {
-    let raw = request.advanced.get("phases").ok_or_else(|| {
-        WorkerError::InvalidPayload("Krea multi-phase job is missing 'advanced.phases'.".to_owned())
-    })?;
-    let list = raw.as_array().ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "'advanced.phases' must be an array of phase objects.".to_owned(),
-        )
-    })?;
+    let list = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .phases
+        .as_ref()
+        .map(|bound| &bound.value)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Krea multi-phase job is missing 'advanced.phases'.".to_owned(),
+            )
+        })?;
     if list.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "'advanced.phases' must contain at least one phase.".to_owned(),
@@ -395,7 +404,7 @@ fn krea_multiphase_raw_settings(
     quant_bits: Option<i64>,
     specs: &[MultiPhaseSpec],
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     // The engine ignores the flat `steps` when phases are present; record the SUM it actually runs.
@@ -536,6 +545,7 @@ pub(super) async fn generate_krea_multiphase_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -546,9 +556,16 @@ pub(super) async fn generate_krea_multiphase_stream(
     // Reject shapes the engine will reject (edit / pose / img2img reference / PiD), loudly, before any
     // heavy work — the router sends every `krea_2_raw` + `advanced.phases` job here, so this is the
     // single place a conflicting shape is caught rather than silently rendered from bare noise.
-    ensure_multiphase_job_shape(request)?;
+    ensure_multiphase_job_shape(execution)?;
     // Parse + validate the phase list against the job's own LoRA stack (indices bounds-checked here).
-    let specs = parse_multiphase_specs(request)?;
+    let specs = execution
+        .phases()
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Krea multi-phase job is missing 'advanced.phases'.".to_owned(),
+            )
+        })?
+        .to_vec();
 
     let raw_model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;

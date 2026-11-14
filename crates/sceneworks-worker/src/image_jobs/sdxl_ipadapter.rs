@@ -14,9 +14,9 @@ use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
@@ -117,10 +117,15 @@ fn resolve_sdxl_ipadapter_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "SDXL IP-Adapter modelPath")
@@ -159,13 +164,13 @@ pub(super) fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settin
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) â†’ manifest `steps` â†’ default (30).
 fn sdxl_ipadapter_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", SDXL_IPADAPTER_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", SDXL_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` â†’ manifest `guidanceScale` â†’ the reference-tuned default
 /// (5.0), clamped to a sane CFG range.
 fn sdxl_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         SDXL_IPADAPTER_DEFAULT_GUIDANCE,
@@ -264,7 +269,7 @@ fn sdxl_ipadapter_raw_settings(
     guidance: f32,
     ip_scale: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -329,6 +334,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -338,8 +344,8 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
 
     let steps = sdxl_ipadapter_steps(request);
     let guidance = sdxl_ipadapter_guidance(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         SDXL_IPADAPTER_IP_SCALE,
         0.0..=1.0,
@@ -350,7 +356,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     // unset â‡’ `None` â‡’ the native ancestral default loop runs byte-exact. (`sdxl`/`realvisxl` are
     // MODEL_TABLE rows already advertising the curated menu â€” guarded by the existing drift guard.)
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,

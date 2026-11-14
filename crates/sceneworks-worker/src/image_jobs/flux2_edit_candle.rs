@@ -15,8 +15,8 @@ use super::mlx_model;
 use super::pid::pid_effective_dims;
 use super::pid::pid_output_tier;
 use super::pid::resolve_pid_weights;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items_reported;
 use super::stream::start_gen_stream;
 use super::CandleBaseEvidence;
@@ -131,11 +131,13 @@ pub(super) fn flux2_edit_candle_mode(request: &ImageRequest) -> bool {
 /// ordinary character/reference edits; any non-empty or malformed pose carrier must stay off this
 /// lane so the control route can consume it or the worker can reject it explicitly.
 fn flux2_edit_candle_pose_carrier_is_absent_or_empty(request: &ImageRequest) -> bool {
-    match request.advanced.get("poses") {
-        None | Some(Value::Null) => true,
-        Some(Value::Array(poses)) => poses.is_empty(),
-        Some(_) => false,
-    }
+    request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref()
+        .is_none_or(|poses| poses.value.is_empty())
 }
 
 /// Resolve the FLUX.2 base snapshot through the **shared** [`resolve_weights_dir`] — the same resolver
@@ -193,20 +195,16 @@ pub(super) fn flux2_edit_candle_available(request: &ImageRequest, settings: &Set
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → the family default
 /// (klein 4 / dev 28).
 fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", default, 1..=50)
+    resolved_option_or_manifest_u32(request, "steps", default, 1..=50)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
-    if let Some(value) = request.advanced.get("trueCfgScale").and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
+    if let Some(value) = request.advanced_f64("trueCfgScale") {
         return (value as f32).clamp(0.0, 30.0);
     }
-    resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
+    resolved_option_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
 /// Reference asset ids for a FLUX.2 edit, in order. The multi-image picker (sc-6211) sends the plural
@@ -256,7 +254,7 @@ fn flux2_edit_candle_raw_settings(
     quant_bits: Option<i64>,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -488,7 +486,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let work = candle_conditioned_edit_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
-    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+    let enhance = PromptEnhance::from_resolved(request)?;
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",

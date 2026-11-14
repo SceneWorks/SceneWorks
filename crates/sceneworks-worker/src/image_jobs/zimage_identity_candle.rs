@@ -49,13 +49,7 @@ fn is_zimage_identity_candle_model(model: &str) -> bool {
 /// kept in lockstep by the shared parity comment.)
 pub(super) fn zimage_identity_candle_strength(request: &ImageRequest) -> Option<f32> {
     let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("referenceStrength")
         .filter(|strength| *strength > 0.0)?;
     let has_asset = request
         .reference_asset_id
@@ -82,7 +76,7 @@ pub(super) fn zimage_identity_candle_available(
         // exclude both so this plain With-Character lane never steals them (it sits BEFORE the Z-Image
         // strict-control lane in the dispatch). Mirrors `resolve_character_image_likeness_source`.
         && pose_entries(request).is_empty()
-        && !advanced::flag(&request.advanced, "angleSet")
+        && !request.advanced_bool("angleSet").unwrap_or(false)
         && matches!(
             resolve_zimage_edit_candle_base(request, settings),
             Ok(Some(_))

@@ -4,7 +4,7 @@ use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::ColdLoadAdmission;
@@ -273,12 +273,28 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
             "this runtime has no registered ComfyUI FLUX.2 generate route".to_owned(),
         )
     })?;
-    let explicit = ["quantTier", "quant", "mlxQuantize"].iter().any(|key| {
-        request
-            .advanced
-            .get(*key)
-            .is_some_and(|value| !value.is_null())
-    });
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    let authored = |origin| {
+        matches!(
+            origin,
+            sceneworks_core::resolved_options::Origin::Authored { .. }
+        )
+    };
+    let explicit = options
+        .quant_tier
+        .as_ref()
+        .is_some_and(|value| authored(value.origin))
+        || options
+            .quant
+            .as_ref()
+            .is_some_and(|value| authored(value.origin))
+        || options
+            .mlx_quantize
+            .as_ref()
+            .is_some_and(|value| value.value.is_some() && authored(value.origin));
     let (selected, _) =
         super::krea_imported::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
     match selected {
@@ -304,13 +320,7 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
 /// same `advanced` knob directly. FLUX.2-dev is guidance-distilled (embedded scalar, no negative pass).
 fn flux2_comfyui_guidance(request: &ImageRequest) -> Option<f32> {
     request
-        .advanced
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
         .map(|value| value as f32)
 }
 
@@ -321,7 +331,7 @@ fn flux2_comfyui_raw_settings(
     guidance: Option<f32>,
     quant: Quant,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
@@ -458,7 +468,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     })?;
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
+        resolved_option_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
     let quant = paths.quant;
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);

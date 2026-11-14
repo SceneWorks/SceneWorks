@@ -5,7 +5,7 @@ use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::ColdLoadAdmission;
@@ -242,7 +242,7 @@ fn zimage_comfyui_raw_settings(
     steps: u32,
     adapter_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
@@ -346,7 +346,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
 
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
+        resolved_option_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps, adapter_count);
     let conditioning =
         super::conditioning::resolve_img2img_init_generic(request, settings, project_path)?

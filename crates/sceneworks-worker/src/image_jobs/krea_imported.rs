@@ -51,7 +51,7 @@ use super::resolve_seed;
 #[cfg(all(native_lane, all(not(target_os = "macos"), feature = "backend-candle")))]
 use super::routing::imported_base_snapshot_companions;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::drive_gen_items_scored;
 #[cfg(not(target_os = "macos"))]
@@ -84,7 +84,6 @@ use super::LoadSpec;
 use super::Progress;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -310,16 +309,22 @@ pub(super) fn resolve_imported_krea_dit_pin(
     // An explicit `modelPath` (a future assembler could pin the file directly) wins; otherwise the
     // import job's recorded install dir (`paths.model`), which holds the single-file checkpoint.
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -458,13 +463,17 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
             }
         }
     }
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    if sceneworks_core::jobs_store::imported_control_intent_is_material_resolved(options)
         && operation != gen_core::ImportedModelOperation::Pose
     {
         return false;
     }
     if operation == gen_core::ImportedModelOperation::Pose
-        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(&request.advanced)
+        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported_resolved(options)
     {
         return false;
     }
@@ -890,6 +899,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedControlSources>,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -918,8 +928,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     } = prepared_adapters;
 
     let steps = krea_control_steps(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_IMPORTED_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_IMPORTED_CONTROL_SCALE_CAP,
@@ -933,7 +943,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     let user_control = resolve_user_control_map(request, settings, project_path)?;
     let control_source = resolve_control_source(request, settings, project_path)?;
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let mut raw_settings = krea_imported_control_raw_settings(
         request,
@@ -1154,6 +1164,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -1197,9 +1208,9 @@ pub(super) async fn generate_krea_imported_control_stream(
     }
 
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+        resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_IMPORTED_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_IMPORTED_CONTROL_SCALE_CAP,
@@ -1213,7 +1224,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     let user_control = resolve_user_control_map(request, settings, project_path)?;
     let control_source = resolve_control_source(request, settings, project_path)?;
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = krea_imported_control_raw_settings(
         request,
@@ -1390,13 +1401,11 @@ pub(super) fn imported_model_quant(
     label: &str,
 ) -> WorkerResult<(Option<Quant>, Option<i64>)> {
     let named = request
-        .advanced
-        .get("quantTier")
-        .or_else(|| request.advanced.get("quant"))
-        .and_then(Value::as_str)
+        .advanced_text("quantTier")
+        .or_else(|| request.advanced_text("quant"))
         .map(str::trim)
         .map(str::to_ascii_lowercase);
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let selected = if krea_imported_native_nvfp4(request) {
         // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
         // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
@@ -1482,7 +1491,7 @@ pub(super) fn krea_imported_raw_settings(
     adapter_count: usize,
     dit: Option<&Path>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
         &mut raw,
         crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
@@ -1497,7 +1506,7 @@ pub(super) fn krea_imported_raw_settings(
     raw.insert(
         "resolvedSampler".to_owned(),
         Value::String(
-            super::sampling::read_advanced_sampling_knobs(&request.advanced)
+            super::sampling::read_resolved_image_sampling_knobs(request)
                 .0
                 .unwrap_or_else(|| KREA_IMPORTED_SAMPLER.to_owned()),
         ),
@@ -2058,6 +2067,7 @@ pub(super) async fn generate_krea_imported_stream(
     settings: &Settings,
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedSources>,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -2100,8 +2110,15 @@ pub(super) async fn generate_krea_imported_stream(
 
     let phase_specs = request_has_multiphase(request)
         .then(|| {
-            ensure_multiphase_job_shape(request)?;
-            parse_multiphase_specs(request)
+            ensure_multiphase_job_shape(execution)?;
+            execution
+                .phases()
+                .map(|phases| phases.to_vec())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "Krea multi-phase job is missing 'advanced.phases'.".to_owned(),
+                    )
+                })
         })
         .transpose()?;
     let phases = phase_specs.as_deref().map(build_generation_phases);
@@ -2113,7 +2130,7 @@ pub(super) async fn generate_krea_imported_stream(
 
     let (width, height) = (request.width, request.height);
     let steps = phase_specs.as_ref().map_or_else(
-        || resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
+        || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
         |specs| specs.iter().map(|phase| phase.steps).sum(),
     );
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);

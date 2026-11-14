@@ -8,8 +8,8 @@ use super::qwen::QWEN_CONTROL_ENGINE_ID;
 #[cfg(target_os = "macos")]
 use super::qwen::QWEN_CONTROL_FILE;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 use super::tier_resolver::qwen_control_tier_subdir;
@@ -115,10 +115,15 @@ fn resolve_qwen_control_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen control modelPath").map(Some);
@@ -143,12 +148,12 @@ pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → default (30).
 fn qwen_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", QWEN_CONTROL_DEFAULT_STEPS, 1..=100)
+    resolved_option_or_manifest_u32(request, "steps", QWEN_CONTROL_DEFAULT_STEPS, 1..=100)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
 fn qwen_control_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         QWEN_CONTROL_DEFAULT_GUIDANCE,
@@ -168,14 +173,14 @@ pub(super) fn qwen_control_repo_file(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .map(str::to_owned)
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .map(str::to_owned)
     };
     let repo = pick("repo").unwrap_or_else(|| QWEN_CONTROL_REPO.to_owned());
     let file = match pick("filename") {
@@ -228,8 +233,11 @@ async fn ensure_qwen_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -465,6 +473,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -477,8 +486,8 @@ pub(super) async fn generate_candle_qwen_control_stream(
 
     let steps = qwen_control_steps(request);
     let guidance = qwen_control_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         QWEN_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
@@ -489,7 +498,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         })
         .to_owned();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
     // The adapter stack rides the LoadSpec, not `QwenFunControlPaths`: `load_with_spec` rebuilds the
@@ -528,6 +537,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

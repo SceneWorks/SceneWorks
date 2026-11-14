@@ -10,8 +10,8 @@ use super::pid::pid_effective_dims;
 use super::pid::pid_output_tier;
 use super::pid::resolve_pid_weights;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items;
 use super::stream::start_gen_stream;
@@ -116,10 +116,15 @@ fn resolve_sdxl_edit_candle_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "SDXL edit modelPath").map(Some);
@@ -157,12 +162,12 @@ pub(super) fn sdxl_edit_candle_available(request: &ImageRequest, settings: &Sett
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (30).
 fn sdxl_edit_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", SDXL_EDIT_CANDLE_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", SDXL_EDIT_CANDLE_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn sdxl_edit_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         SDXL_EDIT_CANDLE_DEFAULT_GUIDANCE,
@@ -186,7 +191,7 @@ fn sdxl_edit_candle_raw_settings(
     strength: f32,
     mode_tag: &str,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -264,8 +269,8 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
         mode,
         SdxlEditCandleMode::Inpaint | SdxlEditCandleMode::Outpaint
     );
-    let strength = advanced::f32_clamped(
-        &request.advanced,
+    let strength = super::sampling::resolved_f32_clamped(
+        request,
         "strength",
         if is_inpaint {
             SDXL_EDIT_CANDLE_INPAINT_STRENGTH

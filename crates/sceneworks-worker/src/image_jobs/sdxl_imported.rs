@@ -18,10 +18,10 @@ use super::render::resolve_hires_fix_plan;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_guidance_method;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_guidance_method;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 #[cfg(target_os = "macos")]
 use super::sdxl::SDXL_EDIT_STRENGTH;
 #[cfg(target_os = "macos")]
@@ -35,7 +35,6 @@ use super::ImageRequest;
 use super::LoadSpec;
 use super::PromptEnhance;
 use super::WeightsSource;
-use crate::advanced;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::Path;
@@ -113,16 +112,22 @@ pub(super) fn resolve_imported_sdxl_pin(
         return Ok(None);
     }
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -150,7 +155,12 @@ pub(super) fn resolve_imported_sdxl_pin(
 }
 
 pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced) {
+    if sceneworks_core::jobs_store::imported_control_intent_is_material_resolved(
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved"),
+    ) {
         return false;
     }
     let operation = if request.mode == "edit_image" {
@@ -170,10 +180,12 @@ pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> b
         return false;
     }
     let has_phases = request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty());
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .phases
+        .as_ref()
+        .is_some_and(|phases| !phases.value.is_empty());
     if !pose_entries(request).is_empty()
         || !request.reference_asset_ids.is_empty()
         || request.character_id.is_some()
@@ -250,8 +262,12 @@ fn resolve_imported_sdxl_conditioning(
             project_path,
         )?;
         let image = fit_engine_image(image, width, height, &request.fit_mode)?;
-        let strength =
-            advanced::f32_clamped(&request.advanced, "strength", SDXL_EDIT_STRENGTH, 0.0..=1.0);
+        let strength = super::sampling::resolved_f32_clamped(
+            request,
+            "strength",
+            SDXL_EDIT_STRENGTH,
+            0.0..=1.0,
+        );
         return Ok((
             vec![Conditioning::Reference {
                 image,
@@ -281,8 +297,8 @@ fn resolve_imported_sdxl_conditioning(
     let masked = non_empty(&request.mask_asset_id);
     let (src_w, src_h) = (source.width, source.height);
     let source = fit_engine_image(source, width, height, &request.fit_mode)?;
-    let strength = advanced::f32_clamped(
-        &request.advanced,
+    let strength = super::sampling::resolved_f32_clamped(
+        request,
         "strength",
         if masked || outpaint {
             SDXL_INPAINT_STRENGTH
@@ -726,14 +742,14 @@ pub(super) async fn generate_sdxl_imported_stream(
     let file = file_pin.loader_path().to_path_buf();
     let adapter_count = prepared_adapters.specs.len();
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
-    let guidance = resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let guidance = resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         SDXL_IMPORTED_DEFAULT_GUIDANCE,
         0.0..=30.0,
     );
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let operation = if request.mode == "edit_image" {
         gen_core::ImportedModelOperation::Edit
     } else {
@@ -767,7 +783,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         backend,
     );
     let guidance_method = normalize_sampling_knob(
-        read_advanced_guidance_method(&request.advanced),
+        read_resolved_image_guidance_method(request),
         &caps.supported_guidance_methods,
         "guidanceMethod",
         &request.model,
@@ -793,7 +809,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
-    let mut raw_settings = request.advanced.clone();
+    let mut raw_settings = request.effective_advanced_wire();
     raw_settings.insert("realModelInference".to_owned(), Value::Bool(true));
     raw_settings.insert("numInferenceSteps".to_owned(), json!(steps));
     raw_settings.insert("guidanceScale".to_owned(), json!(guidance));

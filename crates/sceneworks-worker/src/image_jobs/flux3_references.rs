@@ -154,11 +154,15 @@ pub(crate) fn validated_request(
         "maskAssetId": request.mask_asset_id,
         "width": authored.width,
         "height": authored.height,
-        "advanced": request.advanced,
     });
-    let live =
-        sceneworks_core::image_request::flux3::parse(live.as_object().expect("object literal"))
-            .map_err(WorkerError::InvalidPayload)?;
+    let live = sceneworks_core::image_request::flux3::parse_resolved(
+        live.as_object().expect("object literal"),
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved"),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     if live.asset_ids != authored.asset_ids
         || live.layout != authored.layout
         || live.reference_ids != authored.reference_ids
@@ -868,6 +872,17 @@ mod tests {
         request
             .advanced
             .insert("referenceStrength".to_owned(), serde_json::json!(1.0));
+        assert!(validated_request(&request).unwrap().is_some());
+        request
+            .resolved_advanced
+            .as_mut()
+            .unwrap()
+            .reference_strength = Some(sceneworks_core::resolved_options::Bound {
+            value: 1.0,
+            origin: sceneworks_core::resolved_options::Origin::Authored {
+                spelling: "referenceStrength",
+            },
+        });
         assert!(validated_request(&request)
             .unwrap_err()
             .to_string()

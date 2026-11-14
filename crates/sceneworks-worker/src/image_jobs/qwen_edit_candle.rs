@@ -2,8 +2,8 @@ use super::adapters::resolve_adapters;
 use super::artifact_resolution::requested_receipt_variant;
 use super::conditioning::candle_conditioned_edit_work;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::PoseInput;
+use super::conditioning::{parse_poses, ResolvedImageExecution};
 use super::events::consume_gen_events;
 use super::load_policy::apply_candle_qwen_load_shape;
 use super::load_spec::attach_manifest_text_encoder;
@@ -18,10 +18,12 @@ use super::memory::vram_reject_tail_for_tier;
 use super::memory::ResolutionLever;
 use super::nvfp4_host_eligible;
 use super::nvfp4_selected;
+#[cfg(test)]
 use super::quantization::gate_tier_key;
+use super::quantization::gate_tier_key_resolved;
 use super::quantization::tier_key_from_resolved_dir;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::sampling::resolved_option_or_manifest_u32_with;
 use super::standard_tier_subdir;
 #[cfg(test)]
 use super::standard_tier_subdir_gated;
@@ -339,17 +341,16 @@ fn qwen_shared_load_plan(selected: Option<gen_core::MemoryStrategy>) -> crate::v
 }
 
 fn qwen_edit_candle_unsupported_request_axis(request: &ImageRequest) -> Option<&'static str> {
-    if !matches!(
-        request.advanced.get("usePid"),
-        None | Some(Value::Null | Value::Bool(false))
-    ) {
+    if request.advanced_bool("usePid").unwrap_or(false) {
         return Some("PiD decode");
     }
-    let phases_requested = match request.advanced.get("phases") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(phases)) => !phases.is_empty(),
-        Some(_) => true,
-    };
+    let phases_requested = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .phases
+        .as_ref()
+        .is_some_and(|phases| !phases.value.is_empty());
     phases_requested.then_some("multi-phase denoise")
 }
 
@@ -366,12 +367,40 @@ pub(super) fn qwen_edit_candle_mode(request: &ImageRequest) -> bool {
         && (pose_count == 0 || (request.mode == "character_image" && references.len() == 1))
 }
 
+pub(super) fn qwen_edit_candle_mode_resolved(execution: &ResolvedImageExecution) -> bool {
+    let request: &ImageRequest = execution;
+    if !matches!(request.mode.as_str(), "edit_image" | "character_image") {
+        return false;
+    }
+    let references = qwen_edit_candle_reference_ids(request);
+    let Some(pose_count) = qwen_edit_candle_pose_count_resolved(execution) else {
+        return false;
+    };
+    !references.is_empty()
+        && (pose_count == 0 || (request.mode == "character_image" && references.len() == 1))
+}
+
+pub(super) fn qwen_edit_candle_pose_count_resolved(
+    execution: &ResolvedImageExecution,
+) -> Option<usize> {
+    (execution.pose_source_count() <= sceneworks_core::image_request::MAX_JOB_POSES
+        && execution.invalid_pose_entries().is_empty())
+    .then_some(execution.pose_source_count())
+}
+
 /// Strict mirror of the scheduler's optional Qwen Edit pose carrier. Missing/null/empty selects the
 /// ordinary edit path; a supplied set is object-only and bounded by the shared request contract.
 pub(super) fn qwen_edit_candle_pose_count(request: &ImageRequest) -> Option<usize> {
-    match request.advanced.get("poses") {
-        None | Some(Value::Null) => Some(0),
-        Some(Value::Array(poses))
+    match request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref()
+        .map(|bound| &bound.value)
+    {
+        None => Some(0),
+        Some(poses)
             if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
                 && poses.iter().all(Value::is_object) =>
         {
@@ -385,6 +414,17 @@ pub(super) fn qwen_edit_candle_pose_count(request: &ImageRequest) -> Option<usiz
 /// established MLX Character Studio recipe; ordinary edits retain angle-set/count behavior.
 fn qwen_edit_candle_work(request: &ImageRequest) -> Vec<(i64, String)> {
     match qwen_edit_candle_pose_count(request) {
+        Some(count) if count > 0 => {
+            let seed = resolve_seed(request, 0);
+            (0..count).map(|_| (seed, request.prompt.clone())).collect()
+        }
+        _ => candle_conditioned_edit_work(request),
+    }
+}
+
+fn qwen_edit_candle_work_resolved(execution: &ResolvedImageExecution) -> Vec<(i64, String)> {
+    let request: &ImageRequest = execution;
+    match qwen_edit_candle_pose_count_resolved(execution) {
         Some(count) if count > 0 => {
             let seed = resolve_seed(request, 0);
             (0..count).map(|_| (seed, request.prompt.clone())).collect()
@@ -507,10 +547,15 @@ pub(crate) fn resolve_qwen_edit_candle_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen edit modelPath").map(Some);
@@ -588,7 +633,7 @@ pub(super) fn qwen_edit_candle_available(request: &ImageRequest, settings: &Sett
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → family default
 /// (Lightning → 4, else 30).
 fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32_with(
+    resolved_option_or_manifest_u32_with(
         request,
         "steps",
         || {
@@ -606,15 +651,9 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
 /// payloads keep their `guidanceScale`/manifest fallback.
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
     if let Some(value) = request
-        .advanced
-        .get("guidanceScale")
-        .or_else(|| request.advanced.get("trueCfgScale"))
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
+        .or_else(|| request.advanced_f64("trueCfgScale"))
+        .or_else(|| request.advanced_f64("imageGuidanceScale"))
     {
         return value as f32;
     }
@@ -647,7 +686,7 @@ fn qwen_edit_candle_raw_settings(
     guidance: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -780,6 +819,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -787,7 +827,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let request = &plan.request;
     let qwen_base = resolve_qwen_edit_candle_base(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image-Edit base not found".to_owned()))?;
-    if !qwen_edit_candle_mode(request) {
+    if !qwen_edit_candle_mode_resolved(execution) {
         return Err(WorkerError::InvalidPayload(
             "Qwen edit requires edit_image mode + a source image".to_owned(),
         ));
@@ -828,9 +868,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // keeps the exact ordered stack [built-in distill, user...] for resident/direct execution; the
     // shared selector certifies optimized Lightning evidence only for the singleton built-in stack.
     let adapter_count = adapters.len();
-    let pose_inputs = qwen_edit_candle_pose_count(request)
+    let pose_inputs = qwen_edit_candle_pose_count_resolved(execution)
         .filter(|count| *count > 0)
-        .map(|_| parse_poses(request));
+        .map(|_| execution.poses().to_vec());
     let reference_count = if pose_inputs.is_some() {
         2
     } else {
@@ -850,7 +890,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     }
 
     // Per-image work items: ordinary count/angle edits or one shared-seed edit per pose.
-    let work = qwen_edit_candle_work(request);
+    let work = qwen_edit_candle_work_resolved(execution);
     let total = work.len();
     let negative = request.negative_prompt.clone();
     let mut attached_provider_spec = attach_manifest_text_encoder(
@@ -907,11 +947,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         // Reading the resolved basename makes both cases self-correcting. `convrot_resolved = false`:
         // ConvRot is a Krea tier, not a Qwen-Image-Edit one. `nvfp4_selected` takes the resolved dir, so
         // an `nvfp4/` pick that fell back to an installed tier is budgeted as what it fell back TO.
-        let tier = gate_tier_key(
+        let tier = gate_tier_key_resolved(
             /* convrot_resolved */ false,
             &qwen_base,
-            &request.advanced,
-            &request.model_manifest_entry,
+            request,
             nvfp4_selected(request, nvfp4_host_eligible(), Some(&qwen_base)),
         );
         // The manifest's Lightning rows already include the built-in distill LoRA. Charge only user

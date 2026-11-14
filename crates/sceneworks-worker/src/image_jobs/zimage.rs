@@ -104,20 +104,15 @@ fn resolve_control_weights_for(
     default_repo: &'static str,
     default_file: &'static str,
 ) -> WorkerResult<Option<PathBuf>> {
-    let control = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
-    let str_field = |key: &str, default: &'static str| -> String {
-        control
-            .and_then(|control| control.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
-    };
-    let repo = str_field("repo", default_repo);
+    let control = super::strict_control::resolved_control_weights(request);
+    let repo = control
+        .and_then(|fields| fields.repo.valid_trimmed())
+        .unwrap_or(default_repo)
+        .to_owned();
     let filename = safe_weight_filename(
-        &str_field("filename", default_file),
+        control
+            .and_then(|fields| fields.filename.valid_trimmed())
+            .unwrap_or(default_file),
         "advanced.controlWeights.filename",
     )?;
     let revision = trusted_control_weight_revision(request, engine_id, &repo, &filename)?;
@@ -165,13 +160,7 @@ pub(super) fn resolve_base_control_weights(
 /// Pose ControlNet lock strength: `advanced.controlScale` (default 0.9, clamp [0,2]).
 pub(super) fn resolve_control_scale(request: &ImageRequest) -> f32 {
     request
-        .advanced
-        .get("controlScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("controlScale")
         .map(|value| value as f32)
         .unwrap_or(0.9)
         .clamp(0.0, 2.0)
@@ -294,6 +283,7 @@ pub(super) async fn generate_zimage_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -339,11 +329,11 @@ pub(super) async fn generate_zimage_control_stream(
     // (passthrough short-circuits estimation). Shared across the set; fetched once on first depth job
     // (sc-8242).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings =
         zimage_control_raw_settings(request, &repo, steps, quant_bits, control_scale, count);
@@ -363,6 +353,7 @@ pub(super) async fn generate_zimage_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
@@ -528,7 +519,7 @@ fn zimage_base_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -559,6 +550,7 @@ pub(super) async fn generate_zimage_base_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -597,11 +589,11 @@ pub(super) async fn generate_zimage_base_control_stream(
     // source (the skeleton is synthetic).
     let control_source = resolve_control_source(request, settings, project_path)?;
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = zimage_base_control_raw_settings(
         request,
@@ -629,6 +621,7 @@ pub(super) async fn generate_zimage_base_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
