@@ -1184,6 +1184,8 @@ fn print_production_binding_inventory() {
         *by_file.entry(&read.file).or_default() += 1;
     }
     eprintln!("TOTAL production advanced reads: {}", coverage.reads.len());
+    eprintln!("Unresolved dynamic reads: {}", coverage.dynamic.len());
+    eprintln!("Delegated dynamic reads: {}", coverage.delegated.len());
     eprintln!("Whole-map reads: {}", coverage.whole_map_reads.len());
     for site in &coverage.whole_map_reads {
         eprintln!("whole-map read: {site:?}");
@@ -1233,10 +1235,15 @@ fn production_execution_has_no_raw_advanced_reads() {
         .whole_map_reads
         .iter()
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
+    let mutations = coverage
+        .mutations
+        .iter()
+        .map(|(file, function, expr)| format!("{file}::{function} raw-map remove/entry {expr}"));
     let remaining: Vec<_> = direct
         .chain(dynamic)
         .chain(delegated)
         .chain(whole_map)
+        .chain(mutations)
         .collect();
     assert!(
         remaining.is_empty(),
