@@ -3955,6 +3955,62 @@ async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
     }
 }
 
+#[tokio::test]
+async fn interleave_shifts_survive_typed_and_raw_job_ingress() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = create_project(app.clone(), &"Interleave shifts").await;
+    let project_id = project["id"].as_str().expect("project id");
+    let payload = json!({
+        "projectId": project_id,
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "advanced": {"schedulerShift": 9, "timestepShift": 1.5},
+    });
+    for (path, body) in [
+        ("/api/v1/image/interleave/jobs", payload.clone()),
+        (
+            "/api/v1/jobs",
+            json!({
+                "type": "image_interleave",
+                "projectId": project_id,
+                "requestedGpu": "auto",
+                "payload": payload,
+            }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", path, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{path}: {response}");
+        assert_eq!(response["payload"]["advanced"]["schedulerShift"], 9);
+        assert_eq!(response["payload"]["advanced"]["timestepShift"], 1.5);
+        let job_id = response["id"].as_str().expect("created job id");
+        let (status, stored) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {stored}");
+        assert_eq!(stored["payload"]["advanced"]["schedulerShift"], 9);
+        assert_eq!(stored["payload"]["advanced"]["timestepShift"], 1.5);
+    }
+    let (status, refused) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_vqa",
+            "projectId": project_id,
+            "requestedGpu": "auto",
+            "payload": {"advanced": {"schedulerShift": 9, "timestepShift": 1.5}},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "ConflictingAliases");
+}
+
 /// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
 /// payload. Validate the merged model before either operation can persist a new job.
 #[tokio::test]
