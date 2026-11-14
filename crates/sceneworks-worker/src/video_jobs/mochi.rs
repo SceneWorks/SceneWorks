@@ -1,9 +1,9 @@
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
-use super::wan::{advanced_opt_f32, advanced_opt_u32};
-#[cfg(target_os = "macos")]
 use super::wan::{generate_video_using, VideoGenInput};
+#[cfg(target_os = "macos")]
+use super::wan::{resolved_video_f32, resolved_video_u32};
 
 // ---------------------------------------------------------------------------
 // Mochi 1 (epic 1788 / sc-11992): a 10B AsymmDiT text-to-video model with a 6×-temporal AsymmVAE,
@@ -96,7 +96,7 @@ fn mochi_shared_is_complete(root: &Path) -> bool {
 #[cfg(native_lane)]
 pub(super) fn mochi_wants_q8(request: &VideoRequest) -> bool {
     request
-        .quant_bits()
+        .resolved_quant_bits()
         .is_some_and(|bits| (8..=15).contains(&bits))
 }
 
@@ -107,7 +107,7 @@ pub(super) fn mochi_wants_q8(request: &VideoRequest) -> bool {
 #[cfg(native_lane)]
 pub(super) fn mochi_wants_bf16(request: &VideoRequest) -> bool {
     request
-        .quant_bits()
+        .resolved_quant_bits()
         .is_some_and(|bits| bits <= 0 || bits >= 16)
 }
 
@@ -683,8 +683,8 @@ pub(super) async fn generate_mochi_using(
         frames,
         fps: request.fps,
         // `None` ⇒ the engine's own DEFAULT_STEPS (64) / DEFAULT_GUIDANCE (4.5).
-        steps: advanced_opt_u32(request, "steps"),
-        guidance: advanced_opt_f32(request, "guidanceScale"),
+        steps: resolved_video_u32(request, "steps"),
+        guidance: resolved_video_f32(request, "guidanceScale"),
         seed: resolve_video_seed(request) as u64,
         ..VideoGenInput::default()
     };
@@ -694,7 +694,8 @@ pub(super) async fn generate_mochi_using(
         settings,
         job,
         backend,
-        &request.advanced,
+        request.options(),
+        &request.portable_aux,
         input,
         load_generator,
     )

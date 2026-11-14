@@ -1423,10 +1423,17 @@ async fn run_seedvr2_stream(
             softness: Some(req.softness),
             ..Default::default()
         };
-        // SeedVR2 upscale is one-step with no per-generation sampler/scheduler knobs, so the
-        // advanced block generate_video reads for those is empty here (F-118).
-        let decoded =
-            generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
+        // SeedVR2 has no video-generation overrides or portable auxiliary sources.
+        let decoded = generate_video(
+            api,
+            settings,
+            job,
+            backend,
+            &sceneworks_core::video_request::VideoOptions::default(),
+            &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+            input,
+        )
+        .await?;
         if let Some(frame) = decoded.frames.first() {
             out_w = frame.width;
             out_h = frame.height;

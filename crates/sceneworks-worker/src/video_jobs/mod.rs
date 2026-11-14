@@ -22,8 +22,8 @@ use std::f32::consts::PI;
 use std::path::Path;
 
 use sceneworks_core::video_request::{
-    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, requested_steps,
-    steps_limit_error, VideoRequest,
+    duration_limit_error, fps_limit_error, is_ltx_model, reference_limit_error, steps_limit_error,
+    VideoRequest,
 };
 
 // Used only by the video generation metrics builders below, which are themselves
@@ -586,9 +586,14 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     //
     // The API gate is the one that returns a caller a 400, but it only covers what IT enqueues — a
     // job replayed from a pre-sc-19426 row, or produced by any future non-HTTP path, reaches the
-    // engine through here. Read through `requested_steps`, the same reader `advanced_opt_u32` is,
+    // engine through here. Read through `requested_steps`, the same reader `resolved_video_u32` is,
     // so this judges exactly the number the adapters go on to pass down.
-    if let Some(steps) = requested_steps(&request.advanced) {
+    if let Some(steps) = request
+        .options()
+        .steps
+        .as_ref()
+        .and_then(|v| u32::try_from(v.value).ok())
+    {
         if let Some(message) =
             steps_limit_error(&request.model, steps, &request.model_manifest_entry)
         {
@@ -623,8 +628,17 @@ pub(crate) async fn run_video_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
-    let request = VideoRequest::from_payload(&job.payload);
+    let entry = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("video", &job.payload, &entry)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let mut request =
+        VideoRequest::from_resolved(&job.payload, resolved.as_payload()).map_err(|error| {
+            WorkerError::InvalidPayload(format!("invalid resolved video option: {error:?}"))
+        })?;
+    request.portable_aux = portable_aux.clone();
     video_preflight(&request)?;
     // VACE-Fun has one real route only: dual-expert person replacement. Refuse a replayed request
     // that cannot reach that provider before even resolving the project or creating the output
@@ -1200,9 +1214,10 @@ fn video_asset_fact(
         title.to_owned()
     };
     let timeline_context = request
-        .advanced
-        .get("timelineContext")
-        .cloned()
+        .options()
+        .timeline_context
+        .as_ref()
+        .map(|bound| Value::Object(bound.value.clone()))
         .unwrap_or_else(|| json!({}));
     let mut fact = json!({
         "type": "video",
@@ -1608,7 +1623,7 @@ fn resolve_dense_adapters(
 /// / `resolve_scail2_quant`).
 #[cfg(target_os = "macos")]
 fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
-    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "q4") {
         "bf16" => None,
         "q4" => Some(Quant::Q4),
         _ => Some(Quant::Q8),

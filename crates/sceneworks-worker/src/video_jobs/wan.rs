@@ -76,7 +76,16 @@ pub(super) async fn generate_wan(
         seed: resolve_video_seed(request) as u64,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }
 
 /// Raw-settings recorded on a real MLX Wan asset: the request's `advanced` knobs plus
@@ -461,7 +470,7 @@ pub(super) fn wan_tier_repo(model: &str) -> Option<(&'static str, &'static str)>
 /// precise "highest tier that fits the video-runtime budget" default is the deferred sc-10733 (S8).
 #[cfg(target_os = "macos")]
 pub(super) fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
-    match request.quant_bits() {
+    match request.resolved_quant_bits() {
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         // No explicit pick (`None`) OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
@@ -553,7 +562,7 @@ pub(super) async fn ensure_wan_tier_present(
     let Some((repo, revision)) = wan_tier_repo(&request.model) else {
         return Ok(());
     };
-    let tier = match request.quant_bits() {
+    let tier = match request.resolved_quant_bits() {
         Some(b) if b <= 0 => "bf16",
         Some(b) if b >= 8 => "q8",
         // q4 default — ships with the base install, nothing to fetch on demand.
@@ -935,7 +944,12 @@ pub(super) fn build_wan_boundary_conditioning(
     let mut conditioning = vec![Conditioning::Keyframe {
         image: left_frame,
         frame_idx: 0,
-        strength: advanced::f32(&request.advanced, "videoConditioningStrength", 1.0),
+        strength: request
+            .options()
+            .video_conditioning_strength
+            .as_ref()
+            .map(|v| v.value as f32)
+            .unwrap_or(1.0),
     }];
     if request.mode == "video_bridge" {
         let right = right_frame.ok_or_else(|| {
@@ -947,11 +961,12 @@ pub(super) fn build_wan_boundary_conditioning(
         conditioning.push(Conditioning::Keyframe {
             image: right,
             frame_idx: -1,
-            strength: advanced::f32(
-                &request.advanced,
-                "bridgeRightVideoConditioningStrength",
-                1.0,
-            ),
+            strength: request
+                .options()
+                .bridge_right_video_conditioning_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
         });
     }
     Ok(conditioning)
@@ -1109,7 +1124,7 @@ async fn extract_clip_boundary_frame(
 /// `None`: dense bf16, or the engine builds it quantized from a pre-quantized snapshot.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
-    match crate::payload::tier_for_bits(request.quant_bits(), "bf16") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "bf16") {
         "bf16" => None,
         "q4" => Some(Quant::Q4),
         _ => Some(Quant::Q8),
@@ -1125,28 +1140,35 @@ pub(super) fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
 #[cfg(native_lane)]
 pub(super) const WAN5B_INTERIM_STEPS: u32 = 20;
 
-/// An optional positive-integer `advanced` knob (`steps`); accepts a number or a numeric string.
-/// Shared by the MLX path and the candle video lane (sc-5097).
+/// The resolved step override shared by the MLX and candle video lanes.
 #[cfg(native_lane)]
-pub(super) fn advanced_opt_u32(request: &VideoRequest, key: &str) -> Option<u32> {
-    request.advanced.get(key).and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as u32)
-    })
+pub(super) fn resolved_video_u32(request: &VideoRequest, key: &str) -> Option<u32> {
+    match key {
+        "steps" => request
+            .options()
+            .steps
+            .as_ref()
+            .and_then(|v| u32::try_from(v.value).ok()),
+        _ => None,
+    }
 }
 
-/// An optional float `advanced` knob (`guidanceScale`); accepts a number or a numeric string.
-/// Shared by the MLX path and the candle video lane (sc-5097).
+/// The resolved floating sampling overrides shared by the MLX and candle lanes.
 #[cfg(native_lane)]
-pub(super) fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
-    request.advanced.get(key).and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .map(|value| value as f32)
-    })
+pub(super) fn resolved_video_f32(request: &VideoRequest, key: &str) -> Option<f32> {
+    match key {
+        "guidanceScale" => request
+            .options()
+            .guidance_scale
+            .as_ref()
+            .map(|v| v.value as f32),
+        "schedulerShift" => request
+            .options()
+            .scheduler_shift
+            .as_ref()
+            .map(|v| v.value as f32),
+        _ => None,
+    }
 }
 
 /// `true` if the A14B MoE Lightning distill is engaged for this request (sc-10047). The Lightning
@@ -1163,9 +1185,10 @@ pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool 
     }
     // Absent ⇒ default-on for A14B; only an explicit strict-bool `false` opts out.
     request
-        .advanced
-        .get("lightning")
-        .and_then(serde_json::Value::as_bool)
+        .options()
+        .lightning
+        .as_ref()
+        .map(|v| v.value)
         .unwrap_or(true)
 }
 
@@ -1188,20 +1211,20 @@ pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u
             // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can override the CFG-off recommendation.
             return (
                 Some(lightning_policy::LIGHTNING_STEPS),
-                advanced_opt_f32(request, "guidanceScale")
+                resolved_video_f32(request, "guidanceScale")
                     .or(Some(lightning_policy::LIGHTNING_GUIDANCE)),
             );
         }
         // Toggle off: native multi-step CFG. Honor an explicit user override, else `None` so the
         // engine's config.json A14B non-distill defaults (multi-step + CFG on) stand exactly.
-        let steps = advanced_opt_u32(request, "steps");
-        let guidance = advanced_opt_f32(request, "guidanceScale");
+        let steps = resolved_video_u32(request, "steps");
+        let guidance = resolved_video_f32(request, "guidanceScale");
         return (steps, guidance);
     }
     // wan2_2_ti2v_5b (dense): user override wins, else the interim default; CFG left to the
     // engine (guide 5.0) unless the user disables it via `guidanceScale`.
-    let steps = advanced_opt_u32(request, "steps").or(Some(WAN5B_INTERIM_STEPS));
-    let guidance = advanced_opt_f32(request, "guidanceScale");
+    let steps = resolved_video_u32(request, "steps").or(Some(WAN5B_INTERIM_STEPS));
+    let guidance = resolved_video_f32(request, "guidanceScale");
     (steps, guidance)
 }
 
@@ -1221,10 +1244,11 @@ pub(super) fn scail2_sampling(
     lightning: bool,
 ) -> (Option<u32>, Option<f32>, Option<f32>) {
     (
-        advanced_opt_u32(request, "steps").or(lightning.then_some(SCAIL2_LIGHTNING_STEPS)),
-        advanced_opt_f32(request, "guidanceScale")
+        resolved_video_u32(request, "steps").or(lightning.then_some(SCAIL2_LIGHTNING_STEPS)),
+        resolved_video_f32(request, "guidanceScale")
             .or(lightning.then_some(SCAIL2_LIGHTNING_GUIDANCE)),
-        advanced_opt_f32(request, "schedulerShift").or(lightning.then_some(SCAIL2_LIGHTNING_SHIFT)),
+        resolved_video_f32(request, "schedulerShift")
+            .or(lightning.then_some(SCAIL2_LIGHTNING_SHIFT)),
     )
 }
 
@@ -2622,7 +2646,8 @@ pub(super) async fn generate_video(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
-    advanced: &JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
     generate_video_using(
@@ -2630,7 +2655,8 @@ pub(super) async fn generate_video(
         settings,
         job,
         backend,
-        advanced,
+        options,
+        portable_aux,
         input,
         crate::inference_runtime::load,
     )
@@ -2655,32 +2681,28 @@ pub(super) async fn generate_video_using(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
-    advanced: &JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     mut input: VideoGenInput,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
     if input.veda.as_ref().is_some_and(|veda| veda.enabled) {
-        if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-            if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-                let path = crate::portable_aux_sources::bound_aux_path(advanced, "veda_predictor")
-                    .ok_or_else(|| {
-                        WorkerError::InvalidPayload(
-                            "portable Veda predictor is not bound".to_owned(),
-                        )
-                    })?;
-                input.veda_predictor = Some(WeightsSource::File(path));
-            } else {
-                let component_settings = settings.clone();
-                // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
-                // records its repair/install dense-fallback reason when the enabled request runs.
-                input.veda_predictor = crate::load_progress::spawn_blocking(move || {
-                    super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
-                })
-                .await
-                .map_err(|error| WorkerError::Engine(error.to_string()))?;
-            }
+        if portable_aux.has_paths() {
+            let path = portable_aux.path("veda_predictor").ok_or_else(|| {
+                WorkerError::InvalidPayload("portable Veda predictor is not bound".to_owned())
+            })?;
+            input.veda_predictor = Some(WeightsSource::File(path.to_path_buf()));
+        } else {
+            let component_settings = settings.clone();
+            // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
+            // records its repair/install dense-fallback reason when the enabled request runs.
+            input.veda_predictor = crate::load_progress::spawn_blocking(move || {
+                super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
+            })
+            .await
+            .map_err(|error| WorkerError::Engine(error.to_string()))?;
         }
     }
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
@@ -2692,8 +2714,9 @@ pub(super) async fn generate_video_using(
     // `advanced` by reference avoids re-parsing the whole payload into a throwaway VideoRequest per
     // generation (F-118).
     {
-        let (raw_sampler, raw_scheduler, raw_shift) =
-            crate::image_jobs::read_advanced_sampling_knobs(advanced);
+        let raw_sampler = options.sampler.as_ref().map(|v| v.value.clone());
+        let raw_scheduler = options.scheduler.as_ref().map(|v| v.value.clone());
+        let raw_shift = options.scheduler_shift.as_ref().map(|v| v.value as f32);
         let (samplers, schedulers) = video_engine_sampling_surface(input.engine_id);
         input.sampler = crate::image_jobs::normalize_sampling_knob(
             raw_sampler,
