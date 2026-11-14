@@ -650,6 +650,26 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if let Some(called) = name(&expr.func) {
             let called = self.imports.get(&called).cloned().unwrap_or(called);
+            if called == "has_bound_aux_paths" && expr.args.first().is_some_and(|arg| self.map(arg))
+            {
+                self.coverage.whole_map_reads.insert((
+                    self.file.into(),
+                    self.function.clone(),
+                    "delegated whole advanced map: has_bound_aux_paths".into(),
+                ));
+            }
+            if called == "bound_aux_path" && expr.args.first().is_some_and(|arg| self.map(arg)) {
+                if let Some(key) = expr.args.iter().nth(1) {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!(
+                            "delegated advanced lookup: bound_aux_path({})",
+                            describe(key)
+                        ),
+                    ));
+                }
+            }
             if let Some(key_index) = nested_helper_key(&called) {
                 if expr
                     .args
@@ -983,6 +1003,20 @@ fn injecting_an_unseen_production_key_fails_coverage() {
     );
     assert_eq!(
         fixture("fn production() { let knobs = &request.advanced; for value in knobs.values() { consume(value); } }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture(
+            "fn production() { portable_aux_sources::has_bound_aux_paths(&request.advanced); }"
+        )
+        .whole_map_reads
+        .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { portable_aux_sources::bound_aux_path(&request.advanced, \"sft_cover\"); }")
             .whole_map_reads
             .len(),
         1
