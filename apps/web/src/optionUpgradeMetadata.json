@@ -41,6 +41,9 @@
       "numeric": false
     }
   ],
+  "interleaveIndependentAdvancedKeys": [
+    "schedulerShift"
+  ],
   "optionsSchemaVersion": 1,
   "recipeVersions": {
     "lowResStart": 1

@@ -9,7 +9,9 @@ pub const OPTIONS_SCHEMA_VERSION: u64 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Carrier {
     Request,
+    InterleaveRequest,
     Job,
+    InterleaveJob,
     Recipe,
     StudioSettings,
     SimpleSettings,
@@ -17,6 +19,22 @@ pub enum Carrier {
     CompiledFilmPlan,
     TrainingPlan,
     ShareEnvelope,
+}
+
+pub fn request_carrier(kind: &str) -> Carrier {
+    if kind == "interleave" {
+        Carrier::InterleaveRequest
+    } else {
+        Carrier::Request
+    }
+}
+
+pub fn job_carrier(kind: &str) -> Carrier {
+    if kind == "interleave" {
+        Carrier::InterleaveJob
+    } else {
+        Carrier::Job
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -86,10 +104,16 @@ fn aliases(
     object: &mut Map<String, Value>,
     location: &str,
     path: &str,
+    interleave: bool,
 ) -> Result<(), UpgradeError> {
     for spec in
         crate::registry().filter(|spec| spec.location == location && !spec.aliases.is_empty())
     {
+        // SenseNova interleave reads timestepShift independently of the generic
+        // schedulerShift control. Neither value may replace or reject the other.
+        if interleave && spec.key == "schedulerShift" {
+            continue;
+        }
         let mut authored: Option<(&str, Value)> =
             object.get(spec.key).map(|v| (spec.key, v.clone()));
         for alias in spec.aliases {
@@ -114,7 +138,7 @@ fn aliases(
     Ok(())
 }
 
-fn walk(value: &mut Value, path: &str, depth: usize) -> Result<(), UpgradeError> {
+fn walk(value: &mut Value, path: &str, depth: usize, interleave: bool) -> Result<(), UpgradeError> {
     if depth > 64 {
         return Err(refusal(
             "CarrierTooDeep",
@@ -151,19 +175,19 @@ fn walk(value: &mut Value, path: &str, depth: usize) -> Result<(), UpgradeError>
                     }
                     "advanced" | "rawAdapterSettings" => {
                         if let Some(options) = child.as_object_mut() {
-                            aliases(options, "advanced", &child_path)?;
+                            aliases(options, "advanced", &child_path, interleave)?;
                         }
-                        walk(child, &child_path, depth + 1)?;
+                        walk(child, &child_path, depth + 1, interleave)?;
                     }
                     "payload" => {
                         if let Some(request) = child.as_object_mut() {
-                            aliases(request, "image", &child_path)?;
+                            aliases(request, "image", &child_path, interleave)?;
                         }
-                        walk(child, &child_path, depth + 1)?;
+                        walk(child, &child_path, depth + 1, interleave)?;
                     }
                     "plan" | "normalizedSettings" | "settings" | "recipe" | "config" | "model"
                     | "shots" | "scenes" | "segments" | "generationSet" => {
-                        walk(child, &child_path, depth + 1)?
+                        walk(child, &child_path, depth + 1, interleave)?
                     }
                     _ => {}
                 }
@@ -171,7 +195,7 @@ fn walk(value: &mut Value, path: &str, depth: usize) -> Result<(), UpgradeError>
         }
         Value::Array(values) => {
             for (index, child) in values.iter_mut().enumerate() {
-                walk(child, &format!("{path}{index}."), depth + 1)?;
+                walk(child, &format!("{path}{index}."), depth + 1, interleave)?;
             }
         }
         _ => {}
@@ -200,13 +224,17 @@ fn upgrade_owned(mut result: Value, carrier: Carrier) -> Result<Value, UpgradeEr
         version(original, "schemaVersion", supported, "")?;
     }
     let object = result.as_object_mut().expect("checked object");
-    if matches!(carrier, Carrier::Request | Carrier::Job) {
-        aliases(object, "image", "")?;
+    let interleave = matches!(carrier, Carrier::InterleaveRequest | Carrier::InterleaveJob);
+    if matches!(
+        carrier,
+        Carrier::Request | Carrier::InterleaveRequest | Carrier::Job | Carrier::InterleaveJob
+    ) {
+        aliases(object, "image", "", interleave)?;
     }
     if matches!(carrier, Carrier::StudioSettings) {
-        aliases(object, "advanced", "")?;
+        aliases(object, "advanced", "", interleave)?;
     }
-    walk(&mut result, "", 0)?;
+    walk(&mut result, "", 0, interleave)?;
     Ok(result)
 }
 
@@ -225,6 +253,7 @@ pub fn metadata() -> Value {
     serde_json::json!({
         "optionsSchemaVersion": OPTIONS_SCHEMA_VERSION,
         "recipeVersions": {"lowResStart": 1},
+        "interleaveIndependentAdvancedKeys": ["schedulerShift"],
         "aliases": crate::registry().filter(|s| !s.aliases.is_empty()).map(|s|
             serde_json::json!({"location": s.location, "key": s.key, "aliases": s.aliases, "numeric": matches!(s.shape, crate::Shape::Number | crate::Shape::Integer)})
         ).collect::<Vec<_>>()

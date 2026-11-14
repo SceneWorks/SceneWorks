@@ -1,4 +1,4 @@
-use sceneworks_options::upgrade::{metadata, upgrade, Carrier};
+use sceneworks_options::upgrade::{job_carrier, metadata, request_carrier, upgrade, Carrier};
 use serde_json::{json, Value};
 
 fn carrier(name: &str) -> Carrier {
@@ -55,6 +55,26 @@ fn equivalent_numeric_aliases_keep_authored_representations() {
     let conflict = json!({"advanced":{"schedulerShift":3.0,"timestepShift":"4"}});
     assert_eq!(
         upgrade(&conflict, Carrier::Request).unwrap_err().code,
+        "ConflictingAliases"
+    );
+}
+#[test]
+fn interleave_keeps_independent_scheduler_and_timestep_controls() {
+    let request = json!({"model":"sensenova_u1_8b","prompt":"tree","advanced":{"schedulerShift":9,"timestepShift":1.5}});
+    let job = json!({"payload":request});
+    assert_eq!(
+        upgrade(&request, request_carrier("interleave")).unwrap(),
+        request
+    );
+    assert_eq!(upgrade(&job, job_carrier("interleave")).unwrap(), job);
+    assert_eq!(
+        upgrade(&request, request_carrier("image"))
+            .unwrap_err()
+            .code,
+        "ConflictingAliases"
+    );
+    assert_eq!(
+        upgrade(&job, job_carrier("image")).unwrap_err().code,
         "ConflictingAliases"
     );
 }
