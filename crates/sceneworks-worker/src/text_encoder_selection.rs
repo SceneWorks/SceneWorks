@@ -597,7 +597,7 @@ pub fn resolve_image_text_encoder_selection(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 fn selected_id(advanced: &serde_json::Map<String, Value>) -> WorkerResult<Option<&str>> {
     match advanced.get("textEncoderModel") {
         None => selected_id_value(None),
@@ -637,7 +637,7 @@ fn base_snapshot_root(spec: &LoadSpec) -> WorkerResult<&Path> {
 
 /// Validate and prepare the selected encoder before any memory fit/planner/provider load sees the
 /// spec. The same returned spec must be reused for the eventual load.
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 pub(crate) fn prepare_selected_text_encoder(
     spec: LoadSpec,
     engine_id: &str,
