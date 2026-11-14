@@ -282,6 +282,8 @@ pub(super) async fn consume_gen_events_with_disclosure(
         std::collections::HashMap::new();
     let mut pending_execution_reports: std::collections::HashMap<usize, Value> =
         std::collections::HashMap::new();
+    let mut pending_execution_stages: std::collections::HashMap<usize, Value> =
+        std::collections::HashMap::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -433,6 +435,9 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 if let Some(report) = facts.remove("workerExecutionReport") {
                     pending_execution_reports.insert(index, report);
                 }
+                if let Some(stages) = facts.remove("workerExecutionStages") {
+                    pending_execution_stages.insert(index, stages);
+                }
                 pending_image_facts.entry(index).or_default().extend(facts);
             }
             GenEvent::AssetWritten { index, fact } => {
@@ -548,6 +553,9 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 .map_err(|error| crate::task_join_error("image asset write task", error))??;
                 if let Some(report) = pending_execution_reports.remove(&index) {
                     fact.insert("workerExecutionReport".into(), report);
+                }
+                if let Some(stages) = pending_execution_stages.remove(&index) {
+                    fact.insert("workerExecutionStages".into(), stages);
                 }
                 asset_writes.push(Value::Object(fact));
                 emit_event(

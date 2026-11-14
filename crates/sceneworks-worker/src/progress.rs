@@ -804,6 +804,16 @@ fn unavailable_completed_receipt(
                 }
                 output.execution = Some(report.clone());
             }
+            if let Some(stages) = fact.get("workerExecutionStages") {
+                let stages: Vec<sceneworks_core::execution_receipt::ExecutionStageBinding> =
+                    serde_json::from_value(stages.clone()).map_err(WorkerError::Json)?;
+                if !output.stages.is_empty() && output.stages != stages {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed output has conflicting provider stages".into(),
+                    ));
+                }
+                output.stages = stages;
+            }
             if let Some(relative) = fact.get("mediaPath").and_then(Value::as_str) {
                 let root = confined_root.as_ref().ok_or_else(|| {
                     WorkerError::InvalidPayload("completed media has no project root".into())
