@@ -20,13 +20,14 @@ use crate::error::ApiError;
 use crate::AppState;
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    requested_runtime_variant, selected_requirements_for_model, LocalCacheEligibility,
+    requested_runtime_variant_typed, selected_requirements_for_model, LocalCacheEligibility,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalLibraryUnavailableContext, ModelAvailability,
     ModelResolution,
 };
 use sceneworks_core::model_artifacts::ResolvedModelArtifact;
+use sceneworks_core::resolved_options::RouteField;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -865,7 +866,6 @@ async fn preflight_payload_model_sources(
     job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
-    let requested_variant = requested_runtime_variant(payload);
     let local_utility_selection = matches!(
         job_type,
         JobType::DatasetAnalysis | JobType::TrainingCaption
@@ -910,6 +910,18 @@ async fn preflight_payload_model_sources(
     if entries.is_empty() {
         return Ok(());
     }
+    let (_, options) = crate::portable_admission::route_option_facts(job_type, payload)?;
+    let requested_variant = requested_runtime_variant_typed(
+        payload.get("variant").and_then(Value::as_str),
+        match &options.quant_tier {
+            RouteField::Valid(tier) => Some(tier.as_str()),
+            _ => None,
+        },
+        match &options.mlx_quantize {
+            RouteField::Valid(bits) => Some(*bits),
+            _ => None,
+        },
+    );
     let data_dir = state.settings.data_dir.clone();
     let local_artifacts = local_resolved_artifacts(state);
     tokio::task::spawn_blocking(move || {

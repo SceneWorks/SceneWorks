@@ -25,9 +25,9 @@ use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant, resident_base_component_downloads,
-    selected_portable_model_artifact_closure, selected_portable_requirements_for_model,
-    selected_resident_base_closure_for_row,
+    is_co_requisite_download, requested_runtime_variant_typed, resident_base_component_downloads,
+    selected_portable_model_artifact_closure_resolved,
+    selected_portable_requirements_for_model_resolved, selected_resident_base_closure_for_row,
 };
 #[cfg(test)]
 use sceneworks_core::model_artifacts::artifact_selection::{
@@ -56,8 +56,9 @@ use sceneworks_core::model_artifacts::{
 };
 use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
 use sceneworks_core::portable_sources::{
-    portable_aux_source_shape, required_portable_aux_source_ids, PortableAuxSourceShape,
+    portable_aux_source_shape, required_portable_aux_source_ids_resolved, PortableAuxSourceShape,
 };
+use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
 use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -65,6 +66,53 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use tracing::Level;
+
+/// Authored syntax is retained only for omission-sensitive source and path checks. The effective
+/// facts come from the shared resolver before any source closure is selected.
+#[derive(Clone, Debug)]
+struct SourceOptionFacts {
+    authored: RouteOptionFacts,
+    effective: RouteOptionFacts,
+}
+
+impl SourceOptionFacts {
+    fn resolve(job_type: &JobType, payload: &JsonObject) -> WorkerResult<Self> {
+        let authored = RouteOptionFacts::from_payload_syntax(payload);
+        let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) else {
+            // Source-only utility operations have no generation option contract.
+            return Ok(Self {
+                effective: authored.clone(),
+                authored,
+            });
+        };
+        let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
+        let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
+            .map_err(|error| invalid_binding(error.to_string()))?;
+        Ok(Self {
+            authored,
+            effective: RouteOptionFacts::from_payload_syntax(effective.as_payload()),
+        })
+    }
+
+    #[cfg(test)]
+    fn syntax(payload: &JsonObject) -> Self {
+        let authored = RouteOptionFacts::from_payload_syntax(payload);
+        Self {
+            effective: authored.clone(),
+            authored,
+        }
+    }
+
+    fn artifact_selection(
+        &self,
+        model_id: Option<&str>,
+    ) -> WorkerResult<sceneworks_core::model_artifacts::artifact_selection::PortableArtifactOptions>
+    {
+        self.effective
+            .artifact_selection(&self.authored, model_id)
+            .map_err(invalid_binding)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct RuntimeSourceGuard {
@@ -168,6 +216,8 @@ impl RuntimeSourceGuard {
             }
             return Ok(Self::none(payload));
         }
+
+        let source_options = SourceOptionFacts::resolve(job_type, payload)?;
 
         let mut planning_payload = payload.clone();
         let mut verified_converted_slots = std::collections::BTreeSet::new();
@@ -331,6 +381,7 @@ impl RuntimeSourceGuard {
                 slot,
                 entry,
                 binding.and_then(|route| route.models.iter().find(|model| &model.slot == slot)),
+                &source_options,
             )?;
             let has_hf_downloads = entry
                 .get("downloads")
@@ -374,12 +425,15 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let selected = selected_portable_requirements_for_model(
+            let artifact_options = source_options
+                .artifact_selection(entry.get("id").and_then(serde_json::Value::as_str))?;
+            let selected = selected_portable_requirements_for_model_resolved(
                 entry,
                 crate::portable_runtime_backend(settings),
                 std::env::consts::OS,
                 requested_variant.as_deref(),
                 payload,
+                &artifact_options,
                 &settings.data_dir,
             )
             .map_err(invalid_binding)?;
@@ -544,6 +598,7 @@ impl RuntimeSourceGuard {
                 settings,
                 &plans,
                 &converted_co_requirements,
+                &source_options,
                 cancellation,
             )?;
             let prepared = prepare_portable_snapshot(
@@ -552,6 +607,7 @@ impl RuntimeSourceGuard {
                 payload,
                 settings,
                 &mut dispatch_payload,
+                &source_options,
                 cancellation,
             )?;
             if let Some(prepared) = prepared {
@@ -572,7 +628,12 @@ impl RuntimeSourceGuard {
                 portable_snapshot = Some(prepared.snapshot);
                 plan_layers = prepared.plan_layers;
             }
-            rebind_revision_primary_paths(binding, settings, &mut dispatch_payload)?;
+            rebind_revision_primary_paths(
+                binding,
+                settings,
+                &mut dispatch_payload,
+                &source_options,
+            )?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
             verified_revision_sources = revision_primary_handoffs(binding, &dispatch_payload)?;
             dispatch_payload
@@ -1234,9 +1295,12 @@ fn selected_portable_aux_ids(
     payload: &JsonObject,
     entry: &serde_json::Value,
     backend: &str,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Vec<String>> {
-    let mut ids = required_portable_aux_source_ids(job_type, payload, entry, backend)
-        .map_err(invalid_binding)?;
+    let auxiliary = options.effective.auxiliary_selection();
+    let mut ids =
+        required_portable_aux_source_ids_resolved(job_type, payload, entry, backend, &auxiliary)
+            .map_err(invalid_binding)?;
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
             payload
@@ -1268,9 +1332,23 @@ fn selected_runtime_variant(
     job_type: &JobType,
     payload: &JsonObject,
     model_id: &str,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
+    let requested = || {
+        requested_runtime_variant_typed(
+            payload.get("variant").and_then(serde_json::Value::as_str),
+            match &options.effective.quant_tier {
+                RouteField::Valid(tier) => Some(tier.as_str()),
+                _ => None,
+            },
+            match &options.effective.mlx_quantize {
+                RouteField::Valid(bits) => Some(*bits),
+                _ => None,
+            },
+        )
+    };
     if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
-        return Ok(requested_runtime_variant(payload));
+        return Ok(requested());
     }
     let target = payload
         .get("plan")
@@ -1282,7 +1360,7 @@ fn selected_runtime_variant(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_binding("training plan has no base model"))?;
     if base != model_id {
-        return Ok(requested_runtime_variant(payload));
+        return Ok(requested());
     }
     let kernel = target
         .get("kernel")
@@ -1310,12 +1388,13 @@ fn bound_runtime_variant(
     slot: &str,
     entry: &serde_json::Value,
     binding: Option<&PortableModelBinding>,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
     let model_id = entry
         .get("id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id)? {
+    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id, options)? {
         return Ok(Some(variant));
     }
     if slot != "modelManifestEntry"
@@ -1344,6 +1423,7 @@ fn prepare_portable_snapshot(
     payload: &JsonObject,
     settings: &Settings,
     dispatch_payload: &mut JsonObject,
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<Option<PreparedPortableSnapshot>> {
     let model_slots = payload_model_slots(payload);
@@ -1356,7 +1436,7 @@ fn prepare_portable_snapshot(
                 .find(|(slot, _)| slot == &model.slot)
                 .map(|(_, entry)| *entry)
                 .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
-            selected_portable_aux_ids(job_type, payload, entry, &route.backend)
+            selected_portable_aux_ids(job_type, payload, entry, &route.backend, options)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
     if route.models.is_empty() {
@@ -1531,7 +1611,9 @@ fn prepare_portable_snapshot(
             } else if let Some(layer) = &plan_layer {
                 layer.source_path.clone()
             } else {
-                selected_local_artifact_path(member, model, entry, payload, settings, job_type)?
+                selected_local_artifact_path(
+                    member, model, entry, payload, settings, job_type, options,
+                )?
             };
             if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
                 || plan_layer.is_some()
@@ -1736,6 +1818,7 @@ fn prepare_portable_snapshot(
                     member,
                     &selected,
                     *is_selected_aux,
+                    options,
                 )?;
             }
         }
@@ -1745,7 +1828,7 @@ fn prepare_portable_snapshot(
     for (slot, member, selected, is_selected_aux) in &in_place {
         route_loader_locator(job_type, dispatch_payload, slot, member, selected)?;
         if *is_selected_aux {
-            rewrite_loader_locator(dispatch_payload, slot, member, selected, true)?;
+            rewrite_loader_locator(dispatch_payload, slot, member, selected, true, options)?;
         }
     }
     for (key, snapshot, files) in in_place_aux {
@@ -2200,6 +2283,7 @@ fn rewrite_loader_locator(
     member: &PortableArtifactMember,
     selected: &Path,
     is_selected_aux: bool,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<()> {
     if member.component_id.as_deref() == Some("selected_text_encoder") {
         if model_slot != "modelManifestEntry" {
@@ -2280,7 +2364,9 @@ fn rewrite_loader_locator(
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| invalid_binding("advanced options are not an object"))?;
-        if source_id == "strict_control" {
+        if source_id == "strict_control"
+            && matches!(options.effective.control_weights, RouteField::Valid(_))
+        {
             if let Some(weights) = advanced
                 .get_mut("controlWeights")
                 .and_then(serde_json::Value::as_object_mut)
@@ -2350,7 +2436,7 @@ fn rewrite_loader_locator(
             .get_mut("advanced")
             .and_then(serde_json::Value::as_object_mut)
         {
-            if advanced.contains_key("modelPath") {
+            if !matches!(options.authored.model_path, RouteField::Absent) {
                 advanced.insert(
                     "modelPath".to_owned(),
                     serde_json::Value::String(path.clone()),
@@ -2417,6 +2503,7 @@ fn rebind_revision_primary_paths(
     route: &PortableRouteBinding,
     settings: &Settings,
     dispatch: &mut JsonObject,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<()> {
     for model in &route.models {
         let primary = model
@@ -2439,7 +2526,7 @@ fn rebind_revision_primary_paths(
         } else {
             snapshot
         };
-        rewrite_loader_locator(dispatch, &model.slot, primary, &selected, false)?;
+        rewrite_loader_locator(dispatch, &model.slot, primary, &selected, false, options)?;
     }
     Ok(())
 }
@@ -2580,6 +2667,7 @@ fn verify_portable_route(
     settings: &Settings,
     plans: &[EntryPlan],
     converted_co_requirements: &[ExternalArtifactRequirement],
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
     route
@@ -2678,9 +2766,8 @@ fn verify_portable_route(
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
         ) && model.slot == "modelManifestEntry"
             && matches!(
-                sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
-                    .text_encoder_model,
-                sceneworks_core::resolved_options::RouteField::Valid(ref id)
+                options.effective.text_encoder_model,
+                RouteField::Valid(ref id)
                     if id != "default" && !id.is_empty()
             );
         let bound_encoder = model
@@ -2699,7 +2786,8 @@ fn verify_portable_route(
                 "selected text encoder closure differs from the admitted route",
             ));
         }
-        let required = selected_portable_aux_ids(job_type, payload, entry, &route.backend)?;
+        let required =
+            selected_portable_aux_ids(job_type, payload, entry, &route.backend, options)?;
         for source_id in &required {
             let admitted = model
                 .members
@@ -2730,6 +2818,7 @@ fn verify_portable_route(
             plans,
             &required,
             job_type,
+            options,
             cancellation,
         )?;
     }
@@ -2874,6 +2963,7 @@ fn verify_portable_binding(
     plans: &[EntryPlan],
     selected_aux_ids: &[String],
     job_type: &JobType,
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
     binding
@@ -2900,14 +2990,22 @@ fn verify_portable_binding(
                 .map(move |requirement| (requirement, plan.resident_base))
         })
         .collect();
-    let requested_variant =
-        bound_runtime_variant(job_type, payload, &binding.slot, entry, Some(binding))?;
-    let mut selected_manifest = selected_portable_model_artifact_closure(
+    let requested_variant = bound_runtime_variant(
+        job_type,
+        payload,
+        &binding.slot,
+        entry,
+        Some(binding),
+        options,
+    )?;
+    let artifact_options = options.artifact_selection(Some(binding.model_id.as_str()))?;
+    let mut selected_manifest = selected_portable_model_artifact_closure_resolved(
         entry,
         binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,
+        &artifact_options,
     )
     .map_err(invalid_binding)?;
     if entry
@@ -3008,7 +3106,7 @@ fn verify_portable_binding(
                     layer.source_path
                 } else {
                     selected_local_artifact_path(
-                        member, binding, entry, payload, settings, job_type,
+                        member, binding, entry, payload, settings, job_type, options,
                     )?
                 };
                 let is_file = selected.is_file();
@@ -3049,12 +3147,13 @@ fn verify_portable_binding(
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
         .expect("portable binding validates exactly one primary");
-    let selected = selected_portable_requirements_for_model(
+    let selected = selected_portable_requirements_for_model_resolved(
         entry,
         binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,
+        &artifact_options,
         &settings.data_dir,
     )
     .map_err(invalid_binding)?;
@@ -3120,7 +3219,9 @@ fn verify_portable_binding(
             let selected = if let Some(layer) = plan_layer {
                 layer.source_path
             } else {
-                selected_local_artifact_path(member, binding, entry, payload, settings, job_type)?
+                selected_local_artifact_path(
+                    member, binding, entry, payload, settings, job_type, options,
+                )?
             };
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
@@ -3369,6 +3470,7 @@ fn selected_local_artifact_path(
     payload: &JsonObject,
     settings: &Settings,
     job_type: &JobType,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<PathBuf> {
     let model_slot = model.slot.as_str();
     if member.component_id.as_deref() == Some("selected_text_encoder") {
@@ -3380,10 +3482,8 @@ fn selected_local_artifact_path(
         let resolution = entry
             .get("resolvedTextEncoder")
             .ok_or_else(|| invalid_binding("selected text encoder has no private resolution"))?;
-        let options =
-            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-        let selected_id = match &options.text_encoder_model {
-            sceneworks_core::resolved_options::RouteField::Valid(id) => Some(id.as_str()),
+        let selected_id = match &options.effective.text_encoder_model {
+            RouteField::Valid(id) => Some(id.as_str()),
             _ => None,
         }
         .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
@@ -3491,13 +3591,8 @@ fn selected_local_artifact_path(
             .transpose()?
     } else if member.role == ArtifactMemberRole::Control {
         if member.component_id.as_deref() == Some("strict_control") {
-            let control_weights =
-                sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
-                    .control_weights;
-            let overlay_id = match &control_weights {
-                sceneworks_core::resolved_options::RouteField::Valid(weights) => {
-                    weights.overlay_id.valid().map(String::as_str)
-                }
+            let overlay_id = match &options.effective.control_weights {
+                RouteField::Valid(weights) => weights.overlay_id.valid().map(String::as_str),
                 _ => None,
             }
             .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
@@ -3557,18 +3652,11 @@ fn selected_local_artifact_path(
     } else if let Some(local) = local_catalog {
         Some(local)
     } else if member.role == ArtifactMemberRole::Primary {
-        let options =
-            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
         if model_slot == "modelManifestEntry"
-            && !matches!(
-                &options.model_path,
-                sceneworks_core::resolved_options::RouteField::Absent
-            )
+            && !matches!(&options.authored.model_path, RouteField::Absent)
         {
-            match &options.model_path {
-                sceneworks_core::resolved_options::RouteField::Valid(path) => {
-                    Some(PathBuf::from(path))
-                }
+            match &options.authored.model_path {
+                RouteField::Valid(path) => Some(PathBuf::from(path)),
                 _ => None,
             }
         } else {
@@ -4732,12 +4820,14 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
+        let options = SourceOptionFacts::syntax(&payload);
         rewrite_loader_locator(
             &mut payload,
             "modelManifestEntry",
             &member,
             &private_root,
             false,
+            &options,
         )
         .unwrap();
         let worker_file = private_root.join("model.safetensors");
@@ -5354,8 +5444,13 @@ mod tests {
             {"provider":"huggingface","repo":"guardfx/training-base","revision":REV_A,
              "variant":"bf16","files":["bf16/model.safetensors"]}
         ]});
-        let selected =
-            selected_runtime_variant(&JobType::LoraTrain, &payload, "z_image_turbo").unwrap();
+        let selected = selected_runtime_variant(
+            &JobType::LoraTrain,
+            &payload,
+            "z_image_turbo",
+            &SourceOptionFacts::syntax(&payload),
+        )
+        .unwrap();
         assert_eq!(selected.as_deref(), Some("bf16"));
         let closure =
             selected_model_artifact_closure(&entry, std::env::consts::OS, selected.as_deref());
@@ -5490,6 +5585,7 @@ mod tests {
                 &payload,
                 &settings(data),
                 &mut dispatch,
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .unwrap();
@@ -5940,12 +6036,14 @@ mod tests {
         .unwrap()
         .clone();
         let private = Path::new("/worker/private/verified");
+        let options = SourceOptionFacts::syntax(&payload);
         rewrite_loader_locator(
             &mut payload,
             "modelManifestEntries/0",
             primary,
             private,
             false,
+            &options,
         )
         .unwrap();
         assert_eq!(payload["advanced"]["modelPath"], private.to_str().unwrap());
@@ -6941,6 +7039,7 @@ mod tests {
                 &worker_settings,
                 &[],
                 &[],
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .expect("verification must use the complete source while a partial overlay is active");
@@ -7709,6 +7808,7 @@ mod tests {
                 &payload,
                 &settings(data.clone()),
                 &mut dispatch,
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .expect("both members pass ledger verification in their own roots")

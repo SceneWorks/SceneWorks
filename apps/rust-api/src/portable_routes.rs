@@ -2,9 +2,11 @@
 
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::jobs_store::{
-    native_route_claims_request, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS, NON_GPU_JOB_TYPES,
+    native_route_claims_request_resolved, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
+    NON_GPU_JOB_TYPES,
 };
 use sceneworks_core::model_artifacts::ArtifactMemberRole;
+use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
 use serde_json::Value;
 
 use crate::ApiError;
@@ -100,12 +102,36 @@ fn push_builtin_training_source(
 
 /// Source additions opened by a route but omitted from its always-required model closure.
 /// A missing selected declaration is an admission refusal, never an implicit worker download.
+#[cfg(test)]
 pub(crate) fn selected_route_source_rows(
     job_type: &JobType,
     payload: &JsonObject,
     entries: &[(String, &Value)],
     backend: &str,
     platform: &str,
+) -> Result<Vec<SelectedRouteSource>, String> {
+    let options = RouteOptionFacts::from_payload_syntax(payload);
+    selected_route_source_rows_resolved(job_type, payload, entries, backend, platform, &options)
+}
+
+fn valid_text(field: &RouteField<String>) -> Option<&str> {
+    match field {
+        RouteField::Valid(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn is_true(field: &RouteField<bool>) -> bool {
+    matches!(field, RouteField::Valid(true))
+}
+
+pub(crate) fn selected_route_source_rows_resolved(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    backend: &str,
+    platform: &str,
+    options: &RouteOptionFacts,
 ) -> Result<Vec<SelectedRouteSource>, String> {
     let mut rows = Vec::new();
     if *job_type == JobType::ModelConvert {
@@ -159,15 +185,12 @@ pub(crate) fn selected_route_source_rows(
             _ => {}
         }
     }
-    let advanced = payload.get("advanced").and_then(Value::as_object);
     if matches!(
         job_type,
         JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
     ) {
-        if let Some(selected_id) = advanced
-            .and_then(|advanced| advanced.get("textEncoderModel"))
-            .and_then(Value::as_str)
-            .filter(|id| *id != "default")
+        if let Some(selected_id) =
+            valid_text(&options.text_encoder_model).filter(|id| *id != "default")
         {
             let (slot, entry) = entries
                 .iter()
@@ -462,10 +485,8 @@ pub(crate) fn selected_route_source_rows(
     // so the previous per-entry capture made such an auxiliary fail the whole route with
     // "cannot use decoder" and the all-carrier predicate below refused it as unavailable.
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
-        if let Some(decoder) = advanced
-            .and_then(|value| value.get("decoder"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty() && *value != "native")
+        if let Some(decoder) =
+            valid_text(&options.decoder).filter(|value| !value.is_empty() && *value != "native")
         {
             let (slot, entry) = owning_decoder_carrier(entries)
                 .ok_or("selected decoder has no owning generation-model carrier")?;
@@ -552,11 +573,7 @@ pub(crate) fn selected_route_source_rows(
         if id == "instantid_realvisxl" {
             push_operator_source(&mut rows, slot, "instantid_mlx");
             push_operator_source(&mut rows, slot, "instantid_controlnet");
-            if advanced
-                .and_then(|value| value.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| poses.iter().any(Value::is_object))
-            {
+            if is_true(&options.poses_any_object) {
                 push_operator_source(&mut rows, slot, "instantid_openpose");
             }
         }
@@ -573,11 +590,7 @@ pub(crate) fn selected_route_source_rows(
         }
         if id == "kolors"
             && has_reference
-            && (backend == "mlx"
-                || !advanced
-                    .and_then(|value| value.get("poses"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|poses| poses.iter().any(Value::is_object)))
+            && (backend == "mlx" || !is_true(&options.poses_any_object))
         {
             rows.push(SelectedRouteSource {
                 model_slot: slot.clone(),
@@ -596,16 +609,9 @@ pub(crate) fn selected_route_source_rows(
             });
         }
         if sceneworks_core::portable_sources::pid_backbone_for(id).is_some()
-            && (id != "kolors"
-                || (backend == "candle"
-                    && advanced
-                        .and_then(|value| value.get("poses"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|poses| poses.iter().any(Value::is_object))))
+            && (id != "kolors" || (backend == "candle" && is_true(&options.poses_any_object)))
             && (id != "pulid_flux_dev" || backend == "candle")
-            && sceneworks_core::portable_sources::pid_requested(
-                advanced.and_then(|value| value.get("usePid")),
-            )
+            && is_true(&options.use_pid)
             && payload.get("model").and_then(Value::as_str) == Some(id)
         {
             let backbone =
@@ -628,15 +634,14 @@ pub(crate) fn selected_route_source_rows(
                 .ok_or("PiD utility has no downloads")?;
             let checkpoint = downloads.first().ok_or("PiD utility has no checkpoint")?;
             let gemma = downloads.get(1).ok_or("PiD utility has no Gemma")?;
-            let checkpoint_override = advanced
-                .and_then(|value| value.get("pidCheckpoint"))
-                .and_then(Value::as_object);
+            let checkpoint_override = match &options.pid_checkpoint {
+                RouteField::Valid(config) => Some(config),
+                _ => None,
+            };
             let checkpoint_source = if let Some(config) = checkpoint_override {
-                let authored_repo = config
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty());
-                let authored_file = config.get("filename").and_then(Value::as_str);
+                let authored_repo =
+                    valid_text(&config.repo).filter(|value| !value.trim().is_empty());
+                let authored_file = valid_text(&config.filename);
                 if let Some(file) = authored_file {
                     if file.is_empty()
                         || file == "."
@@ -665,10 +670,8 @@ pub(crate) fn selected_route_source_rows(
             } else {
                 SelectedSourceLocation::ManifestDownload(checkpoint.clone())
             };
-            let gemma_source = if let Some(repo) = advanced
-                .and_then(|value| value.get("pidGemma"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
+            let gemma_source = if let Some(repo) =
+                valid_text(&options.pid_gemma).filter(|value| !value.trim().is_empty())
             {
                 SelectedSourceLocation::DynamicHfFiles {
                     repo: repo.to_owned(),
@@ -749,11 +752,7 @@ pub(crate) fn selected_route_source_rows(
                 push_operator_source(&mut rows, slot, "sdxl_ip_adapter");
                 push_operator_source(&mut rows, slot, "sdxl_ip_encoder");
             }
-            if matches!(id, "flux3_klein" | "flux3_klein_base")
-                && advanced
-                    .and_then(|value| value.get("enhancePrompt"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
+            if matches!(id, "flux3_klein" | "flux3_klein_base") && is_true(&options.enhance_prompt)
             {
                 add_component(
                     &mut rows,
@@ -763,27 +762,24 @@ pub(crate) fn selected_route_source_rows(
             }
             if id != "instantid_realvisxl"
                 && slot == "modelManifestEntry"
-                && advanced
-                    .and_then(|value| value.get("poses"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|poses| !poses.is_empty())
+                && matches!(options.poses, RouteField::Valid(count) if count > 0)
             {
-                let control = advanced.and_then(|value| value.get("controlWeights"));
-                let (source, tier) = if let Some(control) = control {
-                    if let Some(path) = control.get("path").and_then(Value::as_str) {
+                let (source, tier) = if !matches!(options.control_weights, RouteField::Absent) {
+                    let control = match &options.control_weights {
+                        RouteField::Valid(control) => Some(control),
+                        _ => None,
+                    };
+                    if let Some(path) = control.and_then(|control| control.path.valid()) {
                         (SelectedSourceLocation::LocalPath(path.to_owned()), None)
                     } else {
                         let repo = control
-                            .get("repo")
-                            .and_then(Value::as_str)
+                            .and_then(|control| control.repo.valid())
                             .ok_or("control override lacks repo")?;
                         let file = control
-                            .get("filename")
-                            .and_then(Value::as_str)
+                            .and_then(|control| control.filename.valid())
                             .ok_or("control override lacks filename")?;
                         let revision = control
-                            .get("revision")
-                            .and_then(Value::as_str)
+                            .and_then(|control| control.revision.valid())
                             .ok_or("control override lacks revision")?;
                         (
                             SelectedSourceLocation::ManifestDownload(
@@ -793,13 +789,29 @@ pub(crate) fn selected_route_source_rows(
                         )
                     }
                 } else if let Some(weight) =
-                    sceneworks_core::control_weights::default_control_weight_for_request(
-                        id, entry, backend, payload,
+                    sceneworks_core::control_weights::default_control_weight_for_request_resolved(
+                        id,
+                        entry,
+                        backend,
+                        matches!(options.poses, RouteField::Valid(count) if count > 0),
+                        payload
+                            .get("mode")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        match &options.mlx_quantize {
+                            RouteField::Valid(bits) => Some(*bits),
+                            _ => None,
+                        },
                     )
                 {
                     let tier = (id == "qwen_image").then(|| {
-                        sceneworks_core::control_weights::selected_qwen_control_tier(payload)
-                            .to_owned()
+                        sceneworks_core::control_weights::selected_qwen_control_tier_resolved(
+                            match &options.mlx_quantize {
+                                RouteField::Valid(bits) => Some(*bits),
+                                _ => None,
+                            },
+                        )
+                        .to_owned()
                     });
                     (
                         SelectedSourceLocation::ManifestDownload(
@@ -817,20 +829,17 @@ pub(crate) fn selected_route_source_rows(
                     source,
                     selected_tier: tier,
                 });
-                if sceneworks_core::portable_sources::strict_control_requires_depth_estimator(
-                    payload.get("advanced"),
+                if sceneworks_core::portable_sources::strict_control_requires_depth_estimator_resolved(
+                    &options.auxiliary_selection(),
                 ) {
                     push_operator_source(&mut rows, slot, "depth_anything_v2_small");
                 }
             }
         }
         if *job_type == JobType::ImageDetail && slot == "modelManifestEntry" {
-            let custom_repo = advanced
-                .and_then(|value| value.get("tileControlNetRepo"))
-                .and_then(Value::as_str)
-                .filter(|repo| {
-                    !repo.trim().is_empty() && *repo != "xinsir/controlnet-tile-sdxl-1.0"
-                });
+            let custom_repo = valid_text(&options.tile_control_net_repo).filter(|repo| {
+                !repo.trim().is_empty() && *repo != "xinsir/controlnet-tile-sdxl-1.0"
+            });
             if let Some(repo) = custom_repo {
                 if backend != "mlx" {
                     return Err("custom Detail tile ControlNet is supported only on MLX".to_owned());
@@ -855,13 +864,7 @@ pub(crate) fn selected_route_source_rows(
                 ArtifactMemberRole::OptionalComponent,
             )?;
         }
-        if matches!(id, "minimax_h3" | "minimax_h3_ref")
-            && advanced
-                .and_then(|value| value.get("veda"))
-                .and_then(|value| value.get("enabled"))
-                .and_then(Value::as_bool)
-                == Some(true)
-        {
+        if matches!(id, "minimax_h3" | "minimax_h3_ref") && is_true(&options.veda_enabled) {
             add_component(
                 &mut rows,
                 "veda_predictor",
@@ -870,11 +873,8 @@ pub(crate) fn selected_route_source_rows(
         }
         if id.starts_with("ltx")
             && backend == "mlx"
-            && advanced.is_some_and(|value| {
-                value.get("useUncensoredEnhancer").and_then(Value::as_bool) == Some(true)
-                    || value.get("textEncoderModel").and_then(Value::as_str)
-                        == Some("ltx_amoral_gemma_3_12b")
-            })
+            && (is_true(&options.use_uncensored_enhancer)
+                || valid_text(&options.text_encoder_model) == Some("ltx_amoral_gemma_3_12b"))
         {
             rows.push(SelectedRouteSource {
                 model_slot: slot.clone(),
@@ -891,12 +891,32 @@ pub(crate) fn selected_route_source_rows(
 /// Backend and platform pairs whose full source closure must be frozen at admission. The
 /// worker claim still applies the requested GPU id and capability filters; this set never
 /// invents a route merely because the catalog advertises some other request shape.
+#[cfg(test)]
 pub(crate) fn eligible_portable_routes(
     job_type: &JobType,
     payload: &JsonObject,
     entries: &[(String, &Value)],
     requested_gpu: &str,
     data_dir: &std::path::Path,
+) -> Result<Vec<(String, String)>, ApiError> {
+    let options = RouteOptionFacts::from_payload_syntax(payload);
+    eligible_portable_routes_resolved(
+        job_type,
+        payload,
+        entries,
+        requested_gpu,
+        data_dir,
+        &options,
+    )
+}
+
+pub(crate) fn eligible_portable_routes_resolved(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    requested_gpu: &str,
+    data_dir: &std::path::Path,
+    options: &RouteOptionFacts,
 ) -> Result<Vec<(String, String)>, ApiError> {
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -916,7 +936,9 @@ pub(crate) fn eligible_portable_routes(
                 "Model conversion has no native converter for the selected source",
             ));
         }
-        if !native_route_claims_request("cpu", job_type, payload).map_err(ApiError::internal)? {
+        if !native_route_claims_request_resolved("cpu", job_type, payload, options)
+            .map_err(ApiError::internal)?
+        {
             return Err(ApiError::bad_request(
                 "No CPU utility worker route can claim this conversion request",
             ));
@@ -987,19 +1009,14 @@ pub(crate) fn eligible_portable_routes(
         }
         if backend == "candle"
             && *job_type == JobType::ImageDetail
-            && payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("tileControlNetRepo"))
-                .and_then(Value::as_str)
-                .is_some_and(|repo| {
-                    !repo.trim().is_empty() && repo != "xinsir/controlnet-tile-sdxl-1.0"
-                })
+            && valid_text(&options.tile_control_net_repo).is_some_and(|repo| {
+                !repo.trim().is_empty() && repo != "xinsir/controlnet-tile-sdxl-1.0"
+            })
         {
             continue;
         }
-        let claims =
-            native_route_claims_request(backend, job_type, payload).map_err(ApiError::internal)?;
+        let claims = native_route_claims_request_resolved(backend, job_type, payload, options)
+            .map_err(ApiError::internal)?;
         if !claims {
             continue;
         }
@@ -1008,7 +1025,9 @@ pub(crate) fn eligible_portable_routes(
                 .iter()
                 .filter(|platform| {
                     entries_support_route(job_type, payload, entries, backend, platform, data_dir)
-                        && selected_decoder_available_on_route(job_type, payload, entries, backend)
+                        && selected_decoder_available_on_route_resolved(
+                            job_type, entries, backend, options,
+                        )
                 })
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
         );
@@ -1034,21 +1053,28 @@ fn owning_decoder_carrier<'a>(entries: &'a [(String, &'a Value)]) -> Option<(&'a
         .map(|(slot, entry)| (slot.as_str(), *entry))
 }
 
+#[cfg(test)]
 fn selected_decoder_available_on_route(
     job_type: &JobType,
     payload: &JsonObject,
     entries: &[(String, &Value)],
     backend: &str,
 ) -> bool {
+    let options = RouteOptionFacts::from_payload_syntax(payload);
+    selected_decoder_available_on_route_resolved(job_type, entries, backend, &options)
+}
+
+fn selected_decoder_available_on_route_resolved(
+    job_type: &JobType,
+    entries: &[(String, &Value)],
+    backend: &str,
+    options: &RouteOptionFacts,
+) -> bool {
     if !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return true;
     }
-    let Some(decoder) = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("decoder"))
-        .and_then(Value::as_str)
-        .filter(|decoder| !decoder.is_empty() && *decoder != "native")
+    let Some(decoder) =
+        valid_text(&options.decoder).filter(|decoder| !decoder.is_empty() && *decoder != "native")
     else {
         return true;
     };
@@ -1789,6 +1815,25 @@ mod tests {
             &entries,
             "mlx",
             "macos",
+        )
+        .unwrap();
+        assert_eq!(rows[0].selected_tier.as_deref(), Some("q4"));
+    }
+
+    #[test]
+    fn selected_sources_use_effective_control_tier_after_legacy_lowering() {
+        let entry = json!({"id":"qwen_image"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let authored = json!({"model":"qwen_image","advanced":{"poses":[{}],"mlxQuantize":"4"}});
+        let effective = json!({"model":"qwen_image","advanced":{"poses":[{}],"mlxQuantize":4}});
+        let options = RouteOptionFacts::from_payload_syntax(effective.as_object().unwrap());
+        let rows = selected_route_source_rows_resolved(
+            &JobType::ImageGenerate,
+            authored.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+            &options,
         )
         .unwrap();
         assert_eq!(rows[0].selected_tier.as_deref(), Some("q4"));
