@@ -1455,7 +1455,12 @@ impl ResolvedImageExecution {
             })
             .unwrap_or_default();
         let poses = parse_poses(request);
-        let phases = if request.model == "krea_2_raw"
+        let phases = if (request.model == "krea_2_raw"
+            || request
+                .model_manifest_entry
+                .get("family")
+                .and_then(Value::as_str)
+                == Some("krea_2"))
             && super::krea_multiphase::request_has_multiphase(request)
         {
             Some(super::krea_multiphase::parse_multiphase_specs(request)?)
