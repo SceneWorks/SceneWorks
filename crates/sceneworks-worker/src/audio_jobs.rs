@@ -1120,10 +1120,12 @@ async fn run_audio_generate_job_using(
             run_voice_clone_synthesis(api, settings, job, &request, plan).await?,
             None,
         ),
-        AudioSynthesis::NativeVoiceClone(plan) => (
-            run_native_voice_clone_synthesis(api, settings, job, &request, plan).await?,
-            None,
-        ),
+        AudioSynthesis::NativeVoiceClone(plan) => {
+            let (track, execution) =
+                run_native_voice_clone_synthesis_completed(api, settings, job, &request, plan)
+                    .await?;
+            (track, Some(execution))
+        }
     };
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
@@ -1533,6 +1535,7 @@ async fn run_audio_synthesis_using(
 /// shared engine [`CancelFlag`] that reaches [`GenerationRequest::cancel`] is tripped mid-generation
 /// (not only by the post-synthesis `check_cancel` after the whole clip has rendered). Returns the
 /// engine [`AudioTrack`] (`gen_core`'s, stems included) for the caller to write + register.
+#[cfg(test)]
 async fn run_audio_synthesis_with(
     api: &ApiClient,
     settings: &Settings,
@@ -2101,14 +2104,14 @@ fn resolve_native_voice_clone_plan(
 /// x-vector, so this one call produces the full cloned WAV with no base-TTS + conversion pass. Returns
 /// the produced `gen_core::AudioTrack` for the caller to write + register, exactly like
 /// [`run_audio_synthesis`].
-async fn run_native_voice_clone_synthesis(
+async fn run_native_voice_clone_synthesis_completed(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &AudioRequest,
     plan: NativeVoiceClonePlan,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_native_voice_clone_synthesis_using(
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
+    run_native_voice_clone_synthesis_using_completed(
         api,
         settings,
         job,
@@ -2122,6 +2125,7 @@ async fn run_native_voice_clone_synthesis(
 /// [`run_native_voice_clone_synthesis`] with the clone-generator loader injected (sc-13469). The
 /// shared engine [`CancelFlag`] reaches [`GenerationRequest::cancel`] and is tripped mid-synthesis by
 /// the `run_blocking_with_heartbeat` watcher (see [`run_audio_synthesis_using`]).
+#[cfg(test)]
 async fn run_native_voice_clone_synthesis_using(
     api: &ApiClient,
     settings: &Settings,
@@ -2132,6 +2136,28 @@ async fn run_native_voice_clone_synthesis_using(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_native_voice_clone_synthesis_using_completed(
+        api,
+        settings,
+        job,
+        request,
+        plan,
+        load_generator,
+    )
+    .await
+    .map(|(track, _)| track)
+}
+
+async fn run_native_voice_clone_synthesis_using_completed(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    plan: NativeVoiceClonePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
     let NativeVoiceClonePlan {
         model_dir,
         reference,
@@ -2160,7 +2186,7 @@ async fn run_native_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
             let spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -2186,20 +2212,22 @@ async fn run_native_voice_clone_synthesis_using(
             let mut on_progress = |progress: Progress| {
                 crate::load_progress::generator_progress(&progress);
             };
-            match generator
-                .generate(&req, &mut on_progress)
+            let completed = generator
+                .generate_with_execution_report(&req, &mut on_progress)
                 .map_err(|error| {
                     classify_audio_synthesis_error("clone-TTS generation failed", error)
-                })? {
-                GenerationOutput::Audio(track) => Ok(track),
-                GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
+                })?;
+            match completed.generation.output {
+                Some(GenerationOutput::Audio(track)) => Ok((track, completed.execution)),
+                Some(GenerationOutput::Images(_)) | Some(GenerationOutput::ImagesRgba(_)) => {
                     Err(WorkerError::Engine(
                         "clone-TTS model returned images, expected an audio track".to_owned(),
                     ))
                 }
-                GenerationOutput::Video { .. } => Err(WorkerError::Engine(
+                Some(GenerationOutput::Video { .. }) => Err(WorkerError::Engine(
                     "clone-TTS model returned video, expected an audio track".to_owned(),
                 )),
+                None => Err(WorkerError::Engine("clone-TTS model returned no output".to_owned())),
             }
         })
     };
