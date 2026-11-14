@@ -173,10 +173,19 @@ pub fn validate_worker_receipt(
         if let Some(execution) = &output.execution {
             validate_execution_identity(execution, 1)?;
         }
+        let child_transform_stages = output.stages.len() == 2
+            && output.stages[0].stage == "base_render"
+            && output.stages[1].stage == "child_transform";
+        let instantid_stages = matches!(
+            output.stages.first().map(|stage| stage.stage.as_str()),
+            Some("identity" | "angle" | "pose")
+        ) && output.stages.len() == 2
+            && output.stages[1].stage == "restore_face";
+        let hires_stages = output.stages.len() == 2
+            && output.stages[0].stage == "base"
+            && output.stages[1].stage == "refine";
         if !output.stages.is_empty()
-            && (output.stages.len() != 2
-                || output.stages[0].stage != "base_render"
-                || output.stages[1].stage != "child_transform")
+            && !(child_transform_stages || instantid_stages || hires_stages)
         {
             return Err(ReplayUnavailable::new(
                 "invalid_output_stages",
@@ -261,6 +270,12 @@ pub fn validate_worker_receipt(
         {
             return Err(ReplayUnavailable::new("invalid_output_hashes", "outputs"));
         }
+        if !output.stages.is_empty() && output.artifact_ids.is_empty() {
+            return Err(ReplayUnavailable::new(
+                "output_stages_changed",
+                "outputs.stages",
+            ));
+        }
         let writes = terminal_result
             .get("assetWrites")
             .or_else(|| terminal_result.get("datasetWrites"))
@@ -282,13 +297,46 @@ pub fn validate_worker_receipt(
                 .iter()
                 .filter_map(|fact| fact.get("workerChildExecutionReport"))
                 .collect::<Vec<_>>();
-            if child_reports.is_empty() != output.stages.is_empty() {
+            let inline_stages = matching
+                .iter()
+                .filter_map(|fact| fact.get("workerExecutionStages"))
+                .collect::<Vec<_>>();
+            if output.stages.is_empty()
+                && matching.len() == 1
+                && matching[0].get("workerExecutionReport") != output.execution.as_ref()
+            {
+                return Err(ReplayUnavailable::new(
+                    "output_execution_changed",
+                    "outputs.execution",
+                ));
+            }
+            let inline_output_stages = matches!(
+                output.stages.first().map(|stage| stage.stage.as_str()),
+                Some("identity" | "angle" | "pose" | "base")
+            );
+            if inline_output_stages {
+                let expected_stages = serde_json::to_value(&output.stages).map_err(|_| {
+                    ReplayUnavailable::new("invalid_output_stages", "outputs.stages")
+                })?;
+                if matching.len() != 1
+                    || inline_stages != [&expected_stages]
+                    || !child_reports.is_empty()
+                    || matching[0].get("workerExecutionReport") != output.execution.as_ref()
+                {
+                    return Err(ReplayUnavailable::new(
+                        "output_stages_changed",
+                        "outputs.stages",
+                    ));
+                }
+            } else if !inline_stages.is_empty()
+                || (child_reports.is_empty() != output.stages.is_empty())
+            {
                 return Err(ReplayUnavailable::new(
                     "output_stages_changed",
                     "outputs.stages",
                 ));
             }
-            if !child_reports.is_empty() {
+            if !inline_output_stages && !child_reports.is_empty() {
                 let base = matching
                     .first()
                     .and_then(|fact| fact.get("workerExecutionReport"));
@@ -314,6 +362,12 @@ pub fn validate_worker_receipt(
                     ));
                 }
             }
+        }
+        if writes.is_none() && !output.stages.is_empty() {
+            return Err(ReplayUnavailable::new(
+                "output_stages_changed",
+                "outputs.stages",
+            ));
         }
     }
     if terminal_result
@@ -437,15 +491,24 @@ pub fn require_deterministic_scope(
     Ok(())
 }
 
-/// A completed provider identity must name one of the model identities in the
-/// server-selected source route before a stored report can authorize replay.
-/// Imported wrappers without a stable descriptor-to-source mapping refuse
-/// replay until that mapping is made explicit.
+/// A completed identity must match the server-frozen provider for the selected
+/// product model, slot, backend, and operation. Legacy routes without this
+/// binding cannot authorize replay.
 pub fn require_provider_route_binding(
     receipt: &TrustedExecutionReceipt,
     route: &crate::model_artifacts::portable_binding::PortableRouteBinding,
 ) -> Result<(), ReplayUnavailable> {
     if route.backend != receipt.accepted_backend || route.models.is_empty() {
+        return Err(ReplayUnavailable::new("provider_route_changed", "source"));
+    }
+    let expected = route
+        .expected_provider
+        .as_ref()
+        .ok_or_else(|| ReplayUnavailable::new("provider_route_unavailable", "source"))?;
+    route
+        .validate()
+        .map_err(|_| ReplayUnavailable::new("provider_route_changed", "source"))?;
+    if expected.operation != receipt.job_type {
         return Err(ReplayUnavailable::new("provider_route_changed", "source"));
     }
     for output in &receipt.outputs {
@@ -461,13 +524,7 @@ pub fn require_provider_route_binding(
         let identity = report
             .resolved()
             .ok_or_else(|| ReplayUnavailable::new("execution_unavailable", "execution"))?;
-        if identity.backend != route.backend
-            || !route.models.iter().any(|model| {
-                model.model_id == identity.provider_id
-                    || (identity.provider_id == "instantid"
-                        && model.model_id == "instantid_realvisxl")
-            })
-        {
+        if identity.backend != route.backend || identity.provider_id != expected.provider_id {
             return Err(ReplayUnavailable::new("provider_route_changed", "source"));
         }
     }
@@ -706,6 +763,96 @@ mod tests {
     }
 
     #[test]
+    fn instantid_output_stages_bind_each_final_asset_and_order() {
+        let unavailable = json!({"state":"unavailable","reason":{
+            "code":"composite_execution_unavailable","detail":"fixture",
+            "missing_facts":["composite_determinism"]
+        }});
+        let stage_report = json!({"state":"unavailable","reason":{
+            "code":"provider_report_unavailable","detail":"fixture",
+            "missing_facts":["provider_resolved_execution"]
+        }});
+        let mut receipt = worker_receipt();
+        receipt.execution = unavailable.clone();
+        receipt.outputs[0].execution = Some(unavailable.clone());
+        receipt.outputs[1].execution = Some(stage_report.clone());
+        receipt.outputs[0].stages = vec![
+            ExecutionStageBinding {
+                stage: "identity".into(),
+                execution: stage_report.clone(),
+            },
+            ExecutionStageBinding {
+                stage: "restore_face".into(),
+                execution: stage_report.clone(),
+            },
+        ];
+        let result = json!({"expectedCount":2,"assetWrites":[
+            {"assetId":"a","index":0,"workerExecutionReport":unavailable,
+             "workerExecutionStages":receipt.outputs[0].stages},
+            {"assetId":"b","index":1,"workerExecutionReport":receipt.outputs[1].execution}
+        ]});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        let mut wrong_asset = result.clone();
+        wrong_asset["assetWrites"][1]["workerExecutionStages"] =
+            result["assetWrites"][0]["workerExecutionStages"].clone();
+        assert_eq!(
+            validate_worker_receipt(&receipt, wrong_asset.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_stages_changed"
+        );
+        let mut missing = result.clone();
+        missing["assetWrites"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("workerExecutionStages");
+        assert_eq!(
+            validate_worker_receipt(&receipt, missing.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_stages_changed"
+        );
+        receipt.outputs[0].stages.swap(0, 1);
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_output_stages"
+        );
+    }
+
+    #[test]
+    fn hires_base_and_refine_bind_one_final_asset_in_order() {
+        let report = json!({"state":"unavailable","reason":{
+            "code":"provider_report_unavailable","detail":"fixture",
+            "missing_facts":["provider_resolved_execution"]
+        }});
+        let mut receipt = worker_receipt();
+        receipt.execution = report.clone();
+        receipt.outputs.truncate(1);
+        receipt.outputs[0].execution = Some(report.clone());
+        receipt.outputs[0].stages = ["base", "refine"]
+            .into_iter()
+            .map(|stage| ExecutionStageBinding {
+                stage: stage.into(),
+                execution: report.clone(),
+            })
+            .collect();
+        let result = json!({"expectedCount":1,"assetWrites":[{
+            "assetId":"a","index":0,"workerExecutionReport":report,
+            "workerExecutionStages":receipt.outputs[0].stages
+        }]});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        receipt.outputs[0].stages.swap(0, 1);
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_output_stages"
+        );
+    }
+
+    #[test]
     fn seedvr2_window_receipts_require_contiguous_order_and_upscale_result() {
         let unavailable = json!({"state":"unavailable","reason":{
             "code":"provider_report_unavailable","detail":"fixture","missing_facts":["provider_resolved_execution"]
@@ -827,10 +974,13 @@ mod tests {
     }
 
     #[test]
-    fn instantid_provider_alias_is_narrow_and_backend_bound() {
+    fn frozen_provider_must_match_product_slot_operation_and_backend() {
         use crate::model_artifacts::portable_binding::{
-            PortableModelBinding, PortableRouteBinding,
+            portable_closure_sha256, PortableArtifactFile, PortableArtifactMember,
+            PortableExpectedProvider, PortableModelBinding, PortableRouteBinding,
+            PortableSourceIdentity,
         };
+        use crate::model_artifacts::ArtifactMemberRole;
         let mut worker = worker_receipt();
         worker.execution["identity"]["provider_id"] = json!("instantid");
         let receipt = TrustedExecutionReceipt {
@@ -849,22 +999,54 @@ mod tests {
             outputs: worker.outputs,
             stages: Vec::new(),
         };
-        let mut route = PortableRouteBinding {
-            backend: "candle".into(),
-            platform: "windows".into(),
-            models: vec![PortableModelBinding {
-                schema_version: 1,
-                slot: "modelManifestEntry".into(),
-                model_id: "instantid_realvisxl".into(),
-                backend: "candle".into(),
-                variant: "default".into(),
-                tier: None,
-                authored_options_sha256: "e".repeat(64),
-                members: Vec::new(),
-                checkpoint_plan: None,
-            }],
+        let files = vec![PortableArtifactFile {
+            relative_path: "model.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "e".repeat(64)),
+        }];
+        let primary = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256: portable_closure_sha256(&files).unwrap(),
+            },
+            tier: None,
+            files,
         };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "instantid_realvisxl",
+            "candle",
+            "default",
+            None,
+            format!("sha256:{}", "e".repeat(64)),
+            vec![primary],
+        )
+        .unwrap();
+        let mut route = PortableRouteBinding::new("candle", "windows", vec![model]).unwrap();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_unavailable"
+        );
+        route = route
+            .with_expected_provider(PortableExpectedProvider {
+                model_slot: "modelManifestEntry".into(),
+                model_id: "instantid_realvisxl".into(),
+                operation: "image_generate".into(),
+                provider_id: "instantid".into(),
+            })
+            .unwrap();
         assert!(require_provider_route_binding(&receipt, &route).is_ok());
+        route.expected_provider.as_mut().unwrap().provider_id = "another_instantid".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
+        );
+        route.expected_provider.as_mut().unwrap().provider_id = "instantid".into();
         route.models[0].model_id = "another_instantid".into();
         assert_eq!(
             require_provider_route_binding(&receipt, &route)
@@ -873,7 +1055,38 @@ mod tests {
             "provider_route_changed"
         );
         route.models[0].model_id = "instantid_realvisxl".into();
+        route.expected_provider.as_mut().unwrap().model_slot = "modelManifestEntries/1".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
+        );
+        route.expected_provider.as_mut().unwrap().model_slot = "modelManifestEntry".into();
+        route.expected_provider.as_mut().unwrap().operation = "image_edit".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
+        );
+        route.expected_provider.as_mut().unwrap().operation = "image_generate".into();
         route.backend = "mlx".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
+        );
+        route.backend = "candle".into();
+        let auxiliary = route.models[0].clone();
+        let auxiliary = PortableModelBinding {
+            slot: "zzAux".into(),
+            model_id: "instantid".into(),
+            ..auxiliary
+        };
+        route.models.push(auxiliary);
+        route.expected_provider.as_mut().unwrap().provider_id = "spoofed_provider".into();
         assert_eq!(
             require_provider_route_binding(&receipt, &route)
                 .unwrap_err()
