@@ -122,6 +122,7 @@ pub struct RouteOptionFacts {
     pub tile_control_net_repo: RouteField<String>,
     pub strength: RouteField<f64>,
     pub hires_fix_enabled: RouteField<bool>,
+    pub yue2_decoder: RouteField<String>,
     pub conv_rot: RouteField<bool>,
     pub angle_set: RouteField<bool>,
 }
@@ -170,6 +171,7 @@ impl RouteOptionFacts {
             Ok(Some(map)) => parent(map, "veda"),
         };
         let hires_fix = parent(payload, "hiresFix");
+        let yue2 = parent(payload, "yue2");
         Self {
             poses: field(advanced, "poses", count),
             poses_all_objects: field(advanced, "poses", |value| {
@@ -209,7 +211,9 @@ impl RouteOptionFacts {
             quantization: field(advanced, "quantization", text),
             decoder: field(advanced, "decoder", text),
             enhance_prompt: field(advanced, "enhancePrompt", boolean),
-            use_pid: field(advanced, "usePid", boolean),
+            use_pid: field(advanced, "usePid", |value| {
+                Some(crate::portable_sources::pid_requested(Some(value)))
+            }),
             veda_enabled: field(veda, "enabled", boolean),
             use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
             text_encoder_model: field(advanced, "textEncoderModel", text),
@@ -219,6 +223,7 @@ impl RouteOptionFacts {
                 v.as_f64().filter(|n| n.is_finite())
             }),
             hires_fix_enabled: field(hires_fix, "enabled", boolean),
+            yue2_decoder: field(yue2, "decoder", text),
             conv_rot: field(advanced, "convRot", boolean),
             angle_set: field(advanced, "angleSet", boolean),
         }
@@ -254,14 +259,26 @@ impl RouteOptionFacts {
 
     pub fn artifact_selection(
         &self,
-    ) -> crate::model_artifacts::artifact_selection::PortableArtifactOptions {
-        crate::model_artifacts::artifact_selection::PortableArtifactOptions {
-            conv_rot: matches!(self.conv_rot, RouteField::Valid(true)),
-            yue2_decoder: match &self.decoder {
+        authored: &Self,
+        model_id: Option<&str>,
+    ) -> Result<crate::model_artifacts::artifact_selection::PortableArtifactOptions, String> {
+        let yue2_decoder = if model_id == Some("yue2") {
+            // An omitted decoder lets the installed co-requisite win. A materialized literal
+            // "standard" default is not an authored choice and must not override that install.
+            match &authored.yue2_decoder {
+                RouteField::Absent | RouteField::Null => None,
                 RouteField::Valid(value) => Some(value.clone()),
-                _ => None,
+                RouteField::Invalid => return Err("YuE2 decoder choice is not a string".into()),
+            }
+        } else {
+            None
+        };
+        Ok(
+            crate::model_artifacts::artifact_selection::PortableArtifactOptions {
+                conv_rot: matches!(self.conv_rot, RouteField::Valid(true)),
+                yue2_decoder,
             },
-        }
+        )
     }
 }
 
@@ -749,5 +766,54 @@ mod tests {
             TrainingRouteFacts::from_plan_syntax(&malformed).network_type,
             RouteField::Invalid
         );
+    }
+
+    #[test]
+    fn artifact_choice_reads_yue2_decoder_from_its_own_request_block() {
+        let payload = obj(json!({"advanced":{"decoder":"image-vae"},"yue2":{"decoder":"legacy"}}));
+        let facts = RouteOptionFacts::from_payload_syntax(&payload);
+        assert_eq!(
+            facts
+                .artifact_selection(&facts, Some("yue2"))
+                .unwrap()
+                .yue2_decoder,
+            Some("legacy".to_owned())
+        );
+        assert_eq!(
+            facts
+                .artifact_selection(&facts, Some("image"))
+                .unwrap()
+                .yue2_decoder,
+            None
+        );
+        let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":7}})));
+        assert!(malformed
+            .artifact_selection(&malformed, Some("yue2"))
+            .is_err());
+        let omitted = RouteOptionFacts::from_payload_syntax(&obj(json!({})));
+        let effective_default =
+            RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":"standard"}})));
+        assert_eq!(
+            effective_default
+                .artifact_selection(&omitted, Some("yue2"))
+                .unwrap()
+                .yue2_decoder,
+            None
+        );
+    }
+
+    #[test]
+    fn pid_route_probe_uses_its_narrow_legacy_spelling() {
+        for (wire, expected) in [
+            (json!(" TrUe "), true),
+            (json!("false"), false),
+            (json!(1), false),
+        ] {
+            let payload = obj(json!({"advanced":{"usePid":wire}}));
+            assert_eq!(
+                RouteOptionFacts::from_payload_syntax(&payload).use_pid,
+                RouteField::Valid(expected)
+            );
+        }
     }
 }
