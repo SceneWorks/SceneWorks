@@ -9,7 +9,7 @@ import { FIELDS, GUARD_ACTOR, REPO, TEST_NAME, main, stage, summary, validateRec
 function result(tier = 'q4') {
   return {
     schema_version: 1,
-    test_fqn: `batch_describe_jobs::qwen38_describer_gpu_smoke::${TEST_NAME}`,
+    test_fqn: `qwen38_describer_gpu_smoke::${TEST_NAME}`,
     repo: REPO, revision: 'a'.repeat(40), tier,
     weights_dir: 'E:\\huggingface\\hub\\fixture',
     image: { kind: 'synthetic-scene', width: 512, height: 384 },

@@ -76,7 +76,7 @@ jobs:
           if exist "%MODEL_PROOF_OUTPUT_DIR%" exit /b 1
           mkdir "%MODEL_PROOF_OUTPUT_DIR%"
           nvidia-smi
-          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib batch_describe_jobs::qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
           if errorlevel 1 exit /b 1
       # Runs even when the smoke failed, so the receipt and the reason are uploaded. An exact-filter
       # mismatch (zero tests run, exit 0) also fails here: only the completed smoke body writes the result.

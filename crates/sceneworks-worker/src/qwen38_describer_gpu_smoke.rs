@@ -23,7 +23,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use gen_core::core_llm::CancelFlag;
+use sceneworks_core::dataset_batch_describe::DESCRIBE_FIELDS;
+
 use super::*;
+use crate::batch_describe_jobs::{
+    qwen38_describer_weights_dir, BatchDescriber, DescribeModel, DescribePrompt,
+    VisionCaptionerDescriber,
+};
 
 const TIER_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_TIER";
 const CATALOG_ID: &str = "vision_describe_qwen3_8_27b";
