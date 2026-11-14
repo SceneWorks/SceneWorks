@@ -2377,6 +2377,45 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn explicit_null_quantization_stays_distinct_from_absence() {
+        let authored = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let bound = VideoOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
+        assert_eq!(bound.mlx_quantize.unwrap().value, None);
+        let absent = payload(json!({"advanced": {}}));
+        let bound = VideoOptions::bind(&BindingInput::new(&absent, &absent)).unwrap();
+        assert!(bound.mlx_quantize.is_none());
+    }
+
+    #[test]
+    fn typed_ltx_and_h3_controls_match_effective_values() {
+        let effective = payload(json!({"advanced": {
+            "vaeDecoder": "diffusion", "temporalUpsampleRounds": 2,
+            "autoDuration": true, "autoDurationMinSeconds": 3.0,
+            "autoDurationMaxSeconds": 7.0,
+            "referenceImageShortEdge": 1536,
+            "referenceImageResizeMode": "max"
+        }}));
+        let options = VideoOptions::bind(&BindingInput::new(&effective, &effective)).unwrap();
+        assert_eq!(options.ltx25_vae_decoder().unwrap(), "diffusion");
+        assert_eq!(options.temporal_upsample_rounds().unwrap(), 2);
+        assert_eq!(
+            options.auto_duration_range().unwrap(),
+            Some(VideoAutoDurationRange {
+                min_seconds: 3.0,
+                max_seconds: 7.0,
+            })
+        );
+        assert_eq!(
+            options.requested_reference_image_short_edge().unwrap(),
+            Some(1536)
+        );
+        assert_eq!(
+            options.reference_image_resize_mode().unwrap(),
+            ReferenceImageResizeMode::Max
+        );
+    }
+
     // ----------------------------------------------------------------------------------------
     // Image request limits (sc-24113, epic 24107) — the readers Qwen-Image 2.1's control surface
     // needs, each of which must be INERT for a model that declares nothing.
