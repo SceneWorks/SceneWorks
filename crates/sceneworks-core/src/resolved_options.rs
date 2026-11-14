@@ -97,6 +97,8 @@ impl<T> RouteField<T> {
 pub struct AppearanceAuthoredInputs {
     pub has_embedding_or_per_prompt_negative: bool,
     pub moss_accelerated: bool,
+    /// Presence includes explicit null, which blocks a preset from replacing authored intent.
+    pub moss_image_present: bool,
 }
 
 /// A PiD source override can name either component independently. Keep each carrier's syntax
@@ -127,9 +129,12 @@ impl AppearanceAuthoredInputs {
             .and_then(|value| value.get("acceleration"))
             .and_then(Value::as_str)
             .is_some_and(|mode| mode != "off");
+        let moss_image_present =
+            advanced.is_some_and(|advanced| advanced.contains_key("mossImage"));
         Self {
             has_embedding_or_per_prompt_negative,
             moss_accelerated,
+            moss_image_present,
         }
     }
 }
@@ -857,17 +862,26 @@ mod tests {
             "advanced":{"mossImageAdvanced":{"positive":null,"negative":null,"negativePrompts":[]},
                 "mossImage":{"acceleration":"off"}}
         })));
-        assert_eq!(nulls, empty);
+        assert!(!nulls.has_embedding_or_per_prompt_negative);
+        assert!(!nulls.moss_accelerated);
+        assert!(nulls.moss_image_present);
         let supplied = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
             "advanced":{"mossImageAdvanced":{"negativePrompts":["bad"]},
                 "mossImage":{"acceleration":"unmerged_bf16"}}
         })));
         assert!(supplied.has_embedding_or_per_prompt_negative);
         assert!(supplied.moss_accelerated);
+        assert!(supplied.moss_image_present);
         let malformed = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
             "advanced":{"mossImageAdvanced":[],"mossImage":{"acceleration":17}}
         })));
-        assert_eq!(malformed, empty);
+        assert!(!malformed.has_embedding_or_per_prompt_negative);
+        assert!(!malformed.moss_accelerated);
+        assert!(malformed.moss_image_present);
+        let explicit_null = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
+            "advanced":{"mossImage":null}
+        })));
+        assert!(explicit_null.moss_image_present);
     }
 
     #[test]

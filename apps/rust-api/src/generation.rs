@@ -165,30 +165,27 @@ pub(crate) fn validate_selected_decoder_for_manifest(
     job_payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
-    let Some(raw) = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("decoder"))
-    else {
-        return Ok(());
-    };
-    let decoder_id = match raw {
-        Value::Null => return Ok(()),
-        Value::String(value) if value.trim().is_empty() || value == "native" => return Ok(()),
-        Value::String(value) => value.as_str(),
-        _ => {
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let decoder_id = match &route_options.decoder {
+        sceneworks_core::resolved_options::RouteField::Absent
+        | sceneworks_core::resolved_options::RouteField::Null => return Ok(()),
+        sceneworks_core::resolved_options::RouteField::Valid(value)
+            if value.trim().is_empty() || value == "native" =>
+        {
+            return Ok(());
+        }
+        sceneworks_core::resolved_options::RouteField::Valid(value) => value.as_str(),
+        sceneworks_core::resolved_options::RouteField::Invalid => {
             return Err(ApiError::bad_request(
                 "advanced.decoder must be a decoder id string (or 'native')",
             ))
         }
     };
-    if job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("usePid"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
+    if matches!(
+        route_options.use_pid,
+        sceneworks_core::resolved_options::RouteField::Valid(true)
+    ) {
         return Err(ApiError::bad_request(
             "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder",
         ));
@@ -2397,12 +2394,16 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
     // MOSS's model-specific controls survive headless preset expansion. Presence wins, including
     // explicit OFF; never inherit an enabled preset over a caller's deliberate ordinary request.
     if let Some(moss) = preset.get("defaults").and_then(|d| d.get("mossImage")) {
+        let authored =
+            sceneworks_core::resolved_options::AppearanceAuthoredInputs::from_payload_syntax(
+                job_payload,
+            );
         let advanced = job_payload
             .entry("advanced".to_owned())
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
-        if !advanced.contains_key("mossImage") {
+        if !authored.moss_image_present {
             advanced.insert("mossImage".to_owned(), moss.clone());
             if moss
                 .get("acceleration")
