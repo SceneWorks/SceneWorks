@@ -780,6 +780,18 @@ pub(super) fn minimax_h3_reference_image_resize_mode(
     options: &sceneworks_core::video_request::VideoOptions,
 ) -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
     use sceneworks_core::video_request::ReferenceImageResizeMode as Requested;
+    if !options
+        .reference_image_resize_mode
+        .as_ref()
+        .is_some_and(|mode| {
+            matches!(
+                mode.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        })
+    {
+        return Ok(None);
+    }
     let requested = options
         .reference_image_resize_mode()
         .map_err(WorkerError::InvalidPayload)?;

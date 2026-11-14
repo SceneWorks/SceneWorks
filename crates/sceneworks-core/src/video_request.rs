@@ -443,6 +443,7 @@ impl VideoRequest {
         let steps = options
             .steps
             .as_ref()
+            .filter(|steps| matches!(steps.origin, Origin::Authored { .. }))
             .and_then(|steps| u64::try_from(steps.value).ok())
             .map(|steps| steps as u32)
             .or_else(|| recipe.map(|r| r.steps))
@@ -1470,6 +1471,42 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn h3_veda_schedule_uses_authored_steps_before_turbo_recipe() {
+        let payload = payload(json!({
+            "model":"minimax_h3",
+            "loras":[{"id":"minimax_h3_turbo_4step_768p"}],
+            "advanced":{"veda":{"enabled":true,"fullAttentionSteps":"3"}}
+        }));
+        let mut request = VideoRequest::from_payload(&payload);
+        let wire = serde_json::from_value(json!({
+            "enabled":true,"fullAttentionSteps":"3"
+        }))
+        .unwrap();
+        let mut options = VideoOptions {
+            veda: Some(Bound {
+                value: wire,
+                origin: Origin::Authored { spelling: "veda" },
+            }),
+            steps: Some(Bound {
+                value: 2,
+                origin: Origin::Default(sceneworks_options::DefaultRule::Absent),
+            }),
+            ..VideoOptions::default()
+        };
+        request.options = Some(options.clone());
+        assert!(
+            request.h3_veda_settings().is_ok(),
+            "turbo recipe has four steps"
+        );
+        options.steps.as_mut().unwrap().origin = Origin::Authored { spelling: "steps" };
+        request.options = Some(options);
+        assert!(
+            request.h3_veda_settings().is_err(),
+            "authored two steps exclude index three"
+        );
     }
 
     #[test]
