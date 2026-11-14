@@ -760,6 +760,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     "delegated whole advanced map: has_bound_aux_paths".into(),
                 ));
             }
+            if called == "requested_reference_image_resize_mode" {
+                self.coverage.whole_map_reads.insert((
+                    self.file.into(),
+                    self.function.clone(),
+                    "delegated advanced lookup: requested_reference_image_resize_mode".into(),
+                ));
+            }
             if called == "bound_aux_path" && expr.args.first().is_some_and(|arg| self.map(arg)) {
                 if let Some(key) = expr.args.iter().nth(1) {
                     self.coverage.whole_map_reads.insert((
@@ -1121,6 +1128,12 @@ fn injecting_an_unseen_production_key_fails_coverage() {
         )
         .whole_map_reads
         .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { requested_reference_image_resize_mode(advanced); }")
+            .whole_map_reads
+            .len(),
         1
     );
     assert_eq!(
