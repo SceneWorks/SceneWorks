@@ -13,4 +13,4 @@ serde_json.workspace = true
 workspace = true
 
 [dev-dependencies]
-syn = { version = "2", features = ["full", "visit"] }
+syn = { workspace = true }
