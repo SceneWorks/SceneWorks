@@ -1,6 +1,205 @@
 //! Static boundary tests only: no worker or inference execution.
 use super::support::*;
 
+fn preview_settings(temp: &tempfile::TempDir) -> Settings {
+    let settings = test_settings(temp);
+    let manifests = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .unwrap();
+    settings
+}
+
+#[tokio::test]
+async fn options_preview_uses_authenticated_server_facts_and_preserves_result_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = preview_settings(&temp);
+    settings.access_token = "preview-secret".into();
+    let app = create_app(settings).unwrap();
+    let body = json!({
+        "validatorSchemaVersion": 1,
+        "kind": "image",
+        "requests": [
+            {"projectId":"p","model":"flux_dev","prompt":"a tree"},
+            {"projectId":"p","model":"flux_dev","prompt":"a tree","advanced":{"steps":"bad"}},
+            {"projectId":"p","model":"forged_model","prompt":"a tree"},
+            {"projectId":"p","prompt":"a tree"},
+            {"projectId":"p","modelId":"flux_dev","prompt":"a tree"}
+        ]
+    });
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/options/validate",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, response) = request_with_headers(
+        app,
+        "POST",
+        "/api/v1/options/validate",
+        body,
+        &[("authorization", "Bearer preview-secret")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["validatorSchemaVersion"], 1);
+    assert_eq!(response["results"].as_array().unwrap().len(), 5);
+    assert_eq!(response["results"][0]["ok"], true, "{response}");
+    assert_eq!(response["results"][0]["resolved"]["model"], "flux_dev");
+    assert_eq!(response["results"][1]["ok"], false);
+    assert_eq!(response["results"][1]["refusal"]["field"], "advanced.steps");
+    assert_eq!(response["results"][2]["ok"], false);
+    assert_eq!(response["results"][2]["refusal"]["field"], "model");
+    assert_eq!(response["results"][3]["ok"], true, "{response}");
+    assert_eq!(response["results"][4]["ok"], true, "{response}");
+}
+
+#[tokio::test]
+async fn options_preview_rejects_unsupported_contracts_and_keeps_interleave_shifts_distinct() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(preview_settings(&temp)).unwrap();
+    let path = "/api/v1/options/validate";
+    let (status, mismatch) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":2,"kind":"image","requests":[{}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(mismatch["code"], "validator_version_mismatch");
+    for body in [
+        json!({"validatorSchemaVersion":1,"kind":"arbitrary","requests":[{}]}),
+        json!({"validatorSchemaVersion":1,"kind":"image","requests":[]}),
+        json!({"validatorSchemaVersion":1,"kind":"image","requests":vec![json!({});33]}),
+    ] {
+        let (status, _) = request(app.clone(), "POST", path, body).await;
+        assert!(
+            !status.is_success(),
+            "invalid validation envelope passed: {status}"
+        );
+    }
+    let forged = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"validatorSchemaVersion":1,"kind":"image","requests":[{}],"modelEntry":{"id":"forged"}}).to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(forged).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, response) = request(
+        app,
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"interleave","requests":[{
+            "projectId":"p","model":"sensenova_u1_8b","prompt":"a tree",
+            "advanced":{"schedulerShift":9,"timestepShift":1.5}
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["results"][0]["ok"], true, "{response}");
+    assert_eq!(
+        response["results"][0]["resolved"]["advanced"]["schedulerShift"],
+        9
+    );
+    assert_eq!(
+        response["results"][0]["resolved"]["advanced"]["timestepShift"],
+        1.5
+    );
+}
+
+#[tokio::test]
+async fn options_preview_resolves_vector_training_and_model_free_policies() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(preview_settings(&temp)).unwrap();
+    let path = "/api/v1/options/validate";
+    let (status, vector) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"vectorPrompt","requests":[{
+            "projectId":"p","prompt":"a tree","rasterModel":"flux_dev","vectorModel":"starvector_1b"
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{vector}");
+    assert_eq!(vector["results"][0]["ok"], true, "{vector}");
+
+    let (status, detail) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"imageDetail","requests":[
+            {"projectId":"p","sourceAssetId":"source"},
+            {"projectId":"p","sourceAssetId":"source","model":null},
+            {"projectId":"p","sourceAssetId":"source","model":42},
+            {"projectId":"p","sourceAssetId":"source","model":" flux_dev "}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["results"][0]["ok"], true, "{detail}");
+    assert_eq!(detail["results"][1]["refusal"]["field"], "model");
+    assert_eq!(detail["results"][2]["refusal"]["field"], "model");
+    assert_eq!(detail["results"][3]["ok"], true, "{detail}");
+
+    let (status, utility) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"utility","requests":[{
+            "modelId":42,"advanced":{"mlxQuantize":4}
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{utility}");
+    assert_eq!(utility["results"][0]["refusal"]["field"], "modelId");
+
+    let target = crate::training::effective_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .unwrap();
+    let mut invalid_config = serde_json::to_value(target.defaults).unwrap();
+    invalid_config["steps"] = json!(0);
+    let (status, training) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"training","requests":[{
+            "targetId":target.id,"datasetId":"dataset","outputName":"adapter",
+            "config":invalid_config
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{training}");
+    assert_eq!(training["results"][0]["ok"], false, "{training}");
+    assert!(
+        training["results"][0]["refusal"]["field"]
+            .as_str()
+            .is_some_and(|field| field.contains("steps")),
+        "{training}"
+    );
+
+    let (status, yue2) = request(
+        app,
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"yue2","requests":[{
+            "kind":"create","lyrics":"verse","computePolicy":"auto"
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{yue2}");
+    assert_eq!(yue2["results"][0]["ok"], true, "{yue2}");
+}
+
 #[tokio::test]
 async fn shared_refusals_survive_http_raw_deserialization() {
     let temp = tempfile::tempdir().unwrap();
