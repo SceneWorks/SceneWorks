@@ -289,6 +289,7 @@ pub mod image_sampling_controls;
 pub mod limits;
 pub mod payload_util;
 pub mod request_validation;
+pub mod sensenova_validation;
 pub mod video_eligibility;
 pub mod video_request;
 pub mod yue2_validation;
