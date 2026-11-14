@@ -10,7 +10,6 @@ use crate::JobSnapshot;
 use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
-use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
 // Shared worker strict-control driver (epic 8236, sc-8243). The single source of truth for the
@@ -158,6 +157,18 @@ pub(super) fn strict_control_default_repo(engine_id: &str) -> &'static str {
     artifact_repo
 }
 
+pub(super) fn resolved_control_weights(
+    request: &ImageRequest,
+) -> Option<&sceneworks_core::image_request::ControlWeightsFields> {
+    request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .control_weights
+        .as_ref()
+        .map(|bound| &bound.value)
+}
+
 /// Resolve the immutable revision for a remote strict-control artifact.
 ///
 /// Shipped artifacts must match the exact engine/repository/file registry tuple.
@@ -179,21 +190,14 @@ pub(super) fn trusted_control_weight_revision(
         return Ok(artifact.revision.to_owned());
     }
 
-    let control = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let control = resolved_control_weights(request);
     let catalog_authorized = control
-        .and_then(|weights| weights.get("_catalogAuthorized"))
-        .and_then(Value::as_bool)
+        .and_then(|weights| weights.catalog_authorized.valid())
+        .copied()
         .unwrap_or(false);
-    let overlay_id = control
-        .and_then(|weights| weights.get("overlayId"))
-        .and_then(crate::payload::trimmed_value_str);
+    let overlay_id = control.and_then(|weights| weights.overlay_id.valid_trimmed());
     let revision = control
-        .and_then(|weights| weights.get("revision"))
-        .and_then(Value::as_str)
-        .map(str::trim)
+        .and_then(|weights| weights.revision.valid_trimmed())
         .filter(|value| {
             value.len() == 40
                 && value

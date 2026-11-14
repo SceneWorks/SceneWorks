@@ -15,7 +15,6 @@ use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
-use crate::Value;
 #[cfg(target_os = "macos")]
 use serde_json::json;
 #[cfg(native_lane)]
@@ -261,10 +260,7 @@ pub(super) fn resolve_tier_dir(
         "q4" => 4,
         _ => 8, // q8
     };
-    let mut probe = request.clone();
-    probe
-        .advanced
-        .insert("mlxQuantize".to_owned(), Value::from(bits));
+    let probe = request.with_probe_quant_bits(bits);
     let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
     (tier_key_for_resolved_dir(&request.model_manifest_entry, &dir) == Some(tier_static_name(tier)))
         .then_some(dir)

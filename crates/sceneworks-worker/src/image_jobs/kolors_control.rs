@@ -142,15 +142,15 @@ fn kolors_control_guidance(request: &ImageRequest) -> f32 {
 /// else the Kolors-ControlNet-Pose default (parity with the MLX `resolve_control_weights_for`).
 /// The payload filename must be a plain component (sc-8821 / F-019).
 pub(super) fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", KOLORS_CONTROL_REPO);
     let file = safe_weight_filename(

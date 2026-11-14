@@ -955,11 +955,7 @@ pub(super) fn resolve_candle_flux1_packed_weights_dir(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     let requested_tier = candle_flux1_packed_requested_tier(request)?;
-    let mut probe = request.clone();
-    probe.advanced.insert(
-        "mlxQuantize".to_owned(),
-        Value::from(if requested_tier == "q4" { 4 } else { 8 }),
-    );
+    let probe = request.with_probe_quant_bits(if requested_tier == "q4" { 4 } else { 8 });
     let resolved = resolve_weights_dir(&probe, settings)?;
     match resolved {
         Some(dir) if candle_flux1_packed_resolution_is_exact(requested_tier, &dir) => Ok(Some(dir)),
