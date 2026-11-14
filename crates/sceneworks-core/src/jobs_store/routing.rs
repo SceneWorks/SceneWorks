@@ -9,7 +9,7 @@ pub(crate) mod catalog;
 pub(crate) mod gaps;
 pub(crate) mod mlx;
 mod portable;
-pub use portable::native_route_claims_request;
+pub use portable::{native_route_claims_request, native_route_claims_request_resolved};
 
 #[cfg(test)]
 mod typed_registry_contract_tests;

@@ -92,8 +92,9 @@ pub use routing::gaps::{
 // target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
 pub use routing::{
     canonical_video_route_probe, is_qwen_image_2_1_model, native_route_claims_request,
-    qwen_image_2_1_reference_ids, video_backend_mode_supported,
-    video_mode_conditioning_requirements, video_ui_modes, QWEN_IMAGE_2_1_MODEL_IDS,
+    native_route_claims_request_resolved, qwen_image_2_1_reference_ids,
+    video_backend_mode_supported, video_mode_conditioning_requirements, video_ui_modes,
+    QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &JobStatus::active_statuses();
@@ -5729,9 +5730,16 @@ impl ClaimRoutingFacts {
     fn from_job(job: &JobSnapshot) -> Self {
         let route_options =
             crate::resolved_options::RouteOptionFacts::from_payload_syntax(&job.payload);
+        Self::from_job_with_route_options(job, &route_options)
+    }
+
+    fn from_job_with_route_options(
+        job: &JobSnapshot,
+        route_options: &crate::resolved_options::RouteOptionFacts,
+    ) -> Self {
         let route_context = routing::RouteContext {
             payload: &job.payload,
-            options: &route_options,
+            options: route_options,
         };
         let training_route = job
             .payload
@@ -5833,6 +5841,17 @@ impl ClaimRoutingFacts {
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     worker_supports_claim_routing_facts(worker, &ClaimRoutingFacts::from_job(job))
+}
+
+pub(crate) fn worker_supports_job_with_route_options(
+    worker: &WorkerSnapshot,
+    job: &JobSnapshot,
+    route_options: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    worker_supports_claim_routing_facts(
+        worker,
+        &ClaimRoutingFacts::from_job_with_route_options(job, route_options),
+    )
 }
 
 /// The single worker-compatibility policy used by both full snapshots and the
