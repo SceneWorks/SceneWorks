@@ -2154,10 +2154,18 @@ pub(crate) fn validate_imported_submission(
     {
         return Ok(());
     }
-    let has_material_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let has_material_control =
+        sceneworks_core::jobs_store::imported_control_intent_is_material_with_facts(&route_options);
+    let poses_present = matches!(
+        route_options.poses,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
+    let phases_present = matches!(
+        route_options.phases,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
     let backend = enqueue_backend(state);
     let candle_required = backend == "candle";
     let family = entry
@@ -2171,30 +2179,11 @@ pub(crate) fn validate_imported_submission(
     ) {
         return Ok(());
     }
-    let feature = if has_material_control
-        && !payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("poses"))
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    {
+    let feature = if has_material_control && !poses_present {
         "control image/mode without a supported Pose request"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if poses_present {
         "strict-pose control"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("phases"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if phases_present {
         "multi-phase denoise"
     } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         "image edit"

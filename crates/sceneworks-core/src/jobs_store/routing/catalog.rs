@@ -1375,8 +1375,15 @@ fn imported_requested_quant_with_facts(
 pub fn imported_control_intent_is_material(advanced: &Map<String, Value>) -> bool {
     let payload = Map::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
+    imported_control_intent_is_material_with_facts(&facts)
+}
+
+/// Evaluate saved or bare imported control intent from the one-time route projection.
+pub fn imported_control_intent_is_material_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     facts.control_image.is_present_nonnull()
-        || match facts.control_mode {
+        || match &facts.control_mode {
             crate::resolved_options::RouteField::Valid(mode) => !mode.trim().is_empty(),
             crate::resolved_options::RouteField::Invalid => true,
             crate::resolved_options::RouteField::Absent
