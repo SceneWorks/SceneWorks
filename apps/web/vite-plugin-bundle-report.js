@@ -12,7 +12,7 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 //   - `largestRoute`: the heaviest route family in `routeFamilies`, same closure rule.
 //   - `initialExclusions`: named heavy domains must never appear in the initial graph.
 // Telemetry (reported in dist/bundle-report.json, never a gate):
-//   - `total`: every emitted JS chunk/asset. Growing the app with more lazy screens is
+//   - `total`: every emitted JS chunk/asset and WASM asset. Growing the app with more lazy screens is
 //     not a user-facing cost, so the aggregate is tracked but no longer fails the build.
 
 export const routeFamilies = Object.freeze({
