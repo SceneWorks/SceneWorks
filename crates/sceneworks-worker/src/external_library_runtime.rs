@@ -2677,11 +2677,12 @@ fn verify_portable_route(
             job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
         ) && model.slot == "modelManifestEntry"
-            && payload
-                .get("advanced")
-                .and_then(|advanced| advanced.get("textEncoderModel"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| id != "default" && !id.is_empty());
+            && matches!(
+                sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
+                    .text_encoder_model,
+                sceneworks_core::resolved_options::RouteField::Valid(ref id)
+                    if id != "default" && !id.is_empty()
+            );
         let bound_encoder = model
             .members
             .iter()
@@ -3379,11 +3380,13 @@ fn selected_local_artifact_path(
         let resolution = entry
             .get("resolvedTextEncoder")
             .ok_or_else(|| invalid_binding("selected text encoder has no private resolution"))?;
-        let selected_id = payload
-            .get("advanced")
-            .and_then(|advanced| advanced.get("textEncoderModel"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
+        let options =
+            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+        let selected_id = match &options.text_encoder_model {
+            sceneworks_core::resolved_options::RouteField::Valid(id) => Some(id.as_str()),
+            _ => None,
+        }
+        .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
         if resolution
             .get("selectionId")
             .and_then(serde_json::Value::as_str)
@@ -3554,18 +3557,28 @@ fn selected_local_artifact_path(
     } else if let Some(local) = local_catalog {
         Some(local)
     } else if member.role == ArtifactMemberRole::Primary {
-        (model_slot == "modelManifestEntry")
-            .then(|| {
-                payload
-                    .get("advanced")
-                    .and_then(|advanced| advanced.get("modelPath"))
-            })
-            .flatten()
-            .or_else(|| entry.get("modelPath"))
-            .or_else(|| entry.get("paths").and_then(|paths| paths.get("model")))
-            .or_else(|| entry.get("installedPath"))
-            .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
+        let options =
+            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+        if model_slot == "modelManifestEntry"
+            && !matches!(
+                &options.model_path,
+                sceneworks_core::resolved_options::RouteField::Absent
+            )
+        {
+            match &options.model_path {
+                sceneworks_core::resolved_options::RouteField::Valid(path) => {
+                    Some(PathBuf::from(path))
+                }
+                _ => None,
+            }
+        } else {
+            entry
+                .get("modelPath")
+                .or_else(|| entry.get("paths").and_then(|paths| paths.get("model")))
+                .or_else(|| entry.get("installedPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        }
     } else if matches!(
         member.role,
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control

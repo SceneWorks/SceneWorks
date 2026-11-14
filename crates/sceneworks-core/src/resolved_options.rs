@@ -118,6 +118,7 @@ pub struct RouteOptionFacts {
     pub veda_enabled: RouteField<bool>,
     pub use_uncensored_enhancer: RouteField<bool>,
     pub text_encoder_model: RouteField<String>,
+    pub model_path: RouteField<String>,
     pub tile_control_net_repo: RouteField<String>,
     pub strength: RouteField<f64>,
     pub hires_fix_enabled: RouteField<bool>,
@@ -212,6 +213,7 @@ impl RouteOptionFacts {
             veda_enabled: field(veda, "enabled", boolean),
             use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
             text_encoder_model: field(advanced, "textEncoderModel", text),
+            model_path: field(advanced, "modelPath", text),
             tile_control_net_repo: field(advanced, "tileControlNetRepo", text),
             strength: field(advanced, "strength", |v| {
                 v.as_f64().filter(|n| n.is_finite())
