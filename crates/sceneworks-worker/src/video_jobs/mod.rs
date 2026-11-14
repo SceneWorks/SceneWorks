@@ -40,6 +40,8 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
+    #[cfg(test)]
+    pub(super) use super::advanced;
     #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::load_reference_image;
@@ -52,7 +54,7 @@ mod prelude {
     #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::{
-        advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
+        assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
         resolve_dense_adapters, video_frame_count, wan_frame_count, AdapterSpec, CancelFlag,
         CharacterStore, Conditioning, GenerationMetrics, GenerationOutput, GenerationRequest,
         Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision, PreparedVideoAdapters,
