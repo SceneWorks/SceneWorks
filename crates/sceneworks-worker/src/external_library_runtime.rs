@@ -1122,11 +1122,7 @@ fn in_place_revision_files(
 
 /// This host's hash-once verdict store ([`sceneworks_core::verified_source_cache`]).
 fn verified_source_cache(settings: &Settings) -> VerifiedSourceCache {
-    VerifiedSourceCache::new(
-        settings
-            .data_dir
-            .join("models/portable-attempts/.verified-sources"),
-    )
+    VerifiedSourceCache::for_data_dir(&settings.data_dir)
 }
 
 /// Run `body` with a load-progress context that reports `Verifying model files — read / total`
@@ -7382,6 +7378,45 @@ mod tests {
             settle_mtime(&source);
             drop(begin().unwrap());
             assert_eq!(in_place_hashed_files(), start + 2);
+        });
+    }
+
+    #[test]
+    fn a_verdict_recorded_at_api_admission_is_reused_by_the_worker() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let binding = portable_installed_model_binding();
+        let source = library
+            .join("models--guardfx--model/snapshots")
+            .join(REV_A)
+            .join("model.safetensors");
+        settle_mtime(&source);
+        // The API's admission capture checks the installed file through the same host store.
+        let expected = &binding.models[0].members[0].files[0].sha256;
+        assert_eq!(
+            VerifiedSourceCache::for_data_dir(&settings.data_dir)
+                .verify(&std::fs::canonicalize(&source).unwrap(), expected, &|| Ok(
+                    ()
+                ))
+                .unwrap(),
+            SourceVerification::Hashed
+        );
+        with_library(&library, || {
+            let start = in_place_hashed_files();
+            drop(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                in_place_hashed_files(),
+                start,
+                "the worker reuses the admission verdict instead of reading the blob"
+            );
         });
     }
 

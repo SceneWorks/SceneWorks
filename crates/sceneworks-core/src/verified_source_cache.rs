@@ -7,7 +7,8 @@
 //! device, inode and ctime), and later attempts reuse that verdict while the stamp is unchanged.
 //! Any stamp change, a racy stamp (modified within one timestamp tick of its observation), a
 //! different expected digest or an unreadable record re-hashes the file. A mismatch is never
-//! recorded.
+//! recorded. A file with no ledger in advance (a local model captured by its bytes) records the
+//! digest it hashed to, under the same key, so a later ledger check of those bytes reuses it.
 use crate::checkpoint_plan_store::{source_file_sha256_with_check, SourceStampV1, StoreClockV1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,14 +41,64 @@ pub struct VerifiedSourceCache {
     root: PathBuf,
 }
 
+/// Where a host keeps its verdicts, relative to its data directory. The API (job admission) and
+/// the worker (job preparation) both open the store here, so whichever checks a file first on a
+/// host records the verdict the other reuses.
+pub const VERIFIED_SOURCES_RELATIVE_DIR: &str = "models/portable-attempts/.verified-sources";
+
 impl VerifiedSourceCache {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// This host's store under `data_dir` ([`VERIFIED_SOURCES_RELATIVE_DIR`]).
+    pub fn for_data_dir(data_dir: &Path) -> Self {
+        Self::new(data_dir.join(VERIFIED_SOURCES_RELATIVE_DIR))
+    }
+
     fn record_path(&self, real_path: &Path) -> PathBuf {
         let digest = Sha256::digest(real_path.as_os_str().as_encoded_bytes());
         self.root.join(format!("{digest:x}.json"))
+    }
+
+    /// The digest recorded for `real_path` while its stamp is still `current` and not racy.
+    fn recorded_sha256(&self, real_path: &Path, current: &SourceStampV1) -> Option<String> {
+        let body = std::fs::read(self.record_path(real_path)).ok()?;
+        let record = serde_json::from_slice::<VerifiedSourceRecordV1>(&body).ok()?;
+        (record.schema_version == RECORD_SCHEMA_VERSION
+            && record.real_path == real_path
+            && !record.stamp.is_racy()
+            && record.stamp.identifies_same_entry(current))
+        .then_some(record.sha256)
+    }
+
+    /// Hash `real_path` (`sha256:<hex>`), failing if its stamp moved from `before` meanwhile.
+    fn hash(
+        real_path: &Path,
+        before: &SourceStampV1,
+        check: &dyn Fn() -> io::Result<()>,
+    ) -> io::Result<(String, SourceStampV1)> {
+        let digest = source_file_sha256_with_check(real_path, check)?;
+        let after = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
+        if !before.identifies_same_entry(&after) {
+            return Err(io::Error::other(format!(
+                "{} changed while it was verified",
+                real_path.display()
+            )));
+        }
+        Ok((format!("sha256:{digest}"), after))
+    }
+
+    fn record(&self, real_path: &Path, sha256: &str, stamp: SourceStampV1) -> io::Result<()> {
+        let record = VerifiedSourceRecordV1 {
+            schema_version: RECORD_SCHEMA_VERSION,
+            real_path: real_path.to_path_buf(),
+            sha256: sha256.to_owned(),
+            stamp,
+        };
+        std::fs::create_dir_all(&self.root)?;
+        let body = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        crate::fsutil::write_atomic(&self.record_path(real_path), &body)
     }
 
     /// Verify that `real_path` (already canonical) holds exactly `expected_sha256`
@@ -60,23 +111,12 @@ impl VerifiedSourceCache {
         check: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<SourceVerification> {
         let before = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
-        let record_path = self.record_path(real_path);
-        if let Some(record) = std::fs::read(&record_path)
-            .ok()
-            .and_then(|body| serde_json::from_slice::<VerifiedSourceRecordV1>(&body).ok())
-        {
-            if record.schema_version == RECORD_SCHEMA_VERSION
-                && record.real_path == real_path
-                && record.sha256 == expected_sha256
-                && !record.stamp.is_racy()
-                && record.stamp.identifies_same_entry(&before)
-            {
-                return Ok(SourceVerification::Reused);
-            }
+        if self.recorded_sha256(real_path, &before).as_deref() == Some(expected_sha256) {
+            return Ok(SourceVerification::Reused);
         }
-        let digest = source_file_sha256_with_check(real_path, check)?;
-        if format!("sha256:{digest}") != expected_sha256 {
-            let _ = std::fs::remove_file(&record_path);
+        let (digest, after) = Self::hash(real_path, &before, check)?;
+        if digest != expected_sha256 {
+            let _ = std::fs::remove_file(self.record_path(real_path));
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -85,23 +125,25 @@ impl VerifiedSourceCache {
                 ),
             ));
         }
-        let after = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
-        if !before.identifies_same_entry(&after) {
-            return Err(io::Error::other(format!(
-                "{} changed while it was verified",
-                real_path.display()
-            )));
-        }
-        let record = VerifiedSourceRecordV1 {
-            schema_version: RECORD_SCHEMA_VERSION,
-            real_path: real_path.to_path_buf(),
-            sha256: expected_sha256.to_owned(),
-            stamp: after,
-        };
-        std::fs::create_dir_all(&self.root)?;
-        let body = serde_json::to_vec(&record).map_err(io::Error::other)?;
-        crate::fsutil::write_atomic(&record_path, &body)?;
+        self.record(real_path, expected_sha256, after)?;
         Ok(SourceVerification::Hashed)
+    }
+
+    /// The SHA-256 (`sha256:<hex>`) of `real_path` (already canonical) when no ledger names it in
+    /// advance: the recorded digest while the file's stamp is unchanged, otherwise a fresh hash
+    /// that is then recorded. A file that changed while it was hashed is an error.
+    pub fn sha256(
+        &self,
+        real_path: &Path,
+        check: &dyn Fn() -> io::Result<()>,
+    ) -> io::Result<(String, SourceVerification)> {
+        let before = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
+        if let Some(sha256) = self.recorded_sha256(real_path, &before) {
+            return Ok((sha256, SourceVerification::Reused));
+        }
+        let (digest, after) = Self::hash(real_path, &before, check)?;
+        self.record(real_path, &digest, after)?;
+        Ok((digest, SourceVerification::Hashed))
     }
 }
 
@@ -172,6 +214,47 @@ mod tests {
         assert_eq!(
             cache.verify(&path, &sha(b"weights"), &ok).unwrap(),
             SourceVerification::Hashed
+        );
+    }
+
+    #[test]
+    fn an_unledgered_digest_is_recorded_once_and_shared_with_verify() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = VerifiedSourceCache::for_data_dir(temp.path());
+        let path = temp.path().join("blob");
+        std::fs::write(&path, b"weights").unwrap();
+        settle(&path);
+        let path = std::fs::canonicalize(&path).unwrap();
+        let ok = || Ok(());
+        assert_eq!(
+            cache.sha256(&path, &ok).unwrap(),
+            (sha(b"weights"), SourceVerification::Hashed)
+        );
+        assert_eq!(
+            cache.sha256(&path, &ok).unwrap(),
+            (sha(b"weights"), SourceVerification::Reused)
+        );
+        // A digest recorded without a ledger serves a later ledger check of the same bytes.
+        assert_eq!(
+            cache.verify(&path, &sha(b"weights"), &ok).unwrap(),
+            SourceVerification::Reused
+        );
+        // A same-size rewrite that restores the old mtime still moves the stamp (ctime). Windows
+        // stamps carry no ctime, so this case is Unix-only.
+        if cfg!(not(unix)) {
+            return;
+        }
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, b"WEIGHTS").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(
+            cache.sha256(&path, &ok).unwrap(),
+            (sha(b"WEIGHTS"), SourceVerification::Hashed)
         );
     }
 }
