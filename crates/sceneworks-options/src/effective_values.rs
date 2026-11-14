@@ -4,6 +4,28 @@
 use crate::{contracts::JsonObject, DefaultRule, OptionContext, OptionSpec, Shape};
 use serde_json::{Map, Value};
 
+/// Syntax-only compatibility helpers for bare route probes as well as full resolution.
+/// Callers retain absence/null/invalid as distinct states; these helpers insert no defaults.
+pub fn legacy_integer(value: &Value) -> Option<Value> {
+    value
+        .as_i64()
+        .map(Value::from)
+        .or_else(|| value.as_u64().map(Value::from))
+        .or_else(|| {
+            let text = value.as_str()?.trim();
+            text.parse::<i64>()
+                .ok()
+                .map(Value::from)
+                .or_else(|| text.parse::<u64>().ok().map(Value::from))
+        })
+}
+pub fn legacy_number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|value| value.is_finite())
+}
+
 pub fn resolve_advanced(payload: &mut JsonObject, entry: &JsonObject) {
     let model = Value::Object(entry.clone());
     let operation = payload
@@ -88,26 +110,14 @@ fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionCo
             .map(|policy| Value::from(policy.name()));
     }
     if let Some(mut effective) = effective {
-        if spec.compatibility.contains("numeric string") {
-            if let Some(text) = effective.as_str() {
-                let parsed = match spec.shape {
-                    Shape::Integer => text
-                        .trim()
-                        .parse::<i64>()
-                        .ok()
-                        .map(Value::from)
-                        .or_else(|| text.trim().parse::<u64>().ok().map(Value::from)),
-                    Shape::Number => text
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|v| v.is_finite())
-                        .map(Value::from),
-                    _ => None,
-                };
-                if let Some(parsed) = parsed {
-                    effective = parsed;
-                }
+        if spec.compatibility.contains("numeric string") && effective.is_string() {
+            let parsed = match spec.shape {
+                Shape::Integer => legacy_integer(&effective),
+                Shape::Number => legacy_number(&effective).map(Value::from),
+                _ => None,
+            };
+            if let Some(parsed) = parsed {
+                effective = parsed;
             }
         }
         if spec.shape == Shape::Bool && spec.compatibility.contains("Legacy image flag") {
@@ -141,6 +151,20 @@ fn matches_shape(value: &Value, shape: Shape) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn bare_route_numeric_syntax_matches_effective_resolution() {
+        assert_eq!(legacy_integer(&json!(" 8 ")), Some(json!(8)));
+        assert_eq!(
+            legacy_integer(&json!("18446744073709551615")),
+            Some(json!(u64::MAX))
+        );
+        assert_eq!(legacy_integer(&json!("2.5")), None);
+        assert_eq!(legacy_number(&json!(" 2.5 ")), Some(2.5));
+        for invalid in [json!(null), json!(""), json!("NaN"), json!(true), json!({})] {
+            assert!(legacy_integer(&invalid).is_none());
+            assert!(legacy_number(&invalid).is_none());
+        }
+    }
     #[test]
     fn effective_values_lower_accepted_values_without_changing_authored_values() {
         let authored = json!({"advanced":{"steps":"20","guidanceScale":"3.5","usePid":0,"timestepShift":"2","strength":null}});

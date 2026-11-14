@@ -92,10 +92,6 @@ pub(crate) fn default_character_lora_weight() -> f64 {
     0.8
 }
 
-pub(crate) fn default_track_name() -> String {
-    "Selected person".to_owned()
-}
-
 pub(crate) fn default_image_model() -> String {
     "z_image_turbo".to_owned()
 }

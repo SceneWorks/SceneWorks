@@ -20,13 +20,14 @@ pub(crate) async fn create_prompt_refine_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<PromptRefineRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    sceneworks_core::request_validation::validate_shape("promptRefine", &to_json_object(&payload)?)
-        .map_err(ApiError::from)?;
-    let task = payload
-        .task
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let effective = sceneworks_core::request_validation::resolve(
+        "promptRefine",
+        &to_json_object(&payload)?,
+        &JsonObject::new(),
+    )
+    .map_err(ApiError::from)?;
+    // Keep the authored DTO for persistence; use the owner's effective view for decisions.
+    let task = effective.get("task").and_then(Value::as_str);
     // The reference-image vision tasks — `image_caption` (epic 8102, sc-8108) → JSON caption, and
     // `image_describe` (epic 8203, sc-8206) → plain-text description — are driven by an image, not a
     // text prompt: they carry a project `sourceAssetId` instead. Resolve that to the worker's confined
@@ -168,14 +169,14 @@ pub(crate) async fn create_prompt_refine_job(
         );
     }
 
-    let workflow = payload
-        .workflow
-        .as_deref()
+    if let Some(workflow) = effective
+        .get("workflow")
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("image")
-        .to_owned();
-    job_payload.insert("workflow".to_owned(), Value::String(workflow));
+    {
+        job_payload.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
+    }
 
     if let Some(model_id) = payload.model_id.as_deref() {
         if !model_id.trim().is_empty() {

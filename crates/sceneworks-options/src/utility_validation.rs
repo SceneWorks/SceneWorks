@@ -105,6 +105,77 @@ pub fn video_upscale_dimensions(
     (snap(width), snap(height))
 }
 
+/// Canonical discriminator: native prompt-refinement historically treats unknown tasks as rewrite.
+pub fn prompt_refine_task(task: Option<&str>) -> &'static str {
+    match task
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "magic_prompt" => "magic_prompt",
+        "image_caption" => "image_caption",
+        "image_describe" => "image_describe",
+        "film_plan" => "film_plan",
+        "qwen_image_rewrite" => "qwen_image_rewrite",
+        _ => "refine",
+    }
+}
+pub fn prompt_refine_workflow(workflow: Option<&str>) -> &'static str {
+    match workflow.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("video") => "video",
+        Some(value) if value.eq_ignore_ascii_case("audio") => "audio",
+        _ => "image",
+    }
+}
+pub fn prompt_refine_caption_style(style: Option<&str>) -> &'static str {
+    if style.is_some_and(|value| value.trim().eq_ignore_ascii_case("tags")) {
+        "tags"
+    } else {
+        "prose"
+    }
+}
+/// Apply only the selected task's static defaults to an execution copy.
+pub fn resolve_prompt_refine(payload: &JsonObject) -> JsonObject {
+    let mut resolved = payload.clone();
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let task = prompt_refine_task(text("task"));
+    resolved.insert("task".into(), json!(task));
+    if task == "refine" {
+        resolved.insert(
+            "workflow".into(),
+            json!(prompt_refine_workflow(text("workflow"))),
+        );
+    }
+    if task == "magic_prompt" {
+        resolved.insert(
+            "aspectRatio".into(),
+            json!(text("aspectRatio").unwrap_or("1:1")),
+        );
+    }
+    if task == "image_describe" {
+        resolved.insert(
+            "captionStyle".into(),
+            json!(prompt_refine_caption_style(text("captionStyle"))),
+        );
+    }
+    if matches!(
+        task,
+        "image_caption" | "image_describe" | "qwen_image_rewrite"
+    ) {
+        resolved
+            .entry("sourceAssetIds")
+            .or_insert_with(|| json!([]));
+    }
+    resolved
+}
+
 /// Accept authored asset ids or the API-resolved path carrier; path confinement remains native.
 pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefusal> {
     let text = |key: &str| {
@@ -114,7 +185,7 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
             .unwrap_or("")
             .trim()
     };
-    let task = text("task");
+    let task = prompt_refine_task(Some(text("task")));
     let vision = matches!(task, "image_caption" | "image_describe");
     let rewrite = task == "qwen_image_rewrite";
     if text("prompt").is_empty() && !vision {
@@ -256,5 +327,180 @@ fn person_controls_preserve_precedence_and_refuse_malformed_authored_values() {
             resolve(json!({"confidence":value})).unwrap_err().field,
             "advanced.confidence"
         );
+    }
+}
+
+pub fn validate_person_detection_job(
+    payload: &PersonDetectionJobRequest,
+) -> Result<(), ValidationRefusal> {
+    if payload.source_asset_id.is_empty() {
+        return Err(ValidationRefusal::new(
+            "sourceAssetId",
+            "Source clip is required",
+        ));
+    }
+    if payload
+        .source_timestamp
+        .is_some_and(|timestamp| !timestamp.is_finite() || timestamp < 0.0)
+    {
+        return Err(ValidationRefusal::new(
+            "sourceTimestamp",
+            "sourceTimestamp must be greater than or equal to 0",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ValidationRefusal> {
+    if payload.source_asset_id.is_empty() {
+        return Err(ValidationRefusal::new(
+            "sourceAssetId",
+            "Source clip is required",
+        ));
+    }
+    if payload.representative_frame_asset_id.is_empty() {
+        return Err(ValidationRefusal::new(
+            "representativeFrameAssetId",
+            "Representative frame asset is required",
+        ));
+    }
+    if payload.track_name.is_empty() || payload.track_name.chars().count() > 120 {
+        return Err(ValidationRefusal::new(
+            "trackName",
+            "trackName must be between 1 and 120 characters",
+        ));
+    }
+    if !payload.detection.contains_key("id") {
+        return Err(ValidationRefusal::new(
+            "detection.id",
+            "Selected detection metadata is required",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use crate::request_validation::{resolve, validate_shape};
+    #[test]
+    fn person_requests_share_required_identity_and_semantics() {
+        for kind in ["personDetect", "personTrack"] {
+            let valid = if kind == "personTrack" {
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{"id":"person"}})
+            } else {
+                json!({"sourceAssetId":"clip"})
+            };
+            let resolved = resolve(kind, valid.as_object().unwrap(), &JsonObject::new()).unwrap();
+            if kind == "personTrack" {
+                assert_eq!(resolved["trackName"], "Selected person");
+            }
+            for key in if kind == "personTrack" {
+                vec!["sourceAssetId", "representativeFrameAssetId", "detection"]
+            } else {
+                vec!["sourceAssetId"]
+            } {
+                for remove in [true, false] {
+                    let mut invalid = valid.as_object().unwrap().clone();
+                    if remove {
+                        invalid.remove(key);
+                    } else {
+                        invalid.insert(key.into(), Value::Null);
+                    }
+                    assert_eq!(validate_shape(kind, &invalid).unwrap_err().field, key);
+                }
+            }
+            for (key, value, expected) in [
+                ("advanced", Value::Null, "advanced"),
+                ("sourceAssetId", json!(""), "sourceAssetId"),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[key] = value;
+                assert_eq!(
+                    validate_shape(kind, invalid.as_object().unwrap())
+                        .unwrap_err()
+                        .field,
+                    expected
+                );
+            }
+        }
+        for (kind, payload, field) in [
+            (
+                "personDetect",
+                json!({"sourceAssetId":"clip","sourceTimestamp":-1}),
+                "sourceTimestamp",
+            ),
+            (
+                "personTrack",
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{}}),
+                "detection.id",
+            ),
+            (
+                "personTrack",
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{"id":"p"},"trackName":""}),
+                "trackName",
+            ),
+            (
+                "personTrack",
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{"id":"p"},"trackName":"x".repeat(121)}),
+                "trackName",
+            ),
+        ] {
+            assert_eq!(
+                validate_shape(kind, payload.as_object().unwrap())
+                    .unwrap_err()
+                    .field,
+                field
+            );
+        }
+    }
+    #[test]
+    fn prompt_defaults_are_applicable_and_authored_nulls_do_not_disappear() {
+        let authored = json!({"prompt":"tree"});
+        let resolved = resolve(
+            "promptRefine",
+            authored.as_object().unwrap(),
+            &JsonObject::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            json!({"prompt":"tree","task":"refine","workflow":"image"})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(authored, json!({"prompt":"tree"}));
+        assert_eq!(prompt_refine_workflow(Some("unknown")), "image");
+        assert_eq!(prompt_refine_workflow(Some(" VIDEO ")), "video");
+        for (payload, field) in [
+            (
+                json!({"prompt":"tree","sourceAssetIds":null}),
+                "sourceAssetIds",
+            ),
+            (
+                json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+                "prompt",
+            ),
+        ] {
+            assert_eq!(
+                validate_shape("promptRefine", payload.as_object().unwrap())
+                    .unwrap_err()
+                    .field,
+                field
+            );
+        }
+        let magic = resolve_prompt_refine(json!({"task":"magic_prompt"}).as_object().unwrap());
+        assert_eq!(magic["aspectRatio"], "1:1");
+        assert!(!magic.contains_key("captionStyle"));
+        assert!(!magic.contains_key("workflow"));
+        let describe = resolve_prompt_refine(
+            json!({"task":" IMAGE_DESCRIBE ","captionStyle":"unknown"})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(describe["captionStyle"], "prose");
+        assert_eq!(describe["sourceAssetIds"], json!([]));
+        assert!(!describe.contains_key("aspectRatio"));
     }
 }

@@ -194,3 +194,23 @@ fn rectangle_carriers_use_one_geometry_parser_and_refuse_ambiguous_authoring() {
     advanced["aspectRatioBuckets"][0]["width"] = json!(769);
     assert!(training::parse_training_bucket_config(&advanced).is_err());
 }
+
+#[test]
+fn iris_fp16_survives_effective_submission_and_worker_plan() {
+    let target = iris::iris_generation_target();
+    let mut submit = submission(&target);
+    submit["config"]["advanced"]["mixedPrecision"] = json!("fp16");
+    let plan = job(&target, submit["config"].clone());
+    let effective = training::resolve_payload("training", &submit, &facts(&target)).unwrap();
+    let worker = training::resolve_payload("lora_train", &plan, &facts(&target)).unwrap();
+    assert_eq!(effective["config"]["advanced"]["mixedPrecision"], "fp16");
+    assert_eq!(
+        worker["plan"]["config"]["advanced"]["mixedPrecision"],
+        "fp16"
+    );
+    assert_eq!(training::train_dtype_for_kernel("other", "fp16"), "f32");
+    assert_eq!(
+        training::train_dtype_for_kernel(iris::IRIS_TRAINING_KERNEL, " FP16 "),
+        "fp16"
+    );
+}

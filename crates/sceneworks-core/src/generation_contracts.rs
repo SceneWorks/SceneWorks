@@ -17,3 +17,7 @@ pub use sceneworks_options::generation_contracts::{
 pub use sceneworks_options::generation_contracts::{
     CharacterTestRequest, PromptRefineRequest, VectorPromptWorkflowRequest,
 };
+
+pub use sceneworks_options::generation_contracts::{
+    PersonDetectionJobRequest, PersonTrackJobRequest,
+};

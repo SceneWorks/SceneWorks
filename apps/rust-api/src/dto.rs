@@ -406,43 +406,9 @@ pub(crate) struct FrameExtractRequest {
     pub(crate) requested_gpu: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PersonDetectionJobRequest {
-    #[serde(default)]
-    pub(crate) advanced: JsonObject,
-    #[serde(default)]
-    pub(crate) confidence: Option<Value>,
-    pub(crate) source_asset_id: String,
-    #[serde(default)]
-    pub(crate) source_timestamp: Option<f64>,
-    /// Opt into the Rust utility worker's procedural preview instead of real,
-    /// model-backed detection on the native MLX/candle worker. Defaults to real.
-    #[serde(default)]
-    pub(crate) preview: bool,
-    #[serde(default = "default_requested_gpu")]
-    pub(crate) requested_gpu: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PersonTrackJobRequest {
-    #[serde(default)]
-    pub(crate) advanced: JsonObject,
-    #[serde(default)]
-    pub(crate) confidence: Option<Value>,
-    pub(crate) source_asset_id: String,
-    pub(crate) representative_frame_asset_id: String,
-    pub(crate) detection: JsonObject,
-    #[serde(default = "default_track_name")]
-    pub(crate) track_name: String,
-    /// Opt into the Rust utility worker's procedural preview instead of real,
-    /// model-backed tracking on the native MLX/candle worker. Defaults to real.
-    #[serde(default)]
-    pub(crate) preview: bool,
-    #[serde(default = "default_requested_gpu")]
-    pub(crate) requested_gpu: String,
-}
+pub(crate) use sceneworks_core::generation_contracts::{
+    PersonDetectionJobRequest, PersonTrackJobRequest,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

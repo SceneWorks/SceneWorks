@@ -87,3 +87,102 @@ async fn shared_video_upscale_refusals_match_raw_create_retry_duplicate() {
         assert_eq!(body["context"], *expected.context);
     }
 }
+
+#[tokio::test]
+async fn shared_person_and_prompt_refusals_match_typed_raw_retry_and_duplicate() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (_, project) = create_project(app.clone(), "Person static boundary").await;
+    let project_id = project["id"].as_str().unwrap();
+    for (kind, job_type, path, valid, invalids) in [
+        (
+            "personDetect",
+            "person_detect",
+            format!("/api/v1/projects/{project_id}/person-tracks/detections"),
+            json!({"sourceAssetId":"clip"}),
+            vec![
+                json!({}),
+                json!({"sourceAssetId":null}),
+                json!({"sourceAssetId":"clip","sourceTimestamp":-1}),
+                json!({"sourceAssetId":"clip","advanced":null}),
+            ],
+        ),
+        (
+            "personTrack",
+            "person_track",
+            format!("/api/v1/projects/{project_id}/person-tracks/jobs"),
+            json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{"id":"person"}}),
+            vec![
+                json!({}),
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{}}),
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":null,"detection":{"id":"person"}}),
+                json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{"id":"person"},"trackName":null}),
+            ],
+        ),
+        (
+            "promptRefine",
+            "prompt_refine",
+            "/api/v1/prompts/refine".to_owned(),
+            json!({"prompt":"tree"}),
+            vec![
+                json!({"prompt":"tree","sourceAssetIds":null}),
+                json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+            ],
+        ),
+    ] {
+        for invalid in &invalids {
+            let expected = sceneworks_core::request_validation::validate_shape(
+                kind,
+                invalid.as_object().unwrap(),
+            )
+            .unwrap_err();
+            for (route, body) in [
+                (path.as_str(), invalid.clone()),
+                (
+                    "/api/v1/jobs",
+                    json!({"type":job_type,"requestedGpu":"auto","projectId":project_id,"payload":invalid}),
+                ),
+            ] {
+                let (status, body) = request(app.clone(), "POST", route, body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{route}: {body}");
+                assert_eq!(body["code"], expected.code);
+                assert_eq!(body["field"], expected.field);
+                assert_eq!(body["context"], *expected.context);
+            }
+        }
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({"type":job_type,"requestedGpu":"auto","projectId":project_id,"payload":valid}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job_type}: {job}");
+        let changes = if kind == "promptRefine" {
+            json!({"sourceAssetIds":null})
+        } else {
+            json!({"sourceAssetId":""})
+        };
+        let mut patched = valid.as_object().unwrap().clone();
+        patched.extend(changes.as_object().unwrap().clone());
+        let expected =
+            sceneworks_core::request_validation::validate_shape(kind, &patched).unwrap_err();
+        for operation in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{}/{operation}", job["id"].as_str().unwrap()),
+                json!({"payloadChanges":changes}),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{job_type}/{operation}: {body}"
+            );
+            assert_eq!(body["code"], expected.code);
+            assert_eq!(body["field"], expected.field);
+            assert_eq!(body["context"], *expected.context);
+        }
+    }
+}

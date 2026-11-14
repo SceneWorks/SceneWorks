@@ -2219,8 +2219,7 @@ pub struct ResolvedTrainingAdvanced {
     pub requested_gpu: String,
 }
 
-/// Preserve the existing generic bf16/f32 lowering. Iris's native fp16 and backend requirements
-/// remain with its provider-specific adapter.
+/// Preserve the existing generic bf16/f32 lowering.
 pub fn normalize_train_dtype(value: &str) -> String {
     if value.trim().eq_ignore_ascii_case("bf16") {
         "bf16"
@@ -2228,6 +2227,15 @@ pub fn normalize_train_dtype(value: &str) -> String {
         "f32"
     }
     .to_owned()
+}
+
+/// Iris's trainer supports fp16 with dynamic loss scaling; other kernels keep the generic rule.
+pub fn train_dtype_for_kernel(kernel: &str, value: &str) -> String {
+    if iris::is_iris_training_kernel(kernel) && value.trim().eq_ignore_ascii_case("fp16") {
+        "fp16".to_owned()
+    } else {
+        normalize_train_dtype(value)
+    }
 }
 
 /// Resolve legacy omissions and common scalar coercions once for previews and native mapping.
@@ -2354,6 +2362,10 @@ pub fn resolve_payload(
         .as_object()
         .expect("validated advanced object");
     let mut resolved_advanced = resolve_advanced(advanced)?;
+    resolved_advanced.train_dtype = train_dtype_for_kernel(
+        &target.kernel,
+        &preflight_string(advanced, "mixedPrecision", "bf16")?,
+    );
     if target.kernel == "moss_image_lora" {
         resolved_advanced.timestep_type =
             moss_timestep_type(advanced, resolved_advanced.timestep_type);

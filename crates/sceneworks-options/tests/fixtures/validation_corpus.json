@@ -1541,6 +1541,817 @@
         "candleVideoLora": false
       }
     },
+    "qwen_image_2_1": {
+      "id": "qwen_image_2_1",
+      "name": "Qwen Image 2.1",
+      "family": "qwen-image-2-1",
+      "type": "image",
+      "adapter": "qwen_image_2_1",
+      "admissionGeometry": {
+        "maxBatch": 8,
+        "maxJointTokens": 58016,
+        "maxPresetArea": 4300800,
+        "maxReferenceImages": 10,
+        "maxSide": 2752,
+        "maxTargetImageTokens": 16800,
+        "pixelsPerToken": 16,
+        "tokensPerMaxReference": 4096
+      },
+      "candle": {
+        "minMemoryGb": 45,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "implementations": [
+            {
+              "engagedRungs": [
+                "resident"
+              ],
+              "fingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+              "loadProfiles": [
+                "plain",
+                "lora"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image",
+                "image_to_image",
+                "character_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {},
+              "parameters": {},
+              "providerOverlay": "none",
+              "requestContexts": [
+                {
+                  "hasPhases": false,
+                  "mode": "text_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "edit_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "image_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "character_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                }
+              ],
+              "rung": "resident",
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs",
+              "sourceKinds": [
+                "dir"
+              ],
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "fingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+              "loadProfiles": [
+                "plain",
+                "lora"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image",
+                "image_to_image",
+                "character_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {},
+              "parameters": {},
+              "providerOverlay": "none",
+              "requestContexts": [
+                {
+                  "hasPhases": false,
+                  "mode": "text_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "edit_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "image_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "character_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                }
+              ],
+              "rung": "staged_residency",
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs",
+              "sourceKinds": [
+                "dir"
+              ],
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "engagedRungs": [
+                "resident",
+                "bounded_decode"
+              ],
+              "fingerprint": "qwen-image-2-1-candle-derived-2026-09-22-v1",
+              "loadProfiles": [
+                "plain",
+                "lora"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image",
+                "image_to_image",
+                "character_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {
+                "decodeOverlaps": [
+                  64
+                ],
+                "decodeTileEdges": [
+                  768,
+                  640,
+                  512,
+                  384,
+                  256
+                ]
+              },
+              "parameters": {
+                "decodeOverlap": 64,
+                "decodeTileEdge": 512
+              },
+              "providerOverlay": "none",
+              "requestContexts": [
+                {
+                  "hasPhases": false,
+                  "mode": "text_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "edit_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "image_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "character_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                }
+              ],
+              "rung": "bounded_decode",
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs",
+              "sourceKinds": [
+                "dir"
+              ],
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            }
+          ],
+          "provider": "qwen_image_2_1"
+        },
+        "minMemoryGbByTier": {
+          "bf16": 45,
+          "q4": 21,
+          "q8": 30
+        }
+      },
+      "capabilities": [
+        "text_to_image",
+        "image_to_image",
+        "edit_image"
+      ],
+      "defaults": {
+        "count": 1,
+        "guidanceScale": 1.0,
+        "resolution": "2048x2048",
+        "sampler": "default",
+        "scheduler": "default",
+        "steps": 40
+      },
+      "downloads": [
+        {
+          "estimatedSizeBytes": 33134949212,
+          "files": [],
+          "footprint": {
+            "diskSizeBytes": 33134949212,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1",
+          "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
+          "variant": "bf16"
+        },
+        {
+          "estimatedSizeBytes": 19949564155,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 19949564155,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
+          "variant": "q8"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 12919123359,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 12919123359,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-mlx",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
+          "variant": "q4"
+        }
+      ],
+      "gated": false,
+      "licenseNotice": "Qwen-Image 2.1's weights are governed by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+      "limits": {
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "hardMinSteps": 2,
+        "maxDimension": 2752,
+        "maxReferenceAssets": 10,
+        "minDimension": 32,
+        "requiresDimensionsMultipleOf": 32,
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ],
+        "samplers": [
+          "default",
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_2m_sde",
+          "dpmpp_sde",
+          "er_sde",
+          "uni_pc",
+          "lcm",
+          "ddim"
+        ],
+        "schedulers": [
+          "default",
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "qwen-image-2-1"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ]
+      },
+      "mlx": {
+        "quantize": 8,
+        "minMemoryGb": 44,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "implementations": [
+            {
+              "engagedRungs": [
+                "resident"
+              ],
+              "fingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+              "loadProfiles": [
+                "plain",
+                "lora"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image",
+                "image_to_image",
+                "character_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {},
+              "parameters": {},
+              "providerOverlay": "none",
+              "requestContexts": [
+                {
+                  "hasPhases": false,
+                  "mode": "text_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "edit_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "image_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "character_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                }
+              ],
+              "rung": "resident",
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
+              "sourceKinds": [
+                "dir"
+              ],
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "engagedRungs": [
+                "resident",
+                "bounded_decode"
+              ],
+              "fingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
+              "loadProfiles": [
+                "plain",
+                "lora"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image",
+                "image_to_image",
+                "character_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {
+                "decodeOverlaps": [
+                  64
+                ],
+                "decodeTileEdges": [
+                  768,
+                  640,
+                  512,
+                  384,
+                  256
+                ]
+              },
+              "parameters": {
+                "decodeOverlap": 64,
+                "decodeTileEdge": 512
+              },
+              "providerOverlay": "none",
+              "requestContexts": [
+                {
+                  "hasPhases": false,
+                  "mode": "text_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "edit_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "image_to_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                },
+                {
+                  "hasPhases": false,
+                  "mode": "character_image",
+                  "pid": [
+                    false
+                  ],
+                  "providerMode": "text_to_image",
+                  "referenceCounts": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10
+                  ]
+                }
+              ],
+              "rung": "bounded_decode",
+              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
+              "sourceKinds": [
+                "dir"
+              ],
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            }
+          ],
+          "provider": "qwen_image_2_1"
+        },
+        "minMemoryGbByTier": {
+          "bf16": 44,
+          "q4": 21,
+          "q8": 29
+        }
+      },
+      "nonCommercial": true,
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1"
+      },
+      "requiresLicenseAcknowledgment": true,
+      "supportsAlphaOutput": true,
+      "ui": {
+        "description": "Qwen-Image 2.1 — Alibaba's September 2026 text-to-image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). A ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, it renders at up to 2752 px on its long edge across seven aspect presets, with true classifier-free guidance and a negative prompt. Three precision tiers — bf16, Q8 and Q4 — install and run on BOTH backends, and a tier here is a whole-pipeline choice: Q4 runs Q4 through the transformer and the language tower alike, which is what brings it within reach of a 24 GB card. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
+        "label": "Qwen Image 2.1",
+        "multiReference": true,
+        "promptGuide": {
+          "path": "/prompt-guides/qwen-image-2-1.md",
+          "sources": [
+            {
+              "label": "Qwen-Image-2.1 model card",
+              "url": "https://huggingface.co/Qwen/Qwen-Image-2.1"
+            },
+            {
+              "label": "Qwen-Image-2.1 repository",
+              "url": "https://github.com/QwenLM/Qwen-Image-2.1"
+            }
+          ],
+          "title": "Qwen Image 2.1 Prompt Guide"
+        },
+        "recommendedFor": [
+          "text_to_image",
+          "edit_image"
+        ]
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": false,
+        "candleVideoRouted": false,
+        "candleVideoI2v": false,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
     "flux3_klein": {
       "id": "flux3_klein",
       "name": "FLUX 3 Image Klein",
@@ -2987,6 +3798,181 @@
       },
       "optionRouteFacts": {
         "videoMlxRouted": false,
+        "candleVideoRouted": false,
+        "candleVideoI2v": false,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
+    "scail2_14b": {
+      "id": "scail2_14b",
+      "name": "SCAIL-2",
+      "family": "scail2",
+      "type": "video",
+      "adapter": "scail2",
+      "candle": {
+        "minMemoryGb": 64,
+        "vramGbByTier": {
+          "bf16": 102.115,
+          "q4": 61.26,
+          "q8": 64.928
+        },
+        "vramMeasuredPixels": 399360,
+        "measured": true
+      },
+      "capabilities": [
+        "animate_character",
+        "replace_person"
+      ],
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "quality": "balanced",
+        "resolution": "832x480",
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 23993093306,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 23993093306,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 32067131269,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 32067131269,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 47205846839,
+          "files": [
+            "bf16/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 47205846839,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+          "variant": "bf16"
+        }
+      ],
+      "limits": {
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "fps": [
+          16
+        ],
+        "hardMaxDuration": 5,
+        "maxPixels": 921600,
+        "recommendedMaxDuration": 5,
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x704",
+          "704x1280"
+        ],
+        "samplers": [
+          "default"
+        ],
+        "schedulers": [
+          "default"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "scail2"
+        ],
+        "imageConditionedBackbone": true,
+        "sizeClass": "14b",
+        "types": [
+          "style",
+          "motion",
+          "character",
+          "enhance"
+        ]
+      },
+      "mlx": {
+        "limits": {
+          "samplers": [
+            "default"
+          ],
+          "schedulers": [
+            "default"
+          ]
+        },
+        "quantize": 4,
+        "repo": "SceneWorks/scail2-mlx",
+        "minMemoryGb": 96
+      },
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/scail2-mlx"
+      },
+      "ui": {
+        "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. Measured Candle floors are 64 GB for q4, 67 GB for q8, and 105 GB for bf16. Runs minutes-per-clip (segmented 14B denoise).",
+        "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
+        "label": "SCAIL-2",
+        "promptGuide": {
+          "path": "/prompt-guides/scail2.md",
+          "sources": [
+            {
+              "label": "SCAIL-2 model card",
+              "url": "https://huggingface.co/zai-org/SCAIL-2"
+            },
+            {
+              "label": "SCAIL-2 GitHub repo",
+              "url": "https://github.com/zai-org/SCAIL-2"
+            }
+          ],
+          "title": "SCAIL-2 Prompt Guide"
+        },
+        "recommendedFor": [
+          "animate_character"
+        ]
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": true,
         "candleVideoRouted": false,
         "candleVideoI2v": false,
         "candleVideoVace": false,
@@ -5310,6 +6296,224 @@
       }
     },
     {
+      "name": "image model stride refusal",
+      "kind": "image",
+      "model": "qwen_image_2_1",
+      "payload": {
+        "projectId": "p",
+        "model": "qwen_image_2_1",
+        "prompt": "tree",
+        "width": 1001,
+        "height": 1024
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "request",
+          "detail": "qwen_image_2_1 renders on a 32-pixel grid; this request's width of 1001 is not a multiple of 32. The nearest are 992 and 1024.",
+          "context": {
+            "kind": "image",
+            "model": "qwen_image_2_1",
+            "mode": "text_to_image",
+            "field": "request"
+          }
+        }
+      }
+    },
+    {
+      "name": "image FLUX3 reference cap",
+      "kind": "image",
+      "model": "flux3_klein",
+      "payload": {
+        "projectId": "p",
+        "model": "flux3_klein",
+        "prompt": "tree",
+        "referenceAssetIds": [
+          "source-0",
+          "source-1",
+          "source-2",
+          "source-3",
+          "source-4",
+          "source-5",
+          "source-6",
+          "source-7",
+          "source-8",
+          "source-9",
+          "source-10"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "request",
+          "detail": "FLUX.3 accepts 1–10 ordered references, including duplicate slots; this request supplies 11.",
+          "context": {
+            "kind": "image",
+            "model": "flux3_klein",
+            "mode": "text_to_image",
+            "field": "request"
+          }
+        }
+      }
+    },
+    {
+      "name": "video LTX IC-LoRA required",
+      "kind": "video",
+      "model": "ltx_2_5",
+      "payload": {
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "mode": "extend_clip",
+        "prompt": "tree",
+        "sourceClipAssetId": "clip"
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "mode",
+          "detail": "ltx_2_5 cannot render the \"extend_clip\" mode — no backend implements it, so this job would wait for a worker that will never claim it. Choose a mode this model lists in its capabilities, or a model that supports this one.",
+          "context": {
+            "kind": "video",
+            "model": "ltx_2_5",
+            "mode": "extend_clip",
+            "field": "mode"
+          }
+        }
+      }
+    },
+    {
+      "name": "video reference cap",
+      "kind": "video",
+      "model": "ltx_2_5",
+      "payload": {
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "mode": "reference_to_video",
+        "prompt": "tree",
+        "referenceAssetIds": [
+          "source-0",
+          "source-1",
+          "source-2",
+          "source-3",
+          "source-4",
+          "source-5",
+          "source-6",
+          "source-7",
+          "source-8"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "referenceAssetIds",
+          "detail": "ltx_2_5 takes up to 8 reference images, but this request supplies 9. Reduce referenceAssetIds to 8 or fewer, or choose a model that takes more.",
+          "context": {
+            "kind": "video",
+            "model": "ltx_2_5",
+            "mode": "reference_to_video",
+            "field": "referenceAssetIds"
+          }
+        }
+      }
+    },
+    {
+      "name": "video audio-only references",
+      "kind": "video",
+      "model": "ltx_2_5",
+      "payload": {
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "mode": "reference_to_video",
+        "prompt": "tree",
+        "referenceAudioAssetIds": [
+          "audio"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "reference",
+          "detail": "Reference to Video requires at least one reference image or video clip. Audio references condition the soundtrack and cannot be the only reference.",
+          "context": {
+            "kind": "video",
+            "model": "ltx_2_5",
+            "mode": "reference_to_video",
+            "field": "reference"
+          }
+        }
+      }
+    },
+    {
+      "name": "video SCAIL character cap",
+      "kind": "video",
+      "model": "scail2_14b",
+      "payload": {
+        "projectId": "p",
+        "model": "scail2_14b",
+        "mode": "animate_character",
+        "prompt": "tree",
+        "sourceClipAssetId": "clip",
+        "referenceAssetIds": [
+          "source-0",
+          "source-1",
+          "source-2",
+          "source-3",
+          "source-4",
+          "source-5",
+          "source-6"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "reference",
+          "detail": "SCAIL-2 Animate Character supports at most 6 reference characters.",
+          "context": {
+            "kind": "video",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "field": "reference"
+          }
+        }
+      }
+    },
+    {
+      "name": "video SCAIL paired descriptor",
+      "kind": "video",
+      "model": "scail2_14b",
+      "payload": {
+        "projectId": "p",
+        "model": "scail2_14b",
+        "mode": "animate_character",
+        "prompt": "tree",
+        "sourceClipAssetId": "clip",
+        "referenceAssetIds": [
+          "person1",
+          "person2"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "script",
+          "detail": "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
+          "context": {
+            "kind": "video",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "field": "script"
+          }
+        }
+      }
+    },
+    {
       "name": "vector source",
       "kind": "vector",
       "model": "starvector_1b",
@@ -5656,7 +6860,9 @@
       "expected": {
         "ok": true,
         "resolved": {
-          "prompt": "a tree"
+          "prompt": "a tree",
+          "task": "refine",
+          "workflow": "image"
         }
       }
     },
@@ -5665,11 +6871,13 @@
       "kind": "personDetect",
       "model": "",
       "payload": {
+        "sourceAssetId": "clip",
         "confidence": 0.7
       },
       "expected": {
         "ok": true,
         "resolved": {
+          "sourceAssetId": "clip",
           "confidence": 0.7,
           "advanced": {
             "confidence": 0.7,
@@ -5683,6 +6891,8 @@
       "kind": "personDetect",
       "model": "",
       "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
         "advanced": {
           "confidence": "bad"
         }
@@ -5703,16 +6913,94 @@
       }
     },
     {
+      "name": "personDetect missing source",
+      "kind": "personDetect",
+      "model": "",
+      "payload": {},
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "sourceAssetId",
+          "detail": "missing field `sourceAssetId`",
+          "context": {
+            "kind": "personDetect",
+            "model": null,
+            "mode": null,
+            "field": "sourceAssetId"
+          }
+        }
+      }
+    },
+    {
+      "name": "personDetect null sourceAssetId",
+      "kind": "personDetect",
+      "model": "",
+      "payload": {
+        "sourceAssetId": null,
+        "confidence": 0.7
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "sourceAssetId",
+          "detail": "invalid type: null, expected a string",
+          "context": {
+            "kind": "personDetect",
+            "model": null,
+            "mode": null,
+            "field": "sourceAssetId"
+          }
+        }
+      }
+    },
+    {
+      "name": "personDetect null advanced",
+      "kind": "personDetect",
+      "model": "",
+      "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "advanced": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced",
+          "detail": "invalid type: null, expected a map",
+          "context": {
+            "kind": "personDetect",
+            "model": null,
+            "mode": null,
+            "field": "advanced"
+          }
+        }
+      }
+    },
+    {
       "name": "personTrack legacy confidence",
       "kind": "personTrack",
       "model": "",
       "payload": {
-        "confidence": 0.7
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {
+          "id": "person-1"
+        }
       },
       "expected": {
         "ok": true,
         "resolved": {
+          "sourceAssetId": "clip",
           "confidence": 0.7,
+          "representativeFrameAssetId": "frame",
+          "detection": {
+            "id": "person-1"
+          },
+          "trackName": "Selected person",
           "advanced": {
             "confidence": 0.7,
             "segment": true
@@ -5725,6 +7013,12 @@
       "kind": "personTrack",
       "model": "",
       "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {
+          "id": "person-1"
+        },
         "advanced": {
           "confidence": "bad"
         }
@@ -5740,6 +7034,287 @@
             "model": null,
             "mode": null,
             "field": "advanced.confidence"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack missing source",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {},
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "sourceAssetId",
+          "detail": "missing field `sourceAssetId`",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "sourceAssetId"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack null sourceAssetId",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "sourceAssetId": null,
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {
+          "id": "person-1"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "sourceAssetId",
+          "detail": "invalid type: null, expected a string",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "sourceAssetId"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack null advanced",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {
+          "id": "person-1"
+        },
+        "advanced": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced",
+          "detail": "invalid type: null, expected a map",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "advanced"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack invalid representativeFrameAssetId",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "",
+        "detection": {
+          "id": "person-1"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "representativeFrameAssetId",
+          "detail": "Representative frame asset is required",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "representativeFrameAssetId"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack invalid detection",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {}
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "detection.id",
+          "detail": "Selected detection metadata is required",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "detection.id"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack invalid trackName",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "sourceAssetId": "clip",
+        "confidence": 0.7,
+        "representativeFrameAssetId": "frame",
+        "detection": {
+          "id": "person-1"
+        },
+        "trackName": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "trackName",
+          "detail": "invalid type: null, expected a string",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "trackName"
+          }
+        }
+      }
+    },
+    {
+      "name": "vision null prompt",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_caption",
+        "sourceAssetId": "source",
+        "prompt": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "prompt",
+          "detail": "invalid type: null, expected a string",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "prompt"
+          }
+        }
+      }
+    },
+    {
+      "name": "null references",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "prompt": "tree",
+        "sourceAssetIds": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "sourceAssetIds",
+          "detail": "invalid type: null, expected a sequence",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "sourceAssetIds"
+          }
+        }
+      }
+    },
+    {
+      "name": "magic defaults",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "prompt": "tree",
+        "task": "magic_prompt"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "prompt": "tree",
+          "task": "magic_prompt",
+          "aspectRatio": "1:1"
+        }
+      }
+    },
+    {
+      "name": "describe defaults",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_describe",
+        "sourceAssetId": "source"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "task": "image_describe",
+          "sourceAssetId": "source",
+          "captionStyle": "prose",
+          "sourceAssetIds": []
+        }
+      }
+    },
+    {
+      "name": "rewrite defaults",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "prompt": "tree",
+        "task": "qwen_image_rewrite"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "prompt": "tree",
+          "task": "qwen_image_rewrite",
+          "sourceAssetIds": []
+        }
+      }
+    },
+    {
+      "name": "image worker-owned enhancement receipt",
+      "kind": "image",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "prompt": "tree",
+        "advanced": {
+          "promptEnhancement": null
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.promptEnhancement",
+          "detail": "advanced.promptEnhancement is worker-owned and cannot be supplied by a client",
+          "context": {
+            "kind": "image",
+            "model": "flux_dev",
+            "mode": "text_to_image",
+            "field": "advanced.promptEnhancement"
           }
         }
       }

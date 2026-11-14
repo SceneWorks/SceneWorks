@@ -755,3 +755,45 @@ pub(crate) fn default_mode_for(kind: &str) -> Option<String> {
         _ => None,
     }
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonDetectionJobRequest {
+    #[serde(default)]
+    pub advanced: JsonObject,
+    #[serde(default)]
+    pub confidence: Option<Value>,
+    pub source_asset_id: String,
+    #[serde(default)]
+    pub source_timestamp: Option<f64>,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed detection on the native MLX/candle worker. Defaults to real.
+    #[serde(default)]
+    pub preview: bool,
+    #[serde(default = "default_requested_gpu")]
+    pub requested_gpu: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonTrackJobRequest {
+    #[serde(default)]
+    pub advanced: JsonObject,
+    #[serde(default)]
+    pub confidence: Option<Value>,
+    pub source_asset_id: String,
+    pub representative_frame_asset_id: String,
+    pub detection: JsonObject,
+    #[serde(default = "default_track_name")]
+    pub track_name: String,
+    /// Opt into the Rust utility worker's procedural preview instead of real,
+    /// model-backed tracking on the native MLX/candle worker. Defaults to real.
+    #[serde(default)]
+    pub preview: bool,
+    #[serde(default = "default_requested_gpu")]
+    pub requested_gpu: String,
+}
+
+pub fn default_track_name() -> String {
+    "Selected person".to_owned()
+}

@@ -5,12 +5,14 @@ fn main() {
     let mut models = serde_json::Map::new();
     for (model, mode) in [
         ("flux_dev", "text_to_image"),
+        ("qwen_image_2_1", "text_to_image"),
         ("flux3_klein", "text_to_image"),
         ("ltx_2_5", "text_to_video"),
         ("wan_2_2_i2v_14b", "first_last_frame"),
         ("kokoro_82m", "text_to_speech"),
         ("starvector_1b", "image_to_svg"),
         ("sensenova_u1_8b", "text_to_image"),
+        ("scail2_14b", "animate_character"),
     ] {
         models.insert(
             model.into(),
@@ -113,6 +115,41 @@ fn main() {
         payload[key] = value.clone();
         add(&format!("video {key} {value}"), "video", payload);
     }
+    add(
+        "image model stride refusal",
+        "image",
+        json!({"projectId":"p","model":"qwen_image_2_1","prompt":"tree","width":1001,"height":1024}),
+    );
+    add(
+        "image FLUX3 reference cap",
+        "image",
+        json!({"projectId":"p","model":"flux3_klein","prompt":"tree","referenceAssetIds":(0..11).map(|i| format!("source-{i}")).collect::<Vec<_>>()}),
+    );
+    add(
+        "video LTX IC-LoRA required",
+        "video",
+        json!({"projectId":"p","model":"ltx_2_5","mode":"extend_clip","prompt":"tree","sourceClipAssetId":"clip"}),
+    );
+    add(
+        "video reference cap",
+        "video",
+        json!({"projectId":"p","model":"ltx_2_5","mode":"reference_to_video","prompt":"tree","referenceAssetIds":(0..9).map(|i| format!("source-{i}")).collect::<Vec<_>>()}),
+    );
+    add(
+        "video audio-only references",
+        "video",
+        json!({"projectId":"p","model":"ltx_2_5","mode":"reference_to_video","prompt":"tree","referenceAudioAssetIds":["audio"]}),
+    );
+    add(
+        "video SCAIL character cap",
+        "video",
+        json!({"projectId":"p","model":"scail2_14b","mode":"animate_character","prompt":"tree","sourceClipAssetId":"clip","referenceAssetIds":(0..7).map(|i| format!("source-{i}")).collect::<Vec<_>>()}),
+    );
+    add(
+        "video SCAIL paired descriptor",
+        "video",
+        json!({"projectId":"p","model":"scail2_14b","mode":"animate_character","prompt":"tree","sourceClipAssetId":"clip","referenceAssetIds":["person1","person2"]}),
+    );
     add("vector source", "vector", vector.clone());
     for (key, value) in [
         ("prompt", json!("unsupported guidance")),
@@ -165,17 +202,62 @@ fn main() {
     );
     add("prompt refine", "promptRefine", json!({"prompt":"a tree"}));
     for kind in ["personDetect", "personTrack"] {
-        add(
-            &format!("{kind} legacy confidence"),
-            kind,
-            json!({"confidence":0.7}),
-        );
-        add(
-            &format!("{kind} invalid confidence"),
-            kind,
-            json!({"advanced":{"confidence":"bad"}}),
-        );
+        let mut valid = json!({"sourceAssetId":"clip","confidence":0.7});
+        if kind == "personTrack" {
+            valid["representativeFrameAssetId"] = json!("frame");
+            valid["detection"] = json!({"id":"person-1"});
+        }
+        add(&format!("{kind} legacy confidence"), kind, valid.clone());
+        let mut invalid = valid.clone();
+        invalid["advanced"] = json!({"confidence":"bad"});
+        add(&format!("{kind} invalid confidence"), kind, invalid);
+        add(&format!("{kind} missing source"), kind, json!({}));
+        for (key, value) in [("sourceAssetId", Value::Null), ("advanced", Value::Null)] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            add(&format!("{kind} null {key}"), kind, invalid);
+        }
+        if kind == "personTrack" {
+            for (key, value) in [
+                ("representativeFrameAssetId", json!("")),
+                ("detection", json!({})),
+                ("trackName", Value::Null),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[key] = value;
+                add(&format!("{kind} invalid {key}"), kind, invalid);
+            }
+        }
     }
+    for (name, payload) in [
+        (
+            "vision null prompt",
+            json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+        ),
+        (
+            "null references",
+            json!({"prompt":"tree","sourceAssetIds":null}),
+        ),
+        (
+            "magic defaults",
+            json!({"prompt":"tree","task":"magic_prompt"}),
+        ),
+        (
+            "describe defaults",
+            json!({"task":"image_describe","sourceAssetId":"source"}),
+        ),
+        (
+            "rewrite defaults",
+            json!({"prompt":"tree","task":"qwen_image_rewrite"}),
+        ),
+    ] {
+        add(name, "promptRefine", payload);
+    }
+    add(
+        "image worker-owned enhancement receipt",
+        "image",
+        json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"promptEnhancement":null}}),
+    );
     add(
         "prompt refine malformed policy",
         "promptRefine",

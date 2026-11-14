@@ -71,40 +71,15 @@ pub(super) fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<()
 pub(super) fn validate_person_detection_job(
     payload: &PersonDetectionJobRequest,
 ) -> Result<(), ApiError> {
-    if payload.source_asset_id.is_empty() {
-        return Err(ApiError::bad_request("Source clip is required"));
-    }
-    if payload
-        .source_timestamp
-        .is_some_and(|timestamp| !timestamp.is_finite() || timestamp < 0.0)
-    {
-        return Err(ApiError::bad_request(
-            "sourceTimestamp must be greater than or equal to 0",
-        ));
-    }
-    Ok(())
+    // Preserve typed nonfinite timestamp refusal before JSON serialization can turn it into null.
+    sceneworks_core::request_validation::utility_validation::validate_person_detection_job(payload)
+        .map_err(ApiError::from)?;
+    sceneworks_core::request_validation::validate_shape("personDetect", &to_json_object(payload)?)
+        .map_err(ApiError::from)
 }
-
 pub(super) fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiError> {
-    if payload.source_asset_id.is_empty() {
-        return Err(ApiError::bad_request("Source clip is required"));
-    }
-    if payload.representative_frame_asset_id.is_empty() {
-        return Err(ApiError::bad_request(
-            "Representative frame asset is required",
-        ));
-    }
-    if payload.track_name.is_empty() || payload.track_name.chars().count() > 120 {
-        return Err(ApiError::bad_request(
-            "trackName must be between 1 and 120 characters",
-        ));
-    }
-    if !payload.detection.contains_key("id") {
-        return Err(ApiError::bad_request(
-            "Selected detection metadata is required",
-        ));
-    }
-    Ok(())
+    sceneworks_core::request_validation::validate_shape("personTrack", &to_json_object(payload)?)
+        .map_err(ApiError::from)
 }
 
 /// sc-8884 (F-082): `negativePrompt` and the free-form `advanced` bag previously escaped

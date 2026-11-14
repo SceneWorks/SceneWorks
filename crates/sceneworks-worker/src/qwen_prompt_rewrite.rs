@@ -63,10 +63,6 @@ use serde_json::{Map, Value};
 
 use crate::{WorkerError, WorkerResult};
 
-/// The `task` discriminator that selects this path on a `prompt_refine` job.
-#[cfg(any(test, native_lane))]
-pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK as REWRITE_TASK;
-
 /// Whether the rewriters apply to `model`: the base 2.1 model and its distilled Turbo sibling
 /// (sc-25907) — one prompt format, one template — and nothing else. A rewrite request naming any
 /// other target model is refused rather than served with the wrong template.
@@ -770,6 +766,9 @@ mod tests {
     fn the_rewrite_sees_exactly_the_ten_references_the_render_takes() {
         // S3 edit contract: 1-10 ordered references. The rewrite's `<imageN>` numbering is only
         // meaningful if its list is the render's list.
-        assert_eq!(MAX_REWRITE_REFERENCES, 10);
+        assert_eq!(
+            sceneworks_core::request_validation::utility_validation::MAX_QWEN_REWRITE_IMAGES,
+            10
+        );
     }
 }

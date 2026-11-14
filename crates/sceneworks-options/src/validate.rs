@@ -94,14 +94,11 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                 }
                 let numeric_string = spec.compatibility.contains("numeric string");
                 let number = || {
-                    value
-                        .as_f64()
-                        .or_else(|| {
-                            numeric_string
-                                .then(|| value.as_str()?.trim().parse::<f64>().ok())
-                                .flatten()
-                        })
-                        .filter(|v| v.is_finite())
+                    if numeric_string {
+                        crate::effective_values::legacy_number(value)
+                    } else {
+                        value.as_f64().filter(|value| value.is_finite())
+                    }
                 };
                 let valid = match spec.shape {
                     Shape::Bool if spec.compatibility.contains("Legacy image flag") => {
@@ -115,10 +112,7 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                         value.as_i64().is_some()
                             || value.as_u64().is_some()
                             || (numeric_string
-                                && value
-                                    .as_str()
-                                    .and_then(|v| v.trim().parse::<i64>().ok())
-                                    .is_some())
+                                && crate::effective_values::legacy_integer(value).is_some())
                     }
                     Shape::Number => number().is_some(),
                     Shape::Text => value.is_string(),

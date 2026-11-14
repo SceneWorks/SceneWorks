@@ -90,7 +90,13 @@ fn decode<T: DeserializeOwned>(payload: &JsonObject) -> Result<T, ValidationRefu
     // Carrier version is checked by the canonical upgrader, not a generation DTO option.
     fields.remove("optionsSchemaVersion");
     serde_path_to_error::deserialize(Value::Object(fields)).map_err(|error| {
-        ValidationRefusal::new(error.path().to_string(), error.inner().to_string())
+        let detail = error.inner().to_string();
+        let field = detail
+            .strip_prefix("missing field `")
+            .and_then(|rest| rest.split('`').next())
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.path().to_string());
+        ValidationRefusal::new(field, detail)
     })
 }
 fn check(field: &str, error: Option<String>) -> Result<(), ValidationRefusal> {
@@ -131,8 +137,16 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
                 crate::utility_validation::validate_character_test(&decode(payload)?)
             }
             "videoUpscale" => crate::utility_validation::validate_video_upscale(&decode(payload)?),
-            "promptRefine" => crate::utility_validation::validate_prompt_refine(payload),
-            "personDetect" | "personTrack" => {
+            "promptRefine" => {
+                decode::<PromptRefineRequest>(payload)?;
+                crate::utility_validation::validate_prompt_refine(payload)
+            }
+            "personDetect" => {
+                crate::utility_validation::validate_person_detection_job(&decode(payload)?)?;
+                crate::utility_validation::person_controls(payload).map(|_| ())
+            }
+            "personTrack" => {
+                crate::utility_validation::validate_person_track_job(&decode(payload)?)?;
                 crate::utility_validation::person_controls(payload).map(|_| ())
             }
             _ => Ok(()),
@@ -205,6 +219,12 @@ pub fn resolve(
     }
     if matches!(kind, "image" | "video" | "vqa" | "interleave") {
         crate::effective_values::resolve_advanced(&mut resolved, entry);
+    }
+    if kind == "promptRefine" {
+        resolved = crate::utility_validation::resolve_prompt_refine(&resolved);
+    }
+    if kind == "personTrack" && !resolved.contains_key("trackName") {
+        resolved.insert("trackName".into(), json!(default_track_name()));
     }
     if matches!(kind, "personDetect" | "personTrack") {
         let controls = crate::utility_validation::person_controls(payload)?;

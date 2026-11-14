@@ -197,18 +197,8 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
-        if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job.job_type) {
-            let entry =
-                sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
-            sceneworks_core::request_validation::validate(kind, &job.payload, &entry).map_err(
-                |error| {
-                    (
-                        "Invalid generation options.",
-                        WorkerError::Validation(error),
-                    )
-                },
-            )?;
-        }
+        validate_static_job_options(&job.job_type, &job.payload)
+            .map_err(|error| ("Invalid generation options.", error))?;
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
@@ -713,6 +703,52 @@ async fn handle_job_failure(
                 error = %error,
                 "{message}"
             );
+        }
+    }
+}
+
+/// The raw admission gate runs before source/device checks and every tolerant job parser.
+fn validate_static_job_options(job_type: &JobType, payload: &JsonObject) -> WorkerResult<()> {
+    if let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) {
+        let entry = sceneworks_core::request_validation::facts_for_job(job_type, payload);
+        sceneworks_core::request_validation::validate(kind, payload, &entry)
+            .map_err(WorkerError::Validation)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn shared_person_and_prompt_refusals_precede_worker_parsing() {
+    for (job_type, kind, payload) in [
+        (JobType::PersonDetect, "personDetect", serde_json::json!({})),
+        (
+            JobType::PersonDetect,
+            "personDetect",
+            serde_json::json!({"sourceAssetId":"clip","sourceTimestamp":-1}),
+        ),
+        (
+            JobType::PersonTrack,
+            "personTrack",
+            serde_json::json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{}}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"prompt":"tree","sourceAssetIds":null}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+        ),
+    ] {
+        let payload = payload.as_object().unwrap();
+        let expected =
+            sceneworks_core::request_validation::validate_shape(kind, payload).unwrap_err();
+        match validate_static_job_options(&job_type, payload).unwrap_err() {
+            WorkerError::Validation(actual) => assert_eq!(actual, expected),
+            other => panic!("lost typed refusal: {other}"),
         }
     }
 }
