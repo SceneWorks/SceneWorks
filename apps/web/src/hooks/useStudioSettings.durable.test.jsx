@@ -213,6 +213,27 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     }
   });
 
+  it("blocks every cache and durable write after a refused server snapshot", async () => {
+    const key = "sceneworks-studio-image-ws-1";
+    const valid = { "ws-1": { image: { prompt: "server value" } } };
+    try {
+      expect(() => seedStudioSettingsFromServer({
+        "ws-1": { image: { prompt: "valid" }, video: { optionsSchemaVersion: 9, prompt: "future" } },
+      })).toThrow(expect.objectContaining({ code: "UnsupportedSchemaVersion" }));
+      expect(window.localStorage.getItem(key)).toBeNull();
+      await render(<Harness settings={{ prompt: "form fallback" }} />);
+      expect(window.localStorage.getItem(key)).toBeNull();
+      expect(persistNavigationPreferences).not.toHaveBeenCalled();
+
+      // A later compatible server snapshot can restore writes.
+      expect(seedStudioSettingsFromServer(valid)).toBe(1);
+      await render(<Harness settings={{ prompt: "edited" }} />);
+      expect(lastSentMap()["ws-1"].image.prompt).toBe("edited");
+    } finally {
+      seedStudioSettingsFromServer({});
+    }
+  });
+
   // sc-23000: the YuE2 Song Lab's own snapshot (`yue2lab`) rides the same durable map and is seeded
   // back on launch, and a full-size ABC score stays out of the durable copy (it would push the whole
   // workspace entry past the server's per-entry budget, dropping every studio in it).

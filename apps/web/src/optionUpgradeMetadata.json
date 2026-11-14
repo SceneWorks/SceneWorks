@@ -5,35 +5,40 @@
         "timestepShift"
       ],
       "key": "schedulerShift",
-      "location": "advanced"
+      "location": "advanced",
+      "numeric": true
     },
     {
       "aliases": [
         "moss_image_execution_report"
       ],
       "key": "mossImageExecutionReport",
-      "location": "advanced"
+      "location": "advanced",
+      "numeric": false
     },
     {
       "aliases": [
         "moss_image_edit_execution_report"
       ],
       "key": "mossImageEditExecutionReport",
-      "location": "advanced"
+      "location": "advanced",
+      "numeric": false
     },
     {
       "aliases": [
         "repo"
       ],
       "key": "modelRepo",
-      "location": "advanced"
+      "location": "advanced",
+      "numeric": false
     },
     {
       "aliases": [
         "ip_adapter_scale"
       ],
       "key": "ipAdapterScale",
-      "location": "image"
+      "location": "image",
+      "numeric": false
     }
   ],
   "optionsSchemaVersion": 1,

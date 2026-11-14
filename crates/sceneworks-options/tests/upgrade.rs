@@ -45,6 +45,20 @@ fn aliases_are_canonicalized_without_erasing_originals_or_stamps() {
     assert!(after["payload"].get("seed").is_none());
 }
 #[test]
+fn equivalent_numeric_aliases_keep_authored_representations() {
+    for before in [
+        json!({"advanced":{"schedulerShift":3.0,"timestepShift":"3"}}),
+        json!({"advanced":{"schedulerShift":"3.0","timestepShift":3}}),
+    ] {
+        assert_eq!(upgrade(&before, Carrier::Request).unwrap(), before);
+    }
+    let conflict = json!({"advanced":{"schedulerShift":3.0,"timestepShift":"4"}});
+    assert_eq!(
+        upgrade(&conflict, Carrier::Request).unwrap_err().code,
+        "ConflictingAliases"
+    );
+}
+#[test]
 fn refusals_are_typed_and_leave_originals_untouched() {
     for (before, kind, code) in [
         (

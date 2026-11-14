@@ -21,11 +21,26 @@ function equal(left, right) {
   if (Array.isArray(left) && Array.isArray(right)) return left.length === right.length && left.every((v, i) => equal(v, right[i]));
   return object(left) && object(right) && Object.keys(left).length === Object.keys(right).length && Object.keys(left).every((k) => Object.hasOwn(right, k) && equal(left[k], right[k]));
 }
+function aliasNumber(value) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return null;
+    value = Number(text);
+  }
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER
+    ? value : null;
+}
+function aliasesEqual(left, right, rule) {
+  if (equal(left, right)) return true;
+  if (!rule.numeric) return false;
+  const leftNumber = aliasNumber(left);
+  return leftNumber !== null && leftNumber === aliasNumber(right);
+}
 function aliases(value, location, path) {
   for (const rule of metadata.aliases.filter((rule) => rule.location === location)) {
     const names = [rule.key, ...rule.aliases].filter((key) => Object.hasOwn(value, key));
     if (!names.length) continue;
-    if (names.some((name) => !equal(value[name], value[names[0]]))) throw new UpgradeError("ConflictingAliases", `${path}${rule.key}`, `${names.join(" and ")} contain different authored values`);
+    if (names.some((name) => !aliasesEqual(value[name], value[names[0]], rule))) throw new UpgradeError("ConflictingAliases", `${path}${rule.key}`, `${names.join(" and ")} contain different authored values`);
     value[rule.key] = value[names[0]];
   }
 }

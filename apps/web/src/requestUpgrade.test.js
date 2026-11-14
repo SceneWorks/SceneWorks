@@ -36,6 +36,14 @@ describe("historical option carriers",()=>{
     expect(upgradeCarrier({advanced:{timestepShift:"3"}})).toEqual({advanced:{timestepShift:"3",schedulerShift:"3"}});
     expect(upgradeCarrier({})).toEqual({});
   });
+  it("accepts equivalent numeric alias spellings and retains each authored value",()=>{
+    for (const input of [
+      {advanced:{schedulerShift:3,timestepShift:"3"}},
+      {advanced:{schedulerShift:"3.0",timestepShift:3}},
+    ]) expect(upgradeCarrier(input)).toEqual(input);
+    expect(()=>upgradeCarrier({advanced:{schedulerShift:3,timestepShift:"4"}}))
+      .toThrow(/different authored values/);
+  });
   it("regenerates with fresh seed policy and removes prior machine decisions",()=>{
     const recipe={model:"z_image_turbo",prompt:"fox",seed:42,normalizedSettings:{count:1},rawAdapterSettings:{memoryStrategy:{rung:2},memoryEvidenceRevision:3,moss_image_execution_report:{provider:"old"},steps:9}};
     const request=imageRecipeRequest({recipe});

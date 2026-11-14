@@ -60,6 +60,7 @@ import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
+import { UpgradeError } from "./requestUpgrade.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -1160,7 +1161,11 @@ export function App() {
           setActiveView(persistedView);
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (!cancelled && error instanceof UpgradeError) {
+          setError(`Saved studio settings could not be restored: ${error.message}`);
+        }
+      })
       .finally(() => {
         if (!cancelled) {
           // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
@@ -1175,7 +1180,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [setAccent, setTheme, settlePendingWorkflowGeneration]);
+  }, [setAccent, setTheme, setError, settlePendingWorkflowGeneration]);
 
   const refreshHealth = useCallback(() => {
     healthRequestRef.current?.abort();

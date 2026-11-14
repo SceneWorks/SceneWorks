@@ -62,6 +62,23 @@ fn version(
     Ok(())
 }
 
+fn alias_number(value: &Value) -> Option<f64> {
+    let number = match value {
+        Value::Number(value) => value.as_f64()?,
+        Value::String(value) if !value.trim().is_empty() => value.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (number.is_finite() && number.abs() <= 9_007_199_254_740_991.0).then_some(number)
+}
+
+fn aliases_equal(left: &Value, right: &Value, shape: crate::Shape) -> bool {
+    left == right
+        || (matches!(shape, crate::Shape::Number | crate::Shape::Integer)
+            && alias_number(left)
+                .zip(alias_number(right))
+                .is_some_and(|(left, right)| left == right))
+}
+
 /// Original spellings remain available to older consumers. Canonical names are added only
 /// when an alias was authored, never for an omitted field. Even context/telemetry aliases
 /// survive byte-value-identically. Conflicts refuse rather than choosing an arbitrary winner.
@@ -78,7 +95,7 @@ fn aliases(
         for alias in spec.aliases {
             if let Some(value) = object.get(*alias) {
                 if let Some((name, existing)) = &authored {
-                    if existing != value {
+                    if !aliases_equal(existing, value, spec.shape) {
                         return Err(refusal(
                             "ConflictingAliases",
                             &format!("{path}{}", spec.key),
@@ -209,7 +226,7 @@ pub fn metadata() -> Value {
         "optionsSchemaVersion": OPTIONS_SCHEMA_VERSION,
         "recipeVersions": {"lowResStart": 1},
         "aliases": crate::registry().filter(|s| !s.aliases.is_empty()).map(|s|
-            serde_json::json!({"location": s.location, "key": s.key, "aliases": s.aliases})
+            serde_json::json!({"location": s.location, "key": s.key, "aliases": s.aliases, "numeric": matches!(s.shape, crate::Shape::Number | crate::Shape::Integer)})
         ).collect::<Vec<_>>()
     })
 }
