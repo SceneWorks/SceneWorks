@@ -362,6 +362,8 @@ pub struct IrisTrainingOptions {
     /// Portable Iris policy has applied topology defaults once at the binding boundary.
     pub dist_topology: IrisDistTopology,
     pub repa_weight: Option<Bound<f64>>,
+    /// Portable Iris policy decides whether the validated REPA settings activate the loss.
+    pub repa_active: bool,
     pub restore_init: Option<Bound<String>>,
     pub restore_resume_data_policy: Option<Bound<String>>,
     /// Validated opaque engine ABI; callers may pass it to the engine parser, not read its keys.
@@ -399,6 +401,8 @@ impl IrisTrainingOptions {
                 },
             )
             .unwrap_or_default();
+        let repa_active = BindingInput::parent(input.effective, "training.config.advanced.iris")
+            .is_some_and(crate::training::iris::curricula::iris_repa_enabled);
         Ok(Self {
             network_type: input.text("training.config.advanced", "networkType")?,
             mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
@@ -425,6 +429,7 @@ impl IrisTrainingOptions {
                 .integer("training.config.advanced.iris", "expected_global_batch")?,
             dist_topology,
             repa_weight: input.number("training.config.advanced.iris.repa", "weight")?,
+            repa_active,
             restore_init: input.text("training.config.advanced.iris_restore", "init")?,
             restore_resume_data_policy: input.text(
                 "training.config.advanced.iris_restore",
@@ -436,9 +441,7 @@ impl IrisTrainingOptions {
     }
 
     pub fn repa_enabled(&self) -> bool {
-        self.repa_weight
-            .as_ref()
-            .is_some_and(|weight| weight.value > 0.0)
+        self.repa_active
     }
 
     pub fn auxiliary_selection(
