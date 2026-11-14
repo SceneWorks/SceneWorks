@@ -1349,10 +1349,14 @@ fn print_production_binding_inventory() {
         eprintln!("{count:>3} {file}");
     }
     for read in &coverage.reads {
-        if read.file.ends_with("/film_compile.rs") {
+        if read.file.ends_with("/film_compile.rs")
+            || read.file.ends_with("/workflow_parameters.rs")
+            || read.file.ends_with("/workflow_resolution.rs")
+            || read.file.ends_with("/workflow_share.rs")
+        {
             eprintln!(
-                "film read: {} {}.{}",
-                read.function, read.location, read.key
+                "authored workflow read: {}::{} {}.{}",
+                read.file, read.function, read.location, read.key
             );
         }
     }
@@ -1423,10 +1427,42 @@ fn production_execution_has_no_raw_advanced_reads() {
                 )
             )
     };
+    // Workflow share and gallery rendering read the persisted authored envelope. These exact
+    // fields never feed a provider or route decision; replay construction resolves the share
+    // anew before execution.
+    let authored_workflow_read = |read: &Read| {
+        read.location == "advanced"
+            && matches!(
+                (
+                    read.file.as_str(),
+                    read.function.as_str(),
+                    read.key.as_str()
+                ),
+                (
+                    "crates/sceneworks-core/src/workflow_parameters.rs",
+                    "lora_weight_is_fixed",
+                    "phases"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_parameters.rs",
+                    "settings_line",
+                    "guidanceMethod" | "guidanceScale" | "phases" | "sampler" | "steps"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_resolution.rs",
+                    "build_resolution_report",
+                    "mossImageAdvanced"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_share.rs",
+                    "build_share_of_kind",
+                    "mossImageAdvanced" | "mossImageEditExecutionReport"
+                )
+            )
+    };
     let direct = coverage
         .reads
         .iter()
-        .filter(|read| !binding_boundary(&read.file, &read.function))
+        .filter(|read| {
+            !binding_boundary(&read.file, &read.function) && !authored_workflow_read(read)
+        })
         .map(|read| {
             format!(
                 "{}::{} {}.{}",
@@ -1449,6 +1485,11 @@ fn production_execution_has_no_raw_advanced_reads() {
     let nested = coverage
         .nested_reads
         .iter()
+        .filter(|(file, function, expression)| {
+            !(file == "crates/sceneworks-core/src/workflow_parameters.rs"
+                && function == "settings_line"
+                && expression == "nested advanced JSON: iter")
+        })
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let mutations = coverage
         .mutations
