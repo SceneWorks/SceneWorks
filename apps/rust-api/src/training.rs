@@ -125,7 +125,15 @@ pub(crate) async fn fresh_flux3_training_duplicate(
         .get("scope")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("FLUX.3 output scope is missing."))?;
-    if scope != training_output_scope(&plan.config.advanced)?.as_str()
+    let resolved_scope = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(ApiError::bad_request)?
+    .common
+    .output_scope;
+    if scope != resolved_scope.as_str()
         || entry.get("id").and_then(Value::as_str) != Some(plan.output.lora_id.as_str())
     {
         return Err(ApiError::bad_request(
@@ -2267,19 +2275,23 @@ fn validate_training_submission(
         facts.as_object().expect("target object"),
     )
     .map_err(ApiError::from)?;
-    let controls = sceneworks_core::resolved_options::IrisTrainingOptions::bind(
-        &sceneworks_core::resolved_options::BindingInput::new(authored, resolved.as_payload()),
+    let execution = sceneworks_core::resolved_options::TrainingExecutionOptions::bind_for_target(
+        authored, &resolved, target,
     )
-    .map_err(|error| ApiError::bad_request(format!("Invalid training control: {error:?}")))?;
-    let effective_advanced = resolved.as_payload()["config"]["advanced"]
-        .as_object()
-        .expect("validated effective training advanced object");
-    let training_adapter =
-        sceneworks_core::training::training_adapter::training_adapter_model(effective_advanced)
-            .map_err(training_plan_error_to_api_error)?;
-    let subject_mask_consumer =
-        sceneworks_core::training::subject_mask_consumer(effective_advanced)
-            .map_err(training_plan_error_to_api_error)?;
+    .map_err(|error| match error {
+        sceneworks_core::resolved_options::TrainingExecutionError::Validation(error) => {
+            ApiError::from(error)
+        }
+        sceneworks_core::resolved_options::TrainingExecutionError::Technique(error) => {
+            training_plan_error_to_api_error(error)
+        }
+        sceneworks_core::resolved_options::TrainingExecutionError::Binding(error) => {
+            ApiError::bad_request(format!("Invalid training control: {error}"))
+        }
+    })?;
+    let controls = execution.iris;
+    let training_adapter = execution.training_adapter;
+    let subject_mask_consumer = execution.subject_mask_consumer;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -3550,15 +3562,6 @@ pub(crate) fn training_is_full_finetune(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> bool {
     sceneworks_core::training::config_is_full_finetune(config)
-}
-
-/// Resolves the output scope for a training run from the config's `advanced` bag.
-/// Defaults to `project` (the target default) and rejects anything other than the
-/// two scopes the LoRA registry understands.
-pub(crate) fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
-    sceneworks_core::training::resolve_advanced(advanced)
-        .map(|resolved| resolved.output_scope)
-        .map_err(ApiError::from)
 }
 
 /// Single source of truth for where a training run's adapter is written and its
