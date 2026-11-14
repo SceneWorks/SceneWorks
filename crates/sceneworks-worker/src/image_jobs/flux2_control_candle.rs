@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_policy::apply_candle_image_load_shape;
 use super::load_spec::attach_manifest_text_encoder;
@@ -436,7 +437,7 @@ impl CandleStrictControl for Flux2StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = Flux2ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
@@ -454,14 +455,18 @@ impl CandleStrictControl for Flux2StrictControl {
             cancel: cancel.clone(),
         };
         let generated = match self.memory_context.as_ref() {
-            Some(context) => {
-                model.generate_with_memory_context(context, &req, control, on_progress)
-            }
-            None => model.generate(&req, control, on_progress),
+            Some(context) => model.generate_with_memory_context_with_execution_report(
+                context,
+                &req,
+                control,
+                on_progress,
+            ),
+            None => model.generate_with_execution_report(&req, control, on_progress),
         };
-        generated.map_err(|error| {
+        let completed = generated.map_err(|error| {
             WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
-        })
+        })?;
+        completed_control_image(completed)
     }
 }
 

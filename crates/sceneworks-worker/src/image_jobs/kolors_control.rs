@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 #[cfg(target_os = "macos")]
 use super::kolors::kolors_control_raw_settings;
@@ -391,7 +392,7 @@ impl CandleStrictControl for KolorsStrictControl {
         // sweeps this file, so the guard fails the moment the field appears without being fed.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = KolorsControlRequest {
             prompt: self.prompt.clone(),
             negative: self.negative.clone(),
@@ -408,11 +409,17 @@ impl CandleStrictControl for KolorsStrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model
-            .generate_with_memory_context(&self.memory_context, &req, control, on_progress)
+        let completed = model
+            .generate_with_memory_context_with_execution_report(
+                &self.memory_context,
+                &req,
+                control,
+                on_progress,
+            )
             .map_err(|error| {
                 WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
-            })
+            })?;
+        completed_control_image(completed)
     }
 }
 
