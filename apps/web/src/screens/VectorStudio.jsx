@@ -1,4 +1,5 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -404,39 +405,50 @@ export function VectorStudio() {
       vectorWorkflowModel &&
       typeof createVectorPromptWorkflow === "function",
   );
+  const promptDraft = rasterWorkflowModel && vectorWorkflowModel ? {
+    prompt: prompt.trim(),
+    negativePrompt: negativePrompt.trim() || undefined,
+    rasterModel: rasterWorkflowModel.id,
+    vectorModel: vectorWorkflowModel.id,
+    detailBudget,
+    sampling: replay?.sampling,
+    seed: replay?.seed,
+    width: replay?.width,
+    height: replay?.height,
+    expectedRasterRevision: replay?.rasterRevision,
+    expectedVectorRevision: replay?.vectorRevision,
+  } : null;
+  const conversionDraft = conversionModel ? {
+    mode: "image_to_svg",
+    sourceAssetId,
+    model: conversionModel.id,
+    prompt: conversionModel.vector?.acceptsTextGuidance === true ? prompt.trim() : "",
+    detailBudget,
+    sampling: replay?.sampling,
+  } : null;
+  const promptEntry = useMemo(
+    () => rasterWorkflowModel && vectorWorkflowModel
+      ? { raster: rasterWorkflowModel, vector: vectorWorkflowModel } : null,
+    [rasterWorkflowModel, vectorWorkflowModel],
+  );
+  const portableFeedback = usePortableFeedback(
+    mode === "create_from_prompt" ? "vectorPrompt" : "vector",
+    mode === "create_from_prompt" ? promptDraft : conversionDraft,
+    mode === "create_from_prompt" ? promptEntry : conversionModel,
+    mode === "create_from_prompt" ? canCreateFromPrompt : canConvert,
+  );
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const submit = async (event) => {
     event.preventDefault();
     setSubmissionError("");
     try {
       if (mode === "create_from_prompt") {
         if (!canCreateFromPrompt) return;
-        await createVectorPromptWorkflow({
-          prompt: prompt.trim(),
-          negativePrompt: negativePrompt.trim() || undefined,
-          rasterModel: rasterWorkflowModel.id,
-          vectorModel: vectorWorkflowModel.id,
-          detailBudget,
-          sampling: replay?.sampling,
-          seed: replay?.seed,
-          width: replay?.width,
-          height: replay?.height,
-          expectedRasterRevision: replay?.rasterRevision,
-          expectedVectorRevision: replay?.vectorRevision,
-        });
+        await createVectorPromptWorkflow(promptDraft);
         return;
       }
       if (!canConvert) return;
-      await createVectorJob({
-        mode: "image_to_svg",
-        sourceAssetId,
-        model: conversionModel.id,
-        prompt:
-          conversionModel?.vector?.acceptsTextGuidance === true
-            ? prompt.trim()
-            : "",
-        detailBudget,
-        sampling: replay?.sampling,
-      });
+      await createVectorJob(conversionDraft);
     } catch (error) {
       setSubmissionError(
         error instanceof Error
@@ -600,7 +612,8 @@ export function VectorStudio() {
             <p role="status">
               Selected vector budget: {selectedBudgetLabel(detailBudget)}
             </p>
-            <button disabled={!canCreateFromPrompt} type="submit">
+            {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
+            <button disabled={!canCreateFromPrompt || Boolean(portableRefusal)} type="submit">
               Create SVG
             </button>
           </form>
@@ -664,7 +677,8 @@ export function VectorStudio() {
               <p role="status">
                 Selected vector budget: {selectedBudgetLabel(detailBudget)}
               </p>
-              <button disabled={!canConvert} type="submit">
+              {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
+              <button disabled={!canConvert || Boolean(portableRefusal)} type="submit">
                 Convert to SVG
               </button>
             </form>

@@ -38,7 +38,9 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import { DEFAULT_MAC_CAPABILITIES, ltxIcLoraRequired, wanLightningAvailable } from "../modelEligibility.js";
@@ -1088,7 +1090,8 @@ export function VideoStudio() {
   };
 
   const {
-    submit
+    submit,
+    draft: portableDraft,
   } = useVideoSubmission({
     submitting,
   executionTierBlockMessage,
@@ -1181,7 +1184,9 @@ export function VideoStudio() {
   onLocalJobCreated
   });
 
-  const generateDisabled = submitting || !videoValidity.ready;
+  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel, videoValidity.ready);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+  const generateDisabled = submitting || !videoValidity.ready || Boolean(portableRefusal);
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
   return (
@@ -1476,7 +1481,9 @@ export function VideoStudio() {
           {/* Every reason Generate is dead — mode/preset/LoRA/worker problems — in one chip
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
-          <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          <ValidationSummary issues={portableRefusal
+            ? [...videoValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+            : videoValidity.surfaced} label="Generate errors" />
           <VedaOutcome
             label="Recorded recipe attention"
             raw={launchRequest?.recipe?.rawAdapterSettings}

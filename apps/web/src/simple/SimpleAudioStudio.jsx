@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { audioModelServesMode } from "../modelEligibility.js";
 import { audioAssetRunGroups, audioRunGroups } from "../audioTakes.js";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
@@ -102,6 +103,12 @@ export function SimpleAudioStudio() {
   const latestJob = newestLocalJob(audioLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
   const canGenerate = Boolean(prompt.trim()) && Boolean(model) && !busy;
+  const portableDraft = buildSimpleAudioRequest({
+    model, prompt, mode, voice: voices.length ? voice : "",
+    durationSecs: showDuration ? duration : null,
+  });
+  const portableFeedback = usePortableFeedback("audio", portableDraft, selectedModel, canGenerate);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   // Every take this project's audio runs have produced, newest run first — the same derived
   // grouping the Advanced studio reads, flattened into one grid (Simple shows takes, not runs).
@@ -137,15 +144,7 @@ export function SimpleAudioStudio() {
     }
     setSubmitting(true);
     try {
-      const job = await createAudioJob(
-        buildSimpleAudioRequest({
-          model,
-          prompt,
-          mode,
-          voice: voices.length ? voice : "",
-          durationSecs: showDuration ? duration : null,
-        }),
-      );
+      const job = await createAudioJob(portableDraft);
       if (job) {
         rememberLocalGenerationJob?.("audio", job);
       }
@@ -223,13 +222,14 @@ export function SimpleAudioStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate}
+        disabled={!canGenerate || Boolean(portableRefusal)}
         onClick={generate}
         type="button"
       >
         {busy ? <span aria-hidden="true" className="su-spinner" /> : null}
         {busy ? "Generating…" : "Generate audio"}
       </button>
+      {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
 
       {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
       <StudioRunStatus job={latestJob} />

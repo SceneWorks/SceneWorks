@@ -10,6 +10,7 @@ import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -444,6 +445,50 @@ export function SimpleImageStudio() {
     // worker reject it — the job would fail with an error the studio never surfaces.
     !editLoraMissing && mossComponents.ready && !mossEditError;
 
+  const portableDraft = buildSimpleImageRequest({
+    prompt: mossEdit ? prompt : prompt.trim(),
+    mode,
+    model,
+    resolution,
+    count: variations,
+    styleId,
+    // One armed reference; simpleJobs routes it by mode (edit source vs img2img
+    // reference + advanced.strength) and drops it when the model can't use it.
+    referenceAssetId,
+    // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
+    // model declares the surface, so every other model's payload is byte-identical.
+    referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
+    mossImageEdit,
+    mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
+    mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
+    trainingShift: mossTrainingShift,
+    schedulerShift: mossEdit ? mossShift : null,
+    maxSequenceLength: mossContext,
+    // The advanced fold's knobs. Empty string means "the model default", exactly as the full
+    // studio's overrides do, so an untouched control adds nothing to the payload.
+    // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
+    steps: nativeControls ? steps : "",
+    seed: nativeControls ? seed : "",
+    negativePrompt:
+      nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
+    guidance: nativeControls && supportsGuidance ? guidance : "",
+    width: dimensionEval.width,
+    height: dimensionEval.height,
+    supportsImg2img,
+    img2imgStrength: referenceStrengthFor(selectedModel),
+    // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
+    editLora: editLoraInstalled ? editLora : null,
+    loras: lora.serializedLoras,
+    // sc-24113 — the transparency request. `selectedModel` rides along as the capability
+    // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
+    // never leak onto a model that would refuse it.
+    selectedModel,
+    transparentBackground,
+    ...tier,
+  });
+  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel, canGenerate);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+
   async function generate() {
     if (!canGenerate) {
       return;
@@ -454,47 +499,7 @@ export function SimpleImageStudio() {
     }
     setSubmitting(true);
     try {
-      const request = buildSimpleImageRequest({
-        prompt: mossEdit ? prompt : prompt.trim(),
-        mode,
-        model,
-        resolution,
-        count: variations,
-        styleId,
-        // One armed reference; simpleJobs routes it by mode (edit source vs img2img
-        // reference + advanced.strength) and drops it when the model can't use it.
-        referenceAssetId,
-        // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
-        // model declares the surface, so every other model's payload is byte-identical.
-        referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
-        mossImageEdit,
-        mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
-        mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
-        trainingShift: mossTrainingShift,
-        schedulerShift: mossEdit ? mossShift : null,
-        maxSequenceLength: mossContext,
-        // The advanced fold's knobs. Empty string means "the model default", exactly as the full
-        // studio's overrides do, so an untouched control adds nothing to the payload.
-        // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
-        steps: nativeControls ? steps : "",
-        seed: nativeControls ? seed : "",
-        negativePrompt:
-          nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
-        guidance: nativeControls && supportsGuidance ? guidance : "",
-        width: dimensionEval.width,
-        height: dimensionEval.height,
-        supportsImg2img,
-        img2imgStrength: referenceStrengthFor(selectedModel),
-        // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
-        editLora: editLoraInstalled ? editLora : null,
-        loras: lora.serializedLoras,
-        // sc-24113 — the transparency request. `selectedModel` rides along as the capability
-        // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
-        // never leak onto a model that would refuse it.
-        selectedModel,
-        transparentBackground,
-        ...tier,
-      });
+      const request = portableDraft;
       if (!request) {
         toast("That resolution isn’t valid");
         return;
@@ -922,13 +927,14 @@ export function SimpleImageStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate}
+        disabled={!canGenerate || Boolean(portableRefusal)}
         onClick={generate}
         type="button"
       >
         {busy ? <span aria-hidden="true" className="su-spinner" /> : null}
         {busy ? "Generating…" : `Generate ${variations} image${variations > 1 ? "s" : ""}`}
       </button>
+      {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
       ) : null}

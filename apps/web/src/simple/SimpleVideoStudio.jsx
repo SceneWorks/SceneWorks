@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { videoModelServesMode, wanPairedLoraAvailable } from "../modelEligibility.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
@@ -167,6 +168,12 @@ export function SimpleVideoStudio() {
   const needsSource = mode === "image_to_video" && !sourceAssetId && !(supportsLastFrame && lastFrameAssetId);
   const canGenerate =
     Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
+  const portableDraft = buildSimpleVideoRequest({
+    prompt: prompt.trim(), mode, model, resolution, duration, styleId,
+    sourceAssetId, lastFrameAssetId, selectedModel, loras: lora.serializedLoras,
+  });
+  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel, canGenerate);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
     if (!canGenerate) {
@@ -178,18 +185,7 @@ export function SimpleVideoStudio() {
     }
     setSubmitting(true);
     try {
-      const request = buildSimpleVideoRequest({
-        prompt: prompt.trim(),
-        mode,
-        model,
-        resolution,
-        duration,
-        styleId,
-        sourceAssetId,
-        lastFrameAssetId,
-        selectedModel,
-        loras: lora.serializedLoras,
-      });
+      const request = portableDraft;
       if (!request) {
         toast("That resolution isn’t valid");
         return;
@@ -379,13 +375,14 @@ export function SimpleVideoStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate}
+        disabled={!canGenerate || Boolean(portableRefusal)}
         onClick={generate}
         type="button"
       >
         {busy ? <span aria-hidden="true" className="su-spinner" /> : null}
         {busy ? "Rendering…" : "Generate video"}
       </button>
+      {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
       {needsSource ? <p className="su-empty">Attach a start frame to render an Image → Video clip.</p> : null}
 
       {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}

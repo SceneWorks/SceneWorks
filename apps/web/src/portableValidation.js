@@ -1,6 +1,7 @@
 import { cachedModelFacts, rememberModelFacts } from "./portableModelFacts.js";
 
 export const VALIDATOR_SCHEMA_VERSION = 1;
+const MODEL_FREE_KINDS = new Set(["videoUpscale", "characterTest", "promptRefine", "yue2", "yue2Execution"]);
 let enginePromise;
 let loadedEngine;
 let serverValidatorVersion = null;
@@ -48,16 +49,33 @@ function validateWithEngine({
 }, validator) {
   const mismatch = versionReason({ validatorSchemaVersion });
   if (mismatch) return serverRequired(mismatch);
-  const modelId = payload?.model ?? payload?.modelId;
   let entry = modelEntry;
   let metadataSource = "live";
-  if (!entry && typeof modelId === "string") {
-    entry = cachedModelFacts(modelId);
-    metadataSource = "cache";
+  if (MODEL_FREE_KINDS.has(kind)) {
+    entry = {};
+    metadataSource = null;
+  } else if (kind === "vectorPrompt") {
+    if (!entry) {
+      const raster = cachedModelFacts(payload?.rasterModel);
+      const vector = cachedModelFacts(payload?.vectorModel);
+      entry = raster && vector ? { raster, vector } : null;
+      metadataSource = "cache";
+    }
+    if (entry?.raster?.id !== payload?.rasterModel || entry?.vector?.id !== payload?.vectorModel) entry = null;
+    if (entry && metadataSource === "live") {
+      rememberModelFacts(entry.raster.id, entry.raster);
+      rememberModelFacts(entry.vector.id, entry.vector);
+    }
+  } else {
+    const modelId = payload?.model ?? payload?.modelId ?? payload?.targetId ?? payload?.plan?.target?.targetId;
+    if (!entry && typeof modelId === "string") {
+      entry = cachedModelFacts(modelId);
+      metadataSource = "cache";
+    }
+    if (entry?.id !== modelId) entry = null;
+    if (entry && metadataSource === "live") rememberModelFacts(modelId, entry);
   }
-  if (entry?.id !== modelId) entry = null;
   if (!entry) metadataSource = null;
-  if (entry && metadataSource === "live") rememberModelFacts(modelId, entry);
   try {
     const response = JSON.parse(entry
       ? validator.validate(kind, JSON.stringify(payload), JSON.stringify(entry))
