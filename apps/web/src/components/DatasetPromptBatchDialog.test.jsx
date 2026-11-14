@@ -2,7 +2,8 @@ import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, settle, unmountRoot } from "../testUtils/dom.js";
 import { AppContext } from "../context/AppContext.js";
-import { VISION_CAPTION_MODEL_REPO } from "../constants.js";
+import { VISION_CAPTION_MODEL_REPO, VISION_DESCRIBE_MODEL_REPO } from "../constants.js";
+import { formatTierBytes } from "../formatting.js";
 
 vi.mock("../api/trainingResources.js", () => ({
   trainingApi: {
@@ -31,6 +32,7 @@ const JOY_DEFAULT_PROMPT = "You are a meticulous scene describer. Describe only 
 const DEFAULTS = {
   [VISION_CAPTION_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
   [JOY_REPO]: { prompt: JOY_DEFAULT_PROMPT, maxChars: 3000 },
+  [VISION_DESCRIBE_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
 };
 const dataset = {
   id: "ds_1",
@@ -73,6 +75,7 @@ function snapshot(status, items, extra = {}) {
       failedCount,
       canceled: status === "canceled",
       model: extra.model ?? VISION_CAPTION_MODEL_REPO,
+      ...(extra.variant ? { variant: extra.variant } : {}),
       items,
     },
   };
@@ -655,14 +658,17 @@ describe("DatasetPromptBatchDialog", () => {
     joyInstalled();
     await render();
     await runWith([described("item_a", 300, 400), described("item_b", 400, 300)]);
-    // Re-run one image with JoyCaption, then switch back to the Vision Captioner before saving.
+    // Describe the remaining image with JoyCaption, then switch back to the Vision Captioner before saving.
     await chooseModel("joycaption_beta_one");
     await settle();
-    const rowB = document.body.querySelector('[data-item-id="item_b"]');
-    await click([...rowB.querySelectorAll("button")].find((node) => node.textContent === "Re-run"));
+    await click(button("Describe remaining (1)"));
     await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toMatchObject({
+      model: JOY_REPO,
+      itemIds: ["item_c"],
+    });
     await act(async () =>
-      nextPoll(snapshot("completed", [described("item_b", 400, 300)], { itemCount: 1, model: JOY_REPO })),
+      nextPoll(snapshot("completed", [described("item_c", 400, 300)], { itemCount: 1, model: JOY_REPO })),
     );
     await settle();
     await chooseModel("vision_caption_qwen3vl_8b");
@@ -672,9 +678,295 @@ describe("DatasetPromptBatchDialog", () => {
     const payload = context.createPromptBatch.mock.calls[0][0];
     expect(payload.sourceImages.map((image) => [image.itemId, image.model])).toEqual([
       ["item_a", VISION_CAPTION_MODEL_REPO],
-      ["item_b", JOY_REPO],
+      ["item_b", VISION_CAPTION_MODEL_REPO],
+      ["item_c", JOY_REPO],
     ]);
     expect(payload.source.model).toBe("mixed");
+    // Neither model has tiers: no image records one.
+    expect(payload.sourceImages.some((image) => "variant" in image)).toBe(false);
+    expect(payload.source.variant).toBeNull();
+  });
+
+  // The 27B describer with per-tier install state: `installedTiers` lists the tiers present. The
+  // model-level size label describes the default (q4) tier; each variant carries its own bytes,
+  // except bf16 here.
+  const TIER_BYTES = { q4: 19995477764, q8: 32371297322 };
+  function describerWithTiers(...installedTierKeys) {
+    return {
+      id: "vision_describe_qwen3_8_27b",
+      name: "Vision Describer (Qwen3.8-27B)",
+      installState: installedTierKeys.length ? "installed" : "missing",
+      downloadSizeLabel: "18.6 GB",
+      hasVariantMatrix: true,
+      variants: ["q4", "q8", "bf16"].map((variant) => ({
+        variant,
+        installState: installedTierKeys.includes(variant) ? "installed" : "missing",
+        downloadSizeBytes: TIER_BYTES[variant] ?? null,
+      })),
+    };
+  }
+  const tierInput = (key) => document.body.querySelector(`input[name="dataset-prompt-batch-tier"][value="${key}"]`);
+  const rerunButton = (itemId) =>
+    [...document.body.querySelectorAll(`[data-item-id="${itemId}"] button`)].find((node) => node.textContent === "Re-run");
+
+  it("offers the 27B Vision Describer with a tier choice that defaults to q4 (SW-7122)", async () => {
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    expect(document.body.querySelector('input[value="vision_caption_qwen3vl_8b"]').checked).toBe(true);
+    expect(document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent).toContain(
+      "Vision Describer (Qwen3.8-27B)",
+    );
+    expect(tierInput("q4")).toBeNull();
+
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    expect([...document.body.querySelectorAll('input[name="dataset-prompt-batch-tier"]')].map((input) => input.closest("label").textContent)).toEqual([
+      "q4 (20 GB)",
+      "q8 (32 GB) — not installed",
+      "Full precision (56 GB) — not installed",
+    ]);
+    expect(tierInput("q4").checked).toBe(true);
+    // The prompt editor follows the 27B's own default, as for the Vision Captioner.
+    expect(trainingApi.defaultDescribePrompt).toHaveBeenLastCalledWith("t", expect.anything(), VISION_DESCRIBE_MODEL_REPO);
+    expect(textarea("Describing prompt").value).toBe(DEFAULT_PROMPT);
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      requestedGpu: "auto",
+    });
+
+    await chooseModel("vision_caption_qwen3vl_8b");
+    await settle();
+    expect(tierInput("q4")).toBeNull();
+    // The Vision Captioner's run sends no variant.
+    await click(button("Describe all again"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toEqual({
+      model: VISION_CAPTION_MODEL_REPO,
+      requestedGpu: "auto",
+    });
+  });
+
+  it("shows a tier that is not installed as unavailable and downloads only that tier (SW-7122)", async () => {
+    const entry = describerWithTiers("q4");
+    context.models = [...context.models, entry];
+    context.jobs = [
+      { id: "dl_q4", type: "model_download", status: "queued", payload: { modelId: entry.id, variant: "q4" } },
+      { id: "dl_q8", type: "model_download", status: "running", payload: { modelId: entry.id, variant: "q8" } },
+    ];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    expect(document.body.querySelector(".required-models-notice")).toBeNull();
+    expect(button("Describe images").disabled).toBe(false);
+
+    await click(tierInput("bf16"));
+    await settle();
+    const notice = document.body.querySelector(".required-models-notice");
+    expect(notice.textContent).toContain("Describing the dataset needs a model");
+    expect(notice.textContent).toContain("Vision Describer (Qwen3.8-27B) Full precision (56 GB)");
+    // No per-tier size for bf16: no size rather than the default tier's.
+    expect(notice.querySelector("small")).toBeNull();
+    expect(button("Describe images").disabled).toBe(true);
+    await click(button("Download"));
+    expect(context.createModelDownloadJob).toHaveBeenCalledWith(entry, { variant: "bf16" });
+
+    // The progress shown is that tier's download, never another tier's, with that tier's size.
+    await click(tierInput("q8"));
+    await settle();
+    const q8Notice = document.body.querySelector(".required-models-notice");
+    expect(q8Notice.textContent).toContain("q8 (32 GB)");
+    expect(q8Notice.querySelector("small").textContent).toBe(formatTierBytes(TIER_BYTES.q8));
+    const labels = [...q8Notice.querySelectorAll("button")].map((node) => node.textContent.trim());
+    expect(labels).toContain("running");
+    expect(labels).not.toContain("queued");
+    expect(labels).not.toContain("Download");
+  });
+
+  it("lets each missing tier be downloaded after another tier's Download was clicked (SW-7122 review)", async () => {
+    const entry = describerWithTiers("q4");
+    context.models = [...context.models, entry];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("bf16"));
+    await settle();
+    await click(button("Download"));
+    await settle();
+    expect(button("Queued").disabled).toBe(true);
+
+    await click(tierInput("q8"));
+    await settle();
+    expect(button("Queued")).toBeUndefined();
+    expect(button("Download").disabled).toBe(false);
+    await click(button("Download"));
+    expect(context.createModelDownloadJob).toHaveBeenLastCalledWith(entry, { variant: "q8" });
+  });
+
+  it("records each image's tier from the live job result in the saved batch (SW-7122 review)", async () => {
+    context.models = [...context.models, describerWithTiers("q4", "q8")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400)], { model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" })),
+    );
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    await click(button("Describe remaining (2)"));
+    await settle();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [described("item_b", 400, 300), described("item_c", 300, 300)], {
+          itemCount: 2,
+          model: VISION_DESCRIBE_MODEL_REPO,
+          variant: "q8",
+        }),
+      ),
+    );
+    await settle();
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.sourceImages.map((image) => [image.itemId, image.model, image.variant])).toEqual([
+      ["item_a", VISION_DESCRIBE_MODEL_REPO, "q4"],
+      ["item_b", VISION_DESCRIBE_MODEL_REPO, "q8"],
+      ["item_c", VISION_DESCRIBE_MODEL_REPO, "q8"],
+    ]);
+    // One model at two tiers: the model is single, the tier is not.
+    expect(payload.source.model).toBe(VISION_DESCRIBE_MODEL_REPO);
+    expect(payload.source.variant).toBe("mixed");
+  });
+
+  it("blocks a re-run whose recorded tier the model does not offer instead of substituting (SW-7122 review)", async () => {
+    context.models = [...context.models, describerWithTiers("q4", "q8", "bf16")];
+    serveHistory([
+      {
+        id: "job_27b",
+        status: "completed",
+        result: { processedCount: 2, itemCount: 2, model: VISION_DESCRIBE_MODEL_REPO, variant: "q2" },
+      },
+      { id: "job_old", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO } },
+    ]);
+    serveStoredRuns({ job_27b: [described("item_a", 300, 400), described("item_b", 300, 400)], job_old: [described("item_c", 300, 400)] });
+    await render();
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toContain("“q2”");
+    // An older row with no recorded tier re-runs on the default tier.
+    expect(rerunButton("item_c").disabled).toBe(false);
+    await click(rerunButton("item_c"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toMatchObject({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      itemIds: ["item_c"],
+    });
+  });
+
+  it("loads each model's default once, and a failure does not clear or borrow another's (SW-7122 review)", async () => {
+    joyInstalled();
+    trainingApi.defaultDescribePrompt.mockImplementation(async (_token, _options, model) => {
+      if (model === JOY_REPO) throw new Error("joy default unavailable");
+      return { model, ...DEFAULTS[model] };
+    });
+    serveHistory([
+      { id: "job_joy", status: "completed", result: { processedCount: 1, itemCount: 1, model: JOY_REPO } },
+      { id: "job_27b", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" } },
+    ]);
+    serveStoredRuns({ job_joy: [described("item_a", 300, 400)], job_27b: [described("item_b", 300, 400)] });
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    const repos = trainingApi.defaultDescribePrompt.mock.calls.map((call) => call[2]);
+    expect(repos.filter((repo) => repo === VISION_CAPTION_MODEL_REPO)).toHaveLength(1);
+    expect(repos.filter((repo) => repo === VISION_DESCRIBE_MODEL_REPO)).toHaveLength(1);
+    // JoyCaption's failure belongs to its rows' re-run, not to the selected model's editor.
+    expect(document.body.textContent).not.toContain("joy default unavailable");
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toBe("joy default unavailable");
+    expect(rerunButton("item_b").disabled).toBe(false);
+  });
+
+  it("re-runs a row with the model and tier that described it (SW-7122)", async () => {
+    joyInstalled();
+    context.models = [...context.models, describerWithTiers("q4", "q8")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], {
+          model: VISION_DESCRIBE_MODEL_REPO,
+          variant: "q8",
+        }),
+      ),
+    );
+    await settle();
+
+    // Another model selected: the re-run still sends the row's own model and tier.
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    await click(rerunButton("item_b"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+      requestedGpu: "auto",
+      itemIds: ["item_b"],
+    });
+    await act(async () => nextPoll(snapshot("completed", [described("item_b", 400, 300)], { itemCount: 1, model: JOY_REPO })));
+    await settle();
+
+    // item_b is now JoyCaption's: its re-run sends no variant, even with the 27B selected.
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(rerunButton("item_b"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[2][3].body)).toEqual({
+      model: JOY_REPO,
+      requestedGpu: "auto",
+      itemIds: ["item_b"],
+    });
+  });
+
+  it("checks a re-run against the row's own tier install and prompt limit (SW-7122)", async () => {
+    joyInstalled();
+    context.models = [...context.models, describerWithTiers("q4")];
+    serveHistory([
+      { id: "job_joy", status: "completed", result: { processedCount: 1, itemCount: 1, model: JOY_REPO } },
+      // Restored from the payload's variant: a tier this install no longer has.
+      {
+        id: "job_27b",
+        status: "completed",
+        payload: { model: VISION_DESCRIBE_MODEL_REPO, variant: "bf16" },
+        result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO },
+      },
+      { id: "job_vc", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({
+      job_joy: [described("item_a", 300, 400)],
+      job_27b: [described("item_b", 300, 400)],
+      job_vc: [described("item_c", 300, 400)],
+    });
+    await render();
+    expect(rerunButton("item_b").disabled).toBe(true);
+    expect(rerunButton("item_b").title).toBe("Vision Describer (Qwen3.8-27B) Full precision (56 GB) is not installed.");
+    expect(rerunButton("item_a").disabled).toBe(false);
+    expect(rerunButton("item_c").disabled).toBe(false);
+
+    // Over JoyCaption's limit but within the Vision Captioner's: only the JoyCaption row is blocked.
+    await act(async () => setText(textarea("Describing prompt"), "x".repeat(3001)));
+    await settle();
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toContain("at most 3,000");
+    expect(rerunButton("item_c").disabled).toBe(false);
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {

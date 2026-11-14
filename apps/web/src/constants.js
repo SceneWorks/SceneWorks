@@ -88,6 +88,11 @@ export const JOY_CAPTION_MODEL_ID = "joycaption_beta_one";
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
 
+// The larger dataset describer (feature SW-F365): Create Prompt Batch from Dataset offers it beside
+// the Vision Captioner. Its quant tier travels as the describe request's `variant`.
+export const VISION_DESCRIBE_MODEL_ID = "vision_describe_qwen3_8_27b";
+export const VISION_DESCRIBE_MODEL_REPO = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
+
 // Qwen-Image 2.1 and its two OFFICIAL prompt rewriters (sc-24113, epic 24107).
 //
 // The rewriters are OPTIONAL, explicitly downloaded checkpoints — `autoDownload: false` in the
