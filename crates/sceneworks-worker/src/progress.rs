@@ -770,7 +770,7 @@ fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
                 .push(id.to_owned());
         }
     }
-    serde_json::to_value(WorkerExecutionReceipt {
+    let receipt = WorkerExecutionReceipt {
         version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
         execution: serde_json::json!({
             "state":"unavailable",
@@ -781,8 +781,9 @@ fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
             }
         }),
         outputs,
-    })
-    .ok()
+    };
+    sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).ok()?;
+    serde_json::to_value(receipt).ok()
 }
 
 #[cfg(test)]
