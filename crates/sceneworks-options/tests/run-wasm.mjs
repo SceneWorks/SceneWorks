@@ -9,4 +9,4 @@ instance.exports.main();
 const corpus = JSON.parse(await readFile(new URL("./fixtures/validation_corpus.json",import.meta.url),"utf8"));
 const count = corpus.cases.length;
 assert.ok(count > 0);
-console.log(`${count} shared validation cases passed in WASM`);
+console.log(`${count} shared validation cases and independent frozen policy assertions passed in WASM`);
