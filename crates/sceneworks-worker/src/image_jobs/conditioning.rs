@@ -1425,6 +1425,69 @@ pub(super) struct PoseInput {
     pub(super) face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
 }
 
+/// Image options lowered once at the worker boundary, before selecting a provider.
+/// The authored map remains on the request for persistence, but route decisions use these
+/// parsed values and the request's resolved scalar fields.
+pub(super) struct ResolvedImageExecution<'a> {
+    pub(super) request: &'a ImageRequest,
+    poses: Vec<PoseInput>,
+    phases: Option<Vec<super::krea_multiphase::MultiPhaseSpec>>,
+}
+
+impl<'a> ResolvedImageExecution<'a> {
+    pub(super) fn new(request: &'a ImageRequest) -> WorkerResult<Self> {
+        let poses = parse_poses(request);
+        let phases = if request.model == "krea_2_raw"
+            && super::krea_multiphase::request_has_multiphase(request)
+        {
+            Some(super::krea_multiphase::parse_multiphase_specs(request)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            request,
+            poses,
+            phases,
+        })
+    }
+
+    pub(super) fn poses(&self) -> &[PoseInput] {
+        &self.poses
+    }
+
+    pub(super) fn phases(&self) -> Option<&[super::krea_multiphase::MultiPhaseSpec]> {
+        self.phases.as_deref()
+    }
+}
+
+impl std::ops::Deref for ResolvedImageExecution<'_> {
+    type Target = ImageRequest;
+
+    fn deref(&self) -> &Self::Target {
+        self.request
+    }
+}
+
+#[cfg(test)]
+mod resolved_execution_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_lowers_effective_poses_once() {
+        let authored = serde_json::json!({"advanced": {"poses": [null, {"keypoints": []}]}});
+        let effective = authored.clone();
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        let execution = ResolvedImageExecution::new(&request).unwrap();
+        assert_eq!(execution.poses().len(), 1);
+        assert_eq!(execution.poses()[0].keypoints.len(), 18);
+        assert!(execution.phases().is_none());
+    }
+}
+
 #[cfg(native_lane)]
 pub(super) fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
     use crate::openpose_skeleton::{normalize_face, normalize_hands, normalize_keypoints};
