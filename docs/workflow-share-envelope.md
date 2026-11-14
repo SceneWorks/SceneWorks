@@ -71,7 +71,7 @@ A second, smaller block rides beside it in the A1111 convention, purely so third
 | `PARAMETERS_CHUNK_KEYWORD` | `parameters` | The PNG text keyword the A1111 trailer lives under. |
 | `WORKFLOW_SHARE_MARKER_KEY` | `sceneworksWorkflow` | The JSON key whose presence makes the blob ours. |
 | `WORKFLOW_KIND_IMAGE` | `image` | The marker's value for the image lane. |
-| `WORKFLOW_SHARE_SCHEMA_VERSION` | `1` | The contract version this build writes and reads. |
+| `WORKFLOW_SHARE_SCHEMA_VERSION` | `2` | The newest contract version this build reads and writes; v1-compatible content still writes v1. |
 | `PRODUCER_NAME` | `SceneWorks` | Names the software. Never the installation. |
 | `PRODUCER_URL` | `https://github.com/SceneWorks/SceneWorks` | So a file that reaches a stranger is self-identifying. |
 
@@ -389,7 +389,7 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
-| `lowResStart` | Versioned `{version:1,k,scale}` recipe parameters. Active content requires outer schema v2; unavailable controls are disclosed on portable import. |
+| `lowResStart` | `LowResStart` | Versioned `{version:1,k,scale}` recipe parameters. Active content requires outer schema v2; unavailable controls are disclosed on portable import. |
 | `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
 | `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
@@ -581,6 +581,7 @@ of field names, sorted, with unknown entries stripped on read:
 | `loras` | The LoRA list. |
 | `inputs` | The input-image list. |
 | `advanced.poses` | The pose selection. |
+| `advanced.lowResStart` | Active low-res recipe parameters that could not be safely recorded. |
 | `advanced.phases` | The multi-phase schedule. |
 | `advanced.phases[].loras` | A phase's own LoRA schedule. |
 
