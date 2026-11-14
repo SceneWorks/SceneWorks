@@ -664,7 +664,8 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                         ));
                     }
                 }
-                "iter" | "iter_mut" | "keys" | "values" | "values_mut" | "into_iter" => {
+                "iter" | "iter_mut" | "keys" | "values" | "values_mut" | "into_iter" | "clone"
+                | "to_owned" => {
                     self.coverage.whole_map_reads.insert((
                         self.file.into(),
                         self.function.clone(),
@@ -1104,6 +1105,12 @@ fn injecting_an_unseen_production_key_fails_coverage() {
     );
     assert_eq!(
         fixture("fn production() { let knobs = &request.advanced; for value in knobs.values() { consume(value); } }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { let settings = request.advanced.clone(); persist(settings); }")
             .whole_map_reads
             .len(),
         1
