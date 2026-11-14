@@ -45672,11 +45672,11 @@
       "minMemoryGb": 32
     },
     "mlx": {
-      "minMemoryGb": 62,
+      "minMemoryGb": 65,
       "minMemoryGbByTier": {
-        "bf16": 62,
-        "q8": 38,
-        "q4": 25
+        "bf16": 65,
+        "q8": 41,
+        "q4": 28
       }
     },
     "candle": {

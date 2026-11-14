@@ -3,7 +3,8 @@ name: Qwen3.8 27B describer CUDA validation
 # Real model inference is opt-in, never ordinary PR/main CI (SW-7120). Describes one synthetic scene
 # with the worker's Qwen3.8 27B describer on a provisioned Candle tier (see
 # qwen38-describer-provision.yml) and uploads the six described fields, wall time and peak GPU
-# memory. Fails if any field is empty.
+# memory. Fails if any field is empty. `image_side: 1536` draws the same scene at 1536x1536 to
+# measure the peak of a large image; `default` keeps the 512x384 scene.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +14,12 @@ on:
         type: choice
         options: [q4, q8]
         default: q4
+      image_side:
+        description: Synthetic scene size (default 512x384, or 1536x1536)
+        required: true
+        type: choice
+        options: [default, "1536"]
+        default: default
 
 permissions:
   contents: read
@@ -34,6 +41,7 @@ jobs:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
+      SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +97,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qwen38-describer-proof-${{ inputs.tier }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: qwen38-describer-proof-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error

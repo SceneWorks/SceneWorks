@@ -15655,13 +15655,17 @@
       //   `candle.measured` stays false: the flag covers the whole block, including the scalar
       //   `minMemoryGb` (the derived bf16 floor), so it cannot claim calibrated evidence.
       //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
-      //     q4 25 — measured describe peak about 22 GiB (input image size not recorded)
-      //     q8 38 — DERIVED: 30.15 GiB of files + the 3.38 GiB the q4 peak holds above its files
-      //     bf16 62 — UNMEASURED, derived the same way from 51.76 GiB of files
+      //     q4 28 — two measured describe peaks (worker footprint, dev Mac, describe through the
+      //             app): about 22 GiB on a smaller image (its size not recorded), and 25.0 on a
+      //             1536x1536 image (2026-11-14). The floor is from the larger: 25.0 / 0.9 = 27.8.
+      //     q8 41 — DERIVED, not measured: 30.15 GiB of files + the 6.38 GiB the 25.0 q4 peak
+      //             holds above its 18.62 GiB of files = 36.53; / 0.9 = 40.6
+      //     bf16 65 — UNMEASURED, derived the same way: 51.76 GiB of files + 6.38 = 58.14; / 0.9 =
+      //               64.6
       //   These floors are what the worker admits from. The Model Manager's host-size quote for
       //   this entry does NOT use them: it still comes from the catalog's image-generation estimate
       //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
-      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 25).
+      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 28).
       //
       // The file list names what the loader reads, so a metadata-only revision can never look
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).

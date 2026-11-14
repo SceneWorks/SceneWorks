@@ -856,6 +856,19 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     let error = resolved("q8").expect_err("q8 has no snapshot");
     assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
     assert!(error.to_string().contains("q8 tier"), "{error}");
+
+    // Full precision follows the same rule: an upstream snapshot folder without its `config.json`
+    // (a partial download) is not installed, with the same plain message.
+    std::fs::remove_file(upstream.join("config.json")).expect("drop upstream config");
+    let error = resolved("bf16").expect_err("bf16 has no config.json");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The bf16 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
 }
 
 /// The shipped 27B catalog entry, as the API attaches it to a describe job.
@@ -876,7 +889,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [25.0, 38.0, 62.0]), ("candle", [24.0, 36.0, 58.0])] {
+    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [24.0, 36.0, 58.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -887,7 +900,7 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     // A tier with no row falls back to the lane's conservative bf16 floor.
     let job = qwen38_job_payload(&stage, "q4");
     let job = job.as_object().expect("payload");
-    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(62.0));
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(65.0));
     assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
 
     let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
@@ -945,6 +958,118 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     let error =
         qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
     assert!(error.to_string().contains("needs 24 GB"), "{error}");
+}
+
+/// A cold Candle load evicts the cached image/video generator BEFORE free VRAM is read, so a describe
+/// started within the generator cache's idle window sees the memory that generator held. A warm tier
+/// needs no reading and evicts nothing. No GPU: the generator is a unit model in a cache, and the
+/// probe reports what a 32 GiB card holding a 21.48 GiB generator would report.
+#[tokio::test]
+async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    let generators = Mutex::new(CacheThread::<&str, ()>::new(false));
+    let steps = Mutex::new(Vec::<&str>::new());
+    let (generators, steps) = (&generators, &steps);
+    let evict = || async move {
+        steps.lock().unwrap().push("evict");
+        Ok(generators.lock().unwrap().evict().is_some())
+    };
+    let probe = || async move {
+        steps.lock().unwrap().push("probe");
+        let generator_resident = !generators.lock().unwrap().is_empty();
+        Ok(Some(if generator_resident {
+            32.0 - 21.48
+        } else {
+            32.0
+        }))
+    };
+
+    // A generator left cached by an image job: dropped first, so the reading sees its memory free.
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Cold, evict, probe)
+        .await
+        .expect("evict and probe succeed");
+    assert_eq!(*steps.lock().unwrap(), ["evict", "probe"]);
+    assert_eq!(free, Some(32.0));
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, free)
+        .expect("the generator's memory counts once it is evicted");
+    // The order matters: reading before the eviction would refuse a load that fits.
+    assert!(qwen38_fit_refusal("q4", floor, Some(32.0 - 21.48)).is_err());
+
+    // A warm tier reuses the resident describer: no eviction, no reading, admitted.
+    steps.lock().unwrap().clear();
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Warm, evict, probe)
+        .await
+        .expect("warm needs nothing");
+    assert_eq!(free, None);
+    assert!(steps.lock().unwrap().is_empty());
+    assert!(
+        !generators.lock().unwrap().is_empty(),
+        "a warm describe keeps the generator"
+    );
+
+    // A failed eviction fails the admission rather than reading a stale card.
+    let error = qwen38_free_gb_after_eviction(
+        CacheAccess::Cold,
+        || async {
+            Err::<bool, _>(WorkerError::Engine(
+                "generator cache worker stopped".to_owned(),
+            ))
+        },
+        probe,
+    )
+    .await
+    .expect_err("eviction error propagates");
+    assert!(error.to_string().contains("stopped"), "{error}");
+    assert!(
+        steps.lock().unwrap().is_empty(),
+        "no probe after a failed eviction"
+    );
+}
+
+/// A describer's load and generation failures name the model in use: the 27B's say "Qwen3.8 27B
+/// describer", the 8B's keep "Vision Captioner". The load failure is driven for real through the
+/// refine cache against a folder that holds no model (nothing loads, nothing downloads).
+#[tokio::test]
+async fn a_describer_failure_names_the_model_in_use() {
+    assert_eq!(
+        DescribeModel::VisionCaptioner.display_name(),
+        "Vision Captioner"
+    );
+    assert_eq!(
+        DescribeModel::Qwen38.display_name(),
+        "Qwen3.8 27B describer"
+    );
+    let empty = tempfile::tempdir().expect("empty weights dir");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_OFFLINE", "1")]);
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    for (model, expected) in [
+        (DescribeModel::Qwen38, "Qwen3.8 27B describer load failed"),
+        (
+            DescribeModel::VisionCaptioner,
+            "Vision Captioner load failed",
+        ),
+    ] {
+        let describer = VisionCaptionerDescriber {
+            model,
+            weights_dir: empty.path().join("no-model"),
+            job_id: "label-test".to_owned(),
+        };
+        let error = describer
+            .describe(
+                image::DynamicImage::new_rgb8(8, 8),
+                &prompt,
+                CancelFlag::new(),
+            )
+            .await
+            .expect_err("nothing to load");
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }
 
 /// Stage `tier/config.json` in a re-host snapshot of `hf_cache`, as a finished tier download leaves
@@ -1011,7 +1136,7 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
         .expect_err("a tier above the machine is refused");
         assert!(
             error.to_string().ends_with(
-                "The q4 tier of the Qwen3.8 27B describer needs 25 GB of memory, but this \
+                "The q4 tier of the Qwen3.8 27B describer needs 28 GB of memory, but this \
                  worker has 16 GB for it. Choose a smaller tier."
             ),
             "{error}"

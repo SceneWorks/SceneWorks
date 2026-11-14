@@ -12,17 +12,22 @@ export const TIERS = Object.freeze(['q4', 'q8']);
 export const REPO = 'SceneWorks/qwen3.8-27b-abliterated-candle';
 export const TEST_NAME = 'qwen38_describer_describes_a_synthetic_scene_on_cuda';
 export const GUARD_ACTOR = 'qwen38-describer';
+// The workflow's `image_side` input and the scene size the smoke draws for it.
+export const IMAGE_SIZES = Object.freeze({ default: [512, 384], 1536: [1536, 1536] });
 // The worker caps one field at 16,000 characters; six of them, JSON-escaped, stay far below this.
 const MAX_INPUT_BYTES = 1024 * 1024;
 
-export function validateResult(result, tier) {
+export function validateResult(result, tier, imageSide = 'default') {
   assert(TIERS.includes(tier), `requested tier must be one of ${TIERS.join(', ')}`);
+  assert(Object.hasOwn(IMAGE_SIZES, imageSide), `requested image side must be one of ${Object.keys(IMAGE_SIZES).join(', ')}`);
   assert.equal(result?.schema_version, 1, 'unknown describer result schema');
   assert.equal(typeof result.test_fqn, 'string');
   assert.equal(result.test_fqn.split('::').at(-1), TEST_NAME, 'result is not from the describer smoke');
   assert.equal(result.repo, REPO);
   assert.match(String(result.revision), /^[a-f0-9]{40}$/, 'result must name the pinned revision');
   assert.equal(result.tier, tier, 'result tier differs from the requested tier');
+  assert.deepEqual([result.image?.width, result.image?.height], IMAGE_SIZES[imageSide],
+    'result image size differs from the requested image side');
   const empty = FIELDS.filter((name) => typeof result.fields?.[name] !== 'string'
     || (name !== 'camera' && !result.fields[name].trim()));
   assert.deepEqual(empty, [], `described fields are empty: ${empty.join(', ')}`);
@@ -63,6 +68,7 @@ export function summary(evidence) {
   if (result) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
     lines.push(`Tier: \`${result.tier}\` at \`${result.revision}\``, '',
+      `Image: ${result.image.kind}, ${result.image.width}x${result.image.height}`, '',
       `Wall time: ${result.wall_seconds.toFixed(1)} s (${result.wall_time_scope})`, '',
       `Peak GPU memory: ${mib(result.gpu_memory.peak_mib)}; baseline ${mib(result.gpu_memory.baseline_mib)}; `
         + `delta ${mib(result.gpu_memory.peak_delta_mib)}`, '',
@@ -73,13 +79,14 @@ export function summary(evidence) {
 }
 
 // Stage only what was validated: evidence.json, plus a byte copy of the guard receipt.
-export async function stage(outputDir, receiptFile, tier) {
-  const evidence = { schema_version: 1, accepted: false, requested_tier: tier };
+export async function stage(outputDir, receiptFile, tier, imageSide = 'default') {
+  const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide };
   const artifact = path.join(outputDir, 'artifact');
   await fs.mkdir(artifact, { recursive: true });
   let failure = null;
   try {
-    evidence.result = validateResult(await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier);
+    evidence.result = validateResult(
+      await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
   } catch (error) {
     failure = error;
   }
@@ -107,7 +114,8 @@ export async function main(env = process.env) {
   // windows_cuda_execution.py writes its receipt here for this actor.
   const receiptFile = path.join(env.RUNNER_TEMP,
     `sceneworks-cuda-execution-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${GUARD_ACTOR}`, 'resource-receipt.json');
-  const evidence = await stage(outputDir, receiptFile, tier);
+  const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
   console.log(`Qwen3.8 27B describer validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
   if (!evidence.accepted) process.exitCode = 1;

@@ -119,6 +119,15 @@ impl DescribeModel {
             Self::Qwen38 => QWEN38_27B_DESCRIBER_REPO,
         }
     }
+
+    /// The name a failure message gives this model.
+    pub(crate) fn display_name(self) -> &'static str {
+        match self {
+            Self::VisionCaptioner => "Vision Captioner",
+            Self::JoyCaption => "JoyCaption",
+            Self::Qwen38 => "Qwen3.8 27B describer",
+        }
+    }
 }
 
 /// Where a Qwen3.8 27B tier's snapshot lives. Full precision (`bf16`) is the upstream repository's
@@ -139,18 +148,20 @@ pub(crate) fn qwen38_describer_weights_dir(
              in the Model Manager, or choose a tier that is installed."
         ))
     };
-    if tier == "bf16" {
-        return resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label)
-            .map_err(|_| not_installed());
-    }
-    let repo = if cfg!(target_os = "macos") {
-        QWEN38_27B_DESCRIBER_MLX_REPO
+    let dir = if tier == "bf16" {
+        resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label)
+            .map_err(|_| not_installed())?
     } else {
-        QWEN38_27B_DESCRIBER_CANDLE_REPO
+        let repo = if cfg!(target_os = "macos") {
+            QWEN38_27B_DESCRIBER_MLX_REPO
+        } else {
+            QWEN38_27B_DESCRIBER_CANDLE_REPO
+        };
+        resolve_app_managed_model_dir(settings, repo, label)
+            .map_err(|_| not_installed())?
+            .join(tier)
     };
-    let dir = resolve_app_managed_model_dir(settings, repo, label)
-        .map_err(|_| not_installed())?
-        .join(tier);
+    // A snapshot folder alone is not an install: a partial download leaves one without its config.
     if dir.join("config.json").is_file() {
         Ok(dir)
     } else {
@@ -227,16 +238,48 @@ pub(crate) fn qwen38_cached_fit_refusal(
     }
 }
 
+/// The free VRAM (GB) a cold Candle load is checked against, read only after everything this worker
+/// can drop is gone: the cached image/video generator is evicted first (as the depth, training and
+/// image admissions do), then `probe_free_gb` reads the card. A warm tier is reused and needs no
+/// reading, so nothing is evicted for it. The evict and the probe are injected so the order is
+/// testable without a GPU.
+#[cfg(native_lane)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) async fn qwen38_free_gb_after_eviction<Evict, Probe>(
+    access: crate::cache_thread::CacheAccess,
+    evict_generator: impl FnOnce() -> Evict,
+    probe_free_gb: impl FnOnce() -> Probe,
+) -> WorkerResult<Option<f64>>
+where
+    Evict: std::future::Future<Output = WorkerResult<bool>>,
+    Probe: std::future::Future<Output = WorkerResult<Option<f64>>>,
+{
+    if access == crate::cache_thread::CacheAccess::Warm {
+        return Ok(None);
+    }
+    if evict_generator().await? {
+        tracing::info!(
+            event = "qwen38_describer_evicted_cached_generator",
+            "Qwen3.8 27B describer admission: evicted the cached generator before reading free VRAM"
+        );
+    }
+    probe_free_gb().await
+}
+
 /// Whether this worker can hold the job's tier, checked before any image.
 ///
 /// MLX: the tier's floor against TOTAL unified memory (the catalog's MLX floors are whole-machine
-/// sizes). A model held in the refine cache does not lower that total, so a second job never sees
-/// the first job's cached model here.
+/// sizes). A model held in the refine cache or the generator cache does not lower that total, so
+/// nothing is evicted here: eviction could not change the decision.
 ///
 /// Candle: the CUDA fit gate's own floor reader against FREE VRAM, which a cached model does lower.
 /// So the refine cache is asked first: the same tier resident there is reused (admitted with no
-/// check), and a different cached refiner is dropped, as the load's own evict-before-load would,
-/// before free VRAM is read fresh.
+/// check), and a different cached refiner is dropped, as the load's own evict-before-load would.
+/// A cold load also evicts the cached image/video generator before free VRAM is read fresh
+/// ([`qwen38_free_gb_after_eviction`]).
 #[cfg(native_lane)]
 async fn qwen38_memory_admission(
     settings: &Settings,
@@ -260,17 +303,20 @@ async fn qwen38_memory_admission(
             crate::refine_model_cache::prepare_refiner_admission(&spec, &requirements).await?;
         let needed_gb = qwen38_catalog_entry(payload)
             .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
-        let available_gb = if access == crate::cache_thread::CacheAccess::Cold {
-            let gpu_id = settings.gpu_id.clone();
-            crate::load_progress::spawn_blocking(move || {
-                crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
-            })
-            .await
-            .map_err(|error| task_join_error("describer VRAM probe", error))?
-            .map(|budget| budget.free_gb)
-        } else {
-            None
-        };
+        let gpu_id = settings.gpu_id.clone();
+        let available_gb = qwen38_free_gb_after_eviction(
+            access,
+            crate::generator_cache::evict_cached_generator,
+            || async move {
+                Ok(crate::load_progress::spawn_blocking(move || {
+                    crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
+                })
+                .await
+                .map_err(|error| task_join_error("describer VRAM probe", error))?
+                .map(|budget| budget.free_gb))
+            },
+        )
+        .await?;
         qwen38_cached_fit_refusal(access, tier, needed_gb, available_gb)
     }
 }
@@ -444,6 +490,9 @@ pub(crate) trait BatchDescriber: Send + Sync {
 /// cache, the model loaded once and reused across the dataset's images.
 #[cfg(native_lane)]
 pub(crate) struct VisionCaptionerDescriber {
+    /// Which model is loaded: the Vision Captioner or the Qwen3.8 27B describer. Its name leads the
+    /// load and generation failure messages.
+    pub(crate) model: DescribeModel,
     pub(crate) weights_dir: PathBuf,
     pub(crate) job_id: String,
 }
@@ -489,10 +538,11 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let user = prompt.user.clone();
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
+        let name = self.model.display_name();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
-            "Vision Captioner load failed",
+            format!("{name} load failed"),
             move |model| -> WorkerResult<Result<String, String>> {
                 let image = match crate::prompt_refine_jobs::vision_image_ref(image) {
                     Ok(image) => image,
@@ -548,7 +598,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 Ok(generation
                     .map(|output| output.text)
-                    .map_err(|error| format!("Vision Captioner generation failed: {error}")))
+                    .map_err(|error| format!("{name} generation failed: {error}")))
             },
         ))
     }
@@ -968,6 +1018,7 @@ pub(crate) async fn run_dataset_batch_describe_job(
     let request = parse_batch_describe_request(settings, &job.payload)?;
     let describer: Box<dyn BatchDescriber> = match request.model {
         DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber {
+            model: DescribeModel::VisionCaptioner,
             weights_dir: resolve_app_managed_model_dir(
                 settings,
                 VISION_CAPTIONER_REPO,
@@ -983,6 +1034,7 @@ pub(crate) async fn run_dataset_batch_describe_job(
             let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
             qwen38_memory_admission(settings, &job.payload, tier, &weights_dir).await?;
             Box::new(VisionCaptionerDescriber {
+                model: DescribeModel::Qwen38,
                 weights_dir,
                 job_id: job.id.clone(),
             })
