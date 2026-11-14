@@ -40,8 +40,6 @@ use crate::media_jobs::{run_ffmpeg, run_ffmpeg_with_stdin_chunks, FfmpegContext}
 /// list explicit prevents a family from silently inheriting newly imported parent
 /// names or flattening another engine family's namespace.
 mod prelude {
-    #[cfg(test)]
-    pub(super) use super::advanced;
     #[cfg(native_lane)]
     #[allow(unused_imports)]
     pub(super) use super::load_reference_image;

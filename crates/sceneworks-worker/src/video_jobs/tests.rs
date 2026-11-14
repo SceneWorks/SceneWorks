@@ -12946,11 +12946,6 @@ fn write_complete_gemma_dir(dir: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn advanced_object(value: Value) -> JsonObject {
-    value.as_object().expect("advanced object").clone()
-}
-
-#[cfg(target_os = "macos")]
 fn bound_video_options(value: Value) -> sceneworks_core::video_request::VideoOptions {
     let payload = json!({ "advanced": value });
     let payload = payload.as_object().expect("video payload");
