@@ -898,6 +898,16 @@ impl<'a> BindingInput<'a> {
                 Ok(None)
             };
         };
+        // The portable Iris validators treat explicit null nested settings as omitted. Training
+        // resolution retains those nested source objects, so bind their optional fields the same
+        // way rather than turning an accepted saved config into an execution refusal.
+        if value.is_null() && location.starts_with("training.config.advanced.iris") {
+            return if spec.default == DefaultRule::Required {
+                Err(BindingError::MissingRequired { id: spec.id })
+            } else {
+                Ok(None)
+            };
+        }
         let origin = Self::parent(self.authored, location)
             .and_then(|map| {
                 std::iter::once(spec.key)
@@ -1299,6 +1309,24 @@ mod tests {
             bound.restore_degradation_wire.unwrap().value,
             obj(json!({"use_hflip":false}))
         );
+    }
+
+    #[test]
+    fn nested_iris_nulls_follow_portable_omission_semantics() {
+        let authored = obj(json!({"config":{"advanced":{
+            "iris":{"stage":null,"expected_global_batch":null,"repa":{"weight":null},
+                "dist":{"world":{"world_size":null,"share_device":null}}},
+            "iris_restore":{"init":null,"resume_data_policy":null}
+        }}}));
+        let bound = IrisTrainingOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
+        assert!(bound.stage.is_none());
+        assert!(bound.expected_global_batch.is_none());
+        assert!(bound.repa_weight.is_none());
+        assert!(!bound.repa_enabled());
+        assert!(bound.dist_world_size.is_none());
+        assert_eq!(bound.dist_topology.world_size, 1);
+        assert!(bound.restore_init.is_none());
+        assert!(bound.restore_resume_data_policy.is_none());
     }
 
     #[test]
