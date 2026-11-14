@@ -534,7 +534,20 @@ pub(crate) fn hydrate_indexed_asset_cached(
     asset: Value,
     _generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
-    Ok(asset)
+    match crate::options::upgrade::upgrade(&asset, crate::options::upgrade::Carrier::Recipe) {
+        Ok(upgraded) => Ok(upgraded),
+        Err(error) => {
+            // A future recipe must not hide the historical asset or mutate its indexed original.
+            let mut original = asset;
+            if let Some(object) = original.as_object_mut() {
+                object.insert(
+                    "optionsUpgradeError".to_owned(),
+                    serde_json::to_value(error)?,
+                );
+            }
+            Ok(original)
+        }
+    }
 }
 
 fn upsert_asset_row(

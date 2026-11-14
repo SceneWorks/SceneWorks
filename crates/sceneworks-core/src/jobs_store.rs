@@ -4634,11 +4634,27 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         .as_deref()
         .and_then(|started| elapsed_seconds(started, completed_at.as_deref()));
     let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
-    let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
+    let stored_payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
+    let upgraded = crate::options::upgrade::upgrade_object(
+        &stored_payload,
+        crate::options::upgrade::Carrier::Request,
+    );
+    // Reading history must remain possible even when this binary cannot execute its schema.
+    // Keep the stored payload intact and expose the typed refusal; dispatch also checks it.
+    let (payload, upgrade_error) = match upgraded {
+        Ok(payload) => (payload, None),
+        Err(error) => (stored_payload, Some(error)),
+    };
     let title = derive_job_title(&job_type, &payload);
     let revision = row.get::<_, i64>("revision").unwrap_or_default().max(0);
     let queue_rank = row.get::<_, i64>("queue_rank").unwrap_or_default().max(0);
     let mut extra = ExtraFields::default();
+    if let Some(error) = upgrade_error {
+        extra.insert(
+            "optionsUpgradeError".to_owned(),
+            serde_json::to_value(error).unwrap_or(Value::Null),
+        );
+    }
     extra.insert("revision".to_owned(), Value::from(revision));
     extra.insert("queueRank".to_owned(), Value::from(queue_rank));
     if let Some(encoded) = row.get::<_, Option<String>>("model_provenance_json")? {

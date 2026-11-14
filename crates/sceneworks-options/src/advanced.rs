@@ -79,6 +79,12 @@ macro_rules! nested {
 }
 
 pub(crate) const SPECS: &[OptionSpec] = &[
+    opt!("lowResStart", Object("LowResStartV1"), Absent, Feature("low_res_start"), WhatToMake, "versioned low-res recipe params")
+        .limits(&["version 1; k positive and below executed steps; scale 0.25..=0.9"])
+        .compat("Active recipe requires outer workflow share v2. Execution requires exported low_res_start support."),
+    nested!("lowResStart", "version", Integer, Required, Feature("low_res_start"), Context, "low-res recipe version").limits(&["1"]),
+    nested!("lowResStart", "k", Integer, Required, Feature("low_res_start"), WhatToMake, "completed low-res steps").limits(&["1 <= k < executed steps"]),
+    nested!("lowResStart", "scale", Number, Required, Feature("low_res_start"), WhatToMake, "spatial scale").limits(&["0.25..=0.9"]),
 
     nested!("mossImage", "acceleration", OneOf("off | unmerged_bf16 | full_fp32"), Literal("\"off\""), MOSS, WhatToMake, "MossImageOptions.acceleration")
         .effects(&[effect("DMD", "exclude", "advanced.sampler"),effect("DMD", "exclude", "advanced.scheduler"),effect("DMD", "exclude", "advanced.schedulerShift"),effect("DMD", "exclude", "advanced.mossImage.training_shift"),effect("DMD", "exclude", "image.negativePrompt"),effect("DMD", "override", "advanced.steps"),effect("DMD", "override", "advanced.guidanceScale")])

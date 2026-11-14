@@ -1427,6 +1427,21 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let permitted_inline_loras = persisted_character_inline_loras(&merged);
     let persisted = merged.clone();
     merged.extend(payload_changes.clone());
+    merged = sceneworks_core::options::upgrade::upgrade_object(
+        &merged,
+        sceneworks_core::options::upgrade::Carrier::Request,
+    )
+    .map_err(|error| {
+        ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            error.to_string(),
+            error.code,
+            json!({ "field": error.field }),
+        )
+    })?;
+    if !retry {
+        sceneworks_core::options::upgrade::strip_machine_decisions(&mut merged);
+    }
     if merged.get("model") == persisted.get("model") {
         // A retry of the same selection retains the admitted identity even when a patch replaces
         // other settings. Same-id catalog rebinding cannot opt out of the original checkpoint.

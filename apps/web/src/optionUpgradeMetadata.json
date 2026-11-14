@@ -1,0 +1,43 @@
+{
+  "aliases": [
+    {
+      "aliases": [
+        "timestepShift"
+      ],
+      "key": "schedulerShift",
+      "location": "advanced"
+    },
+    {
+      "aliases": [
+        "moss_image_execution_report"
+      ],
+      "key": "mossImageExecutionReport",
+      "location": "advanced"
+    },
+    {
+      "aliases": [
+        "moss_image_edit_execution_report"
+      ],
+      "key": "mossImageEditExecutionReport",
+      "location": "advanced"
+    },
+    {
+      "aliases": [
+        "repo"
+      ],
+      "key": "modelRepo",
+      "location": "advanced"
+    },
+    {
+      "aliases": [
+        "ip_adapter_scale"
+      ],
+      "key": "ipAdapterScale",
+      "location": "image"
+    }
+  ],
+  "optionsSchemaVersion": 1,
+  "recipeVersions": {
+    "lowResStart": 1
+  }
+}

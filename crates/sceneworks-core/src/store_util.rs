@@ -68,7 +68,17 @@ pub(crate) fn configure_connection(
 
 pub(crate) fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     let payload = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&payload)?)
+    let value: Value = serde_json::from_str(&payload)?;
+    if !value.is_object() {
+        return Ok(value);
+    }
+    crate::options::upgrade::upgrade(&value, crate::options::upgrade::Carrier::Recipe).map_err(
+        |error| ProjectStoreError::FieldInvalid {
+            field: "options",
+            code: error.code,
+            detail: error.to_string(),
+        },
+    )
 }
 
 /// Store-error adapter for the shared neutral filesystem writer.

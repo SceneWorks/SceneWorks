@@ -1,3 +1,4 @@
+import { upgradeCarrier, UpgradeError } from "../requestUpgrade.js";
 import { useEffect, useRef } from "react";
 import { persistNavigationPreferences } from "../uiPreferences.js";
 
@@ -130,8 +131,9 @@ export function loadStudioSettings(studio, workspaceId) {
   try {
     const raw = window.localStorage.getItem(storageKey(studio, workspaceId));
     const parsed = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
+    return parsed && typeof parsed === "object" ? upgradeCarrier(parsed, "studioSettings") : {};
+  } catch (error) {
+    if (error instanceof UpgradeError) throw error;
     return {};
   }
 }
@@ -180,8 +182,11 @@ export function seedStudioSettingsFromServer(map) {
       if (!restored || typeof restored !== "object") {
         continue;
       }
+      // Normalize each source before merging: the authoritative server alias must replace a
+      // cached canonical value, not manufacture a conflict between two valid snapshots.
+      const upgraded = upgradeCarrier(restored, "studioSettings");
       const cached = loadStudioSettings(studio, workspace);
-      writeCache(studio, workspace, { ...cached, ...restored });
+      writeCache(studio, workspace, { ...cached, ...upgraded });
       written += 1;
     }
   }
@@ -189,6 +194,9 @@ export function seedStudioSettingsFromServer(map) {
 }
 
 function writeCache(studio, workspaceId, settings) {
+  // Never overwrite a stored future/conflicting document with the form's fallback defaults.
+  loadStudioSettings(studio, workspaceId);
+  settings = upgradeCarrier(settings, "studioSettings");
   try {
     window.localStorage.setItem(storageKey(studio, workspaceId), JSON.stringify(settings));
   } catch {
