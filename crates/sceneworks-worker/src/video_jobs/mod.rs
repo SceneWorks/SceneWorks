@@ -146,6 +146,7 @@ struct DecodedVideo {
     adapter_apply_reports: Vec<gen_core::AdapterApplyReport>,
     /// Post-generation provider observations; never reconstructed from request controls.
     veda_execution: Option<Value>,
+    execution_report: Option<gen_core::generator::ExecutionIdentity>,
 }
 
 /// One RGB8 frame, row-major, `pixels.len() == width * height * 3` (the engine's
@@ -785,6 +786,7 @@ pub(crate) async fn run_video_generate_job(
     let workflow_metadata = plan.media_path.with_extension("workflow.ffmeta");
     let embedded =
         video_workflow_metadata(settings, job, &request, &plan, seed, &workflow_metadata);
+    let decoded_execution_report = decoded.execution_report.clone();
     let encoded = encode_media(
         &plan.media_path,
         decoded,
@@ -803,7 +805,15 @@ pub(crate) async fn run_video_generate_job(
     let _ = tokio::fs::remove_file(&workflow_metadata).await;
     encoded?;
 
-    let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
+    let mut fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
+    if let Some(execution) = decoded_execution_report {
+        fact.as_object_mut()
+            .expect("video fact is an object")
+            .insert(
+                "workerExecutionReport".into(),
+                serde_json::to_value(execution).map_err(WorkerError::Json)?,
+            );
+    }
     let result = streaming_result(&plan, &fact, adapter);
     // Before the terminal post, so a late tick cannot re-advertise a finished worker as busy.
     drop(preload_heartbeat);
@@ -1040,6 +1050,7 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
         audio,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     }
 }
 

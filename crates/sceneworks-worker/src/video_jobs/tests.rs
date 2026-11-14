@@ -3631,6 +3631,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let clip = EncodedClip::measure(&decoded);
     assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
@@ -3653,6 +3654,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let clip = EncodedClip::measure(&zero_fps);
     assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
@@ -3678,6 +3680,7 @@ fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
         audio,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let track = AudioTrack {
         samples: vec![0.0; 64],
@@ -15447,6 +15450,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
             }),
             adapter_apply_reports: Vec::new(),
             veda_execution: None,
+            execution_report: None,
         };
         let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
         encode_media(&media_path, decoded, None, None)
@@ -15492,6 +15496,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
         }),
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let media_path = dir_guard.path().join("long_audio.mp4");
     encode_media(&media_path, decoded, None, None)
@@ -16374,6 +16379,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
 
     let error = encode_media(&media_path, decoded, None, None)
@@ -20730,6 +20736,7 @@ async fn stage_minimax_h3_clip_asset(
         }),
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     encode_media(&media_path, decoded, None, None)
         .await

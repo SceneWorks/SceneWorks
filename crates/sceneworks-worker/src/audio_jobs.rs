@@ -1102,17 +1102,28 @@ async fn run_audio_generate_job_using(
     // replay record omits the (unused) base-TTS model that only the conversion chain carries.
     let native_clone = matches!(synthesis, AudioSynthesis::NativeVoiceClone(_));
     let mut resolved_tier = None;
-    let track = match synthesis {
+    let (track, execution_report) = match synthesis {
         AudioSynthesis::Single(single) => {
             resolved_tier = single.tier.as_ref().map(|tier| tier.name.clone());
-            run_audio_synthesis_with(api, settings, job, &request, single, load_generator).await?
+            let (track, execution) = run_audio_synthesis_with_completed(
+                api,
+                settings,
+                job,
+                &request,
+                single,
+                load_generator,
+            )
+            .await?;
+            (track, Some(execution))
         }
-        AudioSynthesis::VoiceClone(plan) => {
-            run_voice_clone_synthesis(api, settings, job, &request, plan).await?
-        }
-        AudioSynthesis::NativeVoiceClone(plan) => {
-            run_native_voice_clone_synthesis(api, settings, job, &request, plan).await?
-        }
+        AudioSynthesis::VoiceClone(plan) => (
+            run_voice_clone_synthesis(api, settings, job, &request, plan).await?,
+            None,
+        ),
+        AudioSynthesis::NativeVoiceClone(plan) => (
+            run_native_voice_clone_synthesis(api, settings, job, &request, plan).await?,
+            None,
+        ),
     };
 
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
@@ -1247,6 +1258,14 @@ async fn run_audio_generate_job_using(
         facts.push(stem_asset_fact(&fact, &plan, stem_plan, duration));
     }
     facts.insert(0, fact);
+    if let Some(execution) = execution_report {
+        let report = serde_json::to_value(execution).map_err(WorkerError::Json)?;
+        for fact in &mut facts {
+            fact.as_object_mut()
+                .expect("audio fact is an object")
+                .insert("workerExecutionReport".into(), report.clone());
+        }
+    }
     let result = audio_streaming_result(&plan, &request, facts);
     update_job(
         api,
@@ -1524,6 +1543,21 @@ async fn run_audio_synthesis_with(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_audio_synthesis_with_completed(api, settings, job, request, single, load_generator)
+        .await
+        .map(|(track, _)| track)
+}
+
+async fn run_audio_synthesis_with_completed(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    single: SinglePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
     let SinglePlan {
         model_dir,
         tier,
@@ -1662,7 +1696,7 @@ async fn run_audio_synthesis_with(
     };
     let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
             let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -1691,19 +1725,32 @@ async fn run_audio_synthesis_with(
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
             // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
             // aggregate `GenerationOutput` as `generate`, so the written asset is identical either way.
-            let output = if generator.descriptor().capabilities.supports_streaming {
+            let (output, execution) = if generator.descriptor().capabilities.supports_streaming {
                 let mut on_chunk = |chunk: gen_core::AudioChunk| {
                     // The 1-based running chunk count.
                     let update = fold.borrow_mut().chunk(chunk.index.saturating_add(1));
                     publish(update);
                 };
-                generator.generate_streaming(&req, &mut on_chunk, &mut on_progress)
+                generator
+                    .generate_streaming(&req, &mut on_chunk, &mut on_progress)
+                    .map(|output| (
+                        output,
+                        gen_core::generator::ExecutionIdentity::provider_default(),
+                    ))
             } else {
-                generator.generate(&req, &mut on_progress)
+                generator
+                    .generate_with_execution_report(&req, &mut on_progress)
+                    .and_then(|completed| {
+                        completed
+                            .generation
+                            .output
+                            .map(|output| (output, completed.execution))
+                            .ok_or_else(|| gen_core::Error::Unsupported("audio model returned no output".into()))
+                    })
             }
             .map_err(|error| classify_audio_synthesis_error("audio generation failed", error))?;
             match output {
-                GenerationOutput::Audio(track) => Ok(track),
+                GenerationOutput::Audio(track) => Ok((track, execution)),
                 // Either channel count is the same defect: an audio job asked for a track and
                 // got pixels. `ImagesRgba` (sc-24111) is unreachable here — this request never
                 // sets `output_channels` — but the match must name it.
