@@ -16,7 +16,7 @@ use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::stream::drive_gen_items_scored;
@@ -59,7 +59,6 @@ use super::COMPONENT_VAE_FP16_FIX;
 use super::FACE_RESTORE_PROMPT;
 #[cfg(target_os = "macos")]
 use super::FACE_RESTORE_PROMPT;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::quant_int;
@@ -535,7 +534,7 @@ enum InstantIdMode {
 
 /// The 11-view Character-Studio angle set flag.
 fn instantid_angle_set(request: &ImageRequest) -> bool {
-    advanced::flag(&request.advanced, "angleSet")
+    request.advanced_bool("angleSet").unwrap_or(false)
 }
 
 /// Classify the InstantID iteration mode (pose set > angle set > plain identity).
@@ -701,7 +700,7 @@ fn active_angle_collection(
     Vec<sceneworks_core::project_store::ResolvedAnglePreset>,
 ) {
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
-    let override_id = advanced::str(&request.advanced, "keypointCollectionId", "");
+    let override_id = super::sampling::resolved_text(request, "keypointCollectionId", "");
     let override_id = override_id.trim();
     let override_id = (!override_id.is_empty()).then_some(override_id);
     store
@@ -779,7 +778,7 @@ fn instantid_raw_settings(
     controlnet_scale: f32,
     angle_set: bool,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -1134,23 +1133,24 @@ pub(super) async fn generate_instantid_stream(
         project_path,
     )?;
 
-    let (controlnet, ip_adapter, scrfd_path, arcface_path) =
-        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-            let bound = |id| {
-                crate::portable_aux_sources::bound_aux_path(&request.advanced, id).ok_or_else(
-                    || WorkerError::InvalidPayload(format!("missing bound {id} source")),
-                )
-            };
-            let bundle = bound("instantid_mlx")?;
-            (
-                WeightsSource::Dir(bound("instantid_controlnet")?),
-                bundle.join(INSTANTID_IP_ADAPTER_FILE),
-                bundle.join(INSTANTID_SCRFD_FILE),
-                bundle.join(INSTANTID_ARCFACE_FILE),
-            )
-        } else {
-            ensure_instantid_weights(api, settings, job).await?
+    let (controlnet, ip_adapter, scrfd_path, arcface_path) = if request.portable_aux.has_paths() {
+        let bound = |id| {
+            request
+                .portable_aux
+                .path(id)
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| WorkerError::InvalidPayload(format!("missing bound {id} source")))
         };
+        let bundle = bound("instantid_mlx")?;
+        (
+            WeightsSource::Dir(bound("instantid_controlnet")?),
+            bundle.join(INSTANTID_IP_ADAPTER_FILE),
+            bundle.join(INSTANTID_SCRFD_FILE),
+            bundle.join(INSTANTID_ARCFACE_FILE),
+        )
+    } else {
+        ensure_instantid_weights(api, settings, job).await?
+    };
 
     // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
     // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
@@ -1172,8 +1172,8 @@ pub(super) async fn generate_instantid_stream(
         let _ = (quant_bits, recipe_bits);
         None
     };
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         INSTANTID_IP_SCALE,
         0.0..=1.0,
@@ -1189,8 +1189,8 @@ pub(super) async fn generate_instantid_stream(
     } else {
         INSTANTID_CONTROLNET_SCALE
     };
-    let controlnet_scale = advanced::f32_clamped(
-        &request.advanced,
+    let controlnet_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlnetConditioningScale",
         controlnet_default,
         0.0..=2.0,
@@ -1201,13 +1201,13 @@ pub(super) async fn generate_instantid_stream(
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation
     // override > user default > built-in 11. Resolved once (and only for angle jobs).
     let angle_collection = angle_set.then(|| active_angle_collection(request, settings));
-    let openpose_scale = advanced::f32_clamped(
-        &request.advanced,
+    let openpose_scale = super::sampling::resolved_f32_clamped(
+        request,
         "openPoseScale",
         INSTANTID_OPENPOSE_SCALE,
         0.0..=2.0,
     );
-    let face_restore = advanced::flag(&request.advanced, "faceRestore");
+    let face_restore = request.advanced_bool("faceRestore").unwrap_or(false);
     // PiD decoder overlay (epic 7840, sc-8371 mlx / sc-8373 candle): decode Angles/Poses through the
     // `sdxl` PiD super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
     // (`advanced.usePid`) AND the checkpoint + Gemma snapshots are cached. `resolve_pid_weights`
@@ -1222,23 +1222,21 @@ pub(super) async fn generate_instantid_stream(
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
-        Some(
-            if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-                WeightsSource::Dir(
-                    crate::portable_aux_sources::bound_aux_path(
-                        &request.advanced,
-                        "instantid_openpose",
-                    )
+        Some(if request.portable_aux.has_paths() {
+            WeightsSource::Dir(
+                request
+                    .portable_aux
+                    .path("instantid_openpose")
+                    .map(std::path::Path::to_path_buf)
                     .ok_or_else(|| {
                         WorkerError::InvalidPayload(
                             "missing bound InstantID OpenPose source".to_owned(),
                         )
                     })?,
-                )
-            } else {
-                ensure_instantid_openpose(api, settings, job).await?
-            },
-        )
+            )
+        } else {
+            ensure_instantid_openpose(api, settings, job).await?
+        })
     } else {
         None
     };
@@ -1354,7 +1352,7 @@ pub(super) async fn generate_instantid_stream(
     // engine default + emits an event rather than hard-failing `validate_request`. N1: with neither set
     // the request carries `None` ⇒ the bespoke ancestral default loop runs byte-for-byte unchanged.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,

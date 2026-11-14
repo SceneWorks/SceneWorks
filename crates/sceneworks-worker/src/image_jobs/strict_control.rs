@@ -246,7 +246,11 @@ pub(super) fn control_kind_label(kind: &ControlKind) -> String {
 /// — when a future per-model exposure story sets it — selects `canny` / `depth` / `pose`. An unknown value
 /// is rejected loudly rather than silently falling back.
 pub(super) fn requested_control_kind(request: &ImageRequest) -> WorkerResult<ControlKind> {
-    let Some(mode) = crate::payload::trimmed_string(request.advanced.get("controlMode")) else {
+    let Some(mode) = request
+        .advanced_text("controlMode")
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    else {
         return Ok(ControlKind::Pose);
     };
     match mode.to_ascii_lowercase().as_str() {
@@ -266,7 +270,10 @@ pub(super) fn resolve_user_control_map(
     settings: &Settings,
     project_path: &Path,
 ) -> WorkerResult<Option<Image>> {
-    let Some(asset_id) = crate::payload::trimmed_string(request.advanced.get("controlImage"))
+    let Some(asset_id) = request
+        .advanced_text("controlImage")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
     else {
         return Ok(None);
     };

@@ -611,7 +611,7 @@ pub(super) fn control_raw_settings(
     guidance: Option<f32>,
     engine: Option<&str>,
 ) -> sceneworks_core::contracts::JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".into(), Value::Bool(true));
     raw.insert("repo".into(), Value::String(repo.into()));
     raw.insert("numInferenceSteps".into(), serde_json::json!(steps));

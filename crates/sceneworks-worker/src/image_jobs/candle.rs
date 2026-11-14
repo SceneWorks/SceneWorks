@@ -198,9 +198,9 @@ use super::sampling::mlx_raw_settings_for_bundle;
 #[cfg(not(target_os = "macos"))]
 use super::sampling::normalize_sampling_knob;
 #[cfg(not(target_os = "macos"))]
-use super::sampling::read_advanced_guidance_method;
+use super::sampling::read_resolved_image_guidance_method;
 #[cfg(not(target_os = "macos"))]
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 #[cfg(not(target_os = "macos"))]
 use super::sampling::recover_ideogram_placeholder;
 #[cfg(not(target_os = "macos"))]
@@ -748,7 +748,12 @@ async fn generate_candle_registry_stream_using(
     // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
     // alpha — for every model but Qwen-Image 2.1.
     let rgba_output_channels = crate::qwen_alpha::request_output_channels(
-        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+        crate::qwen_alpha::resolve_output_channels_typed(
+            &request.model,
+            request
+                .advanced_bool("transparentBackground")
+                .unwrap_or(false),
+        )?,
     );
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
@@ -783,7 +788,7 @@ async fn generate_candle_registry_stream_using(
     // P4, so most families advertise only their family default today) is dropped back to the engine default
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
@@ -808,7 +813,7 @@ async fn generate_candle_registry_stream_using(
     );
     // Guidance method (epic 7434 P5, sc-7448), N3-guarded against the candle descriptor's advertised set.
     let guidance_method = normalize_sampling_knob(
-        read_advanced_guidance_method(&request.advanced),
+        read_resolved_image_guidance_method(request),
         &caps.supported_guidance_methods,
         "guidanceMethod",
         &request.model,
@@ -818,7 +823,7 @@ async fn generate_candle_registry_stream_using(
     // sc-18474: FLUX.2-dev prompt enhancement is native on Candle too. The request-local report
     // sink below is the proof seam: an enabled request cannot silently run the raw prompt without a
     // typed, honestly persisted fallback. The stale passthrough-only behavior is no longer allowed.
-    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+    let enhance = PromptEnhance::from_resolved(request)?;
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,

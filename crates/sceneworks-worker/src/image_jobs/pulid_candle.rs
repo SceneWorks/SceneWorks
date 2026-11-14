@@ -14,7 +14,7 @@ use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
@@ -196,8 +196,8 @@ fn pulid_candle_guidance(request: &ImageRequest) -> f32 {
 /// The PuLID identity-strength knob → the provider's `id_weight` (0.0 = the no-id ablation = plain
 /// FLUX). Torch/MLX clamp band 0.0–3.0 (the upstream gradio slider), default 1.0.
 fn pulid_candle_id_weight(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(
-        &request.advanced,
+    super::sampling::resolved_f32_clamped(
+        request,
         "idWeight",
         PULID_CANDLE_DEFAULT_ID_WEIGHT,
         0.0..=3.0,
@@ -308,7 +308,7 @@ fn pulid_candle_raw_settings(
     guidance: f32,
     id_weight: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("pulidFlux".to_owned(), Value::Bool(true));
@@ -356,15 +356,14 @@ pub(super) async fn generate_candle_pulid_stream(
         project_path,
     )?;
     let mut _portable_face_lease = None;
-    let (adapter, eva, face_dir) =
-        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-            let (adapter, eva, face_dir, lease) =
-                crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
-            _portable_face_lease = Some(lease);
-            (adapter, eva, face_dir)
-        } else {
-            ensure_pulid_candle_weights(api, settings, job).await?
-        };
+    let (adapter, eva, face_dir) = if request.portable_aux.has_paths() {
+        let (adapter, eva, face_dir, lease) =
+            crate::portable_aux_sources::bound_pulid_weights_typed(&request.portable_aux)?;
+        _portable_face_lease = Some(lease);
+        (adapter, eva, face_dir)
+    } else {
+        ensure_pulid_candle_weights(api, settings, job).await?
+    };
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle PuLID-FLUX lane
     // serves the single-identity `character_image` path (one identity image per seed) and has no
@@ -398,7 +397,7 @@ pub(super) async fn generate_candle_pulid_stream(
     // time-shift `mu`). Read + N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the
     // native euler-over-native-schedule default runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,

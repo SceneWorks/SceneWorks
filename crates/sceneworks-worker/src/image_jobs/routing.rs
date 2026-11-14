@@ -216,7 +216,10 @@ pub(super) fn imported_generate_request_has_unsupported_shape(request: &ImageReq
         || request.character_look_id.is_some()
         || !request.reference_asset_ids.is_empty()
         || request_has_multiphase(request)
-        || sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+        || request.advanced_text("controlImage").is_some()
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty())
 }
 
 pub(super) fn imported_generate_request_supported(
@@ -1212,7 +1215,7 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
     } else if request.model == "kolors"
         && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
             || (non_empty(&request.reference_asset_id)
-                && advanced::flag(&request.advanced, "usePid")))
+                && request.advanced_bool("usePid").unwrap_or(false)))
     {
         // Kolors IP-Adapter is its own provider (not a base overlay), and ControlNet owns a
         // separate pose provider. Neither implementation composes IP+Control or IP+PiD, so this
@@ -1342,13 +1345,19 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_conditioned_pose_requires_reject(request: &ImageRequest) -> bool {
-    let pose_count = match request.advanced.get("poses") {
-        None | Some(Value::Null) => return false,
-        Some(Value::Array(poses))
-            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
-                && poses.iter().all(Value::is_object) =>
+    let poses = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref();
+    let pose_count = match poses {
+        None => return false,
+        Some(poses)
+            if poses.value.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.value.iter().all(Value::is_object) =>
         {
-            poses.len()
+            poses.value.len()
         }
         Some(_) => return true,
     };

@@ -11,7 +11,7 @@ use super::memory::candle_resolved_tier_key;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
@@ -225,7 +225,7 @@ fn kolors_ipadapter_raw_settings(
     guidance: f32,
     ip_scale: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -298,8 +298,8 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
 
     let steps = kolors_ipadapter_steps(request);
     let guidance = kolors_ipadapter_guidance(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         KOLORS_IPADAPTER_IP_SCALE,
         0.0..=1.0,
@@ -308,7 +308,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
     // honors a curated solver/scheduler via the shared `denoise_curated` primitive (#130). Read +
     // N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the native default, byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,

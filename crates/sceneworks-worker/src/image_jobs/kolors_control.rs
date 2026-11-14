@@ -11,7 +11,7 @@ use super::pid::resolve_pid_weights;
 use super::run_candle_strict_control;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
@@ -179,8 +179,11 @@ async fn ensure_kolors_control_weights(
     let (repo, file) = kolors_control_repo_file(request)?;
     let revision =
         trusted_control_weight_revision(request, KOLORS_CONTROL_ENGINE_ID, &repo, &file)?;
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("missing bound Kolors ControlNet source".to_owned())
             });
@@ -223,7 +226,7 @@ fn kolors_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -439,8 +442,8 @@ pub(super) async fn generate_candle_kolors_control_stream(
 
     let steps = kolors_control_steps(request);
     let guidance = kolors_control_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KOLORS_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
@@ -450,7 +453,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     // against the shared curated menu (an unknown name drops to the engine default + emits an event).
     // N1: unset ⇒ `None` ⇒ the native leading-Euler default loop runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,

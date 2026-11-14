@@ -477,7 +477,10 @@ fn checkpoint_plan_request_shape_refusal(
     }
     // Material strict-control intent that did NOT resolve to the Pose operation (a pose set inside
     // edit mode, or a control payload the pose-mode reader rejects) has no lane anywhere.
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+    if (request.advanced_text("controlImage").is_some()
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty()))
         && operation != gen_core::ImportedModelOperation::Pose
     {
         return refuse("cannot combine strict control intent with this operation");
@@ -499,9 +502,9 @@ fn checkpoint_plan_request_shape_refusal(
             }
         }
         gen_core::ImportedModelOperation::Pose => {
-            if !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(
-                &request.advanced,
-            ) {
+            if !request.advanced_text("controlMode").is_none_or(|mode| {
+                mode.trim().is_empty() || mode.trim().eq_ignore_ascii_case("pose")
+            }) {
                 return refuse("does not support the requested pose control mode");
             }
             if !caps
@@ -1899,7 +1902,7 @@ fn checkpoint_plan_raw_settings(
     guidance: Option<f32>,
     quant_bits: Option<i64>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     // This route consumes pinned source layers directly, not a cache derivative. Never echo an
     // advanced-setting claim as conversion history.
     raw.remove("checkpointDerivative");

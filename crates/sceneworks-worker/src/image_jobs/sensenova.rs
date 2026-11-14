@@ -66,14 +66,8 @@ pub(super) fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
         1.0
     };
     request
-        .advanced
-        .get("trueCfgScale")
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("trueCfgScale")
+        .or_else(|| request.advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(default)
         .max(1.0)
@@ -84,14 +78,8 @@ pub(super) fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
 /// back to 3.0. The only sampling knob SenseNova exposes (mirrors the Python adapter).
 pub(super) fn resolve_sensenova_timestep_shift(request: &ImageRequest) -> f32 {
     let raw = request
-        .advanced
-        .get("schedulerShift")
-        .or_else(|| request.advanced.get("timestepShift"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("schedulerShift")
+        .or_else(|| request.advanced_f64("timestepShift"))
         .map(|value| value as f32)
         .unwrap_or(3.0);
     if raw > 0.0 {
@@ -113,7 +101,7 @@ fn sensenova_edit_raw_settings(
     timestep_shift: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));

@@ -141,7 +141,7 @@ pub(crate) fn pid_effective_dims(
 /// like `mlxQuantize` / `schedulerShift` — no top-level `ImageRequest` field, so zero contract-snapshot
 /// drift). Accepts a JSON bool or the string `"true"`.
 pub(super) fn pid_requested(request: &ImageRequest) -> bool {
-    sceneworks_core::portable_sources::pid_requested(request.advanced.get("usePid"))
+    request.advanced_bool("usePid").unwrap_or(false)
 }
 
 /// The `res2k` (2K-tuned) student filename for a backbone that ships one — flux + flux2 (sc-10056).
@@ -250,16 +250,24 @@ pub(super) fn resolve_pid_weights(
         .and_then(crate::payload::trimmed_value_str)
         .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
         .transpose()?;
-    let gemma_repo =
-        crate::payload::trimmed_string(request.advanced.get("pidGemma")).unwrap_or(PID_GEMMA_REPO);
+    let gemma_repo = request
+        .advanced_text("pidGemma")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(PID_GEMMA_REPO);
 
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        let snapshot =
-            crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_checkpoint")
-                .ok_or_else(|| {
-                    crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
-                })?;
-        let gemma = crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_gemma")
+    if request.portable_aux.has_paths() {
+        let snapshot = request
+            .portable_aux
+            .path("pid_checkpoint")
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
+            })?;
+        let gemma = request
+            .portable_aux
+            .path("pid_gemma")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 crate::WorkerError::InvalidPayload("missing bound PiD Gemma".to_owned())
             })?;

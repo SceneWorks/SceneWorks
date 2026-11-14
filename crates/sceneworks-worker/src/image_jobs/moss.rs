@@ -810,14 +810,16 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             if let Some(id) = row.get("componentId").and_then(Value::as_str).filter(|id| {
                 id.starts_with("moss-dmd-") || *id == gen_core::moss_image_edit::EDIT_COMPONENT
             }) {
-                let source = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced)
-                {
-                    let path = crate::portable_aux_sources::bound_aux_path(&request.advanced, id)
+                let source = if request.portable_aux.has_paths() {
+                    let path = request
+                        .portable_aux
+                        .path(id)
+                        .map(std::path::Path::to_path_buf)
                         .ok_or_else(|| {
-                        WorkerError::InvalidPayload(format!(
-                            "portable MOSS component {id} is not bound"
-                        ))
-                    })?;
+                            WorkerError::InvalidPayload(format!(
+                                "portable MOSS component {id} is not bound"
+                            ))
+                        })?;
                     match sceneworks_core::portable_sources::portable_aux_source_shape(
                         id,
                         &Value::Object(entry.clone()),
@@ -1018,8 +1020,14 @@ pub(super) async fn generate_moss_stream_with_runtime(
     } else {
         Default::default()
     };
-    let edit_options = sceneworks_core::moss_image::edit_options(&request.advanced)
-        .map_err(WorkerError::InvalidPayload)?;
+    let edit_options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .moss_image_edit
+        .as_ref()
+        .map(|bound| bound.value)
+        .unwrap_or_default();
     let references = if edit {
         sceneworks_core::moss_image::edit_reference_ids(&job.payload)
             .map_err(WorkerError::InvalidPayload)?

@@ -1889,7 +1889,7 @@ mod tests {
             let seed = lane::resolve_seed(request, 0);
             let steps = lane::sampling::resolve_steps(request, &model);
             let guidance = lane::sampling::resolve_guidance(request, &model);
-            let enhance = lane::PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+            let enhance = lane::PromptEnhance::from_resolved(request)?;
             let cancel = CancelFlag::new();
             lane::stream::drive_native_prompt_batch(
                 tx,

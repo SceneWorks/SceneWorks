@@ -62,11 +62,47 @@ pub(crate) fn resolve_lane_request_controls(
 ) -> WorkerResult<LaneRequestControls> {
     let refuse =
         |message: String| WorkerError::InvalidPayload(format!("{}: {message}", request.model));
-    let cfg_interval = controls::requested_cfg_interval(&request.advanced).map_err(refuse)?;
-    let caption_overflow =
-        controls::requested_caption_overflow(&request.advanced).map_err(refuse)?;
+    let cfg_interval = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .cfg_interval
+        .as_ref()
+        .map(|bound| {
+            let pair = &bound.value;
+            match pair.as_slice() {
+                [lo, hi]
+                    if lo.is_finite() && hi.is_finite() && 0.0 <= *lo && lo < hi && *hi <= 1.0 =>
+                {
+                    Ok((*lo as f32, *hi as f32))
+                }
+                _ => Err(refuse(format!(
+                    "advanced.{CFG_INTERVAL_KEY} must satisfy 0 <= start < end <= 1"
+                ))),
+            }
+        })
+        .transpose()?;
+    let caption_overflow = request
+        .advanced_text(CAPTION_OVERFLOW_KEY)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "default")
+        .map(|name| {
+            CaptionOverflow::from_name(name).ok_or_else(|| {
+                refuse(format!(
+                    "advanced.{CAPTION_OVERFLOW_KEY} is not a caption-overflow policy"
+                ))
+            })
+        })
+        .transpose()?;
     if controls::supports_scheduler_shift(&request.model_manifest_entry) {
-        controls::requested_scheduler_shift(&request.advanced).map_err(refuse)?;
+        if request
+            .advanced_f64("schedulerShift")
+            .is_some_and(|shift| !shift.is_finite() || shift <= 0.0)
+        {
+            return Err(refuse(
+                "advanced.schedulerShift must be a finite value > 0".to_owned(),
+            ));
+        }
     }
     if cfg_interval.is_some() && !caps.supports_cfg_interval {
         return Err(refuse(format!(

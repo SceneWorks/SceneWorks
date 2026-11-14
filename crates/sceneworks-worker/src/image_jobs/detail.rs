@@ -38,7 +38,6 @@ use super::Progress;
 #[cfg(target_os = "macos")]
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::cancel_requested_peek;
 use crate::first_safetensors_path;
 use crate::fresh_asset_id;
@@ -105,14 +104,18 @@ enum DetailEvent {
 
 fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
     DetailParams {
-        strength: advanced::f32_clamped(&request.advanced, "strength", 0.55, 0.2..=1.0),
-        cn_scale: advanced::f32_clamped(&request.advanced, "cnScale", 0.7, 0.1..=1.5),
-        steps: advanced::u32_clamped(&request.advanced, "steps", 24, 1..=60),
-        guidance: advanced::f32_clamped(&request.advanced, "guidanceScale", 5.0, 1.0..=15.0),
-        tile: advanced::u32_clamped(&request.advanced, "tile", 1024, 512..=1536),
-        overlap: advanced::u32_clamped(&request.advanced, "overlap", 128, 0..=512),
-        prompt: advanced::str(&request.advanced, "prompt", DETAIL_DEFAULT_PROMPT),
-        negative: advanced::str(&request.advanced, "negativePrompt", DETAIL_DEFAULT_NEGATIVE),
+        strength: super::sampling::resolved_f32_clamped(request, "strength", 0.55, 0.2..=1.0),
+        cn_scale: super::sampling::resolved_f32_clamped(request, "cnScale", 0.7, 0.1..=1.5),
+        steps: super::sampling::resolved_u32_clamped(request, "steps", 24, 1..=60),
+        guidance: super::sampling::resolved_f32_clamped(request, "guidanceScale", 5.0, 1.0..=15.0),
+        tile: super::sampling::resolved_u32_clamped(request, "tile", 1024, 512..=1536),
+        overlap: super::sampling::resolved_u32_clamped(request, "overlap", 128, 0..=512),
+        prompt: super::sampling::resolved_text(request, "prompt", DETAIL_DEFAULT_PROMPT),
+        negative: super::sampling::resolved_text(
+            request,
+            "negativePrompt",
+            DETAIL_DEFAULT_NEGATIVE,
+        ),
         // Python defaults the detail seed to 7 when the payload omits one.
         seed: request.seed.unwrap_or(7),
     }
@@ -606,11 +609,8 @@ pub(crate) async fn run_image_detail_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (_quant, _) = resolve_quant(&request, Some(&weights_dir));
     let adapters = resolve_adapters(&request, settings)?;
-    let control_repo = advanced::str(
-        &request.advanced,
-        "tileControlNetRepo",
-        TILE_CONTROLNET_REPO,
-    );
+    let control_repo =
+        super::sampling::resolved_text(&request, "tileControlNetRepo", TILE_CONTROLNET_REPO);
     // `tileControlNetRepo` is a public advanced control that accepted any repo before this epic,
     // and the MLX detail route still loads whatever it resolves. Refusing an override here removed
     // a previously-working user control to protect a memory identity that is already protected by
@@ -633,11 +633,14 @@ pub(crate) async fn run_image_detail_job(
              admission falls back to the uncertified resident estimate"
         );
     }
-    let control_file = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, "sdxl_detail_tile_control")
+    let control_file = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path("sdxl_detail_tile_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
-            WorkerError::InvalidPayload("portable Detail tile source is not bound".to_owned())
-        })?
+                WorkerError::InvalidPayload("portable Detail tile source is not bound".to_owned())
+            })?
     } else {
         let control_dir =
             huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {

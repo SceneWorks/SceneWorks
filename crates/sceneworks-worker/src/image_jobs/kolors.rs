@@ -15,7 +15,7 @@ use super::quantization::resolve_quant;
 use super::resolve_seed;
 use super::sampling::mlx_raw_settings;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 use super::sampling::resolve_guidance;
 use super::sampling::resolve_negative_prompt;
 use super::sampling::resolve_steps;
@@ -35,7 +35,6 @@ use super::LoadSpec;
 use super::Progress;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -107,8 +106,8 @@ pub(super) fn resolve_kolors_edit_init(
     } else {
         source
     };
-    let strength = advanced::f32_clamped(
-        &request.advanced,
+    let strength = super::sampling::resolved_f32_clamped(
+        request,
         "strength",
         KOLORS_EDIT_STRENGTH,
         0.05..=1.0,
@@ -139,8 +138,8 @@ pub(super) fn resolve_kolors_ip_reference(
         reference_id,
         project_path,
     )?;
-    let scale = advanced::f32_clamped(
-        &request.advanced,
+    let scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         KOLORS_IP_SCALE,
         0.0..=1.0,
@@ -232,8 +231,8 @@ fn resolve_kolors_controlnet_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 /// Pose ControlNet lock strength: `advanced.openPoseScale` (default 0.7, clamp [0, 2]) — the torch
 /// `_openpose_scale` knob.
 fn kolors_pose_control_scale(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(
-        &request.advanced,
+    super::sampling::resolved_f32_clamped(
+        request,
         "openPoseScale",
         KOLORS_POSE_CONTROL_SCALE,
         0.0..=2.0,
@@ -374,8 +373,11 @@ pub(super) async fn generate_kolors_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("kolors model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Kolors weights not found".to_owned()))?;
-    let control_dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    let control_dir = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .and_then(|file| file.parent().map(Path::to_path_buf))
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("missing bound Kolors ControlNet source".to_owned())
@@ -383,8 +385,11 @@ pub(super) async fn generate_kolors_control_stream(
     } else {
         resolve_kolors_controlnet_dir(settings)?
     };
-    let ip_dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, "kolors_ip_adapter")
+    let ip_dir = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path("kolors_ip_adapter")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
             })?
@@ -414,8 +419,8 @@ pub(super) async fn generate_kolors_control_stream(
     let guidance = resolve_guidance(request, &kolors);
     let negative_prompt = resolve_negative_prompt(request, &kolors);
     let control_scale = kolors_pose_control_scale(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         KOLORS_IP_SCALE,
         0.0..=1.0,
@@ -423,7 +428,7 @@ pub(super) async fn generate_kolors_control_stream(
     // Curated unified-sampler selection (epic 7114, sc-7432): the combined-pose tier builds its own
     // `GenerationRequest`, so read + N3-normalize the knob against the linked kolors descriptor (the
     // same advertised set base.rs uses for the generic kolors path). N1: unset ⇒ `None` ⇒ native default.
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &kolors.descriptor.capabilities.samplers,

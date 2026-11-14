@@ -24,7 +24,6 @@ use super::zimage::CHARACTER_ANGLE_SET_ORDER;
 use super::Conditioning;
 use super::Image;
 use super::ImageRequest;
-use crate::advanced;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::Path;
@@ -37,7 +36,7 @@ use crate::WorkerResult;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_conditioned_angle_set(request: &ImageRequest) -> bool {
     request.mode == "character_image"
-        && advanced::flag(&request.advanced, "angleSet")
+        && request.advanced_bool("angleSet").unwrap_or(false)
         && pose_entries(request).is_empty()
 }
 
@@ -121,14 +120,8 @@ pub(super) fn resolve_sensenova_candle_true_cfg(request: &ImageRequest) -> f32 {
         1.0
     };
     request
-        .advanced
-        .get("trueCfgScale")
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("trueCfgScale")
+        .or_else(|| request.advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(default)
         .clamp(1.0, 10.0)
@@ -161,7 +154,7 @@ pub(super) fn resolve_candle_kolors_edit_init(
     };
     Ok(Some((
         image,
-        advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0),
+        super::sampling::resolved_f32_clamped(request, "strength", 0.6, 0.05..=1.0),
     )))
 }
 
@@ -219,7 +212,7 @@ pub(super) fn edit_grouping(request: &ImageRequest) -> EditGrouping {
     if poses > 0 {
         return EditGrouping::Poses(poses);
     }
-    if advanced::flag(&request.advanced, "angleSet") {
+    if request.advanced_bool("angleSet").unwrap_or(false) {
         return EditGrouping::Angles;
     }
     EditGrouping::Plain
@@ -463,13 +456,7 @@ pub(crate) fn load_reference_alpha(
 #[cfg(target_os = "macos")]
 pub(super) fn identity_strength(request: &ImageRequest) -> Option<f32> {
     let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("referenceStrength")
         .filter(|strength| *strength > 0.0)?;
     let has_asset = request
         .reference_asset_id
@@ -554,7 +541,7 @@ pub(super) fn resolve_img2img_init_generic(
         asset_id,
         project_path,
     )?;
-    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.5, 0.0..=1.0);
+    let strength = super::sampling::resolved_f32_clamped(request, "strength", 0.5, 0.0..=1.0);
     Ok(Some((image, strength)))
 }
 
@@ -612,7 +599,7 @@ pub(super) fn resolve_text_style_gain(request: &ImageRequest) -> Option<f32> {
         .get("ui")
         .and_then(|ui| ui.get("textStyleGain"))
         .is_some()
-        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75))
+        .then(|| super::sampling::resolved_f32_clamped(request, "textStyleGain", 1.0, 0.25..=1.75))
 }
 
 /// Whether a Z-Image t2i request should take the generic `ui.img2img` reference-guided latent-init
@@ -723,7 +710,7 @@ pub(super) fn character_image_likeness_requested(request: &ImageRequest) -> bool
             .is_some_and(|id| !id.trim().is_empty())
         // Angle / pose sets are already scored by sc-4409 / sc-4410 through the shared seam.
         && pose_entries(request).is_empty()
-        && !advanced::flag(&request.advanced, "angleSet")
+        && !request.advanced_bool("angleSet").unwrap_or(false)
 }
 
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
@@ -1341,8 +1328,8 @@ pub(super) fn resolve_ideogram_edit(
     )?;
     let is_outpaint = request.fit_mode == "outpaint";
     let has_user_mask = non_empty(&request.mask_asset_id);
-    let strength = advanced::f32_clamped(
-        &request.advanced,
+    let strength = super::sampling::resolved_f32_clamped(
+        request,
         "strength",
         if is_outpaint || has_user_mask {
             IDEOGRAM_INPAINT_STRENGTH
@@ -1419,9 +1406,12 @@ pub(super) fn non_empty(value: &Option<String>) -> bool {
 #[cfg(native_lane)]
 pub(super) fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
     request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref()
+        .map(|bound| &bound.value)
         .map(|poses| poses.iter().filter(|pose| pose.is_object()).collect())
         .unwrap_or_default()
 }
@@ -1584,7 +1574,7 @@ pub(super) fn resolve_zimage_edit_init(
     } else {
         source
     };
-    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0);
+    let strength = super::sampling::resolved_f32_clamped(request, "strength", 0.6, 0.05..=1.0);
     Ok(Some((image, strength)))
 }
 
@@ -1662,8 +1652,8 @@ pub(super) fn resolve_generic_lane_conditioning(
             &reference_id,
             project_path,
         )?;
-        let scale = advanced::f32_clamped(
-            &request.advanced,
+        let scale = super::sampling::resolved_f32_clamped(
+            request,
             "ipAdapterScale",
             FLUX_IP_SCALE,
             0.0..=1.0,
@@ -1671,8 +1661,8 @@ pub(super) fn resolve_generic_lane_conditioning(
         let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
         // Real CFG only on dev (schnell is distilled — no CFG).
         let true_cfg = (request.model == "flux_dev").then(|| {
-            advanced::f32_clamped(
-                &request.advanced,
+            super::sampling::resolved_f32_clamped(
+                request,
                 "trueCfgScale",
                 FLUX_IP_TRUE_CFG,
                 1.0..=10.0,
