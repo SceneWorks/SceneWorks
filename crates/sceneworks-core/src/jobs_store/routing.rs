@@ -9,6 +9,7 @@ pub(crate) mod catalog;
 pub(crate) mod gaps;
 pub(crate) mod mlx;
 mod portable;
+pub(crate) mod route_coverage;
 pub use portable::native_route_claims_request;
 
 #[cfg(test)]

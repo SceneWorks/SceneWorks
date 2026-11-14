@@ -116,6 +116,8 @@ jsonschema = "0.28"
 # pinned-checksum verification path runs for real. Same 0.10 line the crate already depends on, so
 # no new locked version appears.
 sha2 = { workspace = true }
+# SW-6931 route reconciliation: parses the worker's native dispatch arms in a test.
+syn = { workspace = true }
 
 [lints]
 workspace = true
