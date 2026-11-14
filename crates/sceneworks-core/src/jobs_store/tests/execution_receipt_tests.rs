@@ -273,10 +273,17 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
         execution: json!({"state":"resolved","identity":{
             "version":1,"provider_id":"sdxl","backend":"mlx","runtime_id":"pinned-fixture",
             "output_units":1,
+            "sampling":{"state":"resolved","value":{"sampler":"ddim"}},
+            "schedule":{"state":"resolved","value":{"steps":2}},
+            "estimator":{"state":"not_applicable","reason":"none"},
             "deterministic_replay":{"kind":"deterministic","scope":"same_device_pinned_runtime"},
             "randomness":{"kind":"draws","scheme":"cpu_std_rng","draws":[
                 {"output_index":0,"purpose":"initial_noise","seed":41,"noise_sha256":null}
-            ]}
+            ]},
+            "geometry":{"state":"resolved","value":{"width":64,"height":64}},
+            "quality_policy":{"state":"resolved","value":{"rung":"resident"}},
+            "output_policy":{"state":"resolved","value":{"mime":"image/png"}},
+            "provider_choices":{}
         }}),
         outputs: vec![OutputExecutionBinding {
             output_index: 0,

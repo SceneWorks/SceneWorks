@@ -4120,8 +4120,9 @@ impl JobsStore {
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<JobSnapshot> {
         use crate::execution_receipt::{
-            require_deterministic_scope, require_image_seed_binding, ReplayUnavailable,
-            TrustedExecutionReceipt, SAME_DEVICE_PINNED_RUNTIME_SCOPE,
+            require_deterministic_scope, require_image_seed_binding,
+            require_provider_route_binding, ReplayUnavailable, TrustedExecutionReceipt,
+            SAME_DEVICE_PINNED_RUNTIME_SCOPE,
         };
         let unavailable = |reason, field| {
             JobsStoreError::ReplayUnavailable(ReplayUnavailable::new(reason, field))
@@ -4176,12 +4177,16 @@ impl JobsStore {
             .ok_or_else(|| unavailable("source_route_missing", "source"))?;
         let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
             serde_json::from_value(portable_binding.clone())?;
-        if !typed.routes.values().any(|candidate| {
-            serde_json::to_value(candidate).as_ref().ok() == Some(route)
-                && candidate.backend == receipt.accepted_backend
-        }) {
-            return Err(unavailable("source_route_changed", "source"));
-        }
+        let selected_route = typed
+            .routes
+            .values()
+            .find(|candidate| {
+                serde_json::to_value(candidate).as_ref().ok() == Some(route)
+                    && candidate.backend == receipt.accepted_backend
+            })
+            .ok_or_else(|| unavailable("source_route_changed", "source"))?;
+        require_provider_route_binding(&receipt, selected_route)
+            .map_err(JobsStoreError::ReplayUnavailable)?;
         if source.assigned_gpu.as_deref() != Some(receipt.accepted_device.as_str()) {
             return Err(unavailable("device_changed", "device"));
         }

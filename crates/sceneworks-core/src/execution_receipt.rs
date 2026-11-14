@@ -96,16 +96,19 @@ pub fn capability_id(secret: &str) -> String {
     crate::hashing::hex(&Sha256::digest(secret.as_bytes()))
 }
 
-fn output_asset_ids(result: &Map<String, Value>) -> Result<Vec<String>, ReplayUnavailable> {
+fn output_asset_ids(
+    result: &Map<String, Value>,
+    output_count: usize,
+) -> Result<Vec<Vec<String>>, ReplayUnavailable> {
     let Some(writes) = result.get("assetWrites") else {
-        return Ok(Vec::new());
+        return Ok(vec![Vec::new(); output_count]);
     };
     let writes = writes
         .as_array()
         .ok_or_else(|| ReplayUnavailable::new("invalid_completed_assets", "assetWrites"))?;
-    let mut ids = Vec::with_capacity(writes.len());
+    let mut ids = vec![Vec::new(); output_count];
     let mut unique = BTreeSet::new();
-    for write in writes {
+    for (position, write) in writes.iter().enumerate() {
         let id = write
             .get("assetId")
             .and_then(Value::as_str)
@@ -117,7 +120,13 @@ fn output_asset_ids(result: &Map<String, Value>) -> Result<Vec<String>, ReplayUn
                 "assetWrites",
             ));
         }
-        ids.push(id.to_owned());
+        let index = write
+            .get("index")
+            .map(|value| value.as_u64().and_then(|index| usize::try_from(index).ok()))
+            .unwrap_or(Some(position))
+            .filter(|index| *index < output_count)
+            .ok_or_else(|| ReplayUnavailable::new("invalid_output_order", "assetWrites.index"))?;
+        ids[index].push(id.to_owned());
     }
     Ok(ids)
 }
@@ -141,8 +150,7 @@ pub fn validate_worker_receipt(
             validate_execution_identity(execution, 1)?;
         }
     }
-    let expected_ids = output_asset_ids(terminal_result)?;
-    let mut submitted_ids = Vec::new();
+    let expected_ids = output_asset_ids(terminal_result, submitted.outputs.len())?;
     let mut unique = BTreeSet::new();
     for (index, output) in submitted.outputs.iter().enumerate() {
         if output.output_index != index {
@@ -152,7 +160,6 @@ pub fn validate_worker_receipt(
             if id.trim().is_empty() || !unique.insert(id.as_str()) {
                 return Err(ReplayUnavailable::new("invalid_output_assets", "outputs"));
             }
-            submitted_ids.push(id.clone());
         }
         if !output.artifact_sha256.is_empty()
             && (output.artifact_sha256.len() != output.artifact_ids.len()
@@ -173,9 +180,11 @@ pub fn validate_worker_receipt(
             "expectedCount",
         ));
     }
-    if submitted_ids.len() != expected_ids.len()
-        || submitted_ids.iter().collect::<BTreeSet<_>>()
-            != expected_ids.iter().collect::<BTreeSet<_>>()
+    if submitted
+        .outputs
+        .iter()
+        .zip(&expected_ids)
+        .any(|(output, expected)| output.artifact_ids != *expected)
     {
         return Err(ReplayUnavailable::new(
             "output_artifacts_changed",
@@ -185,54 +194,33 @@ pub fn validate_worker_receipt(
     Ok(())
 }
 
+fn parse_execution_identity(
+    execution: &Value,
+    output_units: usize,
+) -> Result<gen_core::generator::ExecutionIdentity, ReplayUnavailable> {
+    let report: gen_core::generator::ExecutionIdentity = serde_json::from_value(execution.clone())
+        .map_err(|_| ReplayUnavailable::new("invalid_execution_identity", "execution"))?;
+    let (provider, backend) = report
+        .resolved()
+        .map(|identity| (identity.provider_id.as_str(), identity.backend.as_str()))
+        .unwrap_or(("", ""));
+    if report.resolved().is_some() && (provider.trim().is_empty() || backend.trim().is_empty()) {
+        return Err(ReplayUnavailable::new(
+            "invalid_execution_identity",
+            "execution.identity",
+        ));
+    }
+    report
+        .validate(provider, backend, output_units)
+        .map_err(|_| ReplayUnavailable::new("invalid_execution_identity", "execution.identity"))?;
+    Ok(report)
+}
+
 fn validate_execution_identity(
     execution: &Value,
     output_units: usize,
 ) -> Result<(), ReplayUnavailable> {
-    let state = execution
-        .get("state")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ReplayUnavailable::new("invalid_execution_identity", "execution"))?;
-    match state {
-        "resolved" => {
-            let identity = execution.get("identity").ok_or_else(|| {
-                ReplayUnavailable::new("invalid_execution_identity", "execution.identity")
-            })?;
-            if identity.get("version").and_then(Value::as_u64) != Some(1)
-                || identity.get("output_units").and_then(Value::as_u64) != Some(output_units as u64)
-                || identity
-                    .get("runtime_id")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-                || identity.get("deterministic_replay").is_none()
-            {
-                return Err(ReplayUnavailable::new(
-                    "invalid_execution_identity",
-                    "execution.identity",
-                ));
-            }
-        }
-        "unavailable" => {
-            let reason = execution.get("reason").ok_or_else(|| {
-                ReplayUnavailable::new("invalid_execution_identity", "execution.reason")
-            })?;
-            if reason.get("code").and_then(Value::as_str).is_none()
-                || reason.get("detail").and_then(Value::as_str).is_none()
-            {
-                return Err(ReplayUnavailable::new(
-                    "invalid_execution_identity",
-                    "execution.reason",
-                ));
-            }
-        }
-        _ => {
-            return Err(ReplayUnavailable::new(
-                "invalid_execution_identity",
-                "execution.state",
-            ))
-        }
-    }
-    Ok(())
+    parse_execution_identity(execution, output_units).map(|_| ())
 }
 
 /// Exact replay is a separate action. A resolved identity is insufficient: the
@@ -243,25 +231,29 @@ pub fn require_deterministic_scope(
 ) -> Result<(), ReplayUnavailable> {
     for output in &receipt.outputs {
         let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
-        let Some(identity) = execution.get("identity") else {
+        let report = parse_execution_identity(
+            execution,
+            if output.execution.is_some() {
+                1
+            } else {
+                receipt.outputs.len()
+            },
+        )?;
+        let Some(identity) = report.resolved() else {
             return Err(ReplayUnavailable::new("execution_unavailable", "execution"));
         };
-        let support = identity.get("deterministic_replay").ok_or_else(|| {
-            ReplayUnavailable::new("execution_unavailable", "execution.deterministic_replay")
-        })?;
-        if support.get("kind").and_then(Value::as_str) != Some("deterministic") {
+        if !identity.deterministic_replay.is_deterministic() {
             return Err(ReplayUnavailable::new(
                 "deterministic_replay_unavailable",
                 "execution.deterministic_replay",
             ));
         }
-        let declared_scope = support
-            .get("scope")
-            .and_then(Value::as_str)
-            .filter(|scope| !scope.is_empty())
-            .ok_or_else(|| {
-                ReplayUnavailable::new("invalid_replay_scope", "execution.deterministic_replay")
-            })?;
+        let gen_core::generator::ExecutionReplaySupport::Deterministic {
+            scope: declared_scope,
+        } = &identity.deterministic_replay
+        else {
+            unreachable!("is_deterministic guarded this branch")
+        };
         if declared_scope != actual_scope {
             return Err(ReplayUnavailable::new(
                 "replay_scope_changed",
@@ -284,6 +276,42 @@ pub fn require_deterministic_scope(
             "output_hashes_unavailable",
             "outputs",
         ));
+    }
+    Ok(())
+}
+
+/// A completed provider identity must name one of the model identities in the
+/// server-selected source route before a stored report can authorize replay.
+/// Imported wrappers without a stable descriptor-to-source mapping refuse
+/// replay until that mapping is made explicit.
+pub fn require_provider_route_binding(
+    receipt: &TrustedExecutionReceipt,
+    route: &crate::model_artifacts::portable_binding::PortableRouteBinding,
+) -> Result<(), ReplayUnavailable> {
+    if route.backend != receipt.accepted_backend || route.models.is_empty() {
+        return Err(ReplayUnavailable::new("provider_route_changed", "source"));
+    }
+    for output in &receipt.outputs {
+        let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
+        let report = parse_execution_identity(
+            execution,
+            if output.execution.is_some() {
+                1
+            } else {
+                receipt.outputs.len()
+            },
+        )?;
+        let identity = report
+            .resolved()
+            .ok_or_else(|| ReplayUnavailable::new("execution_unavailable", "execution"))?;
+        if identity.backend != route.backend
+            || !route
+                .models
+                .iter()
+                .any(|model| model.model_id == identity.provider_id)
+        {
+            return Err(ReplayUnavailable::new("provider_route_changed", "source"));
+        }
     }
     Ok(())
 }
@@ -355,8 +383,19 @@ mod tests {
         serde_json::from_value(json!({
             "version": 1,
             "execution": {"state":"resolved","identity":{
-                "version":1,"runtime_id":"fixture","output_units":2,
-                "deterministic_replay":{"kind":"deterministic","scope":"same-device"}
+                "version":1,"provider_id":"fixture","backend":"candle","runtime_id":"fixture","output_units":2,
+                "sampling":{"state":"resolved","value":{"sampler":"ddim"}},
+                "schedule":{"state":"resolved","value":{"steps":2}},
+                "estimator":{"state":"not_applicable","reason":"none"},
+                "randomness":{"kind":"draws","scheme":"cpu_std_rng","draws":[
+                    {"output_index":0,"purpose":"initial_noise","seed":41,"noise_sha256":null},
+                    {"output_index":1,"purpose":"initial_noise","seed":42,"noise_sha256":null}
+                ]},
+                "deterministic_replay":{"kind":"deterministic","scope":"same-device"},
+                "geometry":{"state":"resolved","value":{"width":64,"height":64}},
+                "quality_policy":{"state":"resolved","value":{"rung":"resident"}},
+                "output_policy":{"state":"resolved","value":{"mime":"image/png"}},
+                "provider_choices":{}
             }},
             "outputs": [
                 {"outputIndex":0,"artifactIds":["a"],"artifactSha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]},
@@ -389,9 +428,19 @@ mod tests {
         variants.outputs[0].artifact_ids.push("upscaled-a".into());
         variants.outputs[0].artifact_sha256.push("c".repeat(64));
         let variant_result = json!({"expectedCount":2,"assetWrites":[
-            {"assetId":"a"},{"assetId":"b"},{"assetId":"upscaled-a"}
+            {"assetId":"a","index":0},{"assetId":"b","index":1},{"assetId":"upscaled-a","index":0}
         ]});
         assert!(validate_worker_receipt(&variants, variant_result.as_object().unwrap()).is_ok());
+        let mut swapped = variants;
+        swapped.outputs.swap(0, 1);
+        swapped.outputs[0].output_index = 0;
+        swapped.outputs[1].output_index = 1;
+        assert_eq!(
+            validate_worker_receipt(&swapped, variant_result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_artifacts_changed"
+        );
     }
 
     #[test]
@@ -399,6 +448,22 @@ mod tests {
         let left: Value = serde_json::from_str(r#"{"a":{"x":1,"y":2},"b":3}"#).unwrap();
         let right: Value = serde_json::from_str(r#"{"b":3,"a":{"y":2,"x":1}}"#).unwrap();
         assert_eq!(json_sha256(&left).unwrap(), json_sha256(&right).unwrap());
+    }
+
+    #[test]
+    fn incomplete_resolved_provider_report_cannot_become_trusted() {
+        let mut report = worker_receipt();
+        report.execution["identity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("quality_policy");
+        let terminal = json!({"expectedCount":2,"assetWrites":[{"assetId":"a"},{"assetId":"b"}]});
+        assert_eq!(
+            validate_worker_receipt(&report, terminal.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_identity"
+        );
     }
 
     #[test]
