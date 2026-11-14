@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_policy::apply_candle_image_load_shape;
 use super::load_spec::candle_artifact_path_matches;
@@ -402,7 +403,7 @@ impl CandleStrictControl for Flux1StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = Flux1ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
@@ -423,11 +424,14 @@ impl CandleStrictControl for Flux1StrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!(
-                "FLUX.1-dev strict-control generation failed: {error}"
-            ))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!(
+                    "FLUX.1-dev strict-control generation failed: {error}"
+                ))
+            })?;
+        completed_control_image(completed)
     }
 }
 

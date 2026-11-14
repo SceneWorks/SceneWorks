@@ -199,6 +199,46 @@ async fn run_utility_job_inner(
     let result = with_shutdown_flag(shutdown.clone(), async {
         validate_static_job_options(&job.job_type, &job.payload)
             .map_err(|error| ("Invalid generation options.", error))?;
+        if let Some(expected) = EXACT_REPLAY_EXPECTED.try_with(Clone::clone).ok().flatten() {
+            use sceneworks_core::execution_receipt::{
+                require_deterministic_scope, require_image_seed_binding, ReplayUnavailable,
+                SAME_DEVICE_PINNED_RUNTIME_SCOPE,
+            };
+            let unavailable = |reason, field| {
+                (
+                    "Exact replay unavailable.",
+                    WorkerError::ReplayUnavailable(ReplayUnavailable::new(reason, field)),
+                )
+            };
+            if expected.worker_id != settings.worker_id
+                || expected.accepted_device != settings.gpu_id
+                || expected.accepted_backend != crate::portable_runtime_backend(settings)
+                || expected.inference_revision
+                    != sceneworks_core::inference_provenance::INFERENCE_REVISION
+                || expected.accepted_source_route
+                    != portable_model_binding
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|_| unavailable("source_route_changed", "source"))?
+            {
+                return Err(unavailable("replay_binding_changed", "source"));
+            }
+            require_deterministic_scope(&expected, SAME_DEVICE_PINNED_RUNTIME_SCOPE).map_err(
+                |reason| {
+                    (
+                        "Exact replay unavailable.",
+                        WorkerError::ReplayUnavailable(reason),
+                    )
+                },
+            )?;
+            require_image_seed_binding(&expected, &job.payload).map_err(|reason| {
+                (
+                    "Exact replay unavailable.",
+                    WorkerError::ReplayUnavailable(reason),
+                )
+            })?;
+        }
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
@@ -602,6 +642,47 @@ async fn handle_job_failure(
     message: &'static str,
     error: WorkerError,
 ) {
+    let replay_active = EXACT_REPLAY_EXPECTED
+        .try_with(|expected| expected.is_some())
+        .unwrap_or(false);
+    let replay_reason = if matches!(error, WorkerError::Canceled(_)) {
+        None
+    } else if replay_active {
+        use sceneworks_core::execution_receipt::ReplayUnavailable;
+        Some(match &error {
+            WorkerError::ReplayUnavailable(reason) => reason.clone(),
+            WorkerError::ExternalLibraryUnavailable(_) => {
+                ReplayUnavailable::new("source_unavailable", "source")
+            }
+            WorkerError::Api {
+                code: Some(code), ..
+            } if code == "replay_unavailable" => {
+                ReplayUnavailable::new("completed_execution_changed", "executionReceipt")
+            }
+            _ => ReplayUnavailable::new("execution_failed", "execution"),
+        })
+    } else {
+        None
+    };
+    if let Some(reason) = replay_reason {
+        let result = json!({"replayUnavailable": reason}).as_object().cloned();
+        let _ = update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Failed,
+                ProgressStage::Failed,
+                1.0,
+                "Exact replay unavailable.",
+                Some("The recorded execution cannot be replayed exactly.".into()),
+                result,
+                None,
+            ),
+        )
+        .await;
+        tracing::error!(event = "exact_replay_unavailable", jobId = %job.id, reason = %reason.reason, cause = %error);
+        return;
+    }
     match error {
         WorkerError::Canceled(_) => {}
         WorkerError::Validation(error) => {

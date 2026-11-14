@@ -670,6 +670,18 @@ pub struct PortableRouteBinding {
     pub backend: String,
     pub platform: String,
     pub models: Vec<PortableModelBinding>,
+    /// Server-selected execution identity. Older bindings omit this and cannot authorize replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_provider: Option<PortableExpectedProvider>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableExpectedProvider {
+    pub model_slot: String,
+    pub model_id: String,
+    pub operation: String,
+    pub provider_id: String,
 }
 
 /// Private admission envelope. Every permitted backend/platform route is frozen once, and a
@@ -1228,6 +1240,7 @@ impl PortableRouteBinding {
             backend: backend.into(),
             platform: platform.into(),
             models,
+            expected_provider: None,
         };
         route.validate()?;
         Ok(route)
@@ -1235,6 +1248,15 @@ impl PortableRouteBinding {
 
     pub fn key(&self) -> String {
         format!("{}:{}", self.backend, self.platform)
+    }
+
+    pub fn with_expected_provider(
+        mut self,
+        expected: PortableExpectedProvider,
+    ) -> Result<Self, ArtifactContractError> {
+        self.expected_provider = Some(expected);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), ArtifactContractError> {
@@ -1246,6 +1268,9 @@ impl PortableRouteBinding {
         let mut previous = None;
         for model in &self.models {
             model.validate()?;
+            if model.backend != self.backend {
+                return Err(error("portable model backend differs from its route"));
+            }
             if previous
                 .as_deref()
                 .is_some_and(|slot| slot >= model.slot.as_str())
@@ -1255,6 +1280,23 @@ impl PortableRouteBinding {
                 ));
             }
             previous = Some(model.slot.clone());
+        }
+        if let Some(expected) = &self.expected_provider {
+            for (label, value) in [
+                ("provider model slot", expected.model_slot.as_str()),
+                ("provider model id", expected.model_id.as_str()),
+                ("provider id", expected.provider_id.as_str()),
+            ] {
+                validate_logical_name(label, value)?;
+            }
+            if !matches!(expected.operation.as_str(), "image_generate" | "image_edit") {
+                return Err(error("portable provider operation is unsupported"));
+            }
+            if !self.models.iter().any(|model| {
+                model.slot == expected.model_slot && model.model_id == expected.model_id
+            }) {
+                return Err(error("portable provider has no matching frozen model slot"));
+            }
         }
         Ok(())
     }
@@ -2099,9 +2141,28 @@ mod tests {
             backend: "mlx".into(),
             platform: "macos".into(),
             models: vec![model],
+            expected_provider: Some(PortableExpectedProvider {
+                model_slot: "modelManifestEntry".into(),
+                model_id: "example".into(),
+                operation: "image_generate".into(),
+                provider_id: "provider".into(),
+            }),
         };
         let routes = BTreeMap::from([(route.key(), route)]);
         let before = route_map_sha256(&routes).unwrap();
+        let mut changed_provider = routes.clone();
+        changed_provider
+            .get_mut("mlx:macos")
+            .unwrap()
+            .expected_provider
+            .as_mut()
+            .unwrap()
+            .provider_id = "other".into();
+        assert_ne!(before, route_map_sha256(&changed_provider).unwrap());
+        let mut changed_source = routes.clone();
+        changed_source.get_mut("mlx:macos").unwrap().models[0].members[0].files[0].sha256 =
+            format!("sha256:{}", "f".repeat(64));
+        assert_ne!(before, route_map_sha256(&changed_source).unwrap());
         let mut stored = serde_json::to_value(&routes).unwrap();
         stored.sort_all_objects();
         let restored: BTreeMap<String, PortableRouteBinding> =

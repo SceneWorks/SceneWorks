@@ -1,6 +1,7 @@
 use super::adapters::resolve_adapters;
 use super::admit_conditioning_paths;
 use super::artifact_resolution::krea_model_subdir;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_text_style_gain;
 #[cfg(target_os = "macos")]
@@ -704,11 +705,14 @@ impl CandleStrictControl for KreaStrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = self.control_request(seed, cancel, preview);
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
+            })?;
+        completed_control_image(completed)
     }
 }
 

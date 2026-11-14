@@ -675,7 +675,7 @@ pub(crate) async fn run_vqa_job(
     // (sc-9123, the sc-8804 F-003 residual).
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
-    let answer = run_blocking_with_heartbeat(
+    let (answer, execution) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -683,43 +683,49 @@ pub(crate) async fn run_vqa_job(
         VQA_CANCEL_MESSAGE,
         "VQA task join",
         crate::no_cancel_ack(),
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
-            vqa_generate(
-                &weights_dir,
-                &source,
-                &question_for_vqa,
-                max_new_tokens,
-                max_image_pixels,
-                &job_id,
-                &task_cancel,
-                direct_admission,
-                || {
-                    if task_cancel.is_cancelled() {
-                        return Err(WorkerError::Canceled(VQA_CANCEL_MESSAGE.to_owned()));
-                    }
-                    runtime_handle.block_on(async {
-                        update_job(
-                            &ready_api,
-                            &job_id,
-                            image_progress(
-                                JobStatus::Running,
-                                ProgressStage::Generating,
-                                0.6,
-                                "Analyzing image.",
-                                None,
-                                &ready_backend,
-                            ),
-                        )
-                        .await
-                        .map(|_| ())
-                    })
-                },
-            )
-        }),
+        crate::load_progress::spawn_blocking(
+            move || -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
+                vqa_generate(
+                    &weights_dir,
+                    &source,
+                    &question_for_vqa,
+                    max_new_tokens,
+                    max_image_pixels,
+                    &job_id,
+                    &task_cancel,
+                    direct_admission,
+                    || {
+                        if task_cancel.is_cancelled() {
+                            return Err(WorkerError::Canceled(VQA_CANCEL_MESSAGE.to_owned()));
+                        }
+                        runtime_handle.block_on(async {
+                            update_job(
+                                &ready_api,
+                                &job_id,
+                                image_progress(
+                                    JobStatus::Running,
+                                    ProgressStage::Generating,
+                                    0.6,
+                                    "Analyzing image.",
+                                    None,
+                                    &ready_backend,
+                                ),
+                            )
+                            .await
+                            .map(|_| ())
+                        })
+                    },
+                )
+            },
+        ),
     )
     .await?;
 
-    let result = vqa_result_json(&answer, &question, &source_asset_id, &model_id);
+    let mut result = vqa_result_json(&answer, &question, &source_asset_id, &model_id);
+    result.insert(
+        "workerExecutionReport".into(),
+        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+    );
 
     update_job(
         api,
@@ -753,7 +759,7 @@ fn vqa_generate(
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
     on_loaded: impl FnOnce() -> WorkerResult<()>,
-) -> WorkerResult<String> {
+) -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
     })?;
@@ -798,8 +804,8 @@ fn vqa_generate(
         }],
         ..Default::default()
     };
-    let answer = runtime
-        .run_vqa_with_progress(
+    let (answer, execution) = runtime
+        .run_vqa_with_execution_report(
             &context,
             request,
             question,
@@ -813,7 +819,7 @@ fn vqa_generate(
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
         })?;
-    Ok(strip_reasoning(&answer))
+    Ok((strip_reasoning(&answer), execution))
 }
 
 /// Candle (Windows/CUDA) VQA seam — the off-Mac sibling of [`vqa_generate`] (sc-5501). Builds the
@@ -832,7 +838,7 @@ fn vqa_generate(
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
     on_loaded: impl FnOnce() -> WorkerResult<()>,
-) -> WorkerResult<String> {
+) -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
@@ -874,8 +880,8 @@ fn vqa_generate(
         }],
         ..Default::default()
     };
-    let answer = runtime
-        .run_vqa_with_progress(
+    let (answer, execution) = runtime
+        .run_vqa_with_execution_report(
             &context,
             request,
             question,
@@ -889,7 +895,7 @@ fn vqa_generate(
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
         })?;
-    Ok(strip_reasoning(&answer))
+    Ok((strip_reasoning(&answer), execution))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
@@ -1124,8 +1130,8 @@ pub(crate) async fn run_interleave_job(
     );
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
-    let interleave_task =
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
+    let interleave_task = crate::load_progress::spawn_blocking(
+        move || -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
             interleave_generate(
                 &weights_dir,
                 &input_images,
@@ -1135,12 +1141,13 @@ pub(crate) async fn run_interleave_job(
                 &task_cancel,
                 direct_admission,
             )
-        });
+        },
+    );
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
     // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
     // is never falsely marked `interrupted` (sc-8390). Cancelable mid-rollout via the threaded
     // flag (sc-9123).
-    let (generated_text, images) = run_blocking_with_heartbeat(
+    let (generated_text, images, execution) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1198,7 +1205,7 @@ pub(crate) async fn run_interleave_job(
             images,
         )
     });
-    let result = run_blocking_with_heartbeat(
+    let mut result = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1209,6 +1216,14 @@ pub(crate) async fn run_interleave_job(
         write_task,
     )
     .await?;
+    let report = serde_json::to_value(execution).map_err(WorkerError::Json)?;
+    if let Some(writes) = result.get_mut("assetWrites").and_then(Value::as_array_mut) {
+        for write in writes {
+            if let Some(fact) = write.as_object_mut() {
+                fact.insert("workerExecutionReport".into(), report.clone());
+            }
+        }
+    }
 
     update_job(
         api,
@@ -1241,7 +1256,7 @@ fn interleave_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
-) -> WorkerResult<(String, Vec<Image>)> {
+) -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
     })?;
@@ -1303,8 +1318,8 @@ fn interleave_generate(
             .collect(),
         ..Default::default()
     };
-    let out = runtime
-        .run_interleave(
+    let (out, execution) = runtime
+        .run_interleave_with_execution_report(
             &context,
             request,
             prompt,
@@ -1334,7 +1349,7 @@ fn interleave_generate(
             WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
         })?);
     }
-    Ok((out.text, decoded))
+    Ok((out.text, decoded, execution))
 }
 
 /// Candle (Windows/CUDA) interleave seam — the off-Mac sibling of [`interleave_generate`] (sc-5501).
@@ -1350,7 +1365,7 @@ fn interleave_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
-) -> WorkerResult<(String, Vec<Image>)> {
+) -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
@@ -1410,8 +1425,8 @@ fn interleave_generate(
             .collect(),
         ..Default::default()
     };
-    let out = runtime
-        .run_interleave_with_progress(
+    let (out, execution) = runtime
+        .run_interleave_with_execution_report(
             &context,
             request,
             prompt,
@@ -1439,7 +1454,7 @@ fn interleave_generate(
             WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
         })?);
     }
-    Ok((out.text, decoded))
+    Ok((out.text, decoded, execution))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not

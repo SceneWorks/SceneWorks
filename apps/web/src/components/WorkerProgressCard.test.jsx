@@ -276,6 +276,33 @@ describe("WorkerProgressCard layout", () => {
     expect(labels).toContain("Duplicate");
   });
 
+  it("keeps exact replay separate and renders a typed refusal", async () => {
+    const job = {
+      id: "render-one", type: "image_generate", status: "completed",
+      attempts: 1, payload: { seed: 41 },
+    };
+    const onExactReplay = vi.fn(async () => ({
+      ok: false, code: "replay_unavailable", reason: "deterministic_replay_unavailable",
+    }));
+    api = render(<WorkerProgressCard job={job} onExactReplay={onExactReplay} />, makeContext([]));
+    const button = [...api.container.querySelectorAll("button")]
+      .find((item) => item.textContent === "Exact replay");
+    expect(button).toBeDefined();
+    await act(async () => button.click());
+    expect(onExactReplay).toHaveBeenCalledWith(job);
+    expect(api.container.querySelector('[role="alert"]').textContent)
+      .toBe("The provider has not verified exact replay for this run.");
+  });
+
+  it("renders a persisted replay refusal from the job result", () => {
+    api = render(<WorkerProgressCard job={{
+      id: "replay-failed", type: "image_generate", status: "failed", payload: {},
+      result: { replayUnavailable: { code: "replay_unavailable", reason: "source_unavailable", field: "source" } },
+    }} />, makeContext([]));
+    expect(api.container.querySelector('[role="alert"]').textContent)
+      .toBe("The original model source is unavailable.");
+  });
+
   it("shows only Cancel for queued jobs (no Retry/Duplicate)", () => {
     const job = {
       id: "j",

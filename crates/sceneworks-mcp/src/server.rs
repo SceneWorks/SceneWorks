@@ -996,6 +996,44 @@ impl SceneWorksMcp {
     }
 
     #[tool(
+        description = "Read the completed execution receipt for a job. It records the accepted backend and device, the provider's effective choices and per-output artifact binding. A missing receipt returns typed replay_unavailable."
+    )]
+    async fn get_execution_receipt(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let job_id = valid_job_id(&args.job_id)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        match self
+            .api
+            .get_json(&format!("/api/v1/jobs/{job_id}/execution-receipt"), &[])
+            .await
+        {
+            Ok(receipt) => json_result(receipt),
+            Err(error) => replay_tool_error(error),
+        }
+    }
+
+    #[tool(
+        description = "Request exact replay of a completed job from its stored receipt. The API pins the original worker, device, source route, seed draws and provider execution choices. If any fact is unavailable or changed, returns a typed replay_unavailable refusal and starts no job. For a fresh generation use the ordinary submit tool."
+    )]
+    async fn exact_replay_job(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let job_id = valid_job_id(&args.job_id)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        match self
+            .api
+            .post_json(&format!("/api/v1/jobs/{job_id}/exact-replay"), &json!({}))
+            .await
+        {
+            Ok(job) => json_result(compact_job_status(&job)),
+            Err(error) => replay_tool_error(error),
+        }
+    }
+
+    #[tool(
         description = "Fetch the result of a COMPLETED job (video or image) as downloadable links. Mints a short-lived media ticket and returns one resource link per result asset — the URL works from any machine that can reach the SceneWorks API (no auth header needed while the ticket is valid). Workflow metadata is stripped from linked images by default because MCP outputs often travel to model-provider infrastructure; set includeWorkflow=true only when the recipient needs the embedded recipe. Video/image bytes are never inlined by this tool. If the job is still running it reports ready=false; if it failed, the job error."
     )]
     async fn get_job_result(
@@ -1453,6 +1491,19 @@ fn api_error(error: ApiClientError) -> ErrorData {
 /// message it can react to, rather than a raw JSON-RPC protocol error.
 fn tool_error(message: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+}
+
+/// Keep ReplayUnavailable's machine-readable reason and field intact across
+/// MCP instead of turning a domain refusal into a JSON-RPC transport error.
+fn replay_tool_error(error: ApiClientError) -> Result<CallToolResult, ErrorData> {
+    if let ApiClientError::Api { detail, .. } = &error {
+        if let Ok(value) = serde_json::from_str::<Value>(detail) {
+            if value.get("code").and_then(Value::as_str) == Some("replay_unavailable") {
+                return Ok(CallToolResult::error(vec![ContentBlock::json(&value)?]));
+            }
+        }
+    }
+    Err(api_error(error))
 }
 
 /// Map `generate_image` args onto the `ImageJobRequest` wire shape (camelCase).

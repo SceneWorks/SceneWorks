@@ -1070,6 +1070,7 @@ pub(super) async fn generate_stream_using(
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                        let execution_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -1102,12 +1103,13 @@ pub(super) async fn generate_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
                             on_progress,
                         )?;
-                        let facts = lane_controls::image_facts(
+                        let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
@@ -1115,8 +1117,12 @@ pub(super) async fn generate_stream_using(
                                 memory_evaluation.prefix_kv_cache,
                                 prefix_kv_cache_report.take().as_ref(),
                             ),
-                        );
-                        Ok((images, facts))
+                        )
+                        .unwrap_or_default();
+                        if let Some(report) = execution_report.take() {
+                            report.insert_image_facts(&mut facts)?;
+                        }
+                        Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
             }
@@ -1157,6 +1163,7 @@ pub(super) async fn generate_stream_using(
                     let warnings = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                    let execution_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -1193,6 +1200,7 @@ pub(super) async fn generate_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: None,
                             },
                             &cancel,
@@ -1239,6 +1247,9 @@ pub(super) async fn generate_stream_using(
                         ),
                     )
                     .unwrap_or_default();
+                    if let Some(report) = execution_report.take() {
+                        report.insert_image_facts(&mut facts)?;
+                    }
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(
                             flux3_references::FACT_KEY.to_owned(),

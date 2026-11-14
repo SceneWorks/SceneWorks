@@ -33,6 +33,7 @@ use super::stream::drive_gen_items;
 use super::stream::start_gen_stream;
 use super::AdapterKind;
 use super::AdapterSpec;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -1182,6 +1183,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
@@ -1226,14 +1228,14 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         )
                     });
                     let active_references = pose_references.as_deref().unwrap_or(&references);
-                    let result = model.generate_with_memory_context(
+                    let result = model.generate_with_memory_context_with_execution_report(
                         &memory_context,
                         &req,
                         active_references,
                         &mut *on_progress,
                     );
-                    let out = match result {
-                        Ok(out) => out,
+                    let completed = match result {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -1241,6 +1243,23 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "Qwen edit returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = facts_tx
+                        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out.width, out.height, out.pixels)))
                 },
             )

@@ -1383,7 +1383,8 @@ pub(super) async fn generate_krea_imported_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
+            let facts_tx = tx.clone();
+            drive_gen_items_scored(tx, poses, move |index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -1412,14 +1413,31 @@ pub(super) async fn generate_krea_imported_control_stream(
                     cancel: cancel.clone(),
                     preview,
                 };
-                let (out_w, out_h, pixels) = model
-                    .generate(&control_request, &control, on_progress)
-                    .map(|image| (image.width, image.height, image.pixels))
+                let completed = model
+                    .generate_with_execution_report(&control_request, &control, on_progress)
                     .map_err(|error| {
                         WorkerError::Engine(format!(
                             "Krea imported pose generation failed: {error}"
                         ))
                     })?;
+                let image = match completed.generation.output {
+                    Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                        images.remove(0)
+                    }
+                    _ => {
+                        return Err(WorkerError::Engine(
+                            "Krea imported pose returned an incomplete image".into(),
+                        ))
+                    }
+                };
+                let mut facts = crate::JsonObject::new();
+                facts.insert(
+                    "workerExecutionReport".into(),
+                    serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                );
+                let _ =
+                    facts_tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                let (out_w, out_h, pixels) = (image.width, image.height, image.pixels);
                 let face_likeness = scorer.as_ref().and_then(|scorer| {
                     crate::face_likeness::score_generated_image(
                         Some(scorer),

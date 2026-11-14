@@ -258,7 +258,7 @@ pub(super) fn zimage_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -271,15 +271,15 @@ pub(super) fn zimage_control_generate_one(
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
-    let output = generator
-        .generate(&request, on_progress)
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
         .map_err(|error| WorkerError::Engine(format!("control generation failed: {error}")))?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "control generator returned non-image output".to_owned(),
@@ -424,53 +424,63 @@ pub(super) async fn generate_zimage_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
-                let conditioning = build_control_conditioning(
-                    control,
-                    control_kind.clone(),
-                    control_scale,
-                    identity_init,
-                );
-                let (out_w, out_h, pixels) = zimage_control_generate_one(
-                    generator,
-                    &sampling_controls,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    conditioning,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished pose against the cached source embedding (sc-4410). The strict-
-                // control lane produces the FINAL image directly (no face-restore pass), so this scores
-                // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
-                // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let control = preprocess_control_entry(
+                        &control_kind,
+                        user_control,
+                        Some(&pose),
+                        control_source,
+                        width,
+                        height,
+                        stickwidth,
+                        depth_weights_dir,
+                    )?;
+                    let conditioning = build_control_conditioning(
+                        control,
+                        control_kind.clone(),
+                        control_scale,
+                        identity_init,
+                    );
+                    let (out_w, out_h, pixels, execution) = zimage_control_generate_one(
+                        generator,
+                        &sampling_controls,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        conditioning,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                    // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                    // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
+                    // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 
@@ -511,7 +521,7 @@ pub(super) fn zimage_base_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -526,15 +536,17 @@ pub(super) fn zimage_base_control_generate_one(
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("base Z-Image control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "base Z-Image control generator returned non-image output".to_owned(),
@@ -693,55 +705,65 @@ pub(super) async fn generate_zimage_base_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
-                let conditioning = build_control_conditioning(
-                    control,
-                    control_kind.clone(),
-                    control_scale,
-                    identity_init,
-                );
-                let (out_w, out_h, pixels) = zimage_base_control_generate_one(
-                    generator,
-                    &sampling_controls,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    conditioning,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished pose against the cached source embedding (sc-4410). The strict-
-                // control lane produces the FINAL image directly (no face-restore pass), so this scores
-                // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
-                // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let control = preprocess_control_entry(
+                        &control_kind,
+                        user_control,
+                        Some(&pose),
+                        control_source,
+                        width,
+                        height,
+                        stickwidth,
+                        depth_weights_dir,
+                    )?;
+                    let conditioning = build_control_conditioning(
+                        control,
+                        control_kind.clone(),
+                        control_scale,
+                        identity_init,
+                    );
+                    let (out_w, out_h, pixels, execution) = zimage_base_control_generate_one(
+                        generator,
+                        &sampling_controls,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        conditioning,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                    // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                    // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
+                    // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 

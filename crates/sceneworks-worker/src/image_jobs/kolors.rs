@@ -300,7 +300,7 @@ fn kolors_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let conditioning = vec![
         Conditioning::Control {
             image: control,
@@ -334,15 +334,15 @@ fn kolors_control_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, on_progress)
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
         .map_err(|error| WorkerError::Engine(format!("kolors pose generation failed: {error}")))?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("kolors pose generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "kolors pose generator returned non-image output".to_owned(),
@@ -537,57 +537,67 @@ pub(super) async fn generate_kolors_control_stream(
             let scorer = face_stack_dir
                 .as_ref()
                 .and_then(|dir| crate::face_likeness::build_face_likeness_scorer(dir, reference));
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
-                let skeleton = crate::openpose_skeleton::draw_wholebody(
-                    width,
-                    height,
-                    &pose.keypoints,
-                    pose.hands.as_deref(),
-                    pose.face.as_deref(),
-                    stickwidth,
-                );
-                let control = Image {
-                    width,
-                    height,
-                    pixels: skeleton.into_raw(),
-                };
-                let (out_w, out_h, pixels) = kolors_control_generate_one(
-                    generator,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    control,
-                    control_scale,
-                    reference,
-                    ip_scale,
-                    KOLORS_POSE_IMG2IMG_STRENGTH,
-                    sampler.as_deref(),
-                    scheduler.as_deref(),
-                    scheduler_shift,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished pose against the cached source embedding (sc-4410). Clone paid
-                // ONLY when a scorer exists; a full-body / turned pose with no reliable frontal face →
-                // honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        Some(likeness_source_ref.as_str()),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let skeleton = crate::openpose_skeleton::draw_wholebody(
+                        width,
+                        height,
+                        &pose.keypoints,
+                        pose.hands.as_deref(),
+                        pose.face.as_deref(),
+                        stickwidth,
+                    );
+                    let control = Image {
+                        width,
+                        height,
+                        pixels: skeleton.into_raw(),
+                    };
+                    let (out_w, out_h, pixels, execution) = kolors_control_generate_one(
+                        generator,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        control,
+                        control_scale,
+                        reference,
+                        ip_scale,
+                        KOLORS_POSE_IMG2IMG_STRENGTH,
+                        sampler.as_deref(),
+                        scheduler.as_deref(),
+                        scheduler_shift,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    // Score this finished pose against the cached source embedding (sc-4410). Clone paid
+                    // ONLY when a scorer exists; a full-body / turned pose with no reliable frontal face →
+                    // honest detected:false N/A.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 

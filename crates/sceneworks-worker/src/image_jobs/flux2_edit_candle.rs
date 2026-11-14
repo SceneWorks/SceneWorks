@@ -23,6 +23,7 @@ use super::CandleBaseEvidence;
 use super::Flux2Edit;
 use super::Flux2EditPaths;
 use super::Flux2EditRequest;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -535,9 +536,9 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         },
         move |(model, references, memory_context), tx, cancel| {
             drive_gen_items_reported(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -566,16 +567,20 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         cancel: cancel.clone(),
                     };
                     let result = match memory_context.as_ref() {
-                        Some(context) => model.generate_with_memory_context(
+                        Some(context) => model.generate_with_memory_context_with_execution_report(
                             context,
                             &req,
                             &references,
                             &mut *on_progress,
                         ),
-                        None => model.generate(&req, &references, &mut *on_progress),
+                        None => model.generate_with_execution_report(
+                            &req,
+                            &references,
+                            &mut *on_progress,
+                        ),
                     };
-                    let out = match result {
-                        Ok(out) => out,
+                    let completed = match result {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -583,6 +588,22 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "FLUX.2 edit returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out.width, out.height, out.pixels)))
                 },
             )

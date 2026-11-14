@@ -2194,13 +2194,17 @@ pub(super) fn run_loaded_video_generation(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let completed = crate::memory_strategy::generate_with_scope_execution_report(
         generator,
         &mut req,
         memory_context.as_ref(),
         on_progress,
     )
     .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
+    let output = completed
+        .generation
+        .output
+        .ok_or_else(|| WorkerError::Engine("video model produced no output".to_owned()))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -2222,6 +2226,7 @@ pub(super) fn run_loaded_video_generation(
                 .veda_execution_report()
                 .filter(|report| report.requested)
                 .map(|report| report.outcome_json()),
+            execution_report: Some(completed.execution),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
         // unreachable on this path — no video request sets `output_channels` — but the match

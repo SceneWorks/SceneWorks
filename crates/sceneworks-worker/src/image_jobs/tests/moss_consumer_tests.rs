@@ -1038,6 +1038,7 @@ fn advanced_images_use_shared_image_events_and_preserve_explicit_noise_seed() {
         &mut |_| {},
     )
     .unwrap();
+    assert_eq!(facts["workerExecutionReport"]["state"], "unavailable");
     let (tx, mut rx) = tokio::sync::mpsc::channel(2);
     emit_moss_advanced_outputs(
         &tx,
@@ -1650,6 +1651,7 @@ fn actual_provider_receipt_and_seed_reach_facts_and_failed_attempt_never_reads_s
         facts[sceneworks_core::moss_image::REPORT_KEY]["samples"][0]["seed"],
         173
     );
+    assert_eq!(facts["workerExecutionReport"]["state"], "unavailable");
     assert_eq!(progress, 1);
     probe.failure.set(true);
     assert!(moss_render(&probe, &req, &[], &mut |_| {}).is_err());

@@ -17,8 +17,9 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
     registered_digest_member_claim_id, resolve_pinned_hf_files, PortableArtifactFile,
-    PortableArtifactMember, PortableCheckpointPlan, PortableJobBinding, PortableModelBinding,
-    PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
+    PortableArtifactMember, PortableCheckpointPlan, PortableExpectedProvider, PortableJobBinding,
+    PortableModelBinding, PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity,
+    PortableSourceProvenance,
 };
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
@@ -67,6 +68,83 @@ pub(crate) fn route_option_facts(
         authored,
         RouteOptionFacts::from_payload_syntax(effective.as_payload()),
     ))
+}
+
+/// Resolve the provider from server-owned route facts, never from an authored provider string.
+/// Unknown or route-dependent providers remain unbound and cannot authorize exact replay.
+fn expected_image_provider(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    backend: &str,
+    sources: &[SelectedRouteSource],
+) -> Option<PortableExpectedProvider> {
+    if !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        return None;
+    }
+    let (slot, entry) = entries
+        .iter()
+        .find(|(slot, _)| slot == "modelManifestEntry")?;
+    let model_id = entry.get("id")?.as_str()?;
+    let builtin = sceneworks_core::registry::builtin_model_spec(model_id)?;
+    let strict_control = sources
+        .iter()
+        .any(|source| source.model_slot == *slot && source.component_id == "strict_control");
+    let provider_id = if strict_control {
+        if *job_type != JobType::ImageGenerate
+            || payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+        {
+            return None;
+        }
+        let trusted_entry = builtin.project(None);
+        sceneworks_core::control_weights::default_control_weight_for_request(
+            model_id,
+            &trusted_entry,
+            backend,
+            payload,
+        )?
+        .engine_id
+    } else {
+        match (model_id, job_type) {
+            ("instantid_realvisxl", JobType::ImageGenerate)
+                if matches!(backend, "candle" | "mlx") =>
+            {
+                "instantid"
+            }
+            ("pulid_flux_dev", JobType::ImageGenerate) if matches!(backend, "candle" | "mlx") => {
+                "pulid_flux"
+            }
+            _ => {
+                // A primary descriptor route is sufficient only for ordinary text-to-image.
+                // Edit, reference and character lanes may select a different provider.
+                if *job_type != JobType::ImageGenerate
+                    || payload.get("mode").and_then(Value::as_str) != Some("text_to_image")
+                    || payload
+                        .get("referenceAssetId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                    || payload
+                        .get("referenceAssetIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| !values.is_empty())
+                    || payload
+                        .get("advanced")
+                        .and_then(|advanced| advanced.get("poses"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|poses| !poses.is_empty())
+                {
+                    return None;
+                }
+                builtin.routes.get(backend)?.id.as_str()
+            }
+        }
+    };
+    Some(PortableExpectedProvider {
+        model_slot: slot.clone(),
+        model_id: model_id.to_owned(),
+        operation: job_type.as_str().to_owned(),
+        provider_id: provider_id.to_owned(),
+    })
 }
 
 pub(crate) fn pending_portable_source_challenges(
@@ -1132,8 +1210,15 @@ pub(crate) async fn derive_vector_raster_child_binding(
                 .with_checkpoint_plan(plan.clone())
                 .map_err(|error| incomplete(error.to_string()))?;
         }
-        let route = PortableRouteBinding::new(&backend, &platform, vec![model])
+        let mut route = PortableRouteBinding::new(&backend, &platform, vec![model])
             .map_err(|error| incomplete(error.to_string()))?;
+        if let Some(expected) =
+            expected_image_provider(child_type, child_payload, &entries, &backend, &[])
+        {
+            route = route
+                .with_expected_provider(expected)
+                .map_err(|error| incomplete(error.to_string()))?;
+        }
         routes.insert(key, route);
     }
     if routes.is_empty() {
@@ -1382,8 +1467,15 @@ async fn capture_portable_model_binding_inner(
                 last_route_error = Some(error);
                 continue;
             }
-            let route = PortableRouteBinding::new(&backend, &platform, models)
+            let mut route = PortableRouteBinding::new(&backend, &platform, models)
                 .map_err(|error| incomplete(error.to_string()))?;
+            if let Some(expected) =
+                expected_image_provider(job_type, payload, &entries, &backend, &selected_sources)
+            {
+                route = route
+                    .with_expected_provider(expected)
+                    .map_err(|error| incomplete(error.to_string()))?;
+            }
             let has_digest = route
                 .models
                 .iter()
@@ -3807,6 +3899,120 @@ mod tests {
     use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
 
+    #[test]
+    fn server_route_provider_pairs_ignore_authored_provider_strings() {
+        for (model_id, backend, expected) in [
+            ("pulid_flux_dev", "candle", "pulid_flux"),
+            ("instantid_realvisxl", "candle", "instantid"),
+            ("realvisxl", "candle", "sdxl"),
+            ("realvisxl_lightning", "candle", "sdxl"),
+            ("illustrious_xl_v1", "mlx", "sdxl"),
+            ("illustrious_xl_v2", "candle", "sdxl"),
+        ] {
+            let entry = json!({"id":model_id,"providerId":"client_spoof"});
+            let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+            let payload =
+                json!({"model":model_id,"mode":"text_to_image","providerId":"client_spoof"})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            let bound =
+                expected_image_provider(&JobType::ImageGenerate, &payload, &entries, backend, &[])
+                    .unwrap();
+            assert_eq!(bound.provider_id, expected, "{model_id}/{backend}");
+            assert_eq!(bound.model_id, model_id);
+            assert_eq!(bound.model_slot, "modelManifestEntry");
+        }
+    }
+
+    #[test]
+    fn strict_control_provider_is_selected_from_finite_server_source_map() {
+        for (model_id, backend, expected) in [
+            ("flux_dev", "candle", "flux1_dev_control"),
+            ("flux2_dev", "mlx", "flux2_dev_control"),
+            ("z_image_turbo", "candle", "z_image_turbo_control"),
+            ("z_image", "candle", "z_image_control"),
+            ("qwen_image", "mlx", "qwen_image_control"),
+            ("kolors", "candle", "kolors_control"),
+            ("krea_2_turbo", "candle", "krea_2_turbo_control"),
+            ("realvisxl", "candle", "sdxl"),
+        ] {
+            let entry = json!({"id":model_id,"baseModel":"z_image","providerId":"client_spoof"});
+            let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+            let payload = json!({"model":model_id,"advanced":{"poses":[{"pose":"x"}]}})
+                .as_object()
+                .unwrap()
+                .clone();
+            let sources = vec![SelectedRouteSource {
+                model_slot: "modelManifestEntry".into(),
+                component_id: "strict_control".into(),
+                role: ArtifactMemberRole::Control,
+                source: SelectedSourceLocation::ManifestDownload(json!({})),
+                selected_tier: None,
+            }];
+            assert_eq!(
+                expected_image_provider(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &entries,
+                    backend,
+                    &sources,
+                )
+                .unwrap()
+                .provider_id,
+                expected,
+                "{model_id}/{backend}"
+            );
+            assert!(expected_image_provider(
+                &JobType::ImageEdit,
+                &payload,
+                &entries,
+                backend,
+                &sources,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_and_conditioned_routes_do_not_infer_a_primary_provider() {
+        let entry = json!({"id":"realvisxl","providerId":"client_spoof"});
+        let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+        for payload in [
+            json!({"model":"realvisxl","mode":"character_image","providerId":"sdxl"}),
+            json!({"model":"realvisxl","mode":"text_to_image","referenceAssetId":"ref"}),
+            json!({"model":"realvisxl","mode":"text_to_image","referenceAssetIds":["ref"]}),
+        ] {
+            assert!(expected_image_provider(
+                &JobType::ImageGenerate,
+                payload.as_object().unwrap(),
+                &entries,
+                "candle",
+                &[],
+            )
+            .is_none());
+        }
+        let plain = json!({"model":"realvisxl","mode":"text_to_image"});
+        assert!(expected_image_provider(
+            &JobType::ImageEdit,
+            plain.as_object().unwrap(),
+            &entries,
+            "candle",
+            &[],
+        )
+        .is_none());
+        let bespoke = json!({"id":"pulid_flux_dev","providerId":"client_spoof"});
+        let bespoke_entries = vec![("modelManifestEntry".to_owned(), &bespoke)];
+        assert!(expected_image_provider(
+            &JobType::ImageGenerate,
+            plain.as_object().unwrap(),
+            &bespoke_entries,
+            "unregistered",
+            &[],
+        )
+        .is_none());
+    }
+
     /// SW-7031 AC4 / Codex 4541859826: presentation is not source identity. A rename, UI copy,
     /// defaults, limits, capabilities, tags, visibility, license display text or memory evidence
     /// change must still bind an unchanged historical source; the authored text encoder stays
@@ -4209,6 +4415,7 @@ mod tests {
                 backend: "candle".to_owned(),
                 platform: "linux".to_owned(),
                 models: Vec::new(),
+                expected_provider: None,
             },
         )]);
         let eligible = ["candle:linux", "candle:windows", "mlx:macos"];

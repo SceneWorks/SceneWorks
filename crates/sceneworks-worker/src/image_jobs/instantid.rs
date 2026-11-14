@@ -28,6 +28,7 @@ use super::AdapterSpec;
 use super::BodyPoint;
 #[cfg(target_os = "macos")]
 use super::BodyPoint;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -1694,6 +1695,7 @@ pub(super) async fn generate_instantid_stream(
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
+            let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
             // engine's are `&self`. Bind `mut` for the candle lane and allow the unused-mut on macOS.
@@ -1705,7 +1707,7 @@ pub(super) async fn generate_instantid_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt, action), _preview, on_progress| {
+                move |index, (seed, prompt, action), _preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -1749,19 +1751,34 @@ pub(super) async fn generate_instantid_stream(
                                 "InstantID memory request refused: {error}"
                             ))
                         })?;
-                    let result = match &action {
-                        InstantIdAction::Identity => {
-                            model.generate(&req, &reference, &mut *on_progress)
-                        }
-                        InstantIdAction::Angle(kps) => {
-                            model.generate_with_kps(&req, &reference, kps, &mut *on_progress)
-                        }
-                        InstantIdAction::Pose(keypoints) => {
-                            model.generate_pose(&req, &reference, keypoints, &mut *on_progress)
-                        }
+                    let stage = match &action {
+                        InstantIdAction::Identity => "identity",
+                        InstantIdAction::Angle(_) => "angle",
+                        InstantIdAction::Pose(_) => "pose",
                     };
-                    let mut out = match result {
-                        Ok(out) => out,
+                    let result = match &action {
+                        InstantIdAction::Identity => model.generate_with_execution_report(
+                            &req,
+                            &reference,
+                            &mut *on_progress,
+                        ),
+                        InstantIdAction::Angle(kps) => model
+                            .generate_with_kps_with_execution_report(
+                                &req,
+                                &reference,
+                                kps,
+                                &mut *on_progress,
+                            ),
+                        InstantIdAction::Pose(keypoints) => model
+                            .generate_pose_with_execution_report(
+                                &req,
+                                &reference,
+                                keypoints,
+                                &mut *on_progress,
+                            ),
+                    };
+                    let completed = match result {
+                        Ok(completed) => completed,
                         // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
                         // stop cleanly (consume_gen_events posts the Canceled update). The scope
                         // still gets its terminal `finish`, which is what synchronizes the device and
@@ -1779,6 +1796,21 @@ pub(super) async fn generate_instantid_stream(
                             return Err(WorkerError::Engine(message));
                         }
                     };
+                    let mut out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                message: "InstantID returned an incomplete image".into(),
+                            });
+                            return Err(WorkerError::Engine(
+                                "InstantID returned an incomplete image".into(),
+                            ));
+                        }
+                    };
+                    let base_execution = completed.execution;
+                    let mut execution_stages = Vec::new();
                     // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
                     // reference identity on the cropped face with the gender-neutral restore prompt.
                     if let Some(embedding) = &restore_embedding {
@@ -1803,13 +1835,13 @@ pub(super) async fn generate_instantid_stream(
                             scheduler: scheduler.clone(),
                             cancel: cancel.clone(),
                         };
-                        out = match model.restore_face(
+                        let restored = match model.restore_face_with_execution_report(
                             &restore_req,
                             &out,
                             embedding,
                             &mut *on_progress,
                         ) {
-                            Ok(out) => out,
+                            Ok(completed) => completed,
                             Err(_) if cancel.is_cancelled() => {
                                 let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
                                 return Ok(None);
@@ -1822,6 +1854,32 @@ pub(super) async fn generate_instantid_stream(
                                 return Err(WorkerError::InvalidPayload(message));
                             }
                         };
+                        out = match restored.generation.output {
+                            Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                                images.remove(0)
+                            }
+                            _ => {
+                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                    message: "InstantID face-restore returned an incomplete image"
+                                        .into(),
+                                });
+                                return Err(WorkerError::Engine(
+                                    "InstantID face-restore returned an incomplete image".into(),
+                                ));
+                            }
+                        };
+                        execution_stages = vec![
+                            sceneworks_core::execution_receipt::ExecutionStageBinding {
+                                stage: stage.into(),
+                                execution: serde_json::to_value(&base_execution)
+                                    .map_err(WorkerError::Json)?,
+                            },
+                            sceneworks_core::execution_receipt::ExecutionStageBinding {
+                                stage: "restore_face".into(),
+                                execution: serde_json::to_value(restored.execution)
+                                    .map_err(WorkerError::Json)?,
+                            },
+                        ];
                     }
                     // Both engine calls for this item are done: run the scope's terminal cleanup
                     // (synchronize + release the request-local allocations) and drop it, so the next
@@ -1835,6 +1893,30 @@ pub(super) async fn generate_instantid_stream(
                             ))
                         })?;
                     drop(scope);
+                    let execution = if execution_stages.is_empty() {
+                        base_execution
+                    } else {
+                        gen_core::generator::ExecutionIdentity::unavailable(
+                            gen_core::generator::ExecutionUnavailable {
+                                code: "instantid_face_restore_composite_replay_unavailable".into(),
+                                detail: "the final image combines an InstantID render with a separate face restoration pass".into(),
+                                missing_facts: vec!["cross-stage crop and paste-back replay contract".into()],
+                            },
+                        )
+                    };
+                    let mut facts = JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    if !execution_stages.is_empty() {
+                        facts.insert(
+                            "workerExecutionStages".into(),
+                            serde_json::to_value(execution_stages).map_err(WorkerError::Json)?,
+                        );
+                    }
+                    let _ = facts_tx
+                        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Identity-likeness post-pass (sc-4409 angles / sc-4410 poses / sc-4411 plain
                     // With-Character): score this finished image against the per-job cached source
                     // embedding, on this blocking thread (the `!Send` face stack lives here). CRITICAL

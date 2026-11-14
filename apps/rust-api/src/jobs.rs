@@ -313,10 +313,24 @@ pub(crate) async fn claim_job(
                     payload.portable_platform.as_deref(),
                     keyed,
                 )?;
+            let execution_claim_capability = job
+                .as_ref()
+                .map(|claimed| store.execution_claim_capability(&claimed.id, &payload.worker_id))
+                .transpose()?
+                .flatten();
+            let exact_replay_expected = job
+                .as_ref()
+                .map(|claimed| {
+                    store.exact_replay_expected_for_claim(&claimed.id, &payload.worker_id)
+                })
+                .transpose()?
+                .flatten();
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
                 portable_binding,
+                execution_claim_capability,
+                exact_replay_expected,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -332,6 +346,8 @@ pub(crate) async fn claim_job(
         response,
         decision,
         portable_binding,
+        execution_claim_capability,
+        exact_replay_expected,
         stranded,
         unsupported,
         candle_stranded,
@@ -422,6 +438,8 @@ pub(crate) async fn claim_job(
     Ok(Json(ClaimResponse {
         job: response,
         portable_model_binding,
+        execution_claim_capability,
+        exact_replay_expected,
         extra: Default::default(),
     }))
 }
@@ -779,6 +797,86 @@ pub(crate) async fn get_job(
     Ok(Json(public_job_snapshot(
         store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
     )))
+}
+
+/// Public execution facts omit the private source route and the claim secret.
+/// The result remains read-only; exact replay is a separate POST action.
+pub(crate) async fn get_execution_receipt(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let receipt = store_call(state, move |store, _timeout| {
+        store.completed_execution_receipt(&job_id)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::typed(
+            StatusCode::CONFLICT,
+            "This job has no complete execution receipt.",
+            "replay_unavailable",
+            json!({"reason":"receipt_missing","field":"executionReceipt"}),
+        )
+    })?;
+    Ok(Json(json!({
+        "version": receipt.version,
+        "jobId": receipt.job_id,
+        "jobType": receipt.job_type,
+        "attemptId": receipt.attempt_id,
+        "acceptedBackend": receipt.accepted_backend,
+        "acceptedDevice": receipt.accepted_device,
+        "inferenceRevision": receipt.inference_revision,
+        "acceptedBindingSha256": receipt.accepted_binding_sha256,
+        "acceptedResultSha256": receipt.accepted_result_sha256,
+        "execution": receipt.execution,
+        "outputs": receipt.outputs,
+    })))
+}
+
+/// Re-enter the queue only through the stored completed identity. The store
+/// atomically freezes the expected receipt on the new job and pins the worker,
+/// device, source route and current inference revision at claim.
+pub(crate) async fn exact_replay_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    request: AxumRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let headers = request.headers().clone();
+    let body = to_bytes(request.into_body(), 1024)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?;
+    auth::require_json_content_type(&headers, !body.is_empty())?;
+    if !body.iter().all(|byte| byte.is_ascii_whitespace())
+        && serde_json::from_slice::<Value>(&body)
+            .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?
+            != json!({})
+    {
+        tracing::info!(event = "exact_replay_refused", job_id = %job_id, reason = "options_not_allowed");
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "Exact replay accepts no changed options.",
+            "replay_unavailable",
+            json!({"reason":"options_not_allowed","field":"payload"}),
+        ));
+    }
+    let replay_job_id = job_id.clone();
+    let job = store_call(state.clone(), move |store, timeout| {
+        store.create_exact_replay_job(&job_id, timeout)
+    })
+    .await
+    .inspect_err(|error| {
+        if error.code == Some("replay_unavailable") {
+            let reason = error
+                .context
+                .as_ref()
+                .and_then(|context| context.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("unspecified");
+            tracing::info!(event = "exact_replay_refused", job_id = %replay_job_id, reason);
+        }
+    })?;
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 #[derive(Deserialize)]
@@ -2827,6 +2925,25 @@ pub(crate) async fn update_job_progress(
     let peak_gpu_load_pct =
         optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
     let submitted_result = payload.result;
+    if submitted_result.as_ref().is_some_and(|result| {
+        result.contains_key("executionReceipt") || result.contains_key("executionClaimCapability")
+    }) {
+        return Err(ApiError::bad_request(
+            "Execution receipts use the private terminal report field",
+        ));
+    }
+    let submitted_execution_receipt = payload
+        .extra
+        .get("executionReceipt")
+        .cloned()
+        .map(serde_json::from_value::<sceneworks_core::execution_receipt::WorkerExecutionReceipt>)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(format!("Invalid execution receipt: {error}")))?;
+    let execution_claim_capability = payload
+        .extra
+        .get("executionClaimCapability")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     // Test-only one-shot rendezvous that makes a competing terminal transition
     // deterministic. Take the hook before awaiting so the competing request is
@@ -2852,8 +2969,10 @@ pub(crate) async fn update_job_progress(
         let message = payload.message.clone();
         let error = payload.error.clone();
         let backend = payload.backend.clone();
+        let receipt = submitted_execution_receipt.clone();
+        let capability = execution_claim_capability.clone();
         move |store, _timeout| {
-            store.update_job_progress_with_outcome(
+            store.update_job_progress_with_execution_receipt(
                 &job_id,
                 ProgressUpdate {
                     status,
@@ -2868,6 +2987,8 @@ pub(crate) async fn update_job_progress(
                     backend,
                     worker_id,
                 },
+                receipt.as_ref(),
+                capability.as_deref(),
             )
         }
     })

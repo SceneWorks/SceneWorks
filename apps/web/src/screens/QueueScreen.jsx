@@ -451,6 +451,7 @@ export function QueueScreen() {
                       payloadChanges: { yue2: { ...j.payload.yue2, computePolicy, precision: undefined } },
                     } : undefined,
                   })}
+                  onExactReplay={(j) => jobAction(j, "exact-replay")}
                   hideOpenQueue
                 />
               </div>

@@ -4752,7 +4752,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         candle_stream.contains("memory_strategy_context.as_ref()")
             && candle_stream.contains("generate_one_with_hires_on_surface(")
             && render_source.contains("render_on_surface(")
-            && render_surface.contains("crate::memory_strategy::generate_with_scope_report(")
+            && render_surface
+                .contains("crate::memory_strategy::generate_with_scope_execution_report(")
             && render_surface
                 .contains("            memory_strategy_context,\n            on_progress,"),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
@@ -4804,7 +4805,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     assert!(
         qwen_stream.contains("QwenEdit::load_with_memory_context(")
             && qwen_stream.contains("&provider_load_spec,")
-            && qwen_stream.contains("model.generate_with_memory_context("),
+            && qwen_stream.contains("model.generate_with_memory_context_with_execution_report("),
         "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
     );
     let qwen_adapter_setup = between(
@@ -5445,7 +5446,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = sensenova_edit_generate_one(
+    let (w, h, pixels, _) = sensenova_edit_generate_one(
         generator.as_ref(),
         "make it a watercolor painting",
         512,
@@ -5535,7 +5536,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
     mlx_rs::memory::reset_peak_memory();
 
     // Image 0 — succeeds today (the bug was image 1).
-    let (w0, h0, px0) = gen_one(42);
+    let (w0, h0, px0, _) = gen_one(42);
     assert_eq!((w0, h0), (dim, dim));
     assert_eq!(px0.len() as u32, dim * dim * 3);
 
@@ -5571,7 +5572,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
 
     // Image 1 — the image that OOM-killed the worker pre-fix. Completing proves the
     // count=2 batch path is sound once the cache is released between images.
-    let (w1, h1, px1) = gen_one(43);
+    let (w1, h1, px1, _) = gen_one(43);
     assert_eq!((w1, h1), (dim, dim));
     assert_eq!(px1.len() as u32, dim * dim * 3);
     assert!(px1.windows(2).any(|w| w[0] != w[1]));
@@ -8289,7 +8290,7 @@ fn sc3031_ab_dump_pose() {
     let generator = zimage_control_load(weights, control_weights, quant, adapters).expect("load");
     let cancel = CancelFlag::new();
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-    let (ow, oh, pixels) = zimage_control_generate_one(
+    let (ow, oh, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         &req.prompt,
@@ -8516,7 +8517,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = zimage_control_generate_one(
+    let (w, h, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -8578,7 +8579,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let conditioning = build_control_conditioning(control_map, kind.clone(), 0.9, None);
         let cancel = gen_core::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let (ow, oh, pixels) = zimage_base_control_generate_one(
+        let (ow, oh, pixels, _) = zimage_base_control_generate_one(
             generator.as_ref(),
             &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
@@ -8667,7 +8668,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = qwen_control_generate_one(
+    let (w, h, pixels, _) = qwen_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -15491,7 +15492,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15558,7 +15559,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15965,12 +15966,15 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
             seed: i64,
             _preview: &gen_core::PreviewSink,
             _cancel: &CancelFlag,
-        ) -> WorkerResult<Vec<u8>> {
+        ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
             self.calls
                 .lock()
                 .expect("recording lock")
                 .push((eng_w, eng_h, seed));
-            Ok(tile.pixels)
+            Ok((
+                tile.pixels,
+                gen_core::generator::ExecutionIdentity::provider_default(),
+            ))
         }
     }
 
@@ -15991,7 +15995,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     };
     let mut progress = Vec::new();
     let preview = gen_core::PreviewSink::default();
-    let (output, total) = refine_tiled_detail(
+    let (output, total, reports) = refine_tiled_detail(
         &refiner,
         &source,
         &params,
@@ -16002,6 +16006,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     .expect("provider-neutral detail refinement");
 
     assert_eq!(total, 4);
+    assert_eq!(reports.len(), 4);
     assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
     assert_eq!(
         *refiner.calls.lock().expect("recording lock"),
@@ -18259,7 +18264,7 @@ fn matrix_zimage_turbo_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_control_generate_one(
+    let (_, _, pixels, _) = zimage_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18399,7 +18404,7 @@ fn matrix_zimage_base_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_base_control_generate_one(
+    let (_, _, pixels, _) = zimage_base_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18541,7 +18546,7 @@ fn matrix_qwen_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = qwen_control_generate_one(
+    let (_, _, pixels, _) = qwen_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",

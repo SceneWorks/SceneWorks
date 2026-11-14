@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_spec::attach_manifest_text_encoder;
 use super::load_spec::candle_certified_hf_artifact_path;
@@ -512,7 +513,7 @@ impl CandleStrictControl for ZImageStrictControl {
         // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         // `guidance` + `negative_prompt` drive the base-mode real-CFG denoise; the distilled Turbo path
         // ignores both (single cond forward), so a `None`/value is inert there. We always forward the
         // resolved base values — they only take effect when `base = true` in the loaded `ZImageControl`.
@@ -538,9 +539,12 @@ impl CandleStrictControl for ZImageStrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
+            })?;
+        completed_control_image(completed)
     }
 }
 
