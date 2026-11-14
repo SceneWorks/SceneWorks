@@ -249,10 +249,14 @@ test("H3 dispatch queues are unique per run and leave old StarVector and ordinar
   const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
   const expression = workflowExpression(root, "group");
   const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
-  assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
-  const evaluate = (event, operation, id, attempt = 1, selected = expression) => Function("github", "inputs", "format", `return (${selected});`)(
-    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation },
-    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]));
+  assert.ok(root.includes("cancel-in-progress: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && fromJSON(inputs.campaign_run_id || '{}').proof != 'sdxl-exact-replay' }}"));
+  const evaluate = (event, operation, id, attempt = 1, selected = expression, plan = undefined) => Function("github", "inputs", "format", "fromJSON", `return (${selected});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation, campaign_run_id: plan },
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]), JSON.parse);
+  const sdxlPlan = JSON.stringify({proof: "sdxl-exact-replay", ownerGo: true});
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, expression, sdxlPlan), "sdxl-exact-replay-bridge-10-2");
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress"), sdxlPlan), false);
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress")), true);
   // Parentheses may change when a dispatch-only arm is removed. Preserve the actual legacy
   // keys for every event instead of freezing a byte substring of the expression's formatting.
   const legacy = ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "unknown", undefined];

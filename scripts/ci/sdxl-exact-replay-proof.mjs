@@ -46,6 +46,21 @@ export function sourceIdentity(route) {
   const { authoredOptionsSha256: _request, ...source } = model;
   return { backend: route.backend, platform: route.platform, expectedProvider: route.expectedProvider, models: [source] };
 }
+export function validateDispatch(input) {
+  same(Object.keys(input).sort(), ['deviceUuid', 'ownerGo', 'phase', 'planPath', 'proof'], 'unknown dispatch fields');
+  assert.equal(input.proof, 'sdxl-exact-replay', 'unknown proof');
+  assert.equal(input.ownerGo, true, 'owner go window not confirmed');
+  assert(['qualify', 'replay'].includes(input.phase), 'unknown phase');
+  assert(typeof input.planPath === 'string' && path.win32.isAbsolute(input.planPath), 'absolute private Windows plan required');
+  assert(/^GPU-[a-f0-9-]{36}$/i.test(input.deviceUuid), 'physical UUID missing');
+}
+function dispatchInput() {
+  const input = JSON.parse(process.env.SDXL_REPLAY_DISPATCH);
+  validateDispatch(input);
+  assert.equal(input.planPath, process.env.SDXL_REPLAY_PLAN, 'dispatch plan changed');
+  assert.equal(input.phase, process.env.SDXL_REPLAY_PHASE, 'dispatch phase changed');
+  assert.equal(input.deviceUuid, process.env.CUDA_VISIBLE_DEVICES, 'dispatch UUID changed');
+}
 export function validatePlan(plan, sourceSha, pin, phase, now = Date.now()) {
   assert.equal(plan.version, 1, 'unsupported proof plan');
   assert(['qualify', 'replay'].includes(phase), 'unknown phase');
@@ -174,6 +189,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
 async function listen(server) { await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)); return server.address().port; }
 async function runProof() {
+  dispatchInput();
   assert.equal(process.platform, 'win32', 'Windows proof only');
   assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'manual dispatch only');
   assert(process.env.SW_CI_CUDA_EXECUTION_ACTIVE, 'physical UUID guard missing');
@@ -351,6 +367,7 @@ export function finalizeEvidence(evidence, resource) {
 }
 async function main() {
   if (process.argv[2] === 'preflight') {
+    dispatchInput();
     const plan = JSON.parse(await readFile(process.env.SDXL_REPLAY_PLAN, 'utf8'));
     validatePlan(plan, git('rev-parse', 'HEAD'), await inferenceRevision(ROOT), process.env.SDXL_REPLAY_PHASE);
     assert.equal(process.env.CUDA_VISIBLE_DEVICES, plan.deviceUuid, 'approved UUID differs');

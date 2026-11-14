@@ -5,6 +5,59 @@ The current source checkpoint retains its existing inference pin. Integrate the 
 receipt implementation and final inference pin before building a live candidate.
 Normal tests import only metadata validators. Only `workflow_dispatch` starts real weights.
 
+## Registered dispatch route (required before a live run)
+
+GitHub only enables `workflow_dispatch` when the workflow file exists on the default branch;
+`--ref` does not register a brand-new workflow filename. See the
+[official event contract](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+The initial standalone `sdxl-exact-replay-proof.yml` was therefore not a viable pre-main route
+and has been removed.
+
+The proof now uses the **existing** `.github/workflows/server-candle-linux.yml` dispatcher.
+At source audit, remote default branch `main` was `5e88855d6c3890524f0ec4989a90115b14e1a2fe`,
+the workflow was registered and active as ID `297197519`, and manual run `42342133418`
+was completed. Its default-branch schema already accepts `starvector_terminal_operation`
+value `standard` and the string `campaign_run_id`. No new input or choice value is
+required, and no enabling main PR is needed. Recheck registration before live use.
+
+On the **reviewed candidate ref**, that existing choice carries a JSON object with exactly:
+
+```json
+{
+  "proof": "sdxl-exact-replay",
+  "phase": "qualify",
+  "planPath": "C:\\private\\approved-sdxl-plan.json",
+  "deviceUuid": "GPU-00000000-0000-0000-0000-000000000001",
+  "ownerGo": true
+}
+```
+
+This is a shape example, not approved host data. The ordinary Linux compile job explicitly excludes
+this marker, including when `ownerGo` is false. The selector is `standard`, so an old or
+default-branch workflow can only perform its ordinary compile; it cannot select H3 or any
+other learned model operation. Malformed JSON on the candidate fails workflow expression
+parsing before model work; missing/unknown markers can only select the ordinary compile. The SDXL job requires the marker and owner
+go, and its parser refuses extra keys, unknown phases and any command/script/ref field.
+Other H3/StarVector selections retain their existing jobs and queues. If a candidate lacks
+this bridge, do not dispatch it. Never substitute a different operation to get a run.
+
+After independent review, required candidate CI, coordinator publication, final pin/plan
+preflight and the owner's GPU go window, prepare a local `dispatch-inputs.json` containing
+`starvector_terminal_operation: "standard"` and `campaign_run_id` as the serialized
+five-field JSON object above. The following is the concrete dispatch route, **not permission
+to execute it now**:
+
+```sh
+gh workflow run server-candle-linux.yml --repo SceneWorks/SceneWorks \
+  --ref REVIEWED_CANDIDATE_BRANCH --json < dispatch-inputs.json
+```
+
+Read back the run's `head_sha` and require the private plan's exact `sourceSha`; the harness
+also enforces that hash before build and execution. A moving branch cannot silently qualify
+a different candidate. Use the same dispatcher with `phase: "replay"` only after separately
+reviewing the deterministic declaration and obtaining another go window. Nothing in this
+route bypasses the feature PR/CI contract or turns proof work into PR/push-triggered inference.
+
 ## Approval and phases
 
 Before dispatch, inform the owner and obtain an explicit Windows real-model go window.
