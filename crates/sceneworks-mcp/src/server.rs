@@ -1441,7 +1441,7 @@ fn api_error(error: ApiClientError) -> ErrorData {
         .map(str::to_owned)
         .unwrap_or_else(|| error.to_string());
     match &error {
-        ApiClientError::Api { status, .. } if status.is_client_error() => {
+        ApiClientError::Api { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST => {
             ErrorData::invalid_params(message, data)
         }
         _ => ErrorData::internal_error(message, data),
@@ -2336,6 +2336,27 @@ mod tests {
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert_eq!(error.message, "steps exceeds the model limit");
         assert_eq!(error.data, Some(body));
+    }
+
+    #[test]
+    fn other_api_client_failures_are_not_invalid_params() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::CONFLICT,
+        ] {
+            let error = api_error(ApiClientError::Api {
+                status,
+                detail: r#"{"detail":"upstream failure"}"#.to_owned(),
+            });
+            assert_eq!(
+                error.code,
+                ErrorData::internal_error("upstream failure".to_owned(), None).code,
+                "status {status} must not be a parameter error"
+            );
+            assert_eq!(error.message, "upstream failure");
+        }
     }
 
     #[test]
