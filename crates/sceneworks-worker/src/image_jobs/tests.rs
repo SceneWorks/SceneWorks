@@ -8268,7 +8268,7 @@ fn sc3031_ab_dump_pose() {
     let generator = zimage_control_load(weights, control_weights, quant, adapters).expect("load");
     let cancel = CancelFlag::new();
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-    let (ow, oh, pixels) = zimage_control_generate_one(
+    let (ow, oh, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         &req.prompt,
@@ -8495,7 +8495,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = zimage_control_generate_one(
+    let (w, h, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -8557,7 +8557,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let conditioning = build_control_conditioning(control_map, kind.clone(), 0.9, None);
         let cancel = gen_core::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let (ow, oh, pixels) = zimage_base_control_generate_one(
+        let (ow, oh, pixels, _) = zimage_base_control_generate_one(
             generator.as_ref(),
             &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
@@ -18218,7 +18218,7 @@ fn matrix_zimage_turbo_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_control_generate_one(
+    let (_, _, pixels, _) = zimage_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18358,7 +18358,7 @@ fn matrix_zimage_base_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_base_control_generate_one(
+    let (_, _, pixels, _) = zimage_base_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",

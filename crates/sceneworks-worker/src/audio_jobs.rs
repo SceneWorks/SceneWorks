@@ -1102,7 +1102,7 @@ async fn run_audio_generate_job_using(
     // replay record omits the (unused) base-TTS model that only the conversion chain carries.
     let native_clone = matches!(synthesis, AudioSynthesis::NativeVoiceClone(_));
     let mut resolved_tier = None;
-    let (track, execution_report) = match synthesis {
+    let (track, execution_report, execution_stages) = match synthesis {
         AudioSynthesis::Single(single) => {
             resolved_tier = single.tier.as_ref().map(|tier| tier.name.clone());
             let (track, execution) = run_audio_synthesis_with_completed(
@@ -1114,17 +1114,18 @@ async fn run_audio_generate_job_using(
                 load_generator,
             )
             .await?;
-            (track, Some(execution))
+            (track, Some(execution), Vec::new())
         }
-        AudioSynthesis::VoiceClone(plan) => (
-            run_voice_clone_synthesis(api, settings, job, &request, plan).await?,
-            None,
-        ),
+        AudioSynthesis::VoiceClone(plan) => {
+            let (track, stages) =
+                run_voice_clone_synthesis_completed(api, settings, job, &request, plan).await?;
+            (track, None, stages)
+        }
         AudioSynthesis::NativeVoiceClone(plan) => {
             let (track, execution) =
                 run_native_voice_clone_synthesis_completed(api, settings, job, &request, plan)
                     .await?;
-            (track, Some(execution))
+            (track, Some(execution), Vec::new())
         }
     };
 
@@ -1268,7 +1269,13 @@ async fn run_audio_generate_job_using(
                 .insert("workerExecutionReport".into(), report.clone());
         }
     }
-    let result = audio_streaming_result(&plan, &request, facts);
+    let mut result = audio_streaming_result(&plan, &request, facts);
+    if !execution_stages.is_empty() {
+        result.insert(
+            "workerExecutionStages".into(),
+            serde_json::to_value(execution_stages).map_err(WorkerError::Json)?,
+        );
+    }
     update_job(
         api,
         &job.id,
@@ -1933,14 +1940,17 @@ fn resolve_voice_clone_plan(
 /// product-layer orchestration of two backend calls — a single worker job so the library sees exactly
 /// one asset (the converted clip). Returns the converted `gen_core::AudioTrack` for the caller to write
 /// + register, exactly like [`run_audio_synthesis`].
-async fn run_voice_clone_synthesis(
+async fn run_voice_clone_synthesis_completed(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &AudioRequest,
     plan: VoiceClonePlan,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_voice_clone_synthesis_using(
+) -> WorkerResult<(
+    gen_core::AudioTrack,
+    Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>,
+)> {
+    run_voice_clone_synthesis_using_completed(
         api,
         settings,
         job,
@@ -1958,6 +1968,7 @@ async fn run_voice_clone_synthesis(
 /// requested while EITHER call is in-flight trips promptly — the two-call trap (the converter request
 /// used to default `cancel` to a fresh, never-tripped flag via `..Default::default()`).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn run_voice_clone_synthesis_using(
     api: &ApiClient,
     settings: &Settings,
@@ -1969,6 +1980,34 @@ async fn run_voice_clone_synthesis_using(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_voice_clone_synthesis_using_completed(
+        api,
+        settings,
+        job,
+        request,
+        plan,
+        load_base,
+        load_converter,
+    )
+    .await
+    .map(|(track, _)| track)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_voice_clone_synthesis_using_completed(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    plan: VoiceClonePlan,
+    load_base: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+    load_converter: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn AudioTransform>>
+        + Send
+        + 'static,
+) -> WorkerResult<(
+    gen_core::AudioTrack,
+    Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>,
+)> {
     let VoiceClonePlan {
         base_model_dir,
         converter_dir,
@@ -1990,7 +2029,7 @@ async fn run_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>)> {
             // Call 1 — base TTS: synthesize the script in the requested base voice.
             let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
             let base_generator = load_base(&base_model, &base_spec).map_err(|error| {
@@ -2010,12 +2049,13 @@ async fn run_voice_clone_synthesis_using(
             let mut on_progress = |progress: Progress| {
                 crate::load_progress::generator_progress(&progress);
             };
-            let base_track = match base_generator
-                .generate(&base_req, &mut on_progress)
+            let base_completed = base_generator
+                .generate_with_execution_report(&base_req, &mut on_progress)
                 .map_err(|error| {
                     classify_audio_synthesis_error("voice-clone base TTS failed", error)
-                })? {
-                GenerationOutput::Audio(track) => track,
+                })?;
+            let base_track = match base_completed.generation.output {
+                Some(GenerationOutput::Audio(track)) => track,
                 _ => {
                     return Err(WorkerError::Engine(
                         "voice-clone base TTS returned non-audio output".to_owned(),
@@ -2039,12 +2079,25 @@ async fn run_voice_clone_synthesis_using(
                 cancel,
                 ..Default::default()
             };
-            transform
-                .apply(&transform_req, &mut on_progress)
-                .map_err(|error| classify_audio_synthesis_error("voice conversion failed", error))?
-                .into_iter()
+            let converted = transform
+                .apply_with_execution_report(&transform_req, &mut on_progress)
+                .map_err(|error| classify_audio_synthesis_error("voice conversion failed", error))?;
+            if converted.tracks.len() != 1 {
+                return Err(WorkerError::Engine(
+                    "voice conversion must produce exactly one final track".to_owned(),
+                ));
+            }
+            let track = converted.tracks.into_iter()
                 .next()
-                .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
+                .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))?;
+            let stages = [
+                ("base_tts", base_completed.execution),
+                ("voice_conversion", converted.execution),
+            ].into_iter().map(|(stage, execution)| Ok(sceneworks_core::execution_receipt::ExecutionStageBinding {
+                stage: stage.into(),
+                execution: serde_json::to_value(execution).map_err(WorkerError::Json)?,
+            })).collect::<WorkerResult<Vec<_>>>()?;
+            Ok((track, stages))
         })
     };
     run_blocking_with_heartbeat(
@@ -3520,6 +3573,27 @@ mod tests {
         }
     }
 
+    struct CompleteTransform(gen_core::AudioTransformDescriptor);
+
+    impl gen_core::AudioTransform for CompleteTransform {
+        fn descriptor(&self) -> &gen_core::AudioTransformDescriptor {
+            &self.0
+        }
+        fn validate(&self, _req: &AudioTransformRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn apply(
+            &self,
+            req: &AudioTransformRequest,
+            _progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<Vec<gen_core::AudioTrack>> {
+            if req.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            Ok(vec![req.audio.clone()])
+        }
+    }
+
     fn audio_test_job(job_id: &str) -> JobSnapshot {
         serde_json::from_value(json!({
             "id": job_id,
@@ -4297,7 +4371,7 @@ mod tests {
             },
         };
 
-        let result = run_voice_clone_synthesis_using(
+        let result = run_voice_clone_synthesis_using_completed(
             &api,
             &settings,
             &job,
@@ -4322,6 +4396,51 @@ mod tests {
             posts.iter().any(|p| p["status"] == "canceled"),
             "the terminal Canceled must be posted, got {posts:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn voice_clone_reports_both_completed_stages_in_order() {
+        let (base_url, _) = spawn_audio_cancel_stub(false).await;
+        let settings = cancel_test_settings(base_url);
+        let api = ApiClient::new(&settings);
+        let job = audio_test_job("audio-voice-stages");
+        let request = AudioRequest::from_payload(&payload(json!({})));
+        let base_load = stub_load(StubBehavior::CompleteOk, Arc::new(AtomicBool::new(false)));
+        let converter_load = |_id: &str, _spec: &LoadSpec| {
+            Ok(Box::new(CompleteTransform(stub_transform_descriptor())) as Box<dyn AudioTransform>)
+        };
+        let plan = VoiceClonePlan {
+            base_model_dir: PathBuf::from("unused-base"),
+            converter_dir: PathBuf::from("unused-converter"),
+            reference: gen_core::AudioTrack {
+                samples: vec![0.05],
+                sample_rate: 24_000,
+                channels: 1,
+                stems: Vec::new(),
+            },
+        };
+        let (track, stages) = run_voice_clone_synthesis_using_completed(
+            &api,
+            &settings,
+            &job,
+            &request,
+            plan,
+            base_load,
+            converter_load,
+        )
+        .await
+        .unwrap();
+        assert!(!track.samples.is_empty());
+        assert_eq!(
+            stages
+                .iter()
+                .map(|stage| stage.stage.as_str())
+                .collect::<Vec<_>>(),
+            ["base_tts", "voice_conversion"]
+        );
+        assert!(stages
+            .iter()
+            .all(|stage| stage.execution["state"] == "unavailable"));
     }
 
     /// Native single-call clone-TTS path (`chatterbox_tts`): the shared flag reaches the one
