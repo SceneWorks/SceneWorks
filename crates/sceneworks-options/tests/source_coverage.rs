@@ -1760,7 +1760,10 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !authored_receipt_clone(file, function, expression)
                 && !resize_mode_authoring_stamp(file, function, expression)
                 && !(file == "crates/sceneworks-core/src/resolved_options.rs"
-                    && matches!(function.as_str(), "bind" | "for_config" | "from_effective")
+                    && matches!(
+                        function.as_str(),
+                        "bind" | "bind_with_model" | "for_config" | "from_effective"
+                    )
                     && (expression == "whole advanced map: clone"
                         || expression.starts_with("delegated training technique: ")))
         })
