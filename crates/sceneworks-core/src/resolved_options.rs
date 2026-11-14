@@ -197,6 +197,9 @@ pub struct RouteOptionFacts {
     pub use_uncensored_enhancer: RouteField<bool>,
     pub text_encoder_model: RouteField<String>,
     pub model_path: RouteField<String>,
+    /// Legacy source hints used only to match an already-loaded model at claim time.
+    pub model_repo: RouteField<String>,
+    pub repo: RouteField<String>,
     pub tile_control_net_repo: RouteField<String>,
     pub strength: RouteField<f64>,
     pub hires_fix_enabled: RouteField<bool>,
@@ -242,6 +245,12 @@ impl RouteOptionFacts {
         fn count(value: &Value) -> Option<usize> {
             value.as_array().map(Vec::len)
         }
+        fn legacy_integer(value: &Value) -> Option<i64> {
+            sceneworks_options::effective_values::legacy_integer(value)?.as_i64()
+        }
+        fn legacy_number(value: &Value) -> Option<f64> {
+            sceneworks_options::effective_values::legacy_number(value)
+        }
         let advanced = parent(payload, "advanced");
         let veda = match advanced {
             Err(()) => Err(()),
@@ -268,22 +277,12 @@ impl RouteOptionFacts {
             control_weights: field(advanced, "controlWeights", |v| {
                 serde_json::from_value(v.clone()).ok()
             }),
-            control_scale: field(advanced, "controlScale", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
-            true_cfg_scale: field(advanced, "trueCfgScale", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
-            image_guidance_scale: field(advanced, "imageGuidanceScale", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
-            ip_adapter_scale: field(advanced, "ipAdapterScale", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
-            reference_strength: field(advanced, "referenceStrength", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
-            mlx_quantize: field(advanced, "mlxQuantize", Value::as_i64),
+            control_scale: field(advanced, "controlScale", legacy_number),
+            true_cfg_scale: field(advanced, "trueCfgScale", legacy_number),
+            image_guidance_scale: field(advanced, "imageGuidanceScale", legacy_number),
+            ip_adapter_scale: field(advanced, "ipAdapterScale", legacy_number),
+            reference_strength: field(advanced, "referenceStrength", legacy_number),
+            mlx_quantize: field(advanced, "mlxQuantize", legacy_integer),
             quant_tier: field(advanced, "quantTier", text),
             quant: field(advanced, "quant", text),
             quantization: field(advanced, "quantization", text),
@@ -303,14 +302,18 @@ impl RouteOptionFacts {
             use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
             text_encoder_model: field(advanced, "textEncoderModel", text),
             model_path: field(advanced, "modelPath", text),
+            model_repo: field(advanced, "modelRepo", text),
+            repo: field(advanced, "repo", text),
             tile_control_net_repo: field(advanced, "tileControlNetRepo", text),
-            strength: field(advanced, "strength", |v| {
-                v.as_f64().filter(|n| n.is_finite())
-            }),
+            strength: field(advanced, "strength", legacy_number),
             hires_fix_enabled: field(hires_fix, "enabled", boolean),
             yue2_decoder: field(yue2, "decoder", text),
             conv_rot: field(advanced, "convRot", boolean),
-            angle_set: field(advanced, "angleSet", boolean),
+            angle_set: field(advanced, "angleSet", |value| {
+                Some(sceneworks_options::effective_values::legacy_image_flag(
+                    value,
+                ))
+            }),
         }
     }
 
@@ -1182,5 +1185,44 @@ mod tests {
                 RouteField::Valid(expected)
             );
         }
+    }
+
+    #[test]
+    fn loaded_model_hints_preserve_saved_repo_syntax() {
+        let facts = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced":{"modelRepo":" org/model ","repo":"","modelPath":"ignored"}
+        })));
+        assert_eq!(
+            facts.model_repo,
+            RouteField::Valid(" org/model ".to_owned())
+        );
+        assert_eq!(facts.repo, RouteField::Valid(String::new()));
+        let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced":{"modelRepo":7,"repo":null}
+        })));
+        assert_eq!(malformed.model_repo, RouteField::Invalid);
+        assert_eq!(malformed.repo, RouteField::Null);
+    }
+
+    #[test]
+    fn bare_route_probe_uses_portable_legacy_numeric_and_angle_parsers() {
+        let facts = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced": {
+                "mlxQuantize": " 4 ",
+                "referenceStrength": "0.45",
+                "trueCfgScale": "2.5",
+                "angleSet": "false"
+            }
+        })));
+        assert_eq!(facts.mlx_quantize, RouteField::Valid(4));
+        assert_eq!(facts.reference_strength, RouteField::Valid(0.45));
+        assert_eq!(facts.true_cfg_scale, RouteField::Valid(2.5));
+        assert_eq!(facts.angle_set, RouteField::Valid(true));
+        let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced":{"mlxQuantize":"4.5","trueCfgScale":"nan","angleSet":{}}
+        })));
+        assert_eq!(malformed.mlx_quantize, RouteField::Invalid);
+        assert_eq!(malformed.true_cfg_scale, RouteField::Invalid);
+        assert_eq!(malformed.angle_set, RouteField::Valid(false));
     }
 }

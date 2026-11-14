@@ -410,6 +410,7 @@ pub fn registered_digest_member_claim_id(
     member: &PortableArtifactMember,
     payload: &Value,
 ) -> Result<String, ArtifactContractError> {
+    use crate::resolved_options::{RouteField, RouteOptionFacts};
     if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
         return Err(error("registered digest claim requires a Digest member"));
     }
@@ -447,10 +448,15 @@ pub fn registered_digest_member_claim_id(
             let selected = payload
                 .pointer("/modelManifestEntry/resolvedTextEncoder")
                 .ok_or_else(|| error("selected text encoder has no private resolution"))?;
-            let selected_id = payload
-                .pointer("/advanced/textEncoderModel")
-                .and_then(Value::as_str)
-                .filter(|id| *id != "default" && !id.is_empty())
+            let options = payload
+                .as_object()
+                .map(RouteOptionFacts::from_payload_syntax);
+            let selected_id = options
+                .as_ref()
+                .and_then(|options| match &options.text_encoder_model {
+                    RouteField::Valid(id) if id != "default" && !id.is_empty() => Some(id.as_str()),
+                    _ => None,
+                })
                 .ok_or_else(|| error("selected text encoder is no longer authored"))?;
             if selected.get("selectionId").and_then(Value::as_str) != Some(selected_id)
                 || selected
@@ -481,25 +487,38 @@ pub fn registered_digest_member_claim_id(
             .map_err(error);
         }
         ArtifactMemberRole::Control if member.component_id.as_deref() == Some("strict_control") => {
-            let selected = payload
-                .pointer("/advanced/controlWeights")
-                .ok_or_else(|| error("registered control overlay is no longer selected"))?;
-            let id = selected
-                .get("overlayId")
-                .and_then(Value::as_str)
+            let options = payload
+                .as_object()
+                .map(RouteOptionFacts::from_payload_syntax);
+            let weights = match options.as_ref().map(|options| &options.control_weights) {
+                Some(RouteField::Valid(weights)) => weights,
+                Some(RouteField::Null | RouteField::Invalid) => {
+                    return Err(error("registered control overlay has no logical id"));
+                }
+                _ => return Err(error("registered control overlay is no longer selected")),
+            };
+            let id = weights
+                .overlay_id
+                .valid()
+                .map(String::as_str)
                 .filter(|id| !id.trim().is_empty() && *id == id.trim())
                 .ok_or_else(|| error("registered control overlay has no logical id"))?;
-            if selected.get("_catalogAuthorized").and_then(Value::as_bool) != Some(true)
-                || selected
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
+            if !matches!(
+                weights.catalog_authorized,
+                crate::image_request::ControlWeightField::Valid(true)
+            ) || weights.path.valid().is_none_or(String::is_empty)
             {
                 return Err(error(
                     "registered control overlay is not locally authorized",
                 ));
             }
-            ("control", id, None)
+            return crate::portable_sources::registered_digest_claim_id(
+                "control",
+                id,
+                None,
+                &portable_file_ledger_sha256(&member.files)?,
+            )
+            .map_err(error);
         }
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
             let slot = member

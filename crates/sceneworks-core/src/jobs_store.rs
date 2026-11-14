@@ -6476,9 +6476,13 @@ fn desired_model_keys(payload: &Map<String, Value>) -> Vec<String> {
     let mut keys = Vec::new();
     push_string_value(&mut keys, payload.get("model"));
     push_string_value(&mut keys, payload.get("repo"));
-    if let Some(advanced) = payload.get("advanced").and_then(Value::as_object) {
-        push_string_value(&mut keys, advanced.get("modelRepo"));
-        push_string_value(&mut keys, advanced.get("repo"));
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    for field in [&options.model_repo, &options.repo] {
+        if let crate::resolved_options::RouteField::Valid(value) = field {
+            if !value.is_empty() {
+                keys.push(value.clone());
+            }
+        }
     }
     keys.sort();
     keys.dedup();
