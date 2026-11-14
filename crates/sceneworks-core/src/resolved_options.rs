@@ -136,6 +136,37 @@ impl<'a> BindingInput<'a> {
             .transpose()
     }
 
+    /// Preserve a meaningful explicit JSON null separately from omission. A caller can then
+    /// refuse or suppress a route fallback without mistaking null for an absent option.
+    pub fn nullable_integer(
+        &self,
+        location: &str,
+        key: &str,
+    ) -> Result<Option<Bound<Option<i64>>>, BindingError> {
+        self.entry(location, key, "integer or null", |shape| {
+            shape == Shape::Integer
+        })?
+        .map(|(spec, value, origin)| {
+            if value.is_null() {
+                return Ok(Bound {
+                    value: None,
+                    origin,
+                });
+            }
+            value
+                .as_i64()
+                .map(|value| Bound {
+                    value: Some(value),
+                    origin,
+                })
+                .ok_or(BindingError::InvalidEffectiveValue {
+                    id: spec.id,
+                    expected: "integer or null",
+                })
+        })
+        .transpose()
+    }
+
     pub fn number(&self, location: &str, key: &str) -> Result<Option<Bound<f64>>, BindingError> {
         self.entry(location, key, "finite number", |shape| {
             shape == Shape::Number
@@ -249,5 +280,28 @@ mod tests {
             input.integer("advanced", "__unknown"),
             Err(BindingError::Undeclared { .. })
         ));
+    }
+
+    #[test]
+    fn explicit_null_suppresses_an_absent_value_fallback() {
+        let authored = obj(json!({"advanced":{"mlxQuantize":null}}));
+        let effective = authored.clone();
+        let input = BindingInput::new(&authored, &effective);
+        assert_eq!(
+            input.nullable_integer("advanced", "mlxQuantize").unwrap(),
+            Some(Bound {
+                value: None,
+                origin: Origin::Authored {
+                    spelling: "mlxQuantize"
+                }
+            })
+        );
+        let omitted = obj(json!({"advanced":{}}));
+        assert_eq!(
+            BindingInput::new(&omitted, &omitted)
+                .nullable_integer("advanced", "mlxQuantize")
+                .unwrap(),
+            None
+        );
     }
 }
