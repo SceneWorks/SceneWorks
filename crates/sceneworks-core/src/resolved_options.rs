@@ -355,6 +355,10 @@ pub struct IrisTrainingOptions {
     pub resume_data_policy: Option<Bound<String>>,
     pub resume_optimizer: Option<Bound<String>>,
     pub dist_strategy: Option<Bound<String>>,
+    pub dist_world_size: Option<Bound<i64>>,
+    pub dist_share_device: Option<Bound<bool>>,
+    pub dist_timeout_secs: Option<Bound<i64>>,
+    pub expected_global_batch: Option<Bound<i64>>,
     pub repa_weight: Option<Bound<f64>>,
     pub restore_init: Option<Bound<String>>,
     pub restore_resume_data_policy: Option<Bound<String>>,
@@ -380,6 +384,14 @@ impl IrisTrainingOptions {
                 .text("training.config.advanced.iris", "resume_data_policy")?,
             resume_optimizer: input.text("training.config.advanced.iris", "resume_optimizer")?,
             dist_strategy: input.text("training.config.advanced.iris.dist", "strategy")?,
+            dist_world_size: input
+                .integer("training.config.advanced.iris.dist.world", "world_size")?,
+            dist_share_device: input
+                .boolean("training.config.advanced.iris.dist.world", "share_device")?,
+            dist_timeout_secs: input
+                .integer("training.config.advanced.iris.dist.world", "timeout_secs")?,
+            expected_global_batch: input
+                .integer("training.config.advanced.iris", "expected_global_batch")?,
             repa_weight: input.number("training.config.advanced.iris.repa", "weight")?,
             restore_init: input.text("training.config.advanced.iris_restore", "init")?,
             restore_resume_data_policy: input.text(
@@ -807,8 +819,8 @@ mod tests {
             "networkType":"full", "mixedPrecision":"fp16", "controlType":"canny",
             "personGate":true, "resumeFromJobId":"job-r", "loadFromJobId":"job-l",
             "outputScope":"project", "requestedGpu":"auto",
-            "iris":{"stage":"S2", "repa":{"weight":0.25},
-                "dist":{"strategy":"ddp"}},
+            "iris":{"stage":"S2", "expected_global_batch":8, "repa":{"weight":0.25},
+                "dist":{"strategy":"ddp", "world":{"world_size":2,"share_device":true,"timeout_secs":600}}},
             "iris_restore":{"init":"parent","degradation":{"use_hflip":false}}
         }}}}));
         let bound = IrisTrainingOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
@@ -821,6 +833,10 @@ mod tests {
         assert_eq!(bound.requested_gpu.as_ref().unwrap().value, "auto");
         assert_eq!(bound.stage.as_ref().unwrap().value, "S2");
         assert_eq!(bound.dist_strategy.as_ref().unwrap().value, "ddp");
+        assert_eq!(bound.dist_world_size.as_ref().unwrap().value, 2);
+        assert!(bound.dist_share_device.as_ref().unwrap().value);
+        assert_eq!(bound.dist_timeout_secs.as_ref().unwrap().value, 600);
+        assert_eq!(bound.expected_global_batch.as_ref().unwrap().value, 8);
         assert!(bound.repa_enabled());
         assert_eq!(bound.restore_init.as_ref().unwrap().value, "parent");
         assert_eq!(
