@@ -1648,6 +1648,14 @@ fn production_execution_has_no_raw_advanced_reads() {
                     | ("write_image_asset", "phases")
             )
     };
+    // Curriculum preset construction reads the authored nested Iris template to build a new
+    // saved plan. The worker resolves the resulting plan before any training execution.
+    let iris_preset_authoring_read = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/iris_curricula.rs"
+            && read.function == "iris_stage_presets"
+            && read.location == "training.config.advanced"
+            && read.key == "iris"
+    };
     // The verified worker dispatch clone already has typed control-weight validity. This
     // get_mut only finds the object to replace its private path with a confined source path;
     // the exact rewrite site is pinned by raw_option_map_mutations_have_reviewed_sites.
@@ -1674,6 +1682,7 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !authored_workflow_read(read)
                 && !persisted_film_attempt_read(read)
                 && !authored_image_metadata_read(read)
+                && !iris_preset_authoring_read(read)
                 && !trusted_control_weights_write(read)
                 && !authored_control_weights_scrub(read)
                 && !trusted_aux_parser(read)
