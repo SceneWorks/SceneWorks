@@ -1092,3 +1092,10 @@ pub(crate) async fn run_dataset_batch_describe_job(
 #[cfg(all(test, native_lane))]
 #[path = "batch_describe_jobs_tests.rs"]
 mod tests;
+
+// Real-weight CUDA validation of the Qwen3.8 27B describer (SW-7120). Test-only + candle-only and
+// ignored, like the other worker GPU smokes; only the dispatch-only
+// `qwen38-describer-validation.yml` workflow runs it.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "qwen38_describer_gpu_smoke.rs"]
+mod qwen38_describer_gpu_smoke;
