@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "8fd05f79ef841a0d418fa1d5183b77992d8b7a42",
+  "inferenceRevision": "775c7febdcbeaca5e20cd728358842a2cba9b10e",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -1192,7 +1192,7 @@
     },
     "candle:minimax_h3": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "789adbcc6810b5d5a6d07047aaf11e3c35a29e073c36fd2132a91a994966badc",
+      "digest": "8b33fb17d1387ff9fa3a7616ea8124fc008eb07bf4ed6f7d09993a4355673041",
       "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1235,7 +1235,7 @@
     },
     "candle:minimax_h3_image": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "17b225b9e3454b0d49c2059d9117118f6fa0fa55275723dcada01393d54f9766",
+      "digest": "ae464f007512b2b22cf2e3f904bc45375c5f8b90f36b20fc99281d3c9227b4ee",
       "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -3235,7 +3235,7 @@
     },
     "mlx:minimax_h3": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "digest": "731bb3023d526459d78ad524dfdbd50de1e93798c81608b331c6396aa31f4b19",
+      "digest": "d70930c20c6de9c2147d0424613df485db9095898a7bb43b80e058ec5a832a89",
       "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -3275,7 +3275,7 @@
     },
     "mlx:minimax_h3_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "digest": "6759b366f7167c8beb3bca7b30a08fba11ad33de5c8ce17246f0efd9250a3892",
+      "digest": "a466407ced5a37bf3929b425da682a4910e2483574617827465ab14bf17745cd",
       "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
       "closureCrates": [
         "crates/contracts/core-llm",

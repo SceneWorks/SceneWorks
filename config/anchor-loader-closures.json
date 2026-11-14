@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "8fd05f79ef841a0d418fa1d5183b77992d8b7a42",
+  "inferenceRevision": "775c7febdcbeaca5e20cd728358842a2cba9b10e",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -28857,7 +28857,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "c5ccef6d1c8d472506a0e0724618bee4772974de11a37583a3370139bc4e2f2d",
+      "digest": "094365b42bc04d57287e4a7de903a7fb7d92924756049c9e096dcfee5c5ea444",
       "closureFileCount": 742,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -29609,7 +29609,7 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "9663d62812dee4085722e4cc69429d899102ce4d76b9e85e4c39b83bf96ab952",
+      "digest": "891851f9dda3187e5b053858d5ebbfb1cde92981a0c099ab428a84c26f71792f",
       "closureFileCount": 494,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -30113,7 +30113,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/image_model.rs"
       ],
-      "digest": "08f533c4587ffa6083829e7ab938481cb7755d6273d292cc47b75b0344d8c1e5",
+      "digest": "bd9ef9c831ae2172b2b1f9587bfe457bb0060375874c2db84190aac894014c35",
       "closureFileCount": 742,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -30865,7 +30865,7 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/h3_image/memory.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/h3_image/model.rs"
       ],
-      "digest": "86d7bd2fdadef9ce83f4ae1a66785c201fd2a1a7ec7fd29b1b34da1e3d8f58bf",
+      "digest": "6015e290f22b6fc45d88fde5a95932f63eae4b1290726e4328088488b0427bee",
       "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -31382,7 +31382,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "17b454132fe51ba5b68395426c0461cbd7f86f72cf752cef16cca3442ab4f21a",
+      "digest": "8cb96900970bda43a6b178aaf2fa1d2cb39018aadffc0aeeebfd7eb645bf3bc5",
       "closureFileCount": 742,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -32135,7 +32135,7 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "85b6ec81cafdaed4193987839f4bca8ff8db2172d6bf7479af0fce0dbeed7459",
+      "digest": "82580fd0ec0ff13648af5c1f232e4c2499db3b894773dfbe4ef9a7d626594a26",
       "closureFileCount": 494,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
