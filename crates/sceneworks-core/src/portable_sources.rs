@@ -418,45 +418,8 @@ fn authored_aux_selection(
     payload: &JsonObject,
     entry_id: &str,
 ) -> Result<AuxOptionSelection, String> {
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    let poses = advanced
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array);
-    let mut result = AuxOptionSelection {
-        poses_present: poses.is_some_and(|poses| !poses.is_empty()),
-        poses_contain_object: poses.is_some_and(|poses| poses.iter().any(Value::is_object)),
-        use_pid: pid_requested(advanced.and_then(|advanced| advanced.get("usePid"))),
-        decoder: advanced
-            .and_then(|advanced| advanced.get("decoder"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        enhance_prompt: advanced
-            .and_then(|advanced| advanced.get("enhancePrompt"))
-            .and_then(Value::as_bool)
-            == Some(true),
-        control_mode: advanced
-            .and_then(|advanced| advanced.get("controlMode"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        control_image: advanced
-            .and_then(|advanced| advanced.get("controlImage"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        veda_enabled: advanced
-            .and_then(|advanced| advanced.get("veda"))
-            .and_then(|veda| veda.get("enabled"))
-            .and_then(Value::as_bool)
-            == Some(true),
-        use_uncensored_enhancer: advanced
-            .and_then(|advanced| advanced.get("useUncensoredEnhancer"))
-            .and_then(Value::as_bool)
-            == Some(true),
-        text_encoder_model: advanced
-            .and_then(|advanced| advanced.get("textEncoderModel"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        training: None,
-    };
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let mut result = route.auxiliary_selection();
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: crate::training::TrainingPlan = serde_json::from_value(
             payload
@@ -466,36 +429,24 @@ fn authored_aux_selection(
         )
         .map_err(|error| format!("invalid resolved training plan: {error}"))?;
         let matches_entry = plan.target.base_model == entry_id;
-        let depth_init_parent = matches_entry
-            && entry_id == "iris_3b_depth"
-            && crate::training::iris::depth::depth_init(&plan.config)
-                .map_err(|error| error.to_string())?
-                == crate::training::iris::depth::DEPTH_INIT_PARENT;
-        let restore_init_parent = if matches_entry && entry_id == "iris_3b_restore" {
-            crate::training::iris::restore::restore_options(&plan.config)
-                .map_err(|error| error.to_string())?
-                .get("init")
-                .and_then(Value::as_str)
-                == Some("parent")
-        } else {
-            false
-        };
-        let iris_kernel =
-            matches_entry && crate::training::iris::is_iris_training_kernel(&plan.target.kernel);
-        let iris_repa_enabled = if iris_kernel {
-            let options = crate::training::iris::iris_options(&plan.config)
+        // Keep the engine's archived-plan validation while the shared training binding lowers the
+        // source selectors. The engine parsers own the full training option vocabulary.
+        if matches_entry && entry_id == "iris_3b_depth" {
+            crate::training::iris::depth::depth_init(&plan.config)
                 .map_err(|error| error.to_string())?;
-            crate::training::iris::curricula::iris_repa_enabled(&options)
-        } else {
-            false
-        };
-        result.training = Some(TrainingAuxSelection {
-            base_model: plan.target.base_model,
-            depth_init_parent,
-            restore_init_parent,
-            iris_repa_enabled,
-            iris_kernel,
-        });
+        }
+        if matches_entry && entry_id == "iris_3b_restore" {
+            crate::training::iris::restore::restore_options(&plan.config)
+                .map_err(|error| error.to_string())?;
+        }
+        if matches_entry && crate::training::iris::is_iris_training_kernel(&plan.target.kernel) {
+            crate::training::iris::iris_options(&plan.config).map_err(|error| error.to_string())?;
+        }
+        let training = crate::resolved_options::IrisTrainingOptions::bind(
+            &crate::resolved_options::BindingInput::new(payload, payload),
+        )
+        .map_err(|error| error.to_string())?;
+        result.training = Some(training.auxiliary_selection(&plan, entry_id));
     }
     Ok(result)
 }
