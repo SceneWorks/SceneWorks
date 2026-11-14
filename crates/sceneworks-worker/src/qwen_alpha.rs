@@ -127,6 +127,7 @@ pub(crate) fn engine_advertises_alpha_output(model_id: &str) -> bool {
 /// Reads the SceneWorks request axis, not the engine field. Absent, null, `false` and any
 /// non-boolean all mean "no": a toggle that arrives malformed must not silently change what the
 /// render emits.
+#[cfg(test)]
 pub(crate) fn transparency_requested(advanced: &Map<String, Value>) -> bool {
     advanced
         .get(ADVANCED_TRANSPARENT_BACKGROUND)
@@ -144,6 +145,7 @@ pub(crate) fn transparency_requested(advanced: &Map<String, Value>) -> bool {
 /// cut-out and got an opaque render on a white background has to discover that by looking; a job
 /// that fails saying the model cannot do it is actionable. This mirrors the steps-floor decision in
 /// `create_image_job` (reject, never clamp).
+#[cfg(test)]
 pub(crate) fn resolve_output_channels(
     model_id: &str,
     advanced: &Map<String, Value>,
