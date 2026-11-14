@@ -1374,6 +1374,52 @@ fn production_execution_has_no_raw_advanced_reads() {
         file == "crates/sceneworks-core/src/resolved_options.rs"
             && matches!(function, "from_payload_syntax" | "from_plan_syntax")
     };
+    // These exact clones write authored options into asset receipts. The functions only add
+    // resolved telemetry and return the resulting settings object; no route or engine input reads
+    // the clone. Keep each site explicit so a new execution clone cannot inherit the exception.
+    let authored_receipt_clone = |file: &str, function: &str, expression: &str| {
+        expression == "whole advanced map: clone"
+            && matches!(
+                (file, function),
+                (
+                    "crates/sceneworks-worker/src/sensenova_jobs.rs",
+                    "write_interleaved_document"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+                    "bernini_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/candle.rs",
+                    "candle_video_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
+                    "krea_realtime_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+                    "ltx_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs",
+                    "minimax_h3_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/mochi.rs",
+                    "mochi_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+                    "scail2_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/svd.rs",
+                    "svd_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/vace.rs",
+                    "wan_vace_extend_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/vace.rs",
+                    "wan_vace_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/wan.rs",
+                    "wan_raw_settings"
+                )
+            )
+    };
     let direct = coverage
         .reads
         .iter()
@@ -1395,6 +1441,7 @@ fn production_execution_has_no_raw_advanced_reads() {
     let whole_map = coverage
         .whole_map_reads
         .iter()
+        .filter(|(file, function, expression)| !authored_receipt_clone(file, function, expression))
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let nested = coverage
         .nested_reads
