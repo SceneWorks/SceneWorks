@@ -21,6 +21,7 @@ use sceneworks_core::model_artifacts::portable_binding::{
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
 };
+use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -250,8 +251,10 @@ fn write_trusted_pinned_ledger(path: &Path, ledger: &TrustedPinnedLedger) -> std
 static PINNED_METADATA_CACHE: OnceLock<Mutex<BTreeMap<String, Vec<PortableArtifactFile>>>> =
     OnceLock::new();
 
-/// File-content verification can read several GiB. Keep it off Tokio's request-polling threads
-/// without memoizing mutable local bytes between admissions.
+/// File-content verification can read several GiB. Keep it off Tokio's request-polling threads.
+/// Each installed file is read at most once per host while its filesystem stamp (size, mtime and,
+/// on Unix, device, inode and ctime) is unchanged: the verdict lives in the host's
+/// [`VerifiedSourceCache`], which the worker shares, and any stamp change re-hashes the file.
 async fn blocking_source_capture<T: Send + 'static>(
     capture: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
@@ -260,6 +263,31 @@ async fn blocking_source_capture<T: Send + 'static>(
         .map_err(|error| {
             ApiError::internal(format!("Model source verification task failed: {error}"))
         })?
+}
+
+/// This host's hash-once verdict store, the same one the worker opens.
+fn verified_source_cache(state: &AppState) -> VerifiedSourceCache {
+    VerifiedSourceCache::for_data_dir(&state.settings.data_dir)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Files this thread actually read to verify; a reused verdict reads none.
+    static HASHED_SOURCE_FILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_source_verification(verification: SourceVerification) {
+    #[cfg(test)]
+    if verification == SourceVerification::Hashed {
+        HASHED_SOURCE_FILES.with(|count| count.set(count.get() + 1));
+    }
+    #[cfg(not(test))]
+    let _ = verification;
+}
+
+/// Admission never cancels a hash midway.
+fn no_cancellation() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The entry slots are part of the private worker payload, not the public catalog. Preserve the
@@ -1524,7 +1552,7 @@ async fn verify_training_primary_path(
     let prefix = selected
         .strip_prefix(&snapshot)
         .map_err(|_| incomplete("training base path is outside its pinned publisher snapshot"))?;
-    let actual = capture_local_source_files_offloaded(&selected, &allowed).await?;
+    let actual = capture_local_source_files_offloaded(state, &selected, &allowed).await?;
     let remote = members
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1719,9 +1747,12 @@ async fn capture_model_slot(
         }
         let mut local = capture_local_model_entry_offloaded(state, entry, slot).await?;
         if let Some(training) = &training {
-            let selected =
-                capture_local_source_files_offloaded(&training.path, &allowed_local_roots(state))
-                    .await?;
+            let selected = capture_local_source_files_offloaded(
+                state,
+                &training.path,
+                &allowed_local_roots(state),
+            )
+            .await?;
             if local
                 .iter()
                 .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1797,6 +1828,7 @@ async fn capture_model_slot(
             members.push(
                 if role == ArtifactMemberRole::Primary && produced_training {
                     capture_local_member_offloaded(
+                        state,
                         &training.as_ref().unwrap().path,
                         &allowed_local_roots(state),
                         role,
@@ -1825,7 +1857,7 @@ async fn capture_model_slot(
         selected_primary_override(payload, entry, owns_request_overlays, training.is_some())
     {
         let files =
-            capture_local_source_files_offloaded(&path, &allowed_local_roots(state)).await?;
+            capture_local_source_files_offloaded(state, &path, &allowed_local_roots(state)).await?;
         let primary = members
             .iter_mut()
             .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1843,6 +1875,7 @@ async fn capture_model_slot(
         {
             verify_produced_local_source_offloaded(state, entry, &path).await?;
             *primary = capture_local_member_offloaded(
+                state,
                 &path,
                 &allowed_local_roots(state),
                 ArtifactMemberRole::Primary,
@@ -1866,6 +1899,7 @@ async fn capture_model_slot(
                 .to_path_buf(),
         );
         let local = capture_local_member_offloaded(
+            state,
             &selected,
             &roots,
             ArtifactMemberRole::Primary,
@@ -1903,6 +1937,7 @@ async fn capture_model_slot(
             }
             SelectedSourceLocation::LocalPath(path) => {
                 capture_local_member_offloaded(
+                    state,
                     Path::new(path),
                     &allowed_local_roots(state),
                     source.role.clone(),
@@ -2422,13 +2457,14 @@ async fn resolve_dynamic_hf_revision_with_client(
 }
 
 fn capture_local_member(
+    cache: &VerifiedSourceCache,
     path: &Path,
     allowed_roots: &[PathBuf],
     role: ArtifactMemberRole,
     component_id: Option<String>,
     tier: Option<String>,
 ) -> Result<PortableArtifactMember, ApiError> {
-    let files = capture_local_source_files(path, allowed_roots)?;
+    let files = capture_local_source_files(cache, path, allowed_roots)?;
     let digest = portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
     let member = PortableArtifactMember {
         role,
@@ -2444,16 +2480,18 @@ fn capture_local_member(
 }
 
 async fn capture_local_member_offloaded(
+    state: &AppState,
     path: &Path,
     allowed_roots: &[PathBuf],
     role: ArtifactMemberRole,
     component_id: Option<String>,
     tier: Option<String>,
 ) -> Result<PortableArtifactMember, ApiError> {
+    let cache = verified_source_cache(state);
     let path = path.to_path_buf();
     let allowed_roots = allowed_roots.to_vec();
     blocking_source_capture(move || {
-        capture_local_member(&path, &allowed_roots, role, component_id, tier)
+        capture_local_member(&cache, &path, &allowed_roots, role, component_id, tier)
     })
     .await
 }
@@ -2465,8 +2503,9 @@ fn capture_selected_text_encoder_member(
 ) -> Result<PortableArtifactMember, ApiError> {
     let selected = Path::new(path);
     let roots = allowed_local_roots(state);
+    let cache = verified_source_cache(state);
     let mut files = match source_kind {
-        "directory" if selected.is_dir() => capture_local_source_files(selected, &roots)?,
+        "directory" if selected.is_dir() => capture_local_source_files(&cache, selected, &roots)?,
         "file" if selected.is_file() => {
             // A File encoder reads its sibling behavior config. Its tokenizer comes from the
             // already-bound base; a complete snapshot instead carries its own tokenizer below.
@@ -2474,8 +2513,8 @@ fn capture_selected_text_encoder_member(
                 .parent()
                 .ok_or_else(|| incomplete("selected text encoder has no parent"))?
                 .join("config.json");
-            let mut files = capture_local_source_files(selected, &roots)?;
-            files.extend(capture_local_source_files(&config, &roots)?);
+            let mut files = capture_local_source_files(&cache, selected, &roots)?;
+            files.extend(capture_local_source_files(&cache, &config, &roots)?);
             files
         }
         _ => return Err(incomplete("selected text encoder source kind changed")),
@@ -2919,8 +2958,9 @@ async fn capture_download_member(
         let revision = revision.to_owned();
         let variant = variant.to_owned();
         let selectors = selectors.clone();
+        let pinned = files.clone();
         blocking_source_capture(move || {
-            capture_receipted_local_files(&state, &repo, &revision, &variant, &selectors)
+            capture_receipted_local_files(&state, &repo, &revision, &variant, &selectors, &pinned)
         })
         .await?
     };
@@ -3153,14 +3193,17 @@ fn huggingface_token(state: &AppState) -> Result<Option<String>, ApiError> {
 }
 
 /// Prefer a completed, exact install receipt on this host. The receipt enumerates the concrete
-/// files for a pinned revision; each file is rehashed now, so a stale size or a substituted file
-/// never inherits the old identity. Without such a receipt, admission consults pinned HF metadata.
+/// files for a pinned revision; each file is verified against its `pinned` ledger entry through
+/// the host's hash-once record, so an unchanged install is not read again while a stale size or a
+/// substituted file (any stamp change) is rehashed and never inherits the old identity. Without
+/// such a receipt, admission consults pinned HF metadata.
 fn capture_receipted_local_files(
     state: &AppState,
     repo: &str,
     revision: &str,
     variant: &str,
     selectors: &[String],
+    pinned: &[PortableArtifactFile],
 ) -> Result<Option<Vec<PortableArtifactFile>>, ApiError> {
     let managed = state
         .settings
@@ -3230,6 +3273,7 @@ fn capture_receipted_local_files(
         Ok(snapshot) => snapshot,
         Err(_) => return Ok(None),
     };
+    let cache = verified_source_cache(state);
     let mut files = Vec::with_capacity(selected.len());
     for relative in selected {
         let path = confine_artifact_path(&root.join(&relative), &allowed)
@@ -3239,13 +3283,37 @@ fn capture_receipted_local_files(
         if !metadata.is_file() {
             return Err(incomplete("receipted model source is not a regular file"));
         }
-        let digest = sceneworks_core::hashing::sha256_file(&path).map_err(|error| {
-            incomplete(format!("receipted model file cannot be hashed: {error}"))
-        })?;
+        let cannot_hash =
+            |error| incomplete(format!("receipted model file cannot be hashed: {error}"));
+        let expected = pinned
+            .iter()
+            .find(|file| file.relative_path == Path::new(&relative));
+        let sha256 = match expected {
+            Some(expected) => match cache.verify(&path, &expected.sha256, &no_cancellation) {
+                Ok(verification) => {
+                    note_source_verification(verification);
+                    expected.sha256.clone()
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    note_source_verification(SourceVerification::Hashed);
+                    return Err(incomplete(format!(
+                        "installed {repo}@{revision} files differ from the pinned source"
+                    )));
+                }
+                Err(error) => return Err(cannot_hash(error)),
+            },
+            // A file the ledger does not name fails the caller's comparison; hash it as before.
+            None => {
+                let (sha256, verification) =
+                    cache.sha256(&path, &no_cancellation).map_err(cannot_hash)?;
+                note_source_verification(verification);
+                sha256
+            }
+        };
         files.push(PortableArtifactFile {
             relative_path: PathBuf::from(relative),
             size_bytes: metadata.len(),
-            sha256: format!("sha256:{digest}"),
+            sha256,
         });
     }
     Ok(Some(files))
@@ -3342,9 +3410,10 @@ pub(crate) fn capture_local_model_entry(
             verify_produced_local_source(state, entry, &locators[0].1)?;
         }
     }
+    let cache = verified_source_cache(state);
     let mut members = Vec::new();
     for (index, (key, path)) in locators.into_iter().enumerate() {
-        let mut files = capture_local_source_files(&path, &allowed_roots)?;
+        let mut files = capture_local_source_files(&cache, &path, &allowed_roots)?;
         if key.starts_with("importPlan/layers/") {
             if files.len() != 1 {
                 return Err(incomplete("checkpoint plan layer is not one exact file"));
@@ -3555,13 +3624,14 @@ fn allowed_local_roots_for(data_dir: &Path, external_model_roots: &[PathBuf]) ->
 }
 
 fn capture_local_source_files(
+    cache: &VerifiedSourceCache,
     source: &Path,
     allowed_roots: &[PathBuf],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
     let source = confine_artifact_path(source, allowed_roots)
         .map_err(|error| incomplete(error.to_string()))?;
     let mut selected = Vec::new();
-    collect_source_files(&source, &source, allowed_roots, &mut selected, 0)?;
+    collect_source_files(cache, &source, &source, allowed_roots, &mut selected, 0)?;
     if selected.is_empty() {
         return Err(incomplete(
             "selected local model source has no regular files",
@@ -3572,15 +3642,19 @@ fn capture_local_source_files(
 }
 
 async fn capture_local_source_files_offloaded(
+    state: &AppState,
     source: &Path,
     allowed_roots: &[PathBuf],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
+    let cache = verified_source_cache(state);
     let source = source.to_path_buf();
     let allowed_roots = allowed_roots.to_vec();
-    blocking_source_capture(move || capture_local_source_files(&source, &allowed_roots)).await
+    blocking_source_capture(move || capture_local_source_files(&cache, &source, &allowed_roots))
+        .await
 }
 
 fn collect_source_files(
+    cache: &VerifiedSourceCache,
     root: &Path,
     path: &Path,
     allowed_roots: &[PathBuf],
@@ -3612,7 +3686,14 @@ fn collect_source_files(
             .map_err(|error| incomplete(format!("local model directory is unreadable: {error}")))?;
         children.sort();
         for child in children {
-            collect_source_files(root, &path.join(child), allowed_roots, selected, depth + 1)?;
+            collect_source_files(
+                cache,
+                root,
+                &path.join(child),
+                allowed_roots,
+                selected,
+                depth + 1,
+            )?;
         }
         return Ok(());
     }
@@ -3645,12 +3726,15 @@ fn collect_source_files(
         return Ok(());
     }
     let size_bytes = metadata.len();
-    let sha256 = sceneworks_core::hashing::sha256_file(&canonical)
+    // Hashed once per host while the file's stamp is unchanged (shared with the worker's check).
+    let (sha256, verification) = cache
+        .sha256(&canonical, &no_cancellation)
         .map_err(|error| incomplete(format!("local model file cannot be hashed: {error}")))?;
+    note_source_verification(verification);
     selected.push(PortableArtifactFile {
         relative_path,
         size_bytes,
-        sha256: format!("sha256:{sha256}"),
+        sha256,
     });
     Ok(())
 }
@@ -3662,6 +3746,7 @@ fn capture_selected_request_overlays(
     let mut members = Vec::new();
     let value = Value::Object(payload.clone());
     let allowed_roots = allowed_local_roots(state);
+    let cache = verified_source_cache(state);
     for (slot, record) in enumerate_portable_array_slots(&value, &["loras", "lokrs", "controls"]) {
         if slot.starts_with("lokrs/") || slot.contains("/lokrs/") {
             return Err(incomplete(format!(
@@ -3702,7 +3787,7 @@ fn capture_selected_request_overlays(
                 "selected adapter {slot} has no loadable source"
             )));
         };
-        let files = capture_local_source_files(&locator, &allowed_roots)?;
+        let files = capture_local_source_files(&cache, &locator, &allowed_roots)?;
         let digest =
             portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
         let member = PortableArtifactMember {
@@ -3732,6 +3817,13 @@ async fn capture_selected_request_overlays_offloaded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A verdict store outside the captured trees, so its records never join a closure.
+    fn scratch_cache() -> (tempfile::TempDir, VerifiedSourceCache) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = VerifiedSourceCache::new(dir.path().join("verified"));
+        (dir, cache)
+    }
     use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
 
@@ -4129,6 +4221,190 @@ mod tests {
         assert!(error.detail.contains("files differ from the pinned source"));
     }
 
+    /// Older than the verified-source stamp's racy window, so a recorded verdict may stand in
+    /// for a hash.
+    fn settle_mtime(path: &Path, modified: std::time::SystemTime) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    fn hashed_source_files() -> usize {
+        HASHED_SOURCE_FILES.with(std::cell::Cell::get)
+    }
+
+    /// One receipted install of `owner/hash-once` whose pinned ledger names `bytes`.
+    fn receipted_install(
+        state: &AppState,
+        bytes: &[u8],
+    ) -> (PathBuf, Vec<PortableArtifactFile>, Value) {
+        let repo = "owner/hash-once";
+        let revision = "a".repeat(40);
+        let relative = "model.safetensors";
+        let snapshot =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(&state.settings.data_dir, repo)
+                .unwrap()
+                .join("snapshots")
+                .join(&revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let path = snapshot.join(relative);
+        std::fs::write(&path, bytes).unwrap();
+        let receipt_dir = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir(repo));
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            json!({"repo":repo,"snapshotRevision":revision,"variant":"default",
+                "resolvedFiles":[relative]})
+            .to_string(),
+        )
+        .unwrap();
+        let pinned = vec![PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(bytes)),
+        }];
+        let download = json!({"repo":repo,"revision":revision,"files":[relative]});
+        (path, pinned, download)
+    }
+
+    fn capture_receipted(
+        state: &AppState,
+        pinned: &[PortableArtifactFile],
+    ) -> Result<Option<Vec<PortableArtifactFile>>, ApiError> {
+        capture_receipted_local_files(
+            state,
+            "owner/hash-once",
+            &"a".repeat(40),
+            "default",
+            &["model.safetensors".to_owned()],
+            pinned,
+        )
+    }
+
+    #[tokio::test]
+    async fn receipted_install_is_hashed_once_while_its_stamp_is_unchanged() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, pinned, download) = receipted_install(&state, b"trusted");
+        let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        settle_mtime(&path, settled);
+        let start = hashed_source_files();
+        assert_eq!(
+            capture_receipted(&state, &pinned).unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(
+            hashed_source_files(),
+            start + 1,
+            "the first check reads the file"
+        );
+        assert_eq!(
+            capture_receipted(&state, &pinned).unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(
+            hashed_source_files(),
+            start + 1,
+            "a second job creation reads no bytes of the unchanged install"
+        );
+        // The admission path that job creation runs reuses the same verdict end to end.
+        let fixture = pinned.clone();
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| fixture.clone()));
+        let member = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("the unchanged install is admitted");
+        assert_eq!(member.files, pinned);
+
+        // Same size and the same mtime, different bytes: the ctime/inode move, so the file is
+        // hashed again and refused with the existing message. (Windows stamps carry no ctime.)
+        if cfg!(unix) {
+            std::fs::write(&path, b"changed").unwrap();
+            settle_mtime(&path, settled);
+            let before = hashed_source_files();
+            let error = capture_receipted(&state, &pinned).expect_err("substitution is refused");
+            assert!(
+                error.detail.contains("files differ from the pinned source"),
+                "{}",
+                error.detail
+            );
+            assert_eq!(hashed_source_files(), before + 1);
+            let error =
+                capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+                    .await
+                    .expect_err("substitution is refused at admission");
+            assert!(error.detail.contains("files differ from the pinned source"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worker_verdict_is_reused_by_api_admission() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, pinned, _) = receipted_install(&state, b"trusted");
+        settle_mtime(
+            &path,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(10),
+        );
+        // The worker opens the host store with `VerifiedSourceCache::for_data_dir(data_dir)`.
+        assert_eq!(
+            VerifiedSourceCache::for_data_dir(&state.settings.data_dir)
+                .verify(
+                    &std::fs::canonicalize(&path).unwrap(),
+                    &pinned[0].sha256,
+                    &no_cancellation
+                )
+                .unwrap(),
+            SourceVerification::Hashed
+        );
+        let start = hashed_source_files();
+        assert_eq!(capture_receipted(&state, &pinned).unwrap(), Some(pinned));
+        assert_eq!(
+            hashed_source_files(),
+            start,
+            "admission reused the worker's verdict"
+        );
+    }
+
+    #[test]
+    fn local_source_capture_is_hashed_once_while_its_stamp_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let (_verified, cache) = scratch_cache();
+        let model = root.path().join("checkpoint");
+        std::fs::create_dir_all(&model).unwrap();
+        let weights = model.join("model.safetensors");
+        std::fs::write(&weights, b"weights").unwrap();
+        let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        settle_mtime(&weights, settled);
+        let roots = [root.path().to_path_buf()];
+        let start = hashed_source_files();
+        let first = capture_local_source_files(&cache, &model, &roots).unwrap();
+        assert_eq!(hashed_source_files(), start + 1);
+        assert_eq!(
+            capture_local_source_files(&cache, &model, &roots).unwrap(),
+            first
+        );
+        assert_eq!(hashed_source_files(), start + 1, "no bytes are read again");
+        if cfg!(unix) {
+            std::fs::write(&weights, b"WEIGHTS").unwrap();
+            settle_mtime(&weights, settled);
+            let changed = capture_local_source_files(&cache, &model, &roots).unwrap();
+            assert_eq!(hashed_source_files(), start + 2);
+            assert_ne!(changed, first, "the substituted bytes get their own digest");
+        }
+    }
+
     #[test]
     fn vector_child_auto_keeps_only_parent_frozen_worker_routes() {
         let routes = BTreeMap::from([(
@@ -4386,7 +4662,9 @@ mod tests {
         ] {
             std::fs::write(root.path().join(marker), b"mutable").unwrap();
         }
-        let files = capture_local_source_files(root.path(), &[root.path().to_path_buf()]).unwrap();
+        let (_verified, cache) = scratch_cache();
+        let files =
+            capture_local_source_files(&cache, root.path(), &[root.path().to_path_buf()]).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].relative_path, PathBuf::from("weights.safetensors"));
     }
@@ -4448,7 +4726,8 @@ mod tests {
                 digest(borrowed.join("vae.safetensors")),
             ),
         ];
-        let actual = capture_local_source_files(&install, &[root.path().to_path_buf()])
+        let (_verified, cache) = scratch_cache();
+        let actual = capture_local_source_files(&cache, &install, &[root.path().to_path_buf()])
             .unwrap()
             .into_iter()
             .map(|file| (file.relative_path, file.size_bytes, file.sha256))
@@ -4463,7 +4742,7 @@ mod tests {
             install.join("escaped.safetensors"),
         )
         .unwrap();
-        let error = capture_local_source_files(&install, &[root.path().to_path_buf()])
+        let error = capture_local_source_files(&cache, &install, &[root.path().to_path_buf()])
             .unwrap_err()
             .detail;
         assert!(
@@ -4641,12 +4920,15 @@ mod tests {
             std::fs::write(model.join("model.safetensors"), b"same weights").unwrap();
             std::fs::write(model.join("config.json"), b"same config").unwrap();
         }
+        let (_verified, cache) = scratch_cache();
         let first_files = capture_local_source_files(
+            &cache,
             &first.path().join("checkpoint"),
             &[first.path().to_path_buf()],
         )
         .unwrap();
         let second_files = capture_local_source_files(
+            &cache,
             &second.path().join("checkpoint"),
             &[second.path().to_path_buf()],
         )
@@ -4662,6 +4944,7 @@ mod tests {
         )
         .unwrap();
         let changed = capture_local_source_files(
+            &cache,
             &second.path().join("checkpoint"),
             &[second.path().to_path_buf()],
         )
