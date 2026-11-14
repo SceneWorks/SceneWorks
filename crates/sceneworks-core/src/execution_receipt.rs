@@ -115,7 +115,16 @@ fn output_asset_ids(
     result: &Map<String, Value>,
     output_count: usize,
 ) -> Result<Vec<Vec<String>>, ReplayUnavailable> {
-    let Some(writes) = result.get("assetWrites") else {
+    if result.contains_key("assetWrites") && result.contains_key("datasetWrites") {
+        return Err(ReplayUnavailable::new(
+            "invalid_completed_assets",
+            "datasetWrites",
+        ));
+    }
+    let Some(writes) = result
+        .get("assetWrites")
+        .or_else(|| result.get("datasetWrites"))
+    else {
         return Ok(vec![Vec::new(); output_count]);
     };
     let writes = writes
@@ -191,8 +200,25 @@ pub fn validate_worker_receipt(
             .iter()
             .enumerate()
             .all(|(index, stage)| stage.stage == format!("seedvr2_window_{index}"));
+    let detail_stages = terminal_result
+        .get("generationSet")
+        .and_then(|set| set.get("mode"))
+        .and_then(Value::as_str)
+        == Some("image_detail")
+        && terminal_result
+            .get("assetWrites")
+            .and_then(Value::as_array)
+            .and_then(|writes| writes.first())
+            .and_then(|fact| fact.pointer("/rawAdapterSettings/detail/tiles"))
+            .and_then(Value::as_u64)
+            .is_some_and(|tiles| tiles > 0 && tiles as usize == submitted.stages.len())
+        && submitted
+            .stages
+            .iter()
+            .enumerate()
+            .all(|(index, stage)| stage.stage == format!("detail_tile_{index}"));
     if !submitted.stages.is_empty()
-        && (submitted.outputs.len() != 1 || !(voice_stages || seedvr2_stages))
+        && (submitted.outputs.len() != 1 || !(voice_stages || seedvr2_stages || detail_stages))
     {
         return Err(ReplayUnavailable::new("invalid_execution_stages", "stages"));
     }
@@ -235,7 +261,10 @@ pub fn validate_worker_receipt(
         {
             return Err(ReplayUnavailable::new("invalid_output_hashes", "outputs"));
         }
-        let writes = terminal_result.get("assetWrites").and_then(Value::as_array);
+        let writes = terminal_result
+            .get("assetWrites")
+            .or_else(|| terminal_result.get("datasetWrites"))
+            .and_then(Value::as_array);
         if let Some(writes) = writes {
             let matching = writes
                 .iter()
@@ -573,6 +602,39 @@ mod tests {
     }
 
     #[test]
+    fn dataset_derivatives_require_each_ordered_output_without_gallery_assets() {
+        let mut receipt = worker_receipt();
+        receipt.execution = json!({"state":"unavailable","reason":{
+            "code":"real_esrgan_onnx_execution_unavailable","detail":"fixture",
+            "missing_facts":["onnx_execution_recipe"]
+        }});
+        receipt.outputs[0].artifact_ids = vec!["dataset:d:a".into()];
+        receipt.outputs[1].artifact_ids = vec!["dataset:d:b".into()];
+        let result = json!({"expectedCount":2,"datasetWrites":[
+            {"assetId":"dataset:d:a","index":0,"mediaPath":"training/a.png"},
+            {"assetId":"dataset:d:b","index":1,"mediaPath":"training/b.png"}
+        ]});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        let mut swapped = result.clone();
+        swapped["datasetWrites"][0]["index"] = json!(1);
+        swapped["datasetWrites"][1]["index"] = json!(0);
+        assert_eq!(
+            validate_worker_receipt(&receipt, swapped.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_artifacts_changed"
+        );
+        let mut missing = result.clone();
+        missing["datasetWrites"].as_array_mut().unwrap().pop();
+        assert_eq!(
+            validate_worker_receipt(&receipt, missing.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_artifacts_changed"
+        );
+    }
+
+    #[test]
     fn binding_digest_survives_json_object_order_changes() {
         let left: Value = serde_json::from_str(r#"{"a":{"x":1,"y":2},"b":3}"#).unwrap();
         let right: Value = serde_json::from_str(r#"{"b":3,"a":{"y":2,"x":1}}"#).unwrap();
@@ -673,6 +735,43 @@ mod tests {
         wrong_route["generationSet"]["mode"] = json!("video_generate");
         assert_eq!(
             validate_worker_receipt(&receipt, wrong_route.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+    }
+
+    #[test]
+    fn detail_receipt_requires_every_ordered_tile_before_final_asset() {
+        let unavailable = json!({"state":"unavailable","reason":{
+            "code":"provider_report_unavailable","detail":"fixture","missing_facts":["provider_resolved_execution"]
+        }});
+        let stages = (0..4)
+            .map(|index| ExecutionStageBinding {
+                stage: format!("detail_tile_{index}"),
+                execution: unavailable.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut receipt = worker_receipt();
+        receipt.execution = unavailable;
+        receipt.outputs.truncate(1);
+        receipt.stages = stages.clone();
+        let result = json!({"expectedCount":1,"generationSet":{"mode":"image_detail"},
+            "assetWrites":[{"assetId":"a","rawAdapterSettings":{"detail":{"tiles":4}}}],
+            "workerExecutionStages":stages});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        receipt.stages.swap(0, 1);
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+        receipt.stages.swap(0, 1);
+        let mut missing_tile = result.clone();
+        missing_tile["assetWrites"][0]["rawAdapterSettings"]["detail"]["tiles"] = json!(3);
+        assert_eq!(
+            validate_worker_receipt(&receipt, missing_tile.as_object().unwrap())
                 .unwrap_err()
                 .reason,
             "invalid_execution_stages"

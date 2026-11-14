@@ -1524,6 +1524,30 @@ pub(crate) async fn run_dataset_upscale_job(
         )
         .await?;
 
+    // Dataset derivatives are not gallery assets. Keep their ordered completed
+    // paths separate from `assetWrites` while binding every final PNG byte to
+    // this claimed attempt's receipt.
+    let dataset_writes = records
+        .iter()
+        .enumerate()
+        .map(|(index, (item_id, relative))| {
+            json!({
+                "assetId": format!("dataset:{dataset_id}:{item_id}"),
+                "itemId": item_id,
+                "index": index,
+                "mediaPath": relative,
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = json!({
+        "expectedCount": total,
+        "datasetWrites": dataset_writes,
+        "workerExecutionReport": real_esrgan_execution_unavailable(),
+    })
+    .as_object()
+    .cloned()
+    .expect("dataset result is an object");
+
     update_job(
         api,
         &job.id,
@@ -1533,7 +1557,7 @@ pub(crate) async fn run_dataset_upscale_job(
             1.0,
             &format!("Upscaled {total} image(s)."),
             None,
-            None,
+            Some(result),
             None,
         ),
     )

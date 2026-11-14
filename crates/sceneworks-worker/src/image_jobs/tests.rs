@@ -15924,12 +15924,15 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
             seed: i64,
             _preview: &gen_core::PreviewSink,
             _cancel: &CancelFlag,
-        ) -> WorkerResult<Vec<u8>> {
+        ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
             self.calls
                 .lock()
                 .expect("recording lock")
                 .push((eng_w, eng_h, seed));
-            Ok(tile.pixels)
+            Ok((
+                tile.pixels,
+                gen_core::generator::ExecutionIdentity::provider_default(),
+            ))
         }
     }
 
@@ -15950,7 +15953,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     };
     let mut progress = Vec::new();
     let preview = gen_core::PreviewSink::default();
-    let (output, total) = refine_tiled_detail(
+    let (output, total, reports) = refine_tiled_detail(
         &refiner,
         &source,
         &params,
@@ -15961,6 +15964,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     .expect("provider-neutral detail refinement");
 
     assert_eq!(total, 4);
+    assert_eq!(reports.len(), 4);
     assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
     assert_eq!(
         *refiner.calls.lock().expect("recording lock"),

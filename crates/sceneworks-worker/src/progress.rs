@@ -755,7 +755,10 @@ fn unavailable_completed_receipt(
 ) -> WorkerResult<Option<Value>> {
     use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
     use std::io::Read;
-    let writes = result.get("assetWrites").and_then(Value::as_array);
+    let writes = result
+        .get("assetWrites")
+        .or_else(|| result.get("datasetWrites"))
+        .and_then(Value::as_array);
     let output_count = result
         .get("expectedCount")
         .and_then(Value::as_u64)
@@ -972,6 +975,73 @@ fn seedvr2_upscale_receipt_binds_window_order_and_final_mp4_bytes() {
     assert_eq!(
         receipt["outputs"][0]["artifactSha256"][0],
         sceneworks_core::hashing::hex(&Sha256::digest(bytes))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn detail_receipt_binds_tile_order_and_final_composite_png() {
+    let project = tempfile::tempdir().unwrap();
+    let bytes = b"encoded detail composite";
+    std::fs::write(project.path().join("detail.png"), bytes).unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let stages = [0, 1]
+        .into_iter()
+        .map(|index| {
+            serde_json::json!({"stage":format!("detail_tile_{index}"),"execution":report.clone()})
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "generationSet":{"mode":"image_detail"},
+        "assetWrites":[{"assetId":"detail","index":0,"mediaPath":"detail.png",
+            "rawAdapterSettings":{"detail":{"tiles":2}}}],
+        "workerExecutionStages":stages,
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["stages"], result["workerExecutionStages"]);
+    assert_eq!(
+        receipt["outputs"][0]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(bytes))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn dataset_upscale_receipt_hashes_ordered_derivatives_without_gallery_writes() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("a.png"), b"first dataset png").unwrap();
+    std::fs::write(project.path().join("b.png"), b"second dataset png").unwrap();
+    let result = serde_json::json!({
+        "expectedCount":2,
+        "datasetWrites":[
+            {"assetId":"dataset:d:a","index":0,"mediaPath":"a.png"},
+            {"assetId":"dataset:d:b","index":1,"mediaPath":"b.png"}
+        ],
+        "workerExecutionReport":gen_core::generator::ExecutionIdentity::provider_default(),
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt["outputs"][0]["artifactIds"],
+        serde_json::json!(["dataset:d:a"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactIds"],
+        serde_json::json!(["dataset:d:b"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"second dataset png"))
+    );
+    let mut missing = result;
+    missing["datasetWrites"][1]["mediaPath"] = serde_json::json!("missing.png");
+    assert!(
+        unavailable_completed_receipt(missing.as_object().unwrap(), Some(project.path())).is_err()
     );
 }
 
