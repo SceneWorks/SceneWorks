@@ -1759,6 +1759,10 @@ async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_r
                 {
                     assert_eq!(error["code"], "invalid_generation_option");
                     assert_eq!(error["field"], "referenceAssetIds");
+                    assert_eq!(
+                        error["context"],
+                        json!({"kind":"image","model":model,"mode":"edit_image","field":"referenceAssetIds"})
+                    );
                 }
                 assert_eq!(
                     state

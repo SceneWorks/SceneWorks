@@ -417,3 +417,63 @@ async fn shared_source_utility_refusal_precedes_local_paths_on_create_retry_dupl
         }
     }
 }
+
+#[tokio::test]
+async fn shared_malformed_image_references_render_identically_over_http_and_mcp() {
+    use rmcp::transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    };
+    use rmcp::{model::CallToolRequestParams, ServiceExt};
+    let temp = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.trust_loopback = true;
+    settings.mcp_api_url = format!("http://{addr}");
+    let app = create_app(settings).unwrap();
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            served.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = rmcp::model::ClientConfig::default()
+        .serve(StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        ))
+        .await
+        .unwrap();
+    for member in [Value::Null, json!(42), json!(" bad")] {
+        let payload = json!({"projectId":"p","model":"moss_image_base","mode":"edit_image","prompt":"edit","referenceAssetIds":["source",member]});
+        let expected = serde_json::to_value(
+            sceneworks_core::request_validation::validate_shape(
+                "image",
+                payload.as_object().unwrap(),
+            )
+            .unwrap_err(),
+        )
+        .unwrap();
+        let (status, body) =
+            request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body, expected);
+        let error = client
+            .call_tool(
+                CallToolRequestParams::new("generate_image")
+                    .with_arguments(payload.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap_err();
+        let rmcp::ServiceError::McpError(error) = error else {
+            panic!("unexpected MCP failure: {error:?}");
+        };
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.data, Some(expected));
+    }
+    let _ = client.cancel().await;
+    server.abort();
+    let _ = server.await;
+}
