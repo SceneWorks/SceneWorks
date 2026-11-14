@@ -116,6 +116,13 @@ test("no credential reaches the compared builds or their processes", async () =>
   const host = { PATH: "/usr/bin", HOME: "/h", HF_TOKEN: "hf_x", HUGGING_FACE_HUB_TOKEN: "hf_y", HF_HUB_TOKEN: "hf_z", GITHUB_TOKEN: "ghs", AWS_SECRET_ACCESS_KEY: "k", OPENAI_API_KEY: "k", SIGNING_KEY: "k", NPM_PASSWORD: "p", GIT_CREDENTIALS: "c", CUDA_VISIBLE_DEVICES: "1", KEYCHAIN_PATH: "/k" };
   const clean = scrubSecrets(host);
   assert.deepEqual(Object.keys(clean).sort(), ["CUDA_VISIBLE_DEVICES", "HOME", "KEYCHAIN_PATH", "PATH"]);
+  // The ffmpeg preflight validated reaches API and worker; other ambient SCENEWORKS_* values do not.
+  const withFfmpeg = childEnvironments({ ...host, SCENEWORKS_FFMPEG: "C:\\tools\\ffmpeg.exe", SCENEWORKS_FFMPEG_TIMEOUT_SECONDS: "900", SCENEWORKS_PULID_WEIGHTS: "D:\\pulid", SCENEWORKS_INFERENCE_READ_TOKEN: "t" }, { backend: "cuda", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null });
+  for (const child of [withFfmpeg.api, withFfmpeg.worker("http://127.0.0.1:1")]) {
+    assert.equal(child.SCENEWORKS_FFMPEG, "C:\\tools\\ffmpeg.exe"); assert.equal(child.SCENEWORKS_FFMPEG_TIMEOUT_SECONDS, "900");
+    assert.equal(child.SCENEWORKS_PULID_WEIGHTS, undefined); assert.equal(child.SCENEWORKS_INFERENCE_READ_TOKEN, undefined);
+  }
+  assert.equal(childEnvironments(host, { backend: "mlx", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null }).api.SCENEWORKS_FFMPEG, undefined, "unset stays unset: the children find ffmpeg on PATH like preflight did");
   const envs = childEnvironments(host, { backend: "cuda", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null });
   const secretKeys = Object.keys(host).filter((key) => !(key in clean)), secretValues = secretKeys.map((key) => host[key]);
   for (const child of [envs.api, envs.worker("http://127.0.0.1:1")]) {
@@ -278,10 +285,43 @@ test("video fidelity digest covers stream geometry and timing, not only decoded 
   assert.notEqual((await digest({ ...base, r_frame_rate: "25/1", avg_frame_rate: "25/1" })).sha256, reference.sha256, "equal bytes at another frame rate differ");
   assert.notEqual((await digest({ ...base, width: 512, height: 768 })).sha256, reference.sha256, "equal bytes at another geometry of the same area differ");
   assert.notEqual((await digest(base, { codec_type: "audio", sample_rate: "44100", channels: 2, channel_layout: "stereo" })).sha256, reference.sha256, "another audio sample rate differs");
+  // An audio stream that fails to decode never digests as silence: container bytes and the reason.
+  const failingAudio = async (_ffmpeg, _file, kind) => (kind === "audio" ? { ok: false, error: "unsupported codec" } : { ok: true, data: frames });
+  const brokenAudio = await decodedContent(file, "video", { decode: failingAudio, probe: probe(base) });
+  assert.equal(brokenAudio.method, "file_bytes_stream_not_decoded"); assert.match(brokenAudio.decoderError, /^audio stream present but decode failed: unsupported codec/);
+  assert.equal(brokenAudio.sha256, sha256(Buffer.from("container"))); assert.equal(brokenAudio.shape.audio.sampleRate, 48000);
+  // No audio stream (per ffprobe) is a comparable shape, and is never confused with a decode failure.
+  const silentProbe = async () => ({ ok: true, data: { streams: [{ codec_type: "video", ...base }], format: { duration: "0.125" } } });
+  const silent = await decodedContent(file, "video", { decode: failingAudio, probe: silentProbe });
+  assert.equal(silent.method, "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams"); assert.equal(silent.shape.audio, null); assert.equal(silent.shape.decoded.audioBytes, null);
+  assert.notEqual(silent.sha256, reference.sha256);
+  // A video stream that fails to decode, a missing video stream, or bytes that are not whole frames fall back too.
+  const brokenVideo = await decodedContent(file, "video", { decode: async (_f, _x, kind) => (kind === "video-frames" ? { ok: false, error: "corrupt" } : { ok: true, data: pcm }), probe: probe(base) });
+  assert.equal(brokenVideo.method, "file_bytes_stream_not_decoded"); assert.match(brokenVideo.decoderError, /^video stream present but decode failed: corrupt/);
+  assert.match((await decodedContent(file, "video", { decode, probe: async () => ({ ok: true, data: { streams: [], format: {} } }) })).decoderError, /no video stream/);
+  assert.match((await decodedContent(file, "video", { decode: async (_f, _x, kind) => ({ ok: true, data: kind === "video-frames" ? Buffer.alloc(10) : pcm }), probe: probe(base) })).decoderError, /not a whole number of 768x512 RGBA frames/);
+  // The non-WAV audio branch: stream absent or undecodable falls back with its reason.
+  assert.match((await decodedContent(file, "audio", { decode, probe: async () => ({ ok: true, data: { streams: [] } }) })).decoderError, /no audio stream/);
+  assert.match((await decodedContent(file, "audio", { decode: failingAudio, probe: probe(base) })).decoderError, /audio stream present but decode failed/);
   const noProbe = await decodedContent(file, "video", { decode, probe: async () => ({ ok: false, error: "ffprobe missing" }) });
   assert.equal(noProbe.method, "file_bytes_no_probe"); assert.equal(noProbe.sha256, sha256(Buffer.from("container")));
   assert.equal(streamShape({ streams: [] }).video, null);
   assert.equal(ffprobePath("ffmpeg"), "ffprobe"); assert.equal(ffprobePath("/opt/bin/ffmpeg"), "/opt/bin/ffprobe"); assert.equal(ffprobePath("/opt/bin/avconv"), "ffprobe");
+});
+
+test("untiered presence follows the product's preference order and reports the tier found", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-tier-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const models = await readCatalog(root), flux = models.find((entry) => entry.id === "flux_dev"), route = ROUTES["mlx-flux1-dev-t2i"];
+  assert.equal(route.tier, null); assert.deepEqual(route.tierCandidates, ["q8", "bf16", "q4"]); assert.equal(route.body.advanced.mlxQuantize, undefined);
+  const install = async (hub, tier) => { for (const row of routeDownloadRows(flux, { platform: "darwin", tier }).required) for (const selector of row.files) { const target = path.join(hub, `models--${row.repo.replace("/", "--")}`, "snapshots", row.revision, ...selector.replace(/\/\*$/, "/w.bin").split("/")); await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, "w"); } };
+  const q8Only = path.join(dir, "q8"), q4Only = path.join(dir, "q4"), both = path.join(dir, "both"), empty = path.join(dir, "empty");
+  await install(q8Only, "q8"); await install(q4Only, "q4"); await install(both, "q4"); await install(both, "q8"); await mkdir(empty);
+  const plan = async (hub) => (await planRoutes({ routes: [route], hubs: [hub], baseCatalog: models, headCatalog: models, platform: "darwin" }))[0];
+  const a = await plan(q8Only); assert.equal(a.status, "ready"); assert.equal(a.tier, "q8"); assert.match(a.tierSource, /untiered preference order/);
+  const b = await plan(q4Only); assert.equal(b.status, "ready"); assert.equal(b.tier, "q4");
+  assert.equal((await plan(both)).tier, "q8", "q8 wins when both are installed, as the worker's resolver does");
+  const c = await plan(empty); assert.equal(c.status, "skipped"); assert.match(c.skipReason, /weights absent from every hub root for tier q8 or bf16 or q4/);
+  assert.equal(requestTemplate(route).body.advanced.mlxQuantize, undefined, "the request stays untiered");
 });
 
 test("hub fingerprint sees a same-length blob rewrite behind a snapshot link", async (t) => {
@@ -359,7 +399,9 @@ test("CUDA video group: valid short-clip requests at this catalog, first present
   const models = await readCatalog(root);
   for (const [id, expected] of [["cuda-ltx23-distilled-t2v", { model: "ltx_2_3", duration: 4, fps: 24, width: 768, height: 512, steps: 8 }], ["cuda-wan22-ti2v-5b-t2v", { model: "wan_2_2", duration: 4, fps: 16, width: 832, height: 480, steps: 8 }]]) {
     const route = ROUTES[id], body = route.body, model = models.find((entry) => entry.id === route.model);
-    assert.equal(route.group, "cuda-video"); assert.equal(route.kind, "video"); assert.equal(route.endpoint, "/api/v1/video/jobs"); assert.equal(route.tier, "q4");
+    assert.equal(route.group, "cuda-video"); assert.equal(route.kind, "video"); assert.equal(route.endpoint, "/api/v1/video/jobs");
+    assert.deepEqual(route.tierCandidates ?? [route.tier], id === "cuda-wan22-ti2v-5b-t2v" ? ["q8", "q4"] : ["q4"], "untiered Wan follows Candle's q8-then-q4 order; LTX resolves exactly q4");
+    assert.equal(body.advanced.mlxQuantize, undefined, "the request itself names no tier");
     assert.deepEqual({ model: body.model, duration: body.duration, fps: body.fps, width: body.width, height: body.height, steps: body.advanced.steps }, expected);
     assert.equal(body.mode, "text_to_video"); assert.equal(typeof body.seed, "number");
     assert.ok(model.capabilities.includes("text_to_video"), `${id} catalog offers t2v`);

@@ -58,9 +58,16 @@ const PROMPT_IMAGE = "A red glass apple beside a blue ceramic cup, studio photog
 // flux1-owner-worker-proof (FLUX.1), flux3 app lifecycle (Klein, smaller size), load-progress
 // (MOSS-Image, Chatterbox), sdxl admitted replay (SDXL q4); the LTX-2.5 body uses the shortest
 // declared duration/fps of the unchanged catalog entry and the worker's default distilled variant.
-const IMAGE_ROUTE = (id, backend, model, tier, group, body) => ({ id, backend, model, kind: "image", mode: "text_to_image", tier, group, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20, body });
+// `tier` is the tier a request names explicitly (and therefore the only one the worker can run).
+// An untiered request instead carries `tierCandidates`: the worker's own preference order for an
+// unselected tier, so presence succeeds when the tier the product would actually select is complete.
+const IMAGE_ROUTE = (id, backend, model, tier, group, body, tierCandidates = null) => ({ id, backend, model, kind: "image", mode: "text_to_image", tier, tierCandidates, group, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20, body });
 export const ROUTES = Object.freeze(Object.fromEntries([
-  IMAGE_ROUTE("mlx-flux1-dev-t2i", "mlx", "flux_dev", "q4", "mlx-flux-t2i", { mode: "text_to_image", model: "flux_dev", prompt: PROMPT_IMAGE, negativePrompt: "", seed: 33111, width: 768, height: 768, count: 1, advanced: { steps: 4, sampler: "euler", guidanceScale: 3.5 }, loras: [] }),
+  // Untiered: crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `preferred_tier` (line 241,
+  // q8 unless a `minQualityTier` floor above q8; flux_dev declares none) and `standard_tier_subdir`
+  // (line 417, documented at 397-404: q8 -> bf16 -> q4 over complete installed tiers). Head's admission freezes the same
+  // tier from the host's install probe (PR #3379).
+  IMAGE_ROUTE("mlx-flux1-dev-t2i", "mlx", "flux_dev", null, "mlx-flux-t2i", { mode: "text_to_image", model: "flux_dev", prompt: PROMPT_IMAGE, negativePrompt: "", seed: 33111, width: 768, height: 768, count: 1, advanced: { steps: 4, sampler: "euler", guidanceScale: 3.5 }, loras: [] }, ["q8", "bf16", "q4"]),
   IMAGE_ROUTE("mlx-flux3-klein-t2i", "mlx", "flux3_klein", "bf16", "mlx-flux-t2i", { mode: "text_to_image", model: "flux3_klein", prompt: "A small teal ceramic teapot on a pale yellow table, soft daylight, studio photograph", negativePrompt: "", seed: 26234, width: 512, height: 512, count: 1, advanced: { steps: 4, sampler: "euler", guidanceScale: 0 }, loras: [] }),
   IMAGE_ROUTE("mlx-moss-image-t2i", "mlx", "moss_image_sft", null, null, { mode: "text_to_image", model: "moss_image_sft", prompt: "A red ceramic cup on a white table", width: 256, height: 256, count: 1, seed: 26325, advanced: { steps: 2, guidanceScale: 1.0, mossImage: { acceleration: "off", max_sequence_length: 64 } } }),
   { id: "mlx-ltx25-distilled-t2v", backend: "mlx", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
@@ -75,7 +82,12 @@ export const ROUTES = Object.freeze(Object.fromEntries([
   // Wan2.2 TI2V-5B 832x480, 4 s at 16 fps (65 frames), 8 steps. GPU memory is the same nvidia-smi
   // physical-GPU1 peak above the pre-request baseline as every CUDA route.
   { id: "cuda-ltx23-distilled-t2v", backend: "cuda", model: "ltx_2_3", kind: "video", mode: "text_to_video", tier: "q4", group: "cuda-video", endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_3", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { steps: 8 } } },
-  { id: "cuda-wan22-ti2v-5b-t2v", backend: "cuda", model: "wan_2_2", kind: "video", mode: "text_to_video", tier: "q4", group: "cuda-video", endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "wan_2_2", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 16, width: 832, height: 480, seed: 25001, loras: [], advanced: { steps: 8 } } },
+  // Untiered Wan on Candle: video_jobs/candle.rs `candle_wan_tier_subdir` (line 426; its order at
+  // line 440, and the tier repo pick at line 194): q8, then q4.
+  // (LTX-2.3/2.5 on both lanes resolve an untiered request to exactly q4: candle.rs:304
+  // `candle_ltx_tier_key` "Unselected => q4"; MLX ltx.rs:375 `ltx_bundle_tier_order` q4-first and
+  // LTX-2.5 takes its first tier only, so their routes keep `tier: "q4"`.)
+  { id: "cuda-wan22-ti2v-5b-t2v", backend: "cuda", model: "wan_2_2", kind: "video", mode: "text_to_video", tier: null, tierCandidates: ["q8", "q4"], group: "cuda-video", endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "wan_2_2", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 16, width: 832, height: 480, seed: 25001, loras: [], advanced: { steps: 8 } } },
   // Not a default: at inference pin 4a36a7f8 the Candle `ltx_2_5_distilled` provider registers no
   // component footprint (candle-gen-ltx lib.rs REGISTRATION_25), so the worker refuses every
   // LTX-2.5 request at admission (video_jobs/candle.rs ltx_resident_weight_bytes) on base and head
@@ -249,19 +261,38 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     const entry = { id: route.id, model: route.model, kind: route.kind, mode: route.mode, group: route.group, request: requestTemplate(route) };
     const baseModel = baseCatalog.find((model) => model.id === route.model), headModel = headCatalog.find((model) => model.id === route.model);
     if (!baseModel || !headModel) { planned.push({ ...entry, status: "skipped", skipReason: `model ${route.model} is not in the ${!baseModel ? "base" : "head"} catalog` }); continue; }
-    let rows, baseRows;
-    try { rows = routeDownloadRows(headModel, { platform, tier: route.tier }); baseRows = routeDownloadRows(baseModel, { platform, tier: route.tier }); } catch (error) { planned.push({ ...entry, status: "skipped", skipReason: error.message }); continue; }
-    if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { planned.push({ ...entry, status: "skipped", skipReason: `pinned download rows for ${route.model} differ between base and head catalogs`, rows: { base: baseRows, head: rows } }); continue; }
+    // One candidate tier for an explicit request; the product's ordered preference for an untiered one.
+    const candidates = route.tierCandidates ?? [route.tier];
+    const rowsByTier = [];
+    let refusal = null;
+    for (const tier of candidates) {
+      try {
+        const rows = routeDownloadRows(headModel, { platform, tier }), baseRows = routeDownloadRows(baseModel, { platform, tier });
+        if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { refusal = { skipReason: `pinned download rows for ${route.model} (${rows.tier ?? "untiered"}) differ between base and head catalogs`, rows: { base: baseRows, head: rows } }; break; }
+        rowsByTier.push(rows);
+      } catch (error) { if (!route.tierCandidates) { refusal = { skipReason: error.message }; break; } }
+    }
+    if (refusal) { planned.push({ ...entry, status: "skipped", ...refusal }); continue; }
+    if (!rowsByTier.length) { planned.push({ ...entry, status: "skipped", skipReason: `${route.model} offers none of the tiers ${candidates.join(", ")} on this platform` }); continue; }
     // Head's admission reads a repository's pinned file metadata from Hugging Face; a gated one
     // needs a credential, which this harness deliberately never passes to the compared builds.
     if (headModel.gated === true) { planned.push({ ...entry, status: "skipped", skipReason: `${route.model} is a gated repository (${headModel.credentialHost ?? "credential required"}); this harness passes no credential to the compared builds` }); continue; }
-    if (route.group && ranGroups.has(route.group)) { planned.push({ ...entry, tier: rows.tier, status: "skipped", skipReason: `alternative ${ranGroups.get(route.group)} of group ${route.group} is selected` }); continue; }
+    if (route.group && ranGroups.has(route.group)) { planned.push({ ...entry, tier: route.tier, tierCandidates: route.tierCandidates, status: "skipped", skipReason: `alternative ${ranGroups.get(route.group)} of group ${route.group} is selected` }); continue; }
+    // Hubs in order; within a hub, tiers in the product's preference order. The first complete
+    // (hub, tier) is what the run will find, and the tier is reported.
     const checks = [];
-    for (const hub of hubs) { const result = await routePresence(hub, rows, fs); checks.push(result); if (result.complete) break; }
-    const selected = checks.find((result) => result.complete);
-    if (!selected) { planned.push({ ...entry, tier: rows.tier, rows, presence: checks, status: "skipped", skipReason: `weights absent from every hub root (${checks.map((c) => `${c.hub}: ${c.missing.slice(0, 4).join(", ")}${c.missing.length > 4 ? ` +${c.missing.length - 4} more` : ""}`).join("; ")})` }); continue; }
+    let selected = null, selectedRows = null;
+    for (const hub of hubs) {
+      for (const rows of rowsByTier) {
+        const result = { ...(await routePresence(hub, rows, fs)), tier: rows.tier };
+        checks.push(result);
+        if (result.complete) { selected = result; selectedRows = rows; break; }
+      }
+      if (selected) break;
+    }
+    if (!selected) { planned.push({ ...entry, tier: route.tier, tierCandidates: route.tierCandidates, rows: rowsByTier[0], presence: checks, status: "skipped", skipReason: `weights absent from every hub root for tier ${candidates.join(" or ")} (${checks.map((c) => `${c.hub} [${c.tier ?? "untiered"}]: ${c.missing.slice(0, 3).join(", ")}${c.missing.length > 3 ? ` +${c.missing.length - 3} more` : ""}`).join("; ")})` }); continue; }
     if (route.group) ranGroups.set(route.group, route.id);
-    planned.push({ ...entry, tier: rows.tier, rows, presence: checks, hub: selected.hub, status: "ready" });
+    planned.push({ ...entry, tier: selectedRows.tier, tierCandidates: route.tierCandidates, tierSource: route.tierCandidates ? "first complete tier in the product's untiered preference order" : "named by the request", rows: selectedRows, presence: checks, hub: selected.hub, status: "ready" });
   }
   return planned;
 }
@@ -373,22 +404,33 @@ export async function decodedContent(file, kind, { ffmpeg = "ffmpeg", decode = f
   if (kind === "image") { const { width, height, rgba } = decodePng(bytes); return { method: "png_rgba8", shape: { width, height }, sha256: contentDigest({ width, height, format: "rgba8" }, rgba), buffer: rgba }; }
   if (kind === "audio" && bytes.toString("ascii", 0, 4) === "RIFF") { const wav = parseWav(bytes); const shape = { audioFormat: wav.audioFormat, channels: wav.channels, sampleRate: wav.sampleRate, bitsPerSample: wav.bitsPerSample, bytes: wav.data.length }; return { method: "wav_pcm_samples", shape, sha256: contentDigest(shape, wav.data), buffer: wav.data }; }
   if (kind === "audio") {
-    const pcm = await decode(ffmpeg, file, "audio");
-    if (!pcm.ok) return { method: "file_bytes_no_decoder", decoderError: pcm.error, sha256: sha256(bytes), buffer: bytes };
     const probed = await probe(file);
     if (!probed.ok) return { method: "file_bytes_no_probe", decoderError: probed.error, sha256: sha256(bytes), buffer: bytes };
+    if (!streamShape(probed.data).audio) return { method: "file_bytes_stream_not_decoded", decoderError: "ffprobe reports no audio stream", sha256: sha256(bytes), buffer: bytes };
+    const pcm = await decode(ffmpeg, file, "audio");
+    if (!pcm.ok) return { method: "file_bytes_stream_not_decoded", decoderError: `audio stream present but decode failed: ${pcm.error}`, sha256: sha256(bytes), buffer: bytes };
     const shape = streamShape(probed.data, { audioBytes: pcm.data.length });
     return { method: "ffmpeg_s16le+ffprobe_streams", shape, sha256: contentDigest(shape, pcm.data), buffer: pcm.data };
   }
-  const frames = await decode(ffmpeg, file, "video-frames");
-  if (!frames.ok) return { method: "file_bytes_no_decoder", decoderError: frames.error, sha256: sha256(bytes), buffer: bytes };
   // Without the stream description equal bytes could hide another frame rate or geometry, so a
   // missing probe falls back to the container bytes rather than a weaker decoded digest.
   const probed = await probe(file);
   if (!probed.ok) return { method: "file_bytes_no_probe", decoderError: probed.error, sha256: sha256(bytes), buffer: bytes };
-  const audio = await decode(ffmpeg, file, "audio");
-  const shape = streamShape(probed.data, { frameBytes: frames.data.length, audioBytes: audio.ok ? audio.data.length : null });
-  return { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape, sha256: contentDigest(shape, frames.data, audio.ok ? audio.data : Buffer.alloc(0)), buffer: frames.data };
+  const streams = streamShape(probed.data);
+  const fallback = (reason) => ({ method: "file_bytes_stream_not_decoded", decoderError: reason, shape: streams, sha256: sha256(bytes), buffer: bytes });
+  if (!streams.video) return fallback("ffprobe reports no video stream");
+  const frames = await decode(ffmpeg, file, "video-frames");
+  if (!frames.ok) return fallback(`video stream present but decode failed: ${frames.error}`);
+  // An audio stream that exists but does not decode must not digest as silence: fall back to the
+  // container bytes and record why. "No audio stream" (per ffprobe) is a real, comparable shape.
+  let audio = { ok: true, data: Buffer.alloc(0) };
+  if (streams.audio) {
+    audio = await decode(ffmpeg, file, "audio");
+    if (!audio.ok) return fallback(`audio stream present but decode failed: ${audio.error}`);
+  }
+  const shape = streamShape(probed.data, { frameBytes: frames.data.length, audioBytes: streams.audio ? audio.data.length : null });
+  if (!Number.isInteger(shape.video.decodedFrames) || shape.video.decodedFrames <= 0) return fallback(`decoded video bytes (${frames.data.length}) are not a whole number of ${shape.video.width}x${shape.video.height} RGBA frames`);
+  return { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape, sha256: contentDigest(shape, frames.data, audio.data), buffer: frames.data };
 }
 // One numeric difference metric over decoded bytes (RGBA8 channels, PCM bytes or raw frames).
 export function numericDifference(a, b) {
@@ -625,11 +667,11 @@ export function renderMarkdown(report) {
   for (const route of report.routes) {
     const run = (label) => route.runs?.find((item) => item.label === label);
     const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => memoryCell(run(label)?.memory);
-    lines.push(`| ${route.id} | ${route.model} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
+    lines.push(`| ${route.id} | ${route.model}${route.tier ? ` (${route.tier}${route.tierCandidates ? ", untiered request" : ""})` : ""} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
   }
   for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
     lines.push("", `## ${route.id}`, "", `- hub: ${route.hub}`, `- request sha256: ${route.request.sha256}`);
-    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
+    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}${runRecord.output?.content?.decoderError ? ` (${String(runRecord.output.content.decoderError).slice(0, 160)})` : ""}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
@@ -784,6 +826,11 @@ export function childStdio(name, logFd) { return [CHILD_STDIN[name] ?? "ignore",
 // commits). Removes every *TOKEN*, *SECRET*, *PASSWORD*, *CREDENTIAL* and *_KEY variable, including
 // HF_TOKEN, HUGGING_FACE_HUB_TOKEN and HF_HUB_TOKEN.
 export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/i;
+// Ambient SCENEWORKS_* variables are cleared for the children (buildChildEnv); these are the only
+// ones put back, because the children need them and they are not secrets. SCENEWORKS_FFMPEG is the
+// ffmpeg preflight validated (media_process.rs resolves the API/worker's ffmpeg from it, else PATH),
+// and SCENEWORKS_FFMPEG_TIMEOUT_SECONDS bounds that ffmpeg. The product reads no ffprobe variable.
+export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
 export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
   const weights = path.dirname(hub);
@@ -796,6 +843,7 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
   // No credential reaches the compared builds: every default route reads public repositories and
   // gated ones are skipped at planning, so the API and worker get no token of any kind.
   base = scrubSecrets(base);
+  for (const key of FORWARDED_SCENEWORKS_ENV) if (env[key]) base[key] = env[key];
   return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1" }) };
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
