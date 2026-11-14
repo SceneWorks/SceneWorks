@@ -1536,16 +1536,11 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && expression == "nested advanced JSON: iter")
         })
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
-    let mutations = coverage
-        .mutations
-        .iter()
-        .map(|(file, function, expr)| format!("{file}::{function} raw-map remove/entry {expr}"));
     let remaining: Vec<_> = direct
         .chain(dynamic)
         .chain(delegated)
         .chain(whole_map)
         .chain(nested)
-        .chain(mutations)
         .collect();
     assert!(
         remaining.is_empty(),
@@ -1553,6 +1548,140 @@ fn production_execution_has_no_raw_advanced_reads() {
         remaining.len(),
         remaining.join("\n")
     );
+}
+
+/// Writes into authored or verified dispatch envelopes are a separate review surface from
+/// execution reads. Pin the exact write sites so new rewrites require an explicit audit, while
+/// the read gate can accurately require zero execution decisions from the raw option map.
+#[test]
+fn raw_option_map_mutations_have_reviewed_sites() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    let expected: BTreeSet<(String, String, String)> = [
+        (
+            "apps/rust-api/src/control_overlays.rs",
+            "resolve_control_overlay_selection",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "apps/rust-api/src/generation.rs",
+            "apply_recipe_preset_to_image_payload",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "apps/rust-api/src/generation.rs",
+            "merge_preset_loras_into_payload",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/generation.rs",
+            "normalize_ltx25_generation_controls",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/iris_training.rs",
+            "resolve_iris_run_sources",
+            "options_key",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "apply_training_retry_resume",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "canonicalize_image_detail_dense_tier",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "canonicalize_image_model_payload",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "EDIT_OPTIONS_KEY",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "KEY",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/training.rs",
+            "fresh_flux3_training_duplicate",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "EDIT_REPORT_KEY",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "REPORT_KEY",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-core/src/video_request.rs",
+            "stamp_replayed_reference_image_resize_mode",
+            "REFERENCE_IMAGE_RESIZE_MODE_KEY",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "begin_with_binding_cancelable",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "none",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "rewrite_loader_locator",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "crates/sceneworks-worker/src/iris_curricula.rs",
+            "iris_stage_presets",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/iris_training.rs",
+            "activation_checkpointing_hint",
+            "IRIS_OPTIONS_KEY.to_owned(...)",
+        ),
+        (
+            "crates/sceneworks-worker/src/sensenova_jobs.rs",
+            "write_interleaved_document",
+            "PREFIX_KV_CACHE_RESULT_KEY",
+        ),
+    ]
+    .into_iter()
+    .map(|(file, function, expression)| (file.into(), function.into(), expression.into()))
+    .collect();
+    assert_eq!(coverage.mutations, expected);
 }
 
 // A small lexical guard keeps Rust-only CI independent of Node/npm. It recognizes
