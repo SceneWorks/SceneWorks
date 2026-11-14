@@ -90,6 +90,50 @@ impl<T> RouteField<T> {
     }
 }
 
+/// The two authored MOSS controls that appearance folding must inspect before it rewrites the
+/// prompt. This is a one-time authoring projection; the rewritten request later enters portable
+/// validation and the resolved execution binder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AppearanceAuthoredInputs {
+    pub has_embedding_or_per_prompt_negative: bool,
+    pub moss_accelerated: bool,
+}
+
+/// A PiD source override can name either component independently. Keep each carrier's syntax
+/// so admission can refuse malformed source claims without re-reading authored JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutePidCheckpoint {
+    pub repo: RouteField<String>,
+    pub filename: RouteField<String>,
+}
+
+impl AppearanceAuthoredInputs {
+    pub fn from_payload_syntax(payload: &JsonObject) -> Self {
+        let advanced = payload.get("advanced").and_then(Value::as_object);
+        let moss_advanced = advanced
+            .and_then(|advanced| advanced.get("mossImageAdvanced"))
+            .and_then(Value::as_object);
+        let has_embedding_or_per_prompt_negative = moss_advanced.is_some_and(|inputs| {
+            ["positive", "negative"]
+                .iter()
+                .any(|key| inputs.get(*key).is_some_and(|value| !value.is_null()))
+                || inputs
+                    .get("negativePrompts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.is_empty())
+        });
+        let moss_accelerated = advanced
+            .and_then(|advanced| advanced.get("mossImage"))
+            .and_then(|value| value.get("acceleration"))
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode != "off");
+        Self {
+            has_embedding_or_per_prompt_negative,
+            moss_accelerated,
+        }
+    }
+}
+
 /// A one-time typed projection for routing probes, including old or malformed saved payloads.
 /// Structured carriers expose only the shape routing needs; execution binds their full domain
 /// structs after the shared resolver has returned an effective request.
@@ -115,6 +159,8 @@ pub struct RouteOptionFacts {
     pub decoder: RouteField<String>,
     pub enhance_prompt: RouteField<bool>,
     pub use_pid: RouteField<bool>,
+    pub pid_checkpoint: RouteField<RoutePidCheckpoint>,
+    pub pid_gemma: RouteField<String>,
     pub veda_enabled: RouteField<bool>,
     pub use_uncensored_enhancer: RouteField<bool>,
     pub text_encoder_model: RouteField<String>,
@@ -214,6 +260,13 @@ impl RouteOptionFacts {
             use_pid: field(advanced, "usePid", |value| {
                 Some(crate::portable_sources::pid_requested(Some(value)))
             }),
+            pid_checkpoint: field(advanced, "pidCheckpoint", |value| {
+                value.as_object().map(|checkpoint| RoutePidCheckpoint {
+                    repo: field(Ok(Some(checkpoint)), "repo", text),
+                    filename: field(Ok(Some(checkpoint)), "filename", text),
+                })
+            }),
+            pid_gemma: field(advanced, "pidGemma", text),
             veda_enabled: field(veda, "enabled", boolean),
             use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
             text_encoder_model: field(advanced, "textEncoderModel", text),
@@ -794,6 +847,45 @@ mod tests {
             .number_exact_alias("advanced", "timestepShift")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn appearance_authoring_projection_preserves_legacy_missing_and_null_behavior() {
+        let empty = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({})));
+        assert_eq!(empty, AppearanceAuthoredInputs::default());
+        let nulls = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
+            "advanced":{"mossImageAdvanced":{"positive":null,"negative":null,"negativePrompts":[]},
+                "mossImage":{"acceleration":"off"}}
+        })));
+        assert_eq!(nulls, empty);
+        let supplied = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
+            "advanced":{"mossImageAdvanced":{"negativePrompts":["bad"]},
+                "mossImage":{"acceleration":"unmerged_bf16"}}
+        })));
+        assert!(supplied.has_embedding_or_per_prompt_negative);
+        assert!(supplied.moss_accelerated);
+        let malformed = AppearanceAuthoredInputs::from_payload_syntax(&obj(json!({
+            "advanced":{"mossImageAdvanced":[],"mossImage":{"acceleration":17}}
+        })));
+        assert_eq!(malformed, empty);
+    }
+
+    #[test]
+    fn pid_route_projection_retains_nested_source_carrier_shape() {
+        let facts = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced":{"pidCheckpoint":{"repo":"owner/model","filename":null},"pidGemma":"gemma"}
+        })));
+        let RouteField::Valid(checkpoint) = facts.pid_checkpoint else {
+            panic!("checkpoint object must bind");
+        };
+        assert_eq!(checkpoint.repo, RouteField::Valid("owner/model".into()));
+        assert_eq!(checkpoint.filename, RouteField::Null);
+        assert_eq!(facts.pid_gemma, RouteField::Valid("gemma".into()));
+        let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced":{"pidCheckpoint":[],"pidGemma":17}
+        })));
+        assert_eq!(malformed.pid_checkpoint, RouteField::Invalid);
+        assert_eq!(malformed.pid_gemma, RouteField::Invalid);
     }
 
     #[test]
