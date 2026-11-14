@@ -1,5 +1,5 @@
 // Pure browser measurements only. Each cold sample gets a fresh Chromium process, loads
-// the deployed JS/WASM through the requested origin, and calls the real Rust export once.
+// the deployed bridge, JS and WASM through the requested origin, and validates once.
 // Usage: node scripts/measure-options-validator.mjs --origin https://HOST --profile runpod
 import { readFileSync } from "node:fs";
 import { deepStrictEqual } from "node:assert/strict";
@@ -28,8 +28,8 @@ const sample = corpus.cases.find((entry) => entry.name === "image model defaults
 if (!sample) throw new Error("Shared image corpus sample is missing");
 const fixture = {
   kind: sample.kind,
-  payload: JSON.stringify(sample.payload),
-  modelEntry: JSON.stringify(corpus.modelFacts[sample.model]),
+  payload: sample.payload,
+  modelEntry: corpus.modelFacts[sample.model],
   expected: sample.expected,
 };
 
@@ -39,8 +39,8 @@ if (!moduleUrl) {
   if (!response.ok) throw new Error(`Bundle report unavailable (${response.status}); pass --module explicitly`);
   const report = await response.json();
   const candidates = report.chunks.filter((chunk) =>
-    chunk.type === "chunk" && /options_validator.*\.js$/.test(chunk.fileName));
-  if (candidates.length !== 1) throw new Error(`Expected one validator chunk; found ${candidates.length}`);
+    chunk.type === "chunk" && /portableValidationEngine.*\.js$/.test(chunk.fileName));
+  if (candidates.length !== 1) throw new Error(`Expected one validator bridge chunk; found ${candidates.length}`);
   moduleUrl = new URL(`/${candidates[0].fileName}`, origin).href;
 }
 
@@ -66,17 +66,19 @@ for (let index = 0; index < samples; index += 1) {
         body: "<!doctype html><title>Options validator benchmark</title>",
       }));
       await page.goto(`${origin}/__options_validator_benchmark__`, { waitUntil: "domcontentloaded", timeout: 10000 });
-      const result = await page.evaluate(async ({ moduleUrl: url, fixture: input, measurePure }) => {
+      const result = await page.evaluate(async ({ moduleUrl: url, fixture: input, measurePure, version }) => {
         const start = performance.now();
-        const validator = await import(url);
-        await validator.default();
-        const first = JSON.parse(validator.validate_request(input.kind, input.payload, input.modelEntry));
+        const { load } = await import(url);
+        const validate = await load();
+        const request = { kind: input.kind, payload: input.payload, modelEntry: input.modelEntry };
+        const serverRequired = (reason) => ({ state: "server-required", reason });
+        const first = validate(request, version, serverRequired);
         const coldMs = performance.now() - start;
         const pureMs = [];
         if (measurePure) {
           for (let count = 0; count < 500; count += 1) {
             const t = performance.now();
-            validator.validate_request(input.kind, input.payload, input.modelEntry);
+            validate(request, version, serverRequired);
             pureMs.push(performance.now() - t);
           }
         }
@@ -87,7 +89,7 @@ for (let index = 0; index < samples; index += 1) {
           const timings = [];
           field.addEventListener("input", async () => {
             for (let item = 0; item < batchSize; item += 1) {
-              validator.validate_request(input.kind, input.payload, input.modelEntry);
+              validate(request, version, serverRequired);
               if ((item + 1) % 8 === 0 && item + 1 < batchSize) {
                 await new Promise((resolve) => setTimeout(resolve, 0));
               }
@@ -112,11 +114,10 @@ for (let index = 0; index < samples; index += 1) {
         return { coldMs, first, pureMs,
           singleInputVisibleMs: measurePure ? await inputVisible(1) : [],
           batchInputVisibleMs: measurePure ? await inputVisible(32) : [] };
-      }, { moduleUrl, fixture, measurePure: index === 0 });
-      if (result.first.validatorSchemaVersion !== corpus.schemaVersion) {
-        throw new Error(`Browser validator version disagreed with corpus on sample ${index + 1}`);
-      }
-      deepStrictEqual(result.first.result, fixture.expected);
+      }, { moduleUrl, fixture, measurePure: index === 0, version: corpus.schemaVersion });
+      deepStrictEqual(result.first.state === "valid"
+        ? { ok: true, resolved: result.first.resolved }
+        : { ok: false, refusal: result.first.refusal }, fixture.expected);
       cold.push(result.coldMs);
       if (index === 0) {
         pure = result.pureMs;

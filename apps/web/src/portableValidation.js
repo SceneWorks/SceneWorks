@@ -1,7 +1,4 @@
-import { cachedModelFacts, rememberModelFacts } from "./portableModelFacts.js";
-
 export const VALIDATOR_SCHEMA_VERSION = 1;
-const MODEL_FREE_KINDS = new Set(["videoUpscale", "characterTest", "promptRefine", "yue2", "yue2Execution", "personDetect", "personTrack"]);
 let enginePromise;
 let loadedEngine;
 let serverValidatorVersion = null;
@@ -11,10 +8,10 @@ export function setServerValidatorVersion(version) {
 }
 
 function engine() {
-  enginePromise ??= import("./wasm/options-validator/options_validator.js")
-    .then(async (module) => {
-      await module.default();
-      loadedEngine = { validate: module.validate_request, shape: module.validate_shape };
+  enginePromise ??= import("./portableValidationEngine.js")
+    .then(({ load }) => load())
+    .then((validate) => {
+      loadedEngine = validate;
       return loadedEngine;
     })
     .catch((error) => {
@@ -38,65 +35,6 @@ function versionReason(request) {
   return null;
 }
 
-// The entry must come from a served catalog row or this origin's last served copy.
-// Neither source proves current installation, device selection or memory fit; the server
-// revalidates every submission. A cache-backed answer is explicitly marked stale.
-function validateWithEngine({
-  kind,
-  payload,
-  modelEntry = null,
-  validatorSchemaVersion = VALIDATOR_SCHEMA_VERSION,
-}, validator) {
-  const mismatch = versionReason({ validatorSchemaVersion });
-  if (mismatch) return serverRequired(mismatch);
-  let entry = modelEntry;
-  let metadataSource = "live";
-  if (MODEL_FREE_KINDS.has(kind)) {
-    entry = {};
-    metadataSource = null;
-  } else if (kind === "vectorPrompt") {
-    if (!entry) {
-      const raster = cachedModelFacts(payload?.rasterModel);
-      const vector = cachedModelFacts(payload?.vectorModel);
-      entry = raster && vector ? { raster, vector } : null;
-      metadataSource = "cache";
-    }
-    if (entry?.raster?.id !== payload?.rasterModel || entry?.vector?.id !== payload?.vectorModel) entry = null;
-    if (entry && metadataSource === "live") {
-      rememberModelFacts(entry.raster.id, entry.raster);
-      rememberModelFacts(entry.vector.id, entry.vector);
-    }
-  } else {
-    const modelId = payload?.model ?? payload?.modelId ?? payload?.targetId ?? payload?.plan?.target?.targetId;
-    if (!entry && typeof modelId === "string") {
-      entry = cachedModelFacts(modelId);
-      metadataSource = "cache";
-    }
-    if (entry?.id !== modelId) entry = null;
-    if (entry && metadataSource === "live") rememberModelFacts(modelId, entry);
-  }
-  if (!entry) metadataSource = null;
-  try {
-    const response = JSON.parse(entry
-      ? validator.validate(kind, JSON.stringify(payload), JSON.stringify(entry))
-      : validator.shape(kind, JSON.stringify(payload)));
-    if (response.validatorSchemaVersion !== VALIDATOR_SCHEMA_VERSION) {
-      return serverRequired("validator-version-mismatch", metadataSource);
-    }
-    if (response.result.ok && !entry) {
-      return { ...serverRequired("model-facts-unavailable"), shapeChecked: true };
-    }
-    return {
-      state: response.result.ok ? "valid" : "invalid",
-      ...(response.result.ok ? { resolved: response.result.resolved } : { refusal: response.result.refusal }),
-      metadataSource: entry ? metadataSource : null,
-      liveChecks: "server",
-    };
-  } catch {
-    return serverRequired("validator-unavailable", metadataSource);
-  }
-}
-
 // Submission must not wait for a cold module import: navigation or cancellation may occur
 // while it loads. A cold check falls through to the server, which always revalidates.
 export function validatePortableRequestNow(request) {
@@ -106,7 +44,7 @@ export function validatePortableRequestNow(request) {
     void engine().catch(() => {});
     return serverRequired("validator-loading");
   }
-  return validateWithEngine(request, loadedEngine);
+  return loadedEngine(request, VALIDATOR_SCHEMA_VERSION, serverRequired);
 }
 
 // Forms call this as their draft changes, warming the module before submission and
@@ -115,7 +53,7 @@ export async function validatePortableRequest(request) {
   const mismatch = versionReason(request);
   if (mismatch) return serverRequired(mismatch);
   try {
-    return validateWithEngine(request, await engine());
+    return (await engine())(request, VALIDATOR_SCHEMA_VERSION, serverRequired);
   } catch {
     return serverRequired("validator-unavailable");
   }
