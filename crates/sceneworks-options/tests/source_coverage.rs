@@ -1226,12 +1226,10 @@ fn native_training_technique_calls_remain_visible_as_raw_map_reads() {
         }"#,
     );
     assert_eq!(coverage.whole_map_reads.len(), 3);
-    assert!(
-        coverage
-            .whole_map_reads
-            .iter()
-            .any(|(_, _, site)| site == "delegated training technique: latent_loss_settings")
-    );
+    assert!(coverage
+        .whole_map_reads
+        .iter()
+        .any(|(_, _, site)| site == "delegated training technique: latent_loss_settings"));
 }
 
 #[test]
@@ -1287,12 +1285,10 @@ fn generic_typed_boundary_field_calls_remain_in_the_source_inventory() {
         }"#,
     );
     assert!(coverage.reads.iter().any(|read| read.key == "poses"));
-    assert!(
-        coverage
-            .dynamic
-            .iter()
-            .any(|(_, _, key)| key == "dynamic_key")
-    );
+    assert!(coverage
+        .dynamic
+        .iter()
+        .any(|(_, _, key)| key == "dynamic_key"));
 }
 
 #[test]
@@ -1309,12 +1305,10 @@ fn adding_an_unregistered_key_to_a_dynamic_domain_fails_coverage() {
         .unwrap(),
     )]);
     assert!(missing(&valid).is_empty());
-    assert!(
-        valid
-            .domains
-            .get(path)
-            .is_some_and(|domain| domain.contains("gradientCheckpointing"))
-    );
+    assert!(valid
+        .domains
+        .get(path)
+        .is_some_and(|domain| domain.contains("gradientCheckpointing")));
     let mutated = scan(&[(
         path.into(),
         syn::parse_file(
@@ -1363,25 +1357,19 @@ fn common_constant_names_and_training_context_stay_scoped() {
     ];
     let coverage = scan(&sources);
     assert_eq!(coverage.reads.len(), 3);
-    assert!(
-        coverage
-            .reads
-            .iter()
-            .any(|read| read.file == "first.rs" && read.key == "steps")
-    );
-    assert!(
-        coverage
-            .reads
-            .iter()
-            .any(|read| read.file == "second.rs" && read.key == "sampler")
-    );
-    assert!(
-        coverage
-            .reads
-            .iter()
-            .any(|read| read.file.contains("iris_curricula")
-                && read.location == "training.config.advanced")
-    );
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file == "first.rs" && read.key == "steps"));
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file == "second.rs" && read.key == "sampler"));
+    assert!(coverage
+        .reads
+        .iter()
+        .any(|read| read.file.contains("iris_curricula")
+            && read.location == "training.config.advanced"));
 }
 
 // Exact dynamic sites whose finite domain lives in the source-owned declarations above.
@@ -1389,41 +1377,15 @@ fn common_constant_names_and_training_context_stay_scoped() {
 // This is intentionally not a blanket exemption for a training module or function.
 fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'static str> {
     match (file, function, expression) {
-        (
-            "crates/sceneworks-options/src/sensenova_validation.rs",
-            "canonical_numbers",
-            "computed expression",
-        ) => Some(
-            "integer carrier normalization iterates only INTERLEAVE_ADVANCED_INTEGERS; its tuple keys are structurally checked",
-        ),
-        (
-            "crates/sceneworks-options/src/training_validation.rs",
-            "inverted_window_message",
-            "max_key",
-        ) => Some(
-            "diagnostic-only max key supplied by technique parsers; their finite TECHNIQUE_KEYS are checked",
-        ),
-        (
-            "crates/sceneworks-options/src/training_validation/body_losses.rs",
-            "schedule",
-            "every_key" | "min_key" | "max_key" | "loss.weight_key(...)",
-        ) => Some(
-            "BodyLoss formats the three loss prefixes; its explicit TECHNIQUE_KEYS table is checked",
-        ),
-        (
-            "crates/sceneworks-options/src/training_validation/face_losses.rs",
-            "schedule",
-            "weight_key" | "min_key" | "max_key" | "every_key",
-        ) => Some(
-            "schedule destructures the caller's four-key array; the owning TECHNIQUE_KEYS table is checked",
-        ),
-        (
-            "crates/sceneworks-options/src/training_validation/iris.rs",
-            "validate_micro_steps",
-            "field",
-        ) => Some(
-            "IRIS_MICRO_STEP_FIELDS selects sampleEvery/lrWarmupSteps from advanced; steps/saveEvery are top-level config fields",
-        ),
+        ("crates/sceneworks-options/src/sensenova_validation.rs","canonical_numbers","computed expression") => Some("integer carrier normalization iterates only INTERLEAVE_ADVANCED_INTEGERS; its tuple keys are structurally checked"),
+        ("crates/sceneworks-options/src/training_validation.rs", "inverted_window_message", "max_key") =>
+            Some("diagnostic-only max key supplied by technique parsers; their finite TECHNIQUE_KEYS are checked"),
+        ("crates/sceneworks-options/src/training_validation/body_losses.rs", "schedule", "every_key" | "min_key" | "max_key" | "loss.weight_key(...)") =>
+            Some("BodyLoss formats the three loss prefixes; its explicit TECHNIQUE_KEYS table is checked"),
+        ("crates/sceneworks-options/src/training_validation/face_losses.rs", "schedule", "weight_key" | "min_key" | "max_key" | "every_key") =>
+            Some("schedule destructures the caller's four-key array; the owning TECHNIQUE_KEYS table is checked"),
+        ("crates/sceneworks-options/src/training_validation/iris.rs", "validate_micro_steps", "field") =>
+            Some("IRIS_MICRO_STEP_FIELDS selects sampleEvery/lrWarmupSteps from advanced; steps/saveEvery are top-level config fields"),
         _ => None,
     }
 }
@@ -1489,27 +1451,17 @@ fn production_advanced_reads_resolve_to_option_specs() {
             } else {
                 file.as_str()
             };
-            assert!(
-                coverage
-                    .domains
-                    .get(domain_file)
-                    .is_some_and(|keys| !keys.is_empty()),
-                "Dynamic read {file}::{function} ({expression}) lost its finite source-owned key table"
-            );
+            assert!(coverage.domains.get(domain_file).is_some_and(|keys| !keys.is_empty()),
+                "Dynamic read {file}::{function} ({expression}) lost its finite source-owned key table");
             eprintln!("Reviewed dynamic read {file}::{function} ({expression}): {reason}");
         } else {
             unresolved.push((file, function, expression));
         }
     }
     for (file, function, expression) in &coverage.delegated {
-        eprintln!(
-            "Delegated dynamic read {file}::{function} ({expression}): checked at accessor/closure call sites"
-        );
+        eprintln!("Delegated dynamic read {file}::{function} ({expression}): checked at accessor/closure call sites");
     }
-    assert!(
-        unresolved.is_empty(),
-        "Dynamic reads require structural coverage or a documented narrow exception:\n{unresolved:#?}"
-    );
+    assert!(unresolved.is_empty(), "Dynamic reads require structural coverage or a documented narrow exception:\n{unresolved:#?}");
     assert!(!coverage.reads.is_empty());
 }
 
@@ -1760,10 +1712,7 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !authored_receipt_clone(file, function, expression)
                 && !resize_mode_authoring_stamp(file, function, expression)
                 && !(file == "crates/sceneworks-core/src/resolved_options.rs"
-                    && matches!(
-                        function.as_str(),
-                        "bind" | "bind_with_model" | "for_config" | "from_effective"
-                    )
+                    && matches!(function.as_str(), "bind" | "bind_with_model" | "for_config" | "from_effective")
                     && (expression == "whole advanced map: clone"
                         || expression.starts_with("delegated training technique: ")))
         })
@@ -2214,16 +2163,16 @@ fn js_coverage(file: &str, source: &str) -> Coverage {
         let prefixes: BTreeSet<_> = tokens
             .windows(3)
             .filter_map(|part| match part {
-                [
-                    JsToken::Word(name),
-                    JsToken::Punct(':'),
-                    JsToken::Text(value),
-                ] if name == "prefix" => Some(value.clone()),
-                [
-                    JsToken::Word(name),
-                    JsToken::Punct('('),
-                    JsToken::Text(value),
-                ] if name == "faceLossSpec" => Some(value.clone()),
+                [JsToken::Word(name), JsToken::Punct(':'), JsToken::Text(value)]
+                    if name == "prefix" =>
+                {
+                    Some(value.clone())
+                }
+                [JsToken::Word(name), JsToken::Punct('('), JsToken::Text(value)]
+                    if name == "faceLossSpec" =>
+                {
+                    Some(value.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -2419,22 +2368,16 @@ fn javascript_advanced_reads_resolve_to_option_specs() {
         for (file, function, expression) in coverage.dynamic {
             match (file.as_str(), function.as_str(), expression.as_str()) {
                 ("apps/web/src/training/trainingConfig.js", "auxLossesDraft", "[prefix+knob") => {
-                    assert!(
-                        coverage
-                            .domains
-                            .get(&file)
-                            .is_some_and(|domain| !domain.is_empty())
-                    );
-                    eprintln!(
-                        "Reviewed JavaScript computed read {file}::{function}: prefix × knob source domain checked against registry"
-                    );
+                    assert!(coverage
+                        .domains
+                        .get(&file)
+                        .is_some_and(|domain| !domain.is_empty()));
+                    eprintln!("Reviewed JavaScript computed read {file}::{function}: prefix × knob source domain checked against registry");
                 }
                 ("apps/web/src/workflowShare.js", "workflowSettingRows", "[key") => {
                     // This inspector deliberately displays arbitrary imported keys, including
                     // unknown names, as unrestored. It never applies them to a generation request.
-                    eprintln!(
-                        "Reviewed JavaScript computed read {file}::{function}: Object.keys(settings) enumerates arbitrary imported settings for display"
-                    );
+                    eprintln!("Reviewed JavaScript computed read {file}::{function}: Object.keys(settings) enumerates arbitrary imported settings for display");
                 }
                 _ => dynamic.push((file, function, expression)),
             }

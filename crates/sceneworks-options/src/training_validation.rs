@@ -2,7 +2,7 @@
 //! provider selection, dataset files, authorization and output confinement stay native.
 use crate::contracts::{ContractNumber, ExtraFields, JsonObject};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 pub mod flux3;
 pub mod iris;
 pub const MAX_REFERENCE_IMAGES_LIMIT: &str = "maxReferenceImages";
@@ -314,11 +314,9 @@ pub fn parse_resolution_bucket_config(
         let row_form = match (has_resolution, has_width, has_height) {
             (true, false, false) => "legacy",
             (false, true, true) => "aspect",
-            _ => {
-                return Err(format!(
-                    "{RESOLUTION_BUCKETS_KEY} row {n} must use exactly {{resolution, repeats}} or {{width, height, repeats}}."
-                ));
-            }
+            _ => return Err(format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must use exactly {{resolution, repeats}} or {{width, height, repeats}}."
+            )),
         };
         if form.is_some_and(|previous| previous != row_form) {
             return Err(format!(
@@ -1316,7 +1314,7 @@ pub fn subject_mask_loss_weights(
             return Err(field_error(
                 SUBJECT_MASK_LOSS_KEY,
                 format!("{SUBJECT_MASK_LOSS_KEY} must be true or false."),
-            ));
+            ))
         }
     };
     let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
@@ -2055,13 +2053,7 @@ pub fn validate(
                     .and_then(Value::as_str)
                     .is_some_and(|value| value != expected)
                 {
-                    return Err(refusal(
-                        format!("target.{key}"),
-                        format!(
-                            "Training plan target.{key} does not match the authoritative target '{0}'.",
-                            target.id
-                        ),
-                    ));
+                    return Err(refusal(format!("target.{key}"), format!("Training plan target.{key} does not match the authoritative target '{0}'.", target.id)));
                 }
             }
         }
@@ -2071,10 +2063,7 @@ pub fn validate(
         && flux3::KERNELS.contains(&target.kernel.as_str())
         && config.advanced.get("resume").and_then(Value::as_bool) == Some(true)
     {
-        return Err(refusal(
-            "resume",
-            "Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity.",
-        ));
+        return Err(refusal("resume", "Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity."));
     }
     if kind == "training"
         && target.output_kind == TrainingOutputKind::ControlBranch
@@ -2083,10 +2072,7 @@ pub fn validate(
             .and_then(Value::as_bool)
             .unwrap_or(true)
     {
-        return Err(refusal(
-            "dryRun",
-            "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
-        ));
+        return Err(refusal("dryRun", "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false."));
     }
     Ok(())
 }
@@ -2489,21 +2475,11 @@ pub fn validate_preset_binding(
     requested_version: Option<u32>,
 ) -> Result<(), ValidationRefusal> {
     if preset_target_id != target_id {
-        return Err(refusal(
-            "presetId",
-            format!(
-                "Training preset '{preset_id}' targets '{preset_target_id}', but the request targets '{target_id}'."
-            ),
-        ));
+        return Err(refusal("presetId", format!("Training preset '{preset_id}' targets '{preset_target_id}', but the request targets '{target_id}'.")));
     }
     if let Some(requested_version) = requested_version {
         if requested_version != preset_version {
-            return Err(refusal(
-                "presetVersion",
-                format!(
-                    "Training preset '{preset_id}' is version {preset_version}, but the request pinned version {requested_version}."
-                ),
-            ));
+            return Err(refusal("presetVersion", format!("Training preset '{preset_id}' is version {preset_version}, but the request pinned version {requested_version}.")));
         }
     }
     Ok(())
