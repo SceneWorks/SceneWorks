@@ -154,22 +154,17 @@ export function condensable(row) {
   return Boolean(row) && !row.failed && describerCondenses(row.model);
 }
 
-// The condensable rows that need the condensing step for `fitTo`: no usable condensed prompt for
-// that target yet (never condensed, failed, or fields changed since).
-export function rowsToCondense(rows, fitTo) {
+// The condensable rows that would not save a usable condensed prompt for `fitTo`. This is the ONE
+// definition the formatter uses too (`condensedFor`), so Save and the saved blocks cannot
+// disagree: never condensed or still provisional, condensing failed, fields changed since, or
+// the prompt emptied. Save and Export wait for them; Condense re-runs them.
+export function rowsNotFitted(rows, fitTo) {
   if (!fitTo) return [];
   return (rows ?? []).filter((row) => condensable(row) && !condensedFor(row, fitTo));
 }
 
-// The condensable rows that would save without a condensed prompt for `fitTo` because it was
-// never made or the fields changed since: Save and Export wait for them. A row whose condensing
-// failed is reported on the row and saves its seven fields.
-export function rowsNotFitted(rows, fitTo) {
-  if (!fitTo) return [];
-  return (rows ?? []).filter(
-    (row) => condensable(row) && (row.condensed?.target !== fitTo || (row.fieldsEdited && !row.condensed?.failed)),
-  );
-}
+// The rows "Condense" runs for `fitTo`: exactly the rows that are not fitted.
+export const rowsToCondense = rowsNotFitted;
 
 // What a condense-only or measure-only request carries for a row: its fields as edited, its size,
 // its cut-off notice, and for measuring its edited condensed prompt.
@@ -333,6 +328,16 @@ function CondensedPrompt({ row, target, busy, measureBlocked, onChange, onMeasur
       <textarea disabled={busy} onChange={(event) => onChange(row.itemId, event.target.value)} rows={4} value={condensed.text} />
     </label>
   );
+  if (!condensed.text?.trim()) {
+    return (
+      <>
+        {textarea}
+        <p className="inline-warning" data-row-note="condensed-empty">
+          The condensed prompt is empty, so this row cannot be saved for {target.name}. Type a prompt or condense again.
+        </p>
+      </>
+    );
+  }
   if (condensed.edited) {
     const chars = promptBudget(formatPromptBatch([row], { fitTo: target.id }).text);
     return (
@@ -873,6 +878,11 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const pendingCondense = useMemo(() => rowsToCondense(rows, activeFitTo), [rows, activeFitTo]);
   // Rows that would save without a condensed prompt matching their fields: Save/Export wait.
   const unfitted = useMemo(() => rowsNotFitted(rows, activeFitTo), [rows, activeFitTo]);
+  // Saved with a condensed prompt still over the limit after the retry: reported, never fitting.
+  const overLimit = useMemo(
+    () => (activeFitTo ? rows.filter((row) => { const c = condensedFor(row, activeFitTo); return c?.over && !c.edited; }).length : 0),
+    [rows, activeFitTo],
+  );
   // Saved with a condensed prompt edited since it was measured.
   const unmeasured = useMemo(
     () => (activeFitTo ? rows.filter((row) => condensedFor(row, activeFitTo)?.edited).length : 0),
@@ -1182,9 +1192,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             {saveError ? <p className="inline-warning" role="alert">{saveError}</p> : null}
             {unfitted.length ? (
               <p className="inline-warning" data-save-note="not-fitted" role="status">
-                {unfitted.length} {unfitted.length === 1 ? "row is" : "rows are"} not condensed for {fitTarget.name} (never condensed,
-                or fields changed since). Condense {unfitted.length === 1 ? "it" : "them"}, or turn Fit to off to save the seven
-                fields.
+                {unfitted.length} {unfitted.length === 1 ? "row has" : "rows have"} no usable condensed prompt for {fitTarget.name}{" "}
+                (not condensed yet, condensing failed, fields changed since, or the prompt is empty). Condense{" "}
+                {unfitted.length === 1 ? "it" : "them"}, or turn Fit to off to save the seven fields.
+              </p>
+            ) : null}
+            {overLimit ? (
+              <p className="inline-warning" data-save-note="over" role="status">
+                {overLimit} condensed {overLimit === 1 ? "prompt is" : "prompts are"} still over the limit for {fitTarget.name}; the image
+                model will refuse {overLimit === 1 ? "it" : "them"} until shortened.
               </p>
             ) : null}
             {unmeasured ? (

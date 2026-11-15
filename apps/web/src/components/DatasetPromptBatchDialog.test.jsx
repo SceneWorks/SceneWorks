@@ -23,7 +23,8 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE } = await import("./DatasetPromptBatchDialog.jsx");
+const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted } = await import("./DatasetPromptBatchDialog.jsx");
+const { formatPromptBatch } = await import("../promptBatchDescribe.js");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
 const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
@@ -1109,7 +1110,7 @@ describe("DatasetPromptBatchDialog", () => {
     expect(rowNote("item_a", "condense-stale").textContent).toContain("Fields changed since this was condensed");
     expect(condensedBox("item_a")).toBeUndefined();
     const note = document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ");
-    expect(note).toContain("1 row is not condensed for Krea 2 Turbo");
+    expect(note).toContain("1 row has no usable condensed prompt for Krea 2 Turbo");
     expect(note).toContain("Condense it, or turn Fit to off to save the seven fields.");
     expect(button("Save prompt batch").disabled).toBe(true);
     expect(button("Export .json").disabled).toBe(true);
@@ -1264,11 +1265,61 @@ describe("DatasetPromptBatchDialog", () => {
     expect(sizeB.textContent).toMatch(/^Over the limit: about 1,100 of 1,024 tokens \(estimated\)\. Still over the limit after one retry/);
     expect(rowNote("item_c", "condense-failed").textContent).toContain("leaves out woman_1");
     expect(condensedBox("item_c")).toBeUndefined();
+    // A failed row never silently saves its seven fields under an active target.
+    expect(button("Save prompt batch").disabled).toBe(true);
+    expect(document.body.querySelector('[data-save-note="not-fitted"]').textContent).toContain(
+      "1 row has no usable condensed prompt",
+    );
+    // The over row saves its condensed prompt and is reported as over, never as fitting.
+    expect(document.body.querySelector('[data-save-note="over"]').textContent).toContain(
+      "1 condensed prompt is still over the limit",
+    );
+    await chooseFitTo("");
     await click(button("Save prompt batch"));
     await settle();
     const prompts = context.createPromptBatch.mock.calls[0][0].prompts;
-    expect(prompts[1]).toBe("[4:3]\nA woman, {{woman_1}}, stands by a window.");
-    expect(prompts[2].startsWith("[4:3]\nDescription: A woman")).toBe(true);
+    expect(prompts.every((prompt) => prompt.includes("\nDescription: "))).toBe(true);
+  });
+
+  it("an emptied condensed prompt blocks Save with the same message as a stale row", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })]);
+    expect(button("Save prompt batch").disabled).toBe(false);
+    await act(async () => setText(condensedBox("item_a"), "   "));
+    expect(rowNote("item_a", "condensed-empty").textContent).toContain("The condensed prompt is empty");
+    expect(button("Save prompt batch").disabled).toBe(true);
+    expect(button("Export .json").disabled).toBe(true);
+    expect(document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ")).toContain(
+      "Condense it, or turn Fit to off to save the seven fields.",
+    );
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window."));
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("decides every row state with the one fitted definition the formatter uses", () => {
+    const krea = (over = {}) => condensedFor("krea_2_turbo", over);
+    const vision = VISION_CAPTION_MODEL_REPO;
+    const row = (itemId, over) => ({ itemId, model: vision, width: 300, height: 400, failed: false, fields: { description: "woman_1" }, ...over });
+    const rows = [
+      row("fitted", { condensed: krea() }),
+      row("over", { condensed: krea({ over: true }) }),
+      row("edited", { condensed: krea({ edited: true, text: "woman_1 edited." }) }),
+      row("failed", { condensed: krea({ failed: true, text: "" }) }),
+      row("stale", { condensed: krea(), fieldsEdited: true }),
+      row("emptied", { condensed: krea({ edited: true, text: "  " }) }),
+      row("provisional", { provisional: true, condensed: null }),
+      row("other_target", { condensed: condensedFor("krea_2_raw") }),
+      row("joycaption", { model: JOY_REPO, condensed: null }),
+      row("flagged", { failed: true, condensed: null }),
+    ];
+    expect(rowsNotFitted(rows, "krea_2_turbo").map((r) => r.itemId)).toEqual(["failed", "stale", "emptied", "provisional", "other_target"]);
+    // Everything the predicate passes saves a condensed block; the rest are not saved under it.
+    const { text } = formatPromptBatch(rows.filter((r) => !rowsNotFitted(rows, "krea_2_turbo").includes(r)), { fitTo: "krea_2_turbo" });
+    const blocks = text.split("\n---\n");
+    expect(blocks.filter((block) => block.includes("\nDescription: "))).toHaveLength(1); // the JoyCaption row
+    expect(rowsNotFitted(rows, "")).toEqual([]);
   });
 
   it("warns on the over-4,000-character limit using the block that will be saved", async () => {
