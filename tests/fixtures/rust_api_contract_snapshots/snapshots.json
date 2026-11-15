@@ -2073,6 +2073,7 @@
       "projects": "<runtime-root>/data/projects"
     },
     "interruptedJobsOnStartup": 0,
+    "optionsValidatorSchemaVersion": 1,
     "readiness": {
       "criticality": "readiness-critical",
       "status": "ready"
