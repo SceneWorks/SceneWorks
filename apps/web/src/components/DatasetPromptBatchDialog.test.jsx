@@ -1163,6 +1163,75 @@ describe("DatasetPromptBatchDialog", () => {
     window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
   });
 
+  it("restores a run while an image is provisional and shows its condensed prompt once it is final", async () => {
+    context.models = [...context.models, KREA];
+    window.localStorage.setItem("sceneworks.datasetPromptBatch.fitTo.ds_1", "krea_2_turbo");
+    serveHistory([
+      { id: "job_1", status: "running", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 0, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    // Stored before its condensing step: provisional, not yet counted.
+    storedItems = [described("item_a", 300, 400, { provisional: true })];
+    await render();
+    expect(rowNote("item_a", "not-condensed")).toBeTruthy();
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })], { itemCount: 1 })),
+    );
+    await settle();
+    expect(condensedBox("item_a").value).toBe("A woman, woman_1, stands by a window.");
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+  });
+
+  it("re-reads a provisional row an ordinary poll saw until it is final", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await click(button("Describe images"));
+    await settle();
+    const first = snapshot("running", [
+      described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+      described("item_b", 400, 300, { provisional: true }),
+    ]);
+    first.result.processedCount = 1;
+    await act(async () => nextPoll(first));
+    await settle();
+    expect(rowNote("item_b", "not-condensed")).toBeTruthy();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [
+          described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+          described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo", { text: "woman_1 at the door." }) }),
+        ]),
+      ),
+    );
+    await settle();
+    expect(condensedBox("item_b").value).toBe("woman_1 at the door.");
+    expect(jobsApi.resultItems).toHaveBeenCalledWith("job_1", "t", { offset: 1, limit: 1 }, expect.anything());
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("clears a remembered Fit to the catalog no longer offers and never sends it", async () => {
+    for (const [stored, models] of [
+      // A removed model.
+      ["user_model_gone", [...context.models, KREA]],
+      // A model whose limit is below the 512-token minimum.
+      ["small_model", [...context.models, KREA, { id: "small_model", name: "Small", image: { maxPromptTokens: 128 } }]],
+    ]) {
+      context.models = models;
+      trainingApi.batchDescribeJobs.mockClear();
+      window.localStorage.setItem("sceneworks.datasetPromptBatch.fitTo.ds_1", stored);
+      await unmountRoot(root, container);
+      ({ container, root } = mountRoot());
+      await render();
+      expect(window.localStorage.getItem("sceneworks.datasetPromptBatch.fitTo.ds_1")).toBe("");
+      await click(button("Describe images"));
+      await settle();
+      expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body).fitTo).toBeUndefined();
+      await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400)], { progress: 1 })));
+      await settle();
+    }
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+  });
+
   it("shows an estimate as about, a result still over the limit as over, and a failed condense plainly", async () => {
     context.models = [...context.models, KREA];
     await render();

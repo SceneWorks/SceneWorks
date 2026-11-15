@@ -131,6 +131,16 @@ function storeFitTo(datasetId, value) {
   }
 }
 
+// Record which result positions are provisional (stored before their condensing step) in
+// `positions`, for `items` read from `start`; a final item clears its position. Returns the set.
+export function trackProvisional(positions, items, start) {
+  (items ?? []).forEach((item, index) => {
+    if (item?.provisional) positions.add(start + index);
+    else positions.delete(start + index);
+  });
+  return positions;
+}
+
 // Whether the describer `repo` runs the "Fit to" condensing step (the `condenses` property of
 // DESCRIBE_MODELS; sceneworks-core `describer_condenses` decides the same on the server). A row
 // stored before describers were recorded was described by the default, the Vision Captioner.
@@ -406,7 +416,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [restoring, setRestoring] = useState(true);
   const monitoringRef = useRef(false);
   // How many of a job's stored items the table already holds, so polling reads only new ones.
-  const itemsRead = useRef({ jobId: null, count: 0 });
+  const itemsRead = useRef({ jobId: null, count: 0, provisional: new Set() });
   // When the dialog resumes an older running job, the images newer runs already described: that
   // job's later results for them are older work and must not replace the restored rows.
   const supersededItems = useRef({ jobId: null, ids: new Set() });
@@ -480,6 +490,13 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const selectedAvailable = modelAvailable(model.id);
   const fitTargets = useMemo(() => fitToTargets(models), [models]);
   const fitTarget = fitTargets.find((target) => target.id === fitTo) ?? null;
+  // A remembered target the catalog no longer offers (a removed model, or one below the minimum)
+  // is cleared once the catalog and the earlier runs are loaded, so it is never sent.
+  useEffect(() => {
+    if (restoring || !fitTo || !models.length || fitTarget) return;
+    setFitTo("");
+    if (dataset?.id) storeFitTo(dataset.id, "");
+  }, [dataset?.id, fitTarget, fitTo, models.length, restoring]);
   const downloadJobs = useMemo(() => jobs.filter((entry) => entry.type === "model_download"), [jobs]);
 
   const running = Boolean(job) && !terminalStatuses.has(job.status);
@@ -495,25 +512,44 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     for (;;) {
       const page = await withRetries(() => jobsApi.resultItems(jobId, token, { offset }, { signal }), signal);
       const items = Array.isArray(page?.items) ? page.items : [];
-      if (items.length) onItems(items);
+      if (items.length) onItems(items, offset);
       offset += items.length;
       if (!items.length || page?.nextOffset == null) return offset;
     }
   }, [token]);
 
+  // Merge items read from the job into the table and track which positions are still
+  // provisional (an image stored before its condensing step, replaced in place once condensed).
+  const mergeJobItems = useCallback(
+    (jobId, items, start, model) => {
+      if (itemsRead.current.jobId === jobId) trackProvisional(itemsRead.current.provisional, items, start);
+      const superseded = supersededItems.current.jobId === jobId ? supersededItems.current.ids : null;
+      const fresh = superseded ? items.filter((item) => !superseded.has(item?.itemId)) : items;
+      if (fresh.length) setRows((current) => mergeDescribeRows(current, fresh, datasetOrder, model));
+    },
+    [datasetOrder],
+  );
+
   const readItems = useCallback(
     (jobId, from, model, signal) =>
-      readItemPages(
-        jobId,
-        from,
-        (items) => {
-          const superseded = supersededItems.current.jobId === jobId ? supersededItems.current.ids : null;
-          const fresh = superseded ? items.filter((item) => !superseded.has(item?.itemId)) : items;
-          if (fresh.length) setRows((current) => mergeDescribeRows(current, fresh, datasetOrder, model));
-        },
-        signal,
-      ),
-    [datasetOrder, readItemPages],
+      readItemPages(jobId, from, (items, start) => mergeJobItems(jobId, items, start, model), signal),
+    [mergeJobItems, readItemPages],
+  );
+
+  // Re-read only the positions that were provisional, one item each, until they are final.
+  const rereadProvisional = useCallback(
+    async (jobId, model, signal) => {
+      if (itemsRead.current.jobId !== jobId) return;
+      for (const position of [...itemsRead.current.provisional]) {
+        const page = await withRetries(
+          () => jobsApi.resultItems(jobId, token, { offset: position, limit: 1 }, { signal }),
+          signal,
+        );
+        const items = Array.isArray(page?.items) ? page.items.slice(0, 1) : [];
+        if (items.length) mergeJobItems(jobId, items, position, model);
+      }
+    },
+    [mergeJobItems, token],
   );
 
   const pollJob = useCallback(async (jobId, signal) => {
@@ -522,6 +558,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       const snapshot = await withRetries(() => jobsApi.item(jobId, token, { signal }), signal);
       // The worker stores an item before the post that counts it, so `processedCount` items exist.
       const processed = Number(snapshot?.result?.processedCount) || 0;
+      if (itemsRead.current.jobId === jobId && itemsRead.current.provisional.size) {
+        await rereadProvisional(jobId, snapshot?.result?.model, signal);
+      }
       if (itemsRead.current.jobId === jobId && processed > itemsRead.current.count) {
         itemsRead.current.count = await readItems(jobId, itemsRead.current.count, snapshot.result.model, signal);
       }
@@ -530,7 +569,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         return snapshot;
       }
     }
-  }, [readItems, token]);
+  }, [readItems, rereadProvisional, token]);
 
   function reportFinished(finished) {
     lastFinished.current = finished?.status ?? null;
@@ -597,6 +636,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         const activeId = (Array.isArray(unfinished) ? unfinished[0]?.id : null) ?? null;
         let active = null;
         let activeCount = 0;
+        let activeProvisional = new Set();
         let activeRead = !activeId;
         const newerDescribed = new Set();
         let offset = 0;
@@ -623,9 +663,11 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         for (let entry = await nextJob(); entry; entry = await nextJob()) {
           const items = [];
           const count = await readItemPages(entry.id, 0, (page) => items.push(...page), signal);
+          const provisional = trackProvisional(new Set(), items, 0);
           if (entry.id === activeId) {
             active = entry;
             activeCount = count;
+            activeProvisional = provisional;
             activeRead = true;
           }
           const sources = new Map(
@@ -648,7 +690,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         const lastFitTo = storedFitTo(dataset.id) ?? jobsNewestFirst[0]?.payload?.fitTo;
         if (typeof lastFitTo === "string") setFitTo(lastFitTo);
         if (active) {
-          itemsRead.current = { jobId: active.id, count: activeCount };
+          itemsRead.current = { jobId: active.id, count: activeCount, provisional: activeProvisional };
           supersededItems.current = { jobId: active.id, ids: newerDescribed };
           setJob(active);
           monitor(active.id);
@@ -703,7 +745,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
         if (itemIds) body.itemIds = itemIds;
         // A describer without a text step (JoyCaption) never condenses.
-        if (fitTo && model.condenses) body.fitTo = fitTo;
+        // Only a target the catalog still offers: a remembered id of a removed model is never sent.
+        if (fitTarget && model.condenses) body.fitTo = fitTarget.id;
       }
       pollAbort.current?.abort();
       const controller = new AbortController();
@@ -720,7 +763,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         return;
       }
       if (!itemIds && !condense) setRows([]);
-      itemsRead.current = { jobId: created.id, count: 0 };
+      itemsRead.current = { jobId: created.id, count: 0, provisional: new Set() };
       setRerunItemId(itemIds?.length === 1 ? itemIds[0] : null);
       setJob(created);
       await monitor(created.id);

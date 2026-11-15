@@ -1198,18 +1198,27 @@ fn stored_item_json(item: &DescribedItem) -> Value {
 /// Append one finished image to the job's per-item results, as the worker that owns the job. A 409
 /// (the job was canceled, swept or reclaimed) propagates like a rejected progress post.
 #[cfg(native_lane)]
+///
+/// `provisional` marks a checkpoint the job will replace at the same position (an image stored
+/// before its condensing step): a reader re-reads that position until it is final. A final item
+/// carries no `provisional` key.
 async fn append_result_item(
     api: &ApiClient,
     job_id: &str,
     position: usize,
     item: &DescribedItem,
+    provisional: bool,
 ) -> WorkerResult<()> {
+    let mut stored = stored_item_json(item);
+    if provisional {
+        stored["provisional"] = json!(true);
+    }
     let _: Value = api
         .post_json(
             &format!("/api/v1/jobs/{job_id}/result-items"),
             &json!({
                 "workerId": api.worker_id,
-                "items": [{ "position": position, "item": stored_item_json(item) }],
+                "items": [{ "position": position, "item": stored }],
             }),
         )
         .await?;
@@ -1593,8 +1602,8 @@ async fn run_batch_describe(
             if request.mode == RunMode::Describe {
                 // Store the description first: a model that fails while condensing (and so
                 // fails the job) must not lose the image just described. The condensed item
-                // replaces it below (the store keys items by id).
-                append_result_item(api, &job.id, described.len(), &outcome).await?;
+                // replaces it below (the store keys items by id); until then it is provisional.
+                append_result_item(api, &job.id, described.len(), &outcome, true).await?;
                 update_job(
                     api,
                     &job.id,
@@ -1635,7 +1644,7 @@ async fn run_batch_describe(
         }
         // Store the item before the post that counts it, so a reader that sees `processedCount`
         // reach N can always read N items.
-        append_result_item(api, &job.id, described.len(), &outcome).await?;
+        append_result_item(api, &job.id, described.len(), &outcome, false).await?;
         described.push(outcome);
         let done = described.len();
         let finished = match request.mode {

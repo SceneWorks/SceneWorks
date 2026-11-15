@@ -2272,6 +2272,17 @@ async fn a_condensed_prompt_that_fits_first_time_is_stored_beside_the_seven_fiel
     assert!(
         running_messages(&api).contains(&"Condensing image 1 of 1 for Krea 2 Turbo.".to_owned())
     );
+    // The description is checkpointed as provisional before condensing, then replaced in place.
+    let appends = api.appends.lock().unwrap().clone();
+    assert_eq!(appends.len(), 2);
+    assert_eq!(appends[0]["items"][0]["position"], 0);
+    assert_eq!(appends[0]["items"][0]["item"]["provisional"], true);
+    assert!(appends[0]["items"][0]["item"].get("condensed").is_none());
+    assert_eq!(appends[1]["items"][0]["position"], 0);
+    assert!(
+        item.get("provisional").is_none(),
+        "the final item is not provisional"
+    );
     assert_eq!(
         terminal(&api, "completed")["result"]["fitTo"],
         "krea_2_turbo"
