@@ -449,6 +449,12 @@ export function yue2RequestProblems(kind, settings, _target = {}, context = {}) 
   if (context.hasProject === false) {
     problems.push("Open or create a workspace first.");
   }
+  // The request omits planSource, so the server cannot distinguish an empty supplied
+  // score from a deliberate sampling request after the builder drops the empty field.
+  if ((kind === "create" || kind === "plan") && s.planSource === "supplied" &&
+      !trimmed(stripYue2ExportHeader(s.suppliedScore))) {
+    problems.push("Supply an ABC score before starting this run.");
+  }
   if (YUE2_FIELD_KINDS.arMode.includes(kind) && s.arMode === "experimentalFp8") {
     const capabilities = context.selectedGpuCapabilities ?? [];
     if (!context.requestedGpu || context.requestedGpu === "auto" ||
