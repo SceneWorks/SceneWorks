@@ -181,3 +181,6 @@ pub mod test_env;
 
 pub mod appearance;
 pub mod worker_proof;
+
+#[cfg(test)]
+mod option_carrier_upgrade_tests;

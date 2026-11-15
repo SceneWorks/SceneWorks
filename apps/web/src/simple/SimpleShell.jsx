@@ -19,6 +19,7 @@ import {
   readSimpleStudioSnapshot,
   writeSimpleStudioSnapshot,
 } from "../simpleStudioStore.js";
+import { UpgradeError } from "../requestUpgrade.js";
 import { SimpleSheet, SimpleSheetOptions } from "./SimpleSheet.jsx";
 import { PromptGuideSheet } from "./PromptGuideSheet.jsx";
 import { SimplePreview } from "./SimplePreview.jsx";
@@ -154,6 +155,7 @@ export function SimpleShell({
   // key so they REMOUNT and re-read it. `useStudioState` reads the store once at mount (any
   // other rule would fight the studio's own live state), so a remount is how a restore lands.
   const [studioEpoch, setStudioEpoch] = useState(0);
+  const [studioSettingsError, setStudioSettingsError] = useState(null);
   const persistTimer = useRef(null);
 
   // Load this workspace's persisted studio settings, then let the studios write through.
@@ -168,7 +170,21 @@ export function SimpleShell({
       return undefined;
     }
     const store = studioStateRef.current;
-    const restored = readSimpleStudioSnapshot(workspaceId);
+    let refused = false;
+    const refuse = (error, visible = true) => {
+      if (!(error instanceof UpgradeError)) throw error;
+      refused = true;
+      store.persist = () => {};
+      if (visible) setStudioSettingsError(`Saved Simple studio settings could not be read: ${error.message}. Changes in this project will not be saved until the snapshot is repaired.`);
+    };
+    let restored;
+    try {
+      restored = readSimpleStudioSnapshot(workspaceId);
+      setStudioSettingsError(null);
+    } catch (error) {
+      refuse(error);
+      return () => { clearTimeout(persistTimer.current); store.persist = () => {}; };
+    }
     // Only replace the store — and only remount the studios — when there is something to
     // restore. The remount is what discards whatever the mounted studio currently holds, so
     // doing it unconditionally would throw away anything the user typed while the GET was in
@@ -183,18 +199,22 @@ export function SimpleShell({
     // Debounced: a prompt is typed, and one durable write per keystroke would hammer both
     // localStorage and the disk-writing PUT. The store's coalescing queue keeps the requests
     // ordered; this keeps them rare.
+    const persist = (visible = true) => {
+      if (refused) return;
+      try {
+        writeSimpleStudioSnapshot(workspaceId, snapshotFromStore(store));
+      } catch (error) { refuse(error, visible); }
+    };
     store.persist = () => {
       clearTimeout(persistTimer.current);
-      persistTimer.current = setTimeout(() => {
-        writeSimpleStudioSnapshot(workspaceId, snapshotFromStore(store));
-      }, PERSIST_DEBOUNCE_MS);
+      persistTimer.current = setTimeout(() => persist(), PERSIST_DEBOUNCE_MS);
     };
     return () => {
       clearTimeout(persistTimer.current);
       store.persist = () => {};
       // Flush on the way out (workspace switch, or the shell unmounting on a switch to
       // Advanced) so the last few keystrokes aren't the ones that get dropped.
-      writeSimpleStudioSnapshot(workspaceId, snapshotFromStore(store));
+      persist(false);
     };
   }, [preferencesHydrated, workspaceId]);
 
@@ -437,6 +457,7 @@ export function SimpleShell({
 
           <div className="su-body su-scroll">
             <div className="su-content">
+              {studioSettingsError ? <p className="su-error" role="alert">{studioSettingsError}</p> : null}
               {/* Keyed on `studioEpoch` so a restored snapshot — which lands asynchronously,
                   after the ui-preferences GET — remounts the studio and is read by its state
                   initialisers, rather than having to be pushed into already-mounted state.

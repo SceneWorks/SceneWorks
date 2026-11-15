@@ -252,6 +252,7 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // as not restored, and left out of the recipe. The safe default is "the user is told", never "it
 // quietly disappears".
 export const ADVANCED_PREFILL = {
+  lowResStart: { label: "Low-resolution start", detail: "This recipe requires low-resolution start support on the selected model and backend. This build cannot restore it.", prefill: PREFILL_NONE },
   mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
   mossImageEdit: { label: "MOSS edit controls", prefill: PREFILL_CONTROL },
   mossImageAdvanced: { label: "Native edit tensors and output", prefill: PREFILL_CONTROL },

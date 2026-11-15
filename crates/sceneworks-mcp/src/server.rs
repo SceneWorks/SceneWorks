@@ -278,6 +278,7 @@ pub struct ListLorasArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateImageArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(
         schema_with = "appearance_schema",
         description = "Camera, film, multiple looks and lighting recipe IDs from list_appearance. The API resolves model-specific prompt directives and MOSS negatives; incompatible selections are refused."
@@ -420,6 +421,7 @@ fn moss_image_options_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sch
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitVideoJobArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(description = "Project to generate into (from list_projects).")]
     pub project_id: String,
     #[schemars(description = "The video prompt (1-4000 characters).")]
@@ -520,6 +522,7 @@ pub struct SubmitVideoJobArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EstimateDepthArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(description = "Project id (from list_projects).")]
     pub project_id: String,
     #[schemars(description = "The image asset to estimate depth from. It is not modified.")]
@@ -541,6 +544,7 @@ pub struct EstimateDepthArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreImageArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(description = "Project id (from list_projects).")]
     pub project_id: String,
     #[schemars(
@@ -567,6 +571,9 @@ pub struct RestoreImageArgs {
 /// API's own defaults (4x, budgeted, colour fix on) stay authoritative.
 pub(crate) fn restore_job_body(args: &RestoreImageArgs) -> Result<Value, String> {
     let mut payload = Map::new();
+    if let Some(version) = args.options_schema_version {
+        payload.insert("optionsSchemaVersion".to_owned(), json!(version));
+    }
     payload.insert("projectId".to_owned(), json!(args.project_id));
     payload.insert("sourceAssetId".to_owned(), json!(args.source_asset_id));
     payload.insert("engine".to_owned(), json!("iris"));
@@ -621,6 +628,9 @@ pub(crate) fn depth_job_body(args: &EstimateDepthArgs) -> Result<Value, String> 
         "sourceAssetId": args.source_asset_id,
         "resolution": resolution,
     });
+    if let Some(version) = args.options_schema_version {
+        body["optionsSchemaVersion"] = json!(version);
+    }
     if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
         body["irisModel"] = json!(model);
     }
@@ -1467,6 +1477,9 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
     }
     let mut body = Map::new();
     body.insert("projectId".to_owned(), json!(args.project_id));
+    if let Some(version) = args.options_schema_version {
+        body.insert("optionsSchemaVersion".to_owned(), json!(version));
+    }
     body.insert("mode".to_owned(), json!(mode));
     body.insert("prompt".to_owned(), json!(args.prompt));
     body.insert("count".to_owned(), json!(args.count.unwrap_or(1)));
@@ -1769,6 +1782,9 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
     };
     let mut body = Map::new();
     body.insert("projectId".to_owned(), json!(args.project_id));
+    if let Some(version) = args.options_schema_version {
+        body.insert("optionsSchemaVersion".to_owned(), json!(version));
+    }
     body.insert("mode".to_owned(), json!(mode));
     body.insert("prompt".to_owned(), json!(args.prompt));
     let optional = [
@@ -2626,6 +2642,72 @@ mod tests {
                     &Default::default()
                 )
                 .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn historical_mcp_builders_keep_authored_values_and_omissions() {
+        use sceneworks_core::options::upgrade::{upgrade, Carrier};
+        for input in [
+            json!({"projectId":"p","prompt":"fox"}),
+            json!({"projectId":"p","prompt":"fox","seed":0,"steps":9,"guidanceScale":0.0,"sampler":"euler","schedulerShift":3.0}),
+            json!({"projectId":"p","prompt":"fox","mode":"edit_image","sourceAssetId":"old-source","referenceAssetIds":["a","b"]}),
+        ] {
+            let old = super::historical_builders::image_job_body(
+                &serde_json::from_value(input.clone()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(upgrade(&old, Carrier::Request).unwrap(), old);
+            assert_eq!(image_job_body(&args_from(input)).unwrap(), old);
+        }
+        let input =
+            json!({"projectId":"p","prompt":"fox","mode":"generate","seed":0,"duration":5.0});
+        let old = super::historical_builders::video_job_body(
+            &serde_json::from_value(input.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(upgrade(&old, Carrier::Request).unwrap(), old);
+        assert_eq!(
+            video_job_body(&serde_json::from_value(input).unwrap()).unwrap(),
+            old
+        );
+        let future = image_job_body(&args_from(
+            json!({"projectId":"p","prompt":"fox","optionsSchemaVersion":9}),
+        ))
+        .unwrap();
+        assert_eq!(
+            upgrade(&future, Carrier::Request).unwrap_err().code,
+            "UnsupportedSchemaVersion"
+        );
+    }
+
+    #[test]
+    fn permissive_job_args_preserve_options_version_for_typed_api_refusal() {
+        use sceneworks_core::options::upgrade::{upgrade, Carrier};
+        for version in [None, Some(1), Some(9)] {
+            let mut input = json!({"projectId":"p","prompt":"fox","sourceAssetId":"source"});
+            if let Some(version) = version {
+                input["optionsSchemaVersion"] = json!(version);
+            }
+            let bodies = [
+                image_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                video_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                depth_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                restore_job_body(&serde_json::from_value(input).unwrap()).unwrap(),
+            ];
+            for body in bodies {
+                let payload = body.get("payload").unwrap_or(&body);
+                assert_eq!(
+                    payload.get("optionsSchemaVersion"),
+                    version.as_ref().map(|v| json!(v)).as_ref()
+                );
+                let result = upgrade(&body, Carrier::Request);
+                if version == Some(9) {
+                    assert_eq!(result.unwrap_err().code, "UnsupportedSchemaVersion");
+                } else {
+                    assert!(result.is_ok());
+                }
             }
         }
     }
@@ -3716,3 +3798,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/fixtures/historical_builders.rs"]
+mod historical_builders;
