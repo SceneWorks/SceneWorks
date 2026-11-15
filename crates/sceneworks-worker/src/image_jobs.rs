@@ -1454,8 +1454,10 @@ fn image_receipt_appends_child_after_inline_base_stages() {
     std::fs::write(project.path().join("child.png"), b"child").unwrap();
     let base =
         serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
-    let child =
-        serde_json::to_value(crate::upscale_jobs::real_esrgan_execution_unavailable()).unwrap();
+    let child = serde_json::json!({"state":"unavailable","reason":{
+        "code":"provider_report_unavailable","detail":"fixture",
+        "missing_facts":["provider_resolved_execution"]
+    }});
     for stages in [
         serde_json::json!([
             {"stage":"identity","execution":base},
