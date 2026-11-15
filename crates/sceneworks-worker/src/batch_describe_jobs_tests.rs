@@ -2867,3 +2867,37 @@ async fn a_model_failure_while_condensing_keeps_the_image_just_described() {
     assert_eq!(item["description"], "woman_1 description");
     assert!(item.get("condensed").is_none());
 }
+
+/// The real job entry point with neither the describer nor the target installed: a measure-only
+/// job resolves no describer (it would fail "not cached" if it tried), fetches nothing, and
+/// leaves the edited prompt "not measured".
+#[tokio::test]
+async fn a_measure_only_job_runs_without_the_describer_or_the_targets_tokenizer() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["measureOnly"] = json!(true);
+    payload["fitToManifestEntry"]["downloads"] = json!([{
+        "repo": "SceneWorks/krea-2-turbo-mlx",
+        "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "files": ["q8/tokenizer/*"],
+    }]);
+    payload["items"][0]["fields"] = json!({ "description": "A woman, woman_1." });
+    payload["items"][0]["condensedText"] = json!("woman_1 sits.");
+    let mut job: JobSnapshot =
+        serde_json::from_value(job_value("describe-job", false)).expect("job");
+    job.payload = payload.as_object().expect("payload object").clone();
+    run_dataset_batch_describe_job(&ApiClient::new(&stage.settings), &stage.settings, &job)
+        .await
+        .expect("a measure-only job needs no describer");
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokens"], Value::Null, "not measured");
+    assert_eq!(condensed["estimateReason"], "Krea 2 Turbo is not installed");
+    assert!(
+        !stage.settings.data_dir.join("huggingface").exists()
+            || std::fs::read_dir(stage.settings.data_dir.join("huggingface"))
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true),
+        "nothing was downloaded"
+    );
+}

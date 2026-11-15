@@ -630,3 +630,66 @@ async fn batch_describe_refuses_an_unusable_fit_to_target_or_condense_rows() {
         );
     }
 }
+
+/// SW-7163: a measure-only job for a row whose describer is not installed is admitted with no
+/// describer source attached and none bound (it is model-free); a condense-only job runs its
+/// describer, so it carries the describer's source and nothing for the target image model.
+#[tokio::test]
+async fn a_measure_only_job_prepares_no_describer_source_and_condense_only_prepares_only_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = json!({ "itemId": item_ids[0], "fields": { "description": "woman_1" },
+                      "condensedText": "woman_1 sits." });
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "measureOnly": true, "condenseRows": [row.clone()] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = job["payload"].as_object().expect("payload");
+    for carrier in [
+        "modelManifestEntry",
+        "modelManifestEntries",
+        "baseModelManifestEntry",
+    ] {
+        assert!(payload.get(carrier).is_none(), "{carrier}: {job}");
+    }
+    assert!(
+        sceneworks_core::model_artifacts::portable_binding::model_free_job(
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload
+        )
+    );
+    assert_eq!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload,
+            "auto",
+        )
+        .await
+        .expect("a model-free job captures no binding"),
+        None
+    );
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "condenseRows": [row] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("condense-only carries its describer's source")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(entries, vec!["vision_caption_qwen3vl_8b"]);
+}

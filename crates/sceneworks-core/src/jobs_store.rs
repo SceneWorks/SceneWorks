@@ -1306,6 +1306,8 @@ impl JobsStore {
                       and coalesce(json_type(payload_json, '$.semanticEmbeddingsEnabled'), '') = 'false')
              and not (type in ('person_detect','person_track')
                       and coalesce(json_type(payload_json, '$.preview'), '') = 'true')
+             and not (type = 'dataset_batch_describe'
+                      and coalesce(json_type(payload_json, '$.measureOnly'), '') = 'true')
              order by historical_source_attempts asc, queue_rank desc,
                       created_at asc, rowid asc limit ?1",
         )?;
