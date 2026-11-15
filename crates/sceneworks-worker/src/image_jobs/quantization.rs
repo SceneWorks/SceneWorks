@@ -160,11 +160,8 @@ pub(super) fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64
 /// 2. Else the **on-disk tier** the resolver landed on (sc-12090) — budget the tier that will load, not
 ///    one the user never installed. A `modelPath`/flat root has no recognizable basename ⇒ `None`.
 /// 3. Else the manifest/request key (`requested_tier_key`), whose own `nvfp4` arm is the sibling of (1).
-// Candle-lane only — NOT `any(macos, candle)` like `tier_key_from_resolved_dir`, because this fn calls
-// `crate::vram_gate`, which is itself `#[cfg(all(not(macos), backend-candle))]`. On the macOS/MLX build
-// `vram_gate` doesn't exist, so an `any(macos, ...)` gate here fails to compile (E0433). Its only caller,
-// `generate_candle_stream`, is candle-only too, so this loses nothing.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Candle tests retain the raw selector to compare against the resolved production helper below.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn gate_tier_key(
     convrot_resolved: bool,
     weights_dir: &Path,

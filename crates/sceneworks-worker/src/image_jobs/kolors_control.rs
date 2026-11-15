@@ -440,6 +440,7 @@ impl CandleStrictControl for KolorsStrictControl {
 /// `supported_kinds`, per-pose preprocessing, identity-likeness scoring, streaming). A `controlMode =
 /// canny | depth` request is REJECTED by the driver (Kolors is pose-only) instead of silently rendering a
 /// pose skeleton (sc-8823). The pose path is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_kolors_control_stream(
     api: &ApiClient,
     settings: &Settings,

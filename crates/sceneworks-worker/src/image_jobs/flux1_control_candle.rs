@@ -441,6 +441,7 @@ impl CandleStrictControl for Flux1StrictControl {
 /// the shared [`run_candle_strict_control`] driver (validation against `flux1_dev_control`'s
 /// `supported_kinds`, per-pose preprocessing, scoring). dev loads dense bf16 (no quant) and keeps its
 /// embedded guidance (no CFG). The pose path is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_flux1_control_stream(
     api: &ApiClient,
     settings: &Settings,

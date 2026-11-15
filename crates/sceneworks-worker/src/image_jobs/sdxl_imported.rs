@@ -368,7 +368,7 @@ fn resolve_imported_sdxl_conditioning(
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn prepare_sdxl_imported_sources(
     request: &ImageRequest,
     settings: &Settings,

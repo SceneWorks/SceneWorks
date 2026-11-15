@@ -556,6 +556,7 @@ impl CandleStrictControl for ZImageStrictControl {
 /// driver, which validates the requested kind against the model's `supported_kinds`, preprocesses each
 /// pose's control map, runs the per-pose loop, and scores against any identity reference. The pose path is
 /// byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_zimage_control_stream(
     api: &ApiClient,
     settings: &Settings,

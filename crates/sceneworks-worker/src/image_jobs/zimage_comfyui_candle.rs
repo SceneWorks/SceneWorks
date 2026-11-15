@@ -148,9 +148,8 @@ pub(super) fn zimage_comfyui_available(request: &ImageRequest, settings: &Settin
     )
 }
 
-/// Resolve and pin the complete source bundle for a production dispatch. Unlike the boolean routing
-/// probe, the caller keeps this value alive across the async job preamble and moves it into the
-/// handler, so the lexical component entries cannot be re-selected after admission.
+/// Exercise the legacy source selector in tests; production dispatch uses the resolved route below.
+#[cfg(test)]
 pub(super) fn prepare_zimage_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,

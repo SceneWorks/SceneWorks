@@ -722,6 +722,7 @@ impl CandleStrictControl for KreaStrictControl {
 /// the shared [`run_candle_strict_control`] driver (validation against `krea_2_turbo_control`'s
 /// `supported_kinds` = {Pose}, per-pose skeleton rendering, scoring). Krea is CFG-free bf16. The pose path
 /// is byte-preserved; `control_scale = 0` is byte-identical to base.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_krea_control_stream(
     api: &ApiClient,
     settings: &Settings,

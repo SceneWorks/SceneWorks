@@ -780,10 +780,8 @@ pub(super) fn resolve_krea_imported_control_overlay(
     )
 }
 
-/// Prepare every File identity the ordinary imported route selects, once, before the async job
-/// preamble. The returned tokens are moved through dispatch and finalized on the eventual `LoadSpec`;
-/// handlers must not resolve the same source again.
-#[cfg(test)]
+/// Exercise the legacy imported selector in Mac tests; production uses the resolved route below.
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn prepare_krea_imported_sources(
     request: &ImageRequest,
     settings: &Settings,

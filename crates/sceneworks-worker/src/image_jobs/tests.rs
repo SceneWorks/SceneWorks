@@ -1145,6 +1145,7 @@ fn bound_request(value: Value) -> ImageRequest {
 
 // Routing fixtures keep their authored request fields, then bind the same advanced map
 // the worker hands to the typed execution context before selecting a provider.
+#[cfg(native_lane)]
 fn execution(request: &ImageRequest) -> super::conditioning::ResolvedImageExecution {
     let payload = json!({ "advanced": request.advanced });
     let map = payload.as_object().unwrap();

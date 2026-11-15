@@ -1,6 +1,5 @@
 use super::adapters::resolve_adapters;
 use super::candle_strict_control::completed_control_image;
-use super::conditioning::pose_entries;
 use super::load_policy::apply_candle_image_load_shape;
 use super::load_spec::attach_manifest_text_encoder;
 use super::load_spec::candle_certified_artifact_path;
@@ -65,7 +64,7 @@ pub(super) fn flux2_control_adapter_source_bytes(
 // **Candle-only.** macOS keeps the MLX `flux2_dev_control` registry generator (flux2.rs); the candle
 // `Flux2Control` is a bespoke provider, so this whole file is gated to the Windows/CUDA candle build (the
 // the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs` module, so it
-// shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/`WorkerResult`/`resolve_quant`/
+// shares that module's imports (`Settings`/`WorkerResult`/`resolve_quant`/
 // `huggingface_snapshot_dir`/`ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 //
 // The dev base is the 32B flagship, so it loads via the Q4 CPU-stage → quantize-onto-GPU path
@@ -510,6 +509,7 @@ impl CandleStrictControl for Flux2StrictControl {
 /// `flux2_dev_control`'s `supported_kinds`, per-pose preprocessing, scoring). dev (32B) loads Q4 (manifest
 /// `mlx.quantize: 4` → `resolve_quant`); the control overlay quantizes in place. dev keeps its embedded
 /// guidance (no CFG). The pose path is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_flux2_control_stream(
     api: &ApiClient,
     settings: &Settings,

@@ -486,6 +486,7 @@ impl CandleStrictControl for QwenStrictControl {
 /// `qwen_image_control`'s `supported_kinds`, per-pose preprocessing, scoring). `generate` takes the
 /// per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise cancel). The pose path
 /// is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_qwen_control_stream(
     api: &ApiClient,
     settings: &Settings,

@@ -196,9 +196,8 @@ pub(super) fn flux2_comfyui_available(request: &ImageRequest, settings: &Setting
     )
 }
 
-/// Resolve and pin the complete source bundle for a production dispatch. The returned bundle remains
-/// owned by the route until the handler consumes it, so the external transformer cannot be re-selected
-/// after the scheduler/admission gap.
+/// Exercise the legacy source selector in tests; production dispatch uses the resolved route below.
+#[cfg(test)]
 pub(super) fn prepare_flux2_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,

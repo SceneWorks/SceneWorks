@@ -190,173 +190,6 @@ fn send_control_report(
         .is_ok())
 }
 
-#[cfg(test)]
-mod report_tests {
-    use super::*;
-    use gen_core::generator::ExecutionUnavailable;
-
-    fn unavailable(code: &str) -> ExecutionIdentity {
-        ExecutionIdentity::Unavailable {
-            reason: ExecutionUnavailable {
-                code: code.into(),
-                detail: "fixture has no model observations".into(),
-                missing_facts: vec!["fixture observations".into()],
-            },
-        }
-    }
-
-    struct Fixture;
-
-    impl CandleStrictControl for Fixture {
-        type Model = ();
-
-        fn engine_id(&self) -> &'static str {
-            "fixture"
-        }
-        fn engine_label(&self) -> &'static str {
-            "fixture"
-        }
-        fn stream_tag(&self) -> &'static str {
-            "fixture"
-        }
-        fn out_width(&self) -> u32 {
-            1
-        }
-        fn out_height(&self) -> u32 {
-            1
-        }
-        fn conditioning_admission(&self) -> ConditioningAdmission {
-            ConditioningAdmission::GatedInPreamble { gate: "fixture" }
-        }
-        fn load(&self) -> WorkerResult<Self::Model> {
-            Ok(())
-        }
-        fn generate_one(
-            &self,
-            _model: &Self::Model,
-            _control: &Image,
-            seed: u64,
-            cancel: &CancelFlag,
-            _preview: &gen_core::PreviewSink,
-            _on_progress: &mut dyn FnMut(Progress),
-        ) -> WorkerResult<(Image, ExecutionIdentity)> {
-            if seed == 2 {
-                return Err(WorkerError::Engine("fixture error".into()));
-            }
-            if seed == 3 {
-                cancel.cancel();
-            }
-            Ok((
-                Image {
-                    width: seed as u32,
-                    height: 1,
-                    pixels: vec![0; seed as usize * 3],
-                },
-                unavailable(&format!("attempt-{seed}")),
-            ))
-        }
-    }
-
-    #[test]
-    fn strict_control_reports_follow_each_success_and_skip_error_cancel_retry() {
-        let provider = Fixture;
-        let control = Image {
-            width: 1,
-            height: 1,
-            pixels: vec![0; 3],
-        };
-        let preview = gen_core::PreviewSink::default();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let mut progress = |_| {};
-        let first_cancel = CancelFlag::default();
-        let first = generate_control_item(
-            &provider,
-            &(),
-            &control,
-            1,
-            &first_cancel,
-            &preview,
-            &mut progress,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(first.0.width, 1);
-        assert!(send_control_report(&tx, 0, first.1).unwrap());
-
-        let failed_cancel = CancelFlag::default();
-        assert!(generate_control_item(
-            &provider,
-            &(),
-            &control,
-            2,
-            &failed_cancel,
-            &preview,
-            &mut progress
-        )
-        .is_err());
-        let canceled = CancelFlag::default();
-        assert!(generate_control_item(
-            &provider,
-            &(),
-            &control,
-            3,
-            &canceled,
-            &preview,
-            &mut progress
-        )
-        .unwrap()
-        .is_none());
-
-        let retry_cancel = CancelFlag::default();
-        let retry = generate_control_item(
-            &provider,
-            &(),
-            &control,
-            4,
-            &retry_cancel,
-            &preview,
-            &mut progress,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(retry.0.width, 4);
-        assert!(send_control_report(&tx, 1, retry.1).unwrap());
-
-        let first_fact = rx.try_recv().unwrap();
-        let retry_fact = rx.try_recv().unwrap();
-        assert!(
-            matches!(first_fact, GenEvent::ImageFacts { index: 0, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-1")
-        );
-        assert!(
-            matches!(retry_fact, GenEvent::ImageFacts { index: 1, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-4")
-        );
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn completed_control_image_refuses_missing_or_extra_outputs() {
-        for images in [
-            Vec::new(),
-            vec![
-                Image {
-                    width: 1,
-                    height: 1,
-                    pixels: vec![0; 3]
-                };
-                2
-            ],
-        ] {
-            let completed = CompletedGeneration {
-                generation: gen_core::GenerationReport::from_output(GenerationOutput::Images(
-                    images,
-                )),
-                execution: unavailable("fixture"),
-            };
-            assert!(completed_control_image(completed).is_err());
-        }
-    }
-}
-
 /// The shared async preamble + per-pose streaming driver for a candle strict-control lane (sc-8304).
 ///
 /// Mirrors the MLX `strict_control.rs` flow, adapted to the candle providers' raw-`Image` control input
@@ -565,4 +398,171 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use gen_core::generator::ExecutionUnavailable;
+
+    fn unavailable(code: &str) -> ExecutionIdentity {
+        ExecutionIdentity::Unavailable {
+            reason: ExecutionUnavailable {
+                code: code.into(),
+                detail: "fixture has no model observations".into(),
+                missing_facts: vec!["fixture observations".into()],
+            },
+        }
+    }
+
+    struct Fixture;
+
+    impl CandleStrictControl for Fixture {
+        type Model = ();
+
+        fn engine_id(&self) -> &'static str {
+            "fixture"
+        }
+        fn engine_label(&self) -> &'static str {
+            "fixture"
+        }
+        fn stream_tag(&self) -> &'static str {
+            "fixture"
+        }
+        fn out_width(&self) -> u32 {
+            1
+        }
+        fn out_height(&self) -> u32 {
+            1
+        }
+        fn conditioning_admission(&self) -> ConditioningAdmission {
+            ConditioningAdmission::GatedInPreamble { gate: "fixture" }
+        }
+        fn load(&self) -> WorkerResult<Self::Model> {
+            Ok(())
+        }
+        fn generate_one(
+            &self,
+            _model: &Self::Model,
+            _control: &Image,
+            seed: u64,
+            cancel: &CancelFlag,
+            _preview: &gen_core::PreviewSink,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> WorkerResult<(Image, ExecutionIdentity)> {
+            if seed == 2 {
+                return Err(WorkerError::Engine("fixture error".into()));
+            }
+            if seed == 3 {
+                cancel.cancel();
+            }
+            Ok((
+                Image {
+                    width: seed as u32,
+                    height: 1,
+                    pixels: vec![0; seed as usize * 3],
+                },
+                unavailable(&format!("attempt-{seed}")),
+            ))
+        }
+    }
+
+    #[test]
+    fn strict_control_reports_follow_each_success_and_skip_error_cancel_retry() {
+        let provider = Fixture;
+        let control = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 3],
+        };
+        let preview = gen_core::PreviewSink::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut progress = |_| {};
+        let first_cancel = CancelFlag::default();
+        let first = generate_control_item(
+            &provider,
+            &(),
+            &control,
+            1,
+            &first_cancel,
+            &preview,
+            &mut progress,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0.width, 1);
+        assert!(send_control_report(&tx, 0, first.1).unwrap());
+
+        let failed_cancel = CancelFlag::default();
+        assert!(generate_control_item(
+            &provider,
+            &(),
+            &control,
+            2,
+            &failed_cancel,
+            &preview,
+            &mut progress
+        )
+        .is_err());
+        let canceled = CancelFlag::default();
+        assert!(generate_control_item(
+            &provider,
+            &(),
+            &control,
+            3,
+            &canceled,
+            &preview,
+            &mut progress
+        )
+        .unwrap()
+        .is_none());
+
+        let retry_cancel = CancelFlag::default();
+        let retry = generate_control_item(
+            &provider,
+            &(),
+            &control,
+            4,
+            &retry_cancel,
+            &preview,
+            &mut progress,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.0.width, 4);
+        assert!(send_control_report(&tx, 1, retry.1).unwrap());
+
+        let first_fact = rx.try_recv().unwrap();
+        let retry_fact = rx.try_recv().unwrap();
+        assert!(
+            matches!(first_fact, GenEvent::ImageFacts { index: 0, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-1")
+        );
+        assert!(
+            matches!(retry_fact, GenEvent::ImageFacts { index: 1, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-4")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn completed_control_image_refuses_missing_or_extra_outputs() {
+        for images in [
+            Vec::new(),
+            vec![
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 3]
+                };
+                2
+            ],
+        ] {
+            let completed = CompletedGeneration {
+                generation: gen_core::GenerationReport::from_output(GenerationOutput::Images(
+                    images,
+                )),
+                execution: unavailable("fixture"),
+            };
+            assert!(completed_control_image(completed).is_err());
+        }
+    }
 }

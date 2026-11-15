@@ -2829,7 +2829,7 @@ fn finalize_training_config(config: TrainingConfig, plan: &TrainingPlan) -> Trai
         if plan.target.kernel == "ltx_mlx_lora" {
             config.train_dtype = "f32".to_owned();
         }
-        return config;
+        config
     }
     #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
     {

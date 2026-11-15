@@ -167,9 +167,8 @@ pub(super) fn qwen_comfyui_available(request: &ImageRequest, settings: &Settings
     matches!(prepare_qwen_comfyui_sources(request, settings), Ok(Some(_)))
 }
 
-/// Resolve and pin the complete source bundle for a production dispatch. The returned bundle is
-/// retained across the async preamble and consumed by the handler, closing the selection-to-load
-/// retarget window for the payload-selected transformer entry.
+/// Exercise the legacy source selector in tests; production dispatch uses the resolved route below.
+#[cfg(test)]
 pub(super) fn prepare_qwen_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,

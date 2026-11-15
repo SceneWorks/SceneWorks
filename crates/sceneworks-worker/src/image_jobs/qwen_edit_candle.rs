@@ -415,6 +415,7 @@ pub(super) fn qwen_edit_candle_pose_count(request: &ImageRequest) -> Option<usiz
 
 /// Work contract for Qwen Edit. Pose sets render once per pose at one shared seed, matching the
 /// established MLX Character Studio recipe; ordinary edits retain angle-set/count behavior.
+#[cfg(test)]
 fn qwen_edit_candle_work(request: &ImageRequest) -> Vec<(i64, String)> {
     match qwen_edit_candle_pose_count(request) {
         Some(count) if count > 0 => {
@@ -830,6 +831,7 @@ async fn ensure_qwen_lightning_lora_cached(
 /// reference internally, so the source is passed as-is (no render-size pre-fit). `request.count` edits
 /// of the same source, each its own seed. `generate` takes `&self`, so the per-item closure needs no
 /// `mut`. Reuses [`consume_gen_events`].
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_qwen_edit_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -1431,16 +1433,14 @@ mod qwen_edit_tier_reconcile_tests {
             )
             .is_err());
         }
-        for poses in [json!([{}, null])] {
-            let request = make(
-                "character_image",
-                json!({ "referenceAssetId": "identity" }),
-                poses,
-            )
-            .unwrap();
-            assert_eq!(qwen_edit_candle_pose_count(&request), None);
-            assert!(!qwen_edit_candle_mode(&request));
-        }
+        let request = make(
+            "character_image",
+            json!({ "referenceAssetId": "identity" }),
+            json!([{}, null]),
+        )
+        .unwrap();
+        assert_eq!(qwen_edit_candle_pose_count(&request), None);
+        assert!(!qwen_edit_candle_mode(&request));
         let oversize = make(
             "character_image",
             json!({ "referenceAssetId": "identity" }),

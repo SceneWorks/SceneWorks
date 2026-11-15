@@ -1316,7 +1316,7 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
     assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 #[test]
 fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
     let project = tempfile::tempdir().unwrap();
