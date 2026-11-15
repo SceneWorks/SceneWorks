@@ -487,3 +487,96 @@ async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_lic
         "the download door records the expander's acceptance"
     );
 }
+
+/// AT5 (E22, G7): installing MiniMax-H3-Image after MiniMax-H3 fetches no text-encoder bytes.
+///
+/// The text-encoder download is not skipped at plan time: every co-requisite row is queued, and the
+/// worker answers each file already in the Hugging Face cache without a transfer (the cache-hit
+/// tests in `crates/sceneworks-worker/src/downloads.rs`). So the property that makes H3's text
+/// encoder satisfy H3-Image's is that both installs plan the SAME fetch: same repo, pinned
+/// revision, file filter, tier and target directory, hence the same cache entries. This test
+/// plans both shipped entries through the real download route at each tier and requires H3-Image's
+/// text-encoder jobs to equal H3's, while its own DiT and VAE jobs name different repos.
+#[tokio::test]
+async fn minimax_h3_image_plans_the_same_text_encoder_fetch_as_h3_at_every_tier() {
+    let _hf = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("builtin.models.jsonc embedded")
+        .1;
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
+    let shipped = |id: &str| {
+        manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is in the builtin catalog"))
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [shipped("minimax_h3"), shipped("minimax_h3_image")] })
+            .to_string(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    let app = create_app(test_settings(&temp)).unwrap();
+
+    for variant in ["q4", "q8", "bf16"] {
+        let mut text_encoder_fetches = Vec::new();
+        for model in ["minimax_h3", "minimax_h3_image"] {
+            let (status, primary) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/models/{model}/download"),
+                json!({ "requestedGpu": "auto", "variant": variant, "licenseAcknowledged": true }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{model} {variant}: {primary}");
+        }
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        let jobs = jobs.as_array().unwrap();
+        for model in ["minimax_h3", "minimax_h3_image"] {
+            let mut fetches = jobs
+                .iter()
+                .map(|job| &job["payload"])
+                .filter(|payload| payload["modelId"] == model && payload["variant"] == variant)
+                .filter(|payload| payload["files"].to_string().contains("text_encoder"))
+                .map(|payload| {
+                    json!([
+                        payload["repo"],
+                        payload["revision"],
+                        payload["files"],
+                        payload["targetDir"]
+                    ])
+                    .to_string()
+                })
+                .collect::<Vec<_>>();
+            fetches.sort();
+            assert!(
+                !fetches.is_empty(),
+                "{model} {variant}: no text-encoder job"
+            );
+            text_encoder_fetches.push(fetches);
+        }
+        assert_eq!(
+            text_encoder_fetches[0], text_encoder_fetches[1],
+            "{variant}: H3-Image must plan H3's exact text-encoder fetch"
+        );
+        let image_repos = jobs
+            .iter()
+            .map(|job| &job["payload"])
+            .filter(|payload| payload["modelId"] == "minimax_h3_image")
+            .filter_map(|payload| payload["repo"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            image_repos.contains("MiniMaxAI/MiniMax-H3-Image"),
+            "{variant}: H3-Image's own weights stay a separate fetch: {image_repos:?}"
+        );
+    }
+}
