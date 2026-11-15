@@ -3103,6 +3103,13 @@
         "schemaVersion": 1
       },
       "name": "Z-Image-Turbo",
+      "optionRouteFacts": {
+        "candleVideoI2v": false,
+        "candleVideoLora": false,
+        "candleVideoRouted": false,
+        "candleVideoVace": false,
+        "videoMlxRouted": false
+      },
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"
       },
@@ -3307,6 +3314,7 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "advanced": {},
       "modelManifestEntries": [
         {
           "capabilities": [],
@@ -3496,6 +3504,7 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "advanced": {},
       "detection": {
         "box": {
           "height": 0.6,
@@ -3974,6 +3983,13 @@
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx"
         },
         "name": "Wan2.2",
+        "optionRouteFacts": {
+          "candleVideoI2v": false,
+          "candleVideoLora": true,
+          "candleVideoRouted": true,
+          "candleVideoVace": true,
+          "videoMlxRouted": true
+        },
         "quantization": {
           "variants": {
             "gguf-q4_k_m": {
