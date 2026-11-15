@@ -49,6 +49,9 @@ jobs:
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
       SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
       SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION: ${{ inputs.gpu_admission }}
+      # Free memory a shared run needs on the card before it starts: the measured small-image peak
+      # (21,993 MiB for q4, 34,409 MiB for q8) plus room for a large image.
+      SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB: ${{ inputs.tier == 'q8' && '40000' || '28000' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,6 +94,11 @@ jobs:
           if exist "%MODEL_PROOF_OUTPUT_DIR%" exit /b 1
           mkdir "%MODEL_PROOF_OUTPUT_DIR%"
           nvidia-smi
+          rem shared admits on FREE memory, not on how much the desktop already uses.
+          set FREE_MIB=0
+          for /f %%F in ('nvidia-smi --query-gpu^=memory.free --format^=csv^,noheader^,nounits -i %CUDA_VISIBLE_DEVICES%') do set FREE_MIB=%%F
+          echo GPU %CUDA_VISIBLE_DEVICES% free: %FREE_MIB% MiB, shared run needs %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% MiB
+          if "%SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION%"=="shared" if %FREE_MIB% LSS %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% exit /b 1
           rem shared: the display card is never idle for the guard, and a describe needs about a quarter of it.
           rem The smoke still samples the card and reports the peak above its own baseline.
           if "%SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION%"=="shared" (cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1) else (python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1)
