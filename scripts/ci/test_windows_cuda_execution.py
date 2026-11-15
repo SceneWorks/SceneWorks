@@ -166,38 +166,6 @@ class FunctionalAdmissionTests(unittest.TestCase):
         # Existing callers keep their strict policy and device semantics.
         shared.require_admission_policy(shared.STRICT_POLICY, "legacy-actor", {}, "0", "all", None)
 
-    def test_the_qwen38_describer_is_admitted_only_from_its_own_manual_workflow_on_fixed_gpu1(self):
-        describer = dict(self.environment, GITHUB_WORKFLOW_REF=
-            "SceneWorks/SceneWorks/.github/workflows/qwen38-describer-validation.yml@refs/heads/feature/test")
-        self.require_policy(describer, actor="qwen38-describer")
-        # Each actor is paired with its own workflows: neither borrows the other's.
-        with self.assertRaises(RuntimeError): self.require_policy(actor="qwen38-describer")
-        with self.assertRaises(RuntimeError): self.require_policy(describer)
-        with self.assertRaises(RuntimeError): self.require_policy(describer, actor="another-actor")
-        # The same manual-dispatch and fixed-GPU1 conditions apply.
-        with self.assertRaises(RuntimeError):
-            self.require_policy(dict(describer, GITHUB_EVENT_NAME="push"), actor="qwen38-describer")
-        for key in ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
-            with self.assertRaises(RuntimeError):
-                self.require_policy(dict(describer, **{key: "0"}), actor="qwen38-describer")
-        for selection in ({"physical_indices": "1"}, {"cuda_ordinals": "1"}, {"probe_visible": "0"}):
-            with self.assertRaises(RuntimeError): self.require_policy(describer, actor="qwen38-describer", **selection)
-
-    def test_free_memory_is_read_per_held_card_and_refuses_a_card_with_too_little(self):
-        reading = Mock(return_value=SimpleNamespace(stdout="30000\n"))
-        identity = shared.DeviceIdentity("trusted-smi", reading)
-        held = [{"index": 1, "uuid": "GPU-two"}]
-        readings = shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
-        self.assertEqual(readings, [{"index": 1, "uuid": "GPU-two", "free_mib": 30000, "need_mib": 28000}])
-        self.assertEqual(reading.call_args.args[0], ["trusted-smi", "--query-gpu=memory.free",
-            "--format=csv,noheader,nounits", "-i", "1"])
-        with self.assertRaisesRegex(RuntimeError, "GPU 1 has 30000 MiB free; this run needs 40000 MiB"):
-            shared.require_free_memory(identity, held, 40000, time.monotonic() + 30)
-        for value in ("", "n/a", "1,2"):
-            reading.return_value.stdout = value
-            with self.assertRaises(RuntimeError):
-                shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
-
     def test_functional_device_only_probe_and_exact_binding_refuse_gpu0_missing_or_wrong_uuid(self):
         devices = Mock(return_value=SimpleNamespace(stdout="0, GPU-one\n1, GPU-two\n"))
         identity = shared.DeviceIdentity("trusted-smi", devices)
@@ -439,6 +407,29 @@ class SharedDisplayAdmissionTests(unittest.TestCase):
             shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "tier2-ab-cuda", self.environment, "1", "0", None)
         with self.assertRaisesRegex(RuntimeError, "needs --min-free-mib"):
             self.claim(self.guard_for([5847] * 10, DISPLAY), min_free_mib=None)
+
+    def test_the_qwen38_describer_is_admitted_only_from_its_own_dispatched_workflow(self):
+        describer = dict(self.environment, GITHUB_WORKFLOW_REF=
+            "SceneWorks/SceneWorks/.github/workflows/qwen38-describer-validation.yml@refs/heads/feature/test")
+        shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "qwen38-describer", describer, None, "0", None)
+        # Each actor is paired with its own workflow: neither borrows the other's.
+        for actor, environment in [("qwen38-describer", self.environment), ("tier2-ab-cuda", describer),
+                                   ("another-actor", describer),
+                                   ("qwen38-describer", dict(describer, GITHUB_EVENT_NAME="push")),
+                                   ("qwen38-describer", dict(describer, NVIDIA_VISIBLE_DEVICES="0"))]:
+            with self.assertRaises(RuntimeError, msg=actor):
+                shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, actor, environment, None, "0", None)
+        with self.assertRaises(RuntimeError):
+            shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "qwen38-describer", describer, None, "1", None)
+        # The describer is not on the functional-coexistence allow-list.
+        with self.assertRaisesRegex(RuntimeError, "restricted to load-progress"):
+            shared.require_admission_policy(shared.FUNCTIONAL_POLICY, "qwen38-describer", describer, None, "0", "1")
+        # The same quiet-window rule admits it at its tier's free memory and refuses below it.
+        self.claim(self.guard_for([14259] * 10, DISPLAY), min_free_mib=28000)
+        self.assertTrue(self.window()["admitted"])
+        with self.assertRaises(TimeoutError):
+            self.claim(self.guard_for([70000] * 10, DISPLAY), deadline=30, min_free_mib=28000)
+        self.assertTrue(any("free" in reason for reason in self.window()["reasons"]))
 
     def test_receipt_identities_name_both_gpus_with_display_and_process_types(self):
         rows = shared.gpu_identities(fake_smi_xml(5847, DISPLAY + [("40068", "C", "N/A")]))

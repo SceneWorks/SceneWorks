@@ -25,8 +25,10 @@ function receipt(completed = true) {
 }
 function sharedReceipt(completed = true) {
   return { kind: 'cuda-execution-resource-lease-v1', actor: GUARD_ACTOR, resource_completed: completed,
-    admission_policy: 'functional-coexistence', shared_device: true, isolated_device: false,
-    vram_measurement: false, performance_measurement: false, post_child_idle_verified: false };
+    admission_policy: 'shared-display', shared_device: true, isolated_device: false,
+    post_child_idle_verified: false, observation_note: 'shared display GPU: fixture',
+    shared_admission: { 'GPU-two': { samples: 10, baseline_used_mib: 14259, min_used_mib: 14200,
+      free_mib: 83628, min_free_mib: 28000, max_utilization_percent: 12 } } };
 }
 
 test('a complete result is accepted for its own tier', () => {
@@ -84,12 +86,17 @@ test('the guard receipt must come from this actor and complete', () => {
 });
 test('each admission needs a receipt of its own guard policy', () => {
   validateReceipt(sharedReceipt(), 'shared');
-  // An idle run cannot pass on a functional receipt, nor a shared run on a strict one.
+  // An idle run cannot pass on a shared-display receipt, nor a shared run on a strict one.
   assert.throws(() => validateReceipt(sharedReceipt(), 'idle'), /strict-idle/);
-  assert.throws(() => validateReceipt(receipt(), 'shared'), /functional-coexistence/);
+  assert.throws(() => validateReceipt(receipt(), 'shared'), /shared-display/);
   assert.throws(() => validateReceipt(sharedReceipt(false), 'shared'), /did not complete/);
   assert.throws(() => validateReceipt({ ...sharedReceipt(), shared_device: false }, 'shared'), /shared card/);
-  assert.throws(() => validateReceipt({ ...sharedReceipt(), vram_measurement: true }, 'shared'), /VRAM/);
+  assert.throws(() => validateReceipt({ ...sharedReceipt(), admission_policy: 'functional-coexistence' }, 'shared'),
+    /shared-display/);
+  assert.throws(() => validateReceipt({ ...sharedReceipt(), post_child_idle_verified: true }, 'shared'), /idle after/);
+  assert.throws(() => validateReceipt({ ...sharedReceipt(), shared_admission: {} }, 'shared'), /admission window/);
+  assert.throws(() => validateReceipt({ ...sharedReceipt(), shared_admission: { 'GPU-two': {
+    free_mib: 20000, min_free_mib: 28000 } } }, 'shared'), /free memory/);
   assert.throws(() => validateReceipt({ ...receipt(), post_child_idle_verified: false }, 'idle'), /idle after/);
   assert.throws(() => validateReceipt({ ...sharedReceipt(), actor: 'load-progress-acceptance' }, 'shared'));
 });
@@ -97,7 +104,7 @@ test('the summary escapes table pipes and names the peak, the image size and the
   const text = summary({ accepted: true, gpu_admission: 'idle', result: validateResult(result(), 'q4') });
   assert.match(text, /GPU admission: idle \(strict-idle guard/);
   assert.match(summary({ accepted: true, gpu_admission: 'shared' }),
-    /GPU admission: shared \(functional-coexistence guard.*measured on a shared card/);
+    /GPU admission: shared \(shared-display guard.*measured on a shared card/);
   assert.match(text, /Peak GPU memory: 21000 MiB/);
   assert.match(text, /Image: synthetic-scene, 512x384/);
   assert.match(text, /description text \\\| with a pipe/);
@@ -130,7 +137,7 @@ test('staging accepts a complete run and copies only the validated files', () =>
   const recorded = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
   assert.equal(recorded.result.fields.lighting, 'lighting text | with a pipe');
 }));
-test('a shared-card run is accepted on a completed functional receipt and labels its peak', () => scratch(async (directory) => {
+test('a shared-card run is accepted on a completed shared-display receipt and labels its peak', () => scratch(async (directory) => {
   const output = path.join(directory, 'proof');
   await fs.mkdir(output);
   await fs.writeFile(path.join(output, 'describer-result.json'), JSON.stringify(result()));
@@ -138,7 +145,8 @@ test('a shared-card run is accepted on a completed functional receipt and labels
   const evidence = await stage(output, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared');
   assert.equal(evidence.accepted, true, evidence.error);
   assert.equal(evidence.gpu_admission, 'shared');
-  assert.equal(evidence.resource_receipt.admission_policy, 'functional-coexistence');
+  assert.equal(evidence.resource_receipt.admission_policy, 'shared-display');
+  assert.equal(evidence.resource_receipt.shared_admission['GPU-two'].baseline_used_mib, 14259);
   assert.equal(evidence.result.gpu_memory.measured_on, 'shared-card');
   assert.equal(evidence.result.gpu_memory.peak_mib, 21000);
   assert.deepEqual((await fs.readdir(path.join(output, 'artifact'))).sort(), ['evidence.json', 'resource-receipt.json']);
@@ -156,7 +164,7 @@ test('a shared-card run without a receipt, or with a strict one, is a failure', 
   await fs.writeFile(path.join(directory, 'receipt.json'), JSON.stringify(receipt()));
   const wrong = await stage(strict, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared');
   assert.equal(wrong.accepted, false);
-  assert.match(wrong.error, /functional-coexistence/);
+  assert.match(wrong.error, /shared-display/);
 }));
 test('an unknown admission is refused', () => scratch(async (directory) => {
   await assert.rejects(stage(path.join(directory, 'proof'), path.join(directory, 'no-receipt.json'), 'q4', 'default', 'anything'), /admission/);

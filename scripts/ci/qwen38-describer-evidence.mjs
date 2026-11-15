@@ -52,7 +52,7 @@ export function validateResult(result, tier, imageSide = 'default') {
 }
 
 // The guard policy each GPU admission must have run under.
-export const ADMISSION_POLICIES = Object.freeze({ idle: 'strict-idle', shared: 'functional-coexistence' });
+export const ADMISSION_POLICIES = Object.freeze({ idle: 'strict-idle', shared: 'shared-display' });
 
 export function validateReceipt(receipt, admission = 'idle') {
   assert.equal(receipt?.kind, 'cuda-execution-resource-lease-v1', 'not a CUDA guard receipt');
@@ -62,7 +62,13 @@ export function validateReceipt(receipt, admission = 'idle') {
     `a ${admission} run must hold the card under the ${ADMISSION_POLICIES[admission]} policy`);
   if (admission === 'shared') {
     assert.equal(receipt.shared_device, true, 'a shared run receipt must record the shared card');
-    assert.equal(receipt.vram_measurement, false, 'a shared run receipt cannot claim a VRAM measurement');
+    assert.equal(receipt.post_child_idle_verified, false, 'a shared run cannot claim the card was idle after it');
+    const windows = Object.values(receipt.shared_admission ?? {});
+    assert(windows.length > 0, 'a shared run receipt must record its admission window');
+    for (const window of windows) {
+      assert(Number.isInteger(window?.free_mib) && Number.isInteger(window?.min_free_mib)
+        && window.free_mib >= window.min_free_mib, 'the admission window must show the free memory the run needed');
+    }
   } else {
     assert.equal(receipt.post_child_idle_verified, true, 'an idle run must verify the card idle after the child');
   }
@@ -79,9 +85,9 @@ export function summary(evidence) {
   const lines = [`## Qwen3.8 27B describer CUDA validation`, '', `Accepted: **${evidence.accepted}**`, ''];
   if (evidence.error) lines.push(`Error: ${evidence.error}`, '');
   lines.push(evidence.gpu_admission === 'shared'
-    ? 'GPU admission: shared (functional-coexistence guard: per-GPU lock and owned child, no idle check; the '
-      + 'card was shared with the desktop). The peak below was measured on a shared card: card-wide, above the '
-      + 'smoke\'s own baseline.'
+    ? 'GPU admission: shared (shared-display guard: per-GPU lock and owned child; a quiet 10-second window with '
+      + 'the tier\'s free memory instead of an idle card; the card was shared with the desktop). The peak below '
+      + 'was measured on a shared card: card-wide, above the smoke\'s own baseline.'
     : 'GPU admission: idle (strict-idle guard: the card was idle before and after the run).', '');
   const result = evidence.result;
   if (result) {
@@ -99,7 +105,8 @@ export function summary(evidence) {
 
 // Stage only what was validated: evidence.json, plus a byte copy of the guard receipt.
 // `admission` is how the run took the card: `idle` under the guard's strict-idle policy, or `shared`
-// under its functional-coexistence policy (the per-GPU lock and owned child, no idle check). Both
+// under its shared-display policy (the per-GPU lock and owned child, a quiet window with enough free
+// memory instead of an idle card). Both
 // need a completed receipt of the matching policy. A shared run's peak is still measured above the
 // smoke's own baseline, on a card other programs also use, so it is labelled as such.
 export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'idle') {
@@ -122,7 +129,8 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
     const receipt = await readBoundedJson(receiptFile);
     await fs.writeFile(path.join(artifact, 'resource-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
     evidence.resource_receipt = { actor: receipt.actor, resource_completed: receipt.resource_completed,
-      admission_policy: receipt.admission_policy };
+      admission_policy: receipt.admission_policy,
+      ...(receipt.shared_admission ? { shared_admission: receipt.shared_admission } : {}) };
     validateReceipt(receipt, admission);
   } catch (error) {
     failure ??= error;
