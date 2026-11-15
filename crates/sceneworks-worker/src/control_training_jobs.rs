@@ -490,11 +490,11 @@ mod imp {
                 "planVersion": 1,
                 "jobId": "job-control",
                 "target": {
-                    "targetId": "krea_control_target",
+                    "targetId": "krea_2_control",
                     "kernel": "krea_control",
-                    "family": "krea",
+                    "family": "krea_2",
                     "modality": "image",
-                    "outputKind": "controlnet",
+                    "outputKind": "control_branch",
                     "baseModel": "krea_2_raw",
                     "baseModelPath": data_dir.join("models/krea").display().to_string()
                 },
@@ -511,7 +511,7 @@ mod imp {
                     "rank": 16,
                     "alpha": 16,
                     "learningRate": 0.0001,
-                    "steps": 10,
+                    "steps": 200,
                     "batchSize": 1,
                     "gradientAccumulation": 1,
                     "resolution": 512,
@@ -530,7 +530,7 @@ mod imp {
                 "provenance": {
                     "datasetId": "ds-1",
                     "datasetVersion": 1,
-                    "targetId": "krea_control_target",
+                    "targetId": "krea_2_control",
                     "baseModel": "krea_2_raw",
                     "configSnapshot": {},
                     "outputLoraId": "control-1",
