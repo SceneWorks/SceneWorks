@@ -175,7 +175,7 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
     AdvancedBuilder {
         source: AdvancedKeySource::InterleaveBuilder,
         path: "apps/web/src/screens/DocumentStudio.jsx",
-        function: "submit",
+        function: "buildInterleaveAdvanced",
         shape: AdvancedBuilderShape::AssignedObject,
         lane: "POST /api/v1/image/interleave/jobs, written by `sensenova_jobs.rs` through \
                `write_image_asset`",
@@ -203,7 +203,7 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
     AdvancedBuilder {
         source: AdvancedKeySource::VideoStudioBuilder,
         path: "apps/web/src/screens/videoStudio/useVideoSubmission.js",
-        function: "submit",
+        function: "buildRequest",
         shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
         lane: "POST /api/v1/jobs type=video_generate — the Video Studio, written by \
                `video_jobs/mod.rs::encode_media`",
@@ -626,7 +626,7 @@ const VIDEO_UPSCALE_BUILDERS: &[WebBuilderRef] = &[WebBuilderRef {
 const VIDEO_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
         path: "apps/web/src/screens/videoStudio/useVideoSubmission.js",
-        function: "submit",
+        function: "buildRequest",
     },
     WebBuilderRef {
         path: "apps/web/src/components/editor/useEditorGeneration.js",
@@ -716,6 +716,6 @@ const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
     },
     WebBuilderRef {
         path: "apps/web/src/screens/DocumentStudio.jsx",
-        function: "submit",
+        function: "buildInterleaveAdvanced",
     },
 ];
