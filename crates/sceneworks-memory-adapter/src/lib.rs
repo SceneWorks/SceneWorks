@@ -1521,7 +1521,7 @@ mod minimax_h3_image_tests {
     #[test]
     fn the_inputs_bind_the_catalog_pins_and_the_spec_is_the_workers() {
         let temporary = tempfile::tempdir().unwrap();
-        let mut entry = minimax_h3_image_catalog_entry().unwrap();
+        let entry = minimax_h3_image_catalog_entry().unwrap();
         let root_row = minimax_h3_image_co_requisite(&entry, "image_vae", None).unwrap();
         let (repo, revision) = minimax_h3_image_row_identity(root_row).unwrap();
         let (repo, revision) = (repo.to_owned(), revision.to_owned());
@@ -1572,8 +1572,15 @@ mod minimax_h3_image_tests {
         stale.revision = "1".repeat(40);
         assert!(minimax_h3_image_inputs_at(&entry, "bf16", stale, None, bf16_te).is_err());
 
-        // q8 is pending in the shipped catalog: refused by name.
-        let packed_rev = "2".repeat(40);
+        // A tier the catalog marks `pendingArtifact` is refused by name.
+        let packed_rev = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "q8" && row.get("coRequisite").is_none())
+            .and_then(|row| row["revision"].as_str())
+            .unwrap()
+            .to_owned();
         let packed = MinimaxH3ImageArtifact {
             repository: MINIMAX_H3_IMAGE_REPOSITORY.to_owned(),
             revision: packed_rev.clone(),
@@ -1581,8 +1588,14 @@ mod minimax_h3_image_tests {
         };
         touch(packed.root.join("transformer_diffusers/config.json"));
         let q8_te = te_dir(&entry, "q8");
+        let mut pending_entry = entry.clone();
+        for row in pending_entry["downloads"].as_array_mut().unwrap() {
+            if row["variant"] == "q8" && row.get("coRequisite").is_none() {
+                row["pendingArtifact"] = json!(true);
+            }
+        }
         let pending = minimax_h3_image_inputs_at(
-            &entry,
+            &pending_entry,
             "q8",
             upstream.clone(),
             Some(packed.clone()),
@@ -1591,13 +1604,8 @@ mod minimax_h3_image_tests {
         .expect_err("a pendingArtifact tier");
         assert!(pending.contains("pendingArtifact"), "{pending}");
 
-        // Published, the packed tier stages its DiT, the same-tier text encoder and its quant.
-        for row in entry["downloads"].as_array_mut().unwrap() {
-            if row.get("pendingArtifact").is_some() {
-                row.as_object_mut().unwrap().remove("pendingArtifact");
-                row["revision"] = json!(packed_rev);
-            }
-        }
+        // Published (as shipped), the packed tier stages its DiT, the same-tier text encoder and
+        // its quant.
         let inputs =
             minimax_h3_image_inputs_at(&entry, "q8", upstream, Some(packed.clone()), q8_te)
                 .unwrap();
