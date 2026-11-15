@@ -27787,9 +27787,9 @@
       //
       // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
       // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7099 MLX
-      // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published, pinned and macOS-only; their sizes are
-      // the hosted totals. The Candle conversions sit beside them (`candle-q8/`, `candle-q4/`) and are not declared
-      // here yet. bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
+      // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published and pinned; their sizes are the hosted
+      // totals. Each tier has two rows under one variant, narrowed to the host OS before the worker sees the entry:
+      // the MLX layout (`q8/`, macOS) and the Candle layout (`candle-q8/`, Windows/Linux). bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
       "id": "minimax_h3_image_pe",
       "autoDownload": false,
       "macOnly": false,
@@ -27839,7 +27839,7 @@
           "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
           "variant": "q8",
           "files": ["q8/*"],
-          // MLX layout only: the Candle layout is published beside it as `candle-q8/` and is not declared yet.
+          // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
           // Hub tree at the pinned revision: q8/ 31,927,190,423 B (7 files).
           "estimatedSizeBytes": 31927190423,
@@ -27849,13 +27849,35 @@
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
           "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "variant": "q8",
+          "files": ["candle-q8/*"],
+          "platforms": ["windows", "linux"],
+          // Hub tree at the pinned revision: candle-q8/ 31,927,191,452 B (11 files, four weight shards).
+          "estimatedSizeBytes": 31927191452,
+          "footprint": { "diskSizeBytes": 31927191452, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
           "variant": "q4",
           "files": ["q4/*"],
-          // MLX layout only: the Candle layout is published beside it as `candle-q4/` and is not declared yet.
+          // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
           // Hub tree at the pinned revision: q4/ 19,763,707,887 B (7 files).
           "estimatedSizeBytes": 19763707887,
           "footprint": { "diskSizeBytes": 19763707887, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "variant": "q4",
+          "files": ["candle-q4/*"],
+          "platforms": ["windows", "linux"],
+          // Hub tree at the pinned revision: candle-q4/ 19,763,709,780 B (11 files, four weight shards).
+          "estimatedSizeBytes": 19763709780,
+          "footprint": { "diskSizeBytes": 19763709780, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         // The prompt files, read at run time from the upstream snapshot for every tier.
         {

@@ -4292,11 +4292,18 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     assert primaries["bf16"]["revision"] == "0" * 40
     assert primaries["bf16"]["files"] == ["bf16/*"]
     for tier in ("q8", "q4"):
-        row = primaries[tier]
-        assert row.get("pendingArtifact") is None, tier
-        assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", tier
-        assert row["platforms"] == ["macos"], tier
-        assert row["files"] == [f"{tier}/*"], tier
+        rows = [
+            download
+            for download in entry["downloads"]
+            if download.get("variant") == tier and download.get("coRequisite") is not True
+        ]
+        by_platforms = {tuple(row["platforms"]): row for row in rows}
+        assert len(rows) == len(by_platforms) == 2, tier
+        for platforms, directory in ((("macos",), tier), (("windows", "linux"), f"candle-{tier}")):
+            row = by_platforms[platforms]
+            assert row.get("pendingArtifact") is None, (tier, platforms)
+            assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", (tier, platforms)
+            assert row["files"] == [f"{directory}/*"], (tier, platforms)
     prompt_rows = [
         download
         for download in entry["downloads"]

@@ -518,6 +518,39 @@ mod tests {
         assert!(!dirs.weights.join(PROMPT_MANIFEST).exists());
     }
 
+    /// A CUDA (Windows/Linux) host receives the Candle layout of each converted tier — the
+    /// `candle-{tier}/` directory — and a macOS host the MLX `{tier}/` one, from the same variant.
+    /// Weights-free: only a `config.json` marker per directory.
+    #[test]
+    fn each_host_os_resolves_its_own_layout_of_a_converted_tier() {
+        for (os, q8_dir) in [
+            ("macos", "q8"),
+            ("windows", "candle-q8"),
+            ("linux", "candle-q8"),
+        ] {
+            let (data, _cache) = isolated();
+            let mut entry = Value::Object(catalog_entry());
+            sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+                &mut entry, os,
+            );
+            let entry = entry.as_object().unwrap().clone();
+            let row = model_download_for_variant(&entry_value(&entry), "q8").expect("q8 row");
+            let (repo, revision) = row_identity(&row).unwrap();
+            assert_eq!(row_tier_subdir(&row).as_deref(), Some(q8_dir), "{os}");
+            assert!(!is_pending_artifact_download(&row), "{os}");
+            let tier_snapshot = snapshot(data.path(), repo, revision);
+            // Both layouts exist on disk; only the host's own may be chosen.
+            for directory in ["q8", "candle-q8"] {
+                std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
+                std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
+            }
+            synthetic_prompt_tree(&snapshot(data.path(), PE_REPO, PE_REVISION));
+            let dirs = resolve_dirs(&settings(data.path()), &entry, Some("q8"), None).unwrap();
+            assert_eq!(dirs.weights, tier_snapshot.join(q8_dir), "{os}");
+            assert_eq!(dirs.tier, Some("q8"));
+        }
+    }
+
     #[test]
     fn a_tier_without_its_prompt_files_is_refused_with_the_install_step() {
         let (data, _cache) = isolated();
