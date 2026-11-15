@@ -202,7 +202,10 @@ fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
-    if let Some(value) = request.advanced_f64("trueCfgScale") {
+    if let Some(value) = request
+        .authored_advanced_f64("trueCfgScale")
+        .or_else(|| request.authored_advanced_f64("guidanceScale"))
+    {
         return (value as f32).clamp(0.0, 30.0);
     }
     resolved_option_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
@@ -650,6 +653,33 @@ mod tests {
 
     #[test]
     fn guidance_prefers_true_cfg_then_guidance_manifest_and_default() {
+        let authored = json!({
+            "projectId": "p", "model": "flux2_klein_9b_edit", "mode": "edit_image",
+            "advanced": { "guidanceScale": 2.0 }
+        });
+        let effective = json!({
+            "projectId": "p", "model": "flux2_klein_9b_edit", "mode": "edit_image",
+            "advanced": { "trueCfgScale": 4.0, "guidanceScale": 2.0 }
+        });
+        let resolved = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(flux2_edit_candle_guidance(&resolved, 1.0), 2.0);
+        let omitted = json!({
+            "projectId": "p", "model": "flux2_klein_9b_edit", "mode": "edit_image"
+        });
+        let effective = json!({
+            "projectId": "p", "model": "flux2_klein_9b_edit", "mode": "edit_image",
+            "advanced": { "trueCfgScale": 4.0 }
+        });
+        let resolved = ImageRequest::from_resolved(
+            omitted.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(flux2_edit_candle_guidance(&resolved, 1.0), 1.0);
         assert_eq!(
             flux2_edit_candle_guidance(
                 &request(

@@ -390,7 +390,8 @@ pub(super) fn flux2_edit_text_guidance(
         return None;
     }
     request
-        .advanced_f64("trueCfgScale")
+        .authored_advanced_f64("trueCfgScale")
+        .or_else(|| request.authored_advanced_f64("guidanceScale"))
         .map(|value| value as f32)
         .or_else(|| resolve_guidance(request, model))
 }

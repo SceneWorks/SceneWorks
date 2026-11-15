@@ -10330,9 +10330,23 @@ fn flux2_edit_image_guidance_lever() {
 #[test]
 fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
     let model = mlx_model("flux2_dev").unwrap();
+    let authored = serde_json::json!({
+        "model": "flux2_dev", "mode": "edit_image",
+        "advanced": { "guidanceScale": 2.0 }
+    });
+    let effective = serde_json::json!({
+        "model": "flux2_dev", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 4.0, "guidanceScale": 2.0 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(flux2_edit_text_guidance(&resolved, &model), Some(2.0));
     assert_eq!(
         flux2_edit_text_guidance(
-            &request(serde_json::json!({
+            &bound_request(serde_json::json!({
                 "model": "flux2_dev", "mode": "character_image",
                 "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
             })),
@@ -10342,7 +10356,7 @@ fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
     );
     assert_eq!(
         flux2_edit_text_guidance(
-            &request(serde_json::json!({
+            &bound_request(serde_json::json!({
                 "model": "flux2_dev", "mode": "edit_image",
                 "advanced": { "guidanceScale": 2.0 }
             })),
