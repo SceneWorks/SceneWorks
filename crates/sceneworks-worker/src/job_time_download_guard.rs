@@ -867,6 +867,10 @@ const UNSCANNED_WORKSPACE_MEMBERS: &[(&str, &str)] = &[
         "crates/sceneworks-options",
         "Portable declarations and pure JSON predicates, depending only on serde/serde_json in production. No settings, filesystem, network or job-execution API exposes the app data dir; reclassify if that boundary changes.",
     ),
+    (
+        "crates/sceneworks-options-wasm",
+        "Browser-only JSON/WASM wrapper over sceneworks-options, depending on serde_json and wasm-bindgen. No filesystem, settings or job-execution API exposes the app data dir; reclassify if that boundary changes.",
+    ),
 ];
 
 /// The externally-visible, network-reaching surface of every [`HTTP_CLIENT_FILES`] member **other

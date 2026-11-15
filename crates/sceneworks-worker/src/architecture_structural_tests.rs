@@ -479,6 +479,7 @@ fn cargo_dependency_direction_is_an_executable_graph_rule() {
         ("sceneworks-image-quality", "sceneworks-core"),
         ("sceneworks-mcp", "sceneworks-core"),
         ("sceneworks-memory-adapter", "sceneworks-core"),
+        ("sceneworks-options-wasm", "sceneworks-options"),
         ("sceneworks-worker", "sceneworks-core"),
         ("sceneworks-worker", "sceneworks-image-quality"),
     ]
