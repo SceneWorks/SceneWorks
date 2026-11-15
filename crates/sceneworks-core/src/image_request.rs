@@ -20,7 +20,7 @@ use crate::payload_util::{
     array_or_empty, int_array, nonempty_string_or, object_or_empty, optional_i64, optional_id,
     string_list, string_or,
 };
-use crate::resolved_options::{BindingError, BindingInput, Bound};
+use crate::resolved_options::{BindingError, BindingInput, Bound, Origin};
 
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
@@ -579,6 +579,17 @@ impl ImageRequest {
     }
 
     pub fn advanced_f64(&self, key: &'static str) -> Option<f64> {
+        self.advanced_f64_bound(key).map(|bound| bound.value)
+    }
+
+    /// Use an authored override ahead of another option's materialized model default.
+    pub fn authored_advanced_f64(&self, key: &'static str) -> Option<f64> {
+        self.advanced_f64_bound(key)
+            .filter(|bound| matches!(bound.origin, Origin::Authored { .. }))
+            .map(|bound| bound.value)
+    }
+
+    fn advanced_f64_bound(&self, key: &'static str) -> Option<&Bound<f64>> {
         let options = self
             .resolved_advanced
             .as_ref()
@@ -603,7 +614,7 @@ impl ImageRequest {
             "imageGuidanceScale" => &options.image_guidance_scale,
             _ => panic!("undeclared image number accessor: {key}"),
         };
-        value.as_ref().map(|bound| bound.value)
+        value.as_ref()
     }
 
     pub fn advanced_text(&self, key: &'static str) -> Option<&str> {

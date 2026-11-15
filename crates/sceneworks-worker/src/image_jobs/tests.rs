@@ -15399,10 +15399,33 @@ fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
 #[test]
 fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     let model = mlx_model("qwen_image_edit_2511").unwrap();
+    let authored = json!({
+        "projectId":"p", "model":"qwen_image_edit_2511", "mode":"character_image",
+        "advanced":{"trueCfgScale":6.0}
+    });
+    let effective = json!({
+        "projectId":"p", "model":"qwen_image_edit_2511", "mode":"character_image",
+        "advanced":{"trueCfgScale":6.0,"guidanceScale":1.0}
+    });
+    let resolved_request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_qwen_edit_guidance(&resolved_request, &model), 6.0);
+    let omitted = json!({"projectId":"p","model":"qwen_image_edit_2511","mode":"edit_image"});
+    let defaulted = json!({
+        "projectId":"p","model":"qwen_image_edit_2511","mode":"edit_image",
+        "advanced":{"guidanceScale":1.0}
+    });
+    let resolved_request =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), defaulted.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_qwen_edit_guidance(&resolved_request, &model), 4.0);
     // Default is the family true-CFG default (4.0).
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({ "projectId": "p", "mode": "edit_image" })),
+            &bound_request(json!({ "projectId": "p", "mode": "edit_image" })),
             &model
         ),
         4.0
@@ -15410,7 +15433,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // The Advanced guidance control names true CFG on Qwen edit.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "guidanceScale": 1.5, "trueCfgScale": 4.0 }
             })),
@@ -15421,7 +15444,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // trueCfgScale remains an alias.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 6.0 }
             })),
@@ -15431,7 +15454,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "imageGuidanceScale": 2.5 }
             })),
@@ -15443,7 +15466,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // Recommendation ranges do not cap explicit CFG.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 50.0 }
             })),
@@ -15453,7 +15476,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),
@@ -15464,7 +15487,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // Inverse guidance remains explicit on edit requests too.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),

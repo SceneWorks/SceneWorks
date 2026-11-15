@@ -429,6 +429,9 @@ pub(super) fn route_carrier_material(
     facts: &crate::resolved_options::RouteOptionFacts,
     carrier_key: &str,
 ) -> bool {
+    if !facts.advanced_was_authored(carrier_key) {
+        return false;
+    }
     match carrier_key {
         "controlMode" => facts.control_mode.is_present_nonnull(),
         "controlImage" => facts.control_image.is_present_nonnull(),

@@ -7,6 +7,7 @@
 
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 
 use crate::contracts::JsonObject;
 use crate::image_request::ControlWeightsFields;
@@ -206,9 +207,24 @@ pub struct RouteOptionFacts {
     pub yue2_decoder: RouteField<String>,
     pub conv_rot: RouteField<bool>,
     pub angle_set: RouteField<bool>,
+    /// Presence in the authored advanced object, even when execution fields come from a
+    /// resolved request whose defaults materialize omitted controls.
+    authored_advanced_keys: Option<BTreeSet<String>>,
 }
 
 impl RouteOptionFacts {
+    pub fn with_authored_presence(mut self, authored: &Self) -> Self {
+        self.authored_advanced_keys = authored.authored_advanced_keys.clone();
+        self
+    }
+
+    /// A malformed authored advanced object remains material and must fail closed.
+    pub fn advanced_was_authored(&self, key: &str) -> bool {
+        self.authored_advanced_keys
+            .as_ref()
+            .is_none_or(|keys| keys.contains(key))
+    }
+
     /// Parse only JSON syntax. A malformed `advanced` object marks every advanced carrier invalid
     /// because treating it as empty could make an unsupported route appear eligible.
     pub fn from_payload_syntax(payload: &JsonObject) -> Self {
@@ -252,6 +268,11 @@ impl RouteOptionFacts {
             sceneworks_options::legacy_number(value)
         }
         let advanced = parent(payload, "advanced");
+        let authored_advanced_keys = match advanced {
+            Ok(Some(map)) => Some(map.keys().cloned().collect()),
+            Ok(None) => Some(BTreeSet::new()),
+            Err(()) => None,
+        };
         let veda = match advanced {
             Err(()) => Err(()),
             Ok(None) => Ok(None),
@@ -312,6 +333,7 @@ impl RouteOptionFacts {
             angle_set: field(advanced, "angleSet", |value| {
                 Some(sceneworks_options::legacy_image_flag(value))
             }),
+            authored_advanced_keys,
         }
     }
 

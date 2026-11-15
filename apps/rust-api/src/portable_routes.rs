@@ -1232,6 +1232,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaulted_advanced_carrier_does_not_refuse_sana() {
+        let payload = serde_json::json!({
+            "projectId":"p", "model":"sana_1600m", "mode":"text_to_image",
+            "prompt":"a blue kite", "advanced":{}
+        });
+        let payload = payload.as_object().unwrap();
+        let (_, options) =
+            crate::portable_admission::route_option_facts(&JobType::ImageGenerate, payload)
+                .unwrap();
+        assert!(!options.advanced_was_authored("convRot"));
+        assert!(native_route_claims_request_resolved(
+            "candle",
+            &JobType::ImageGenerate,
+            payload,
+            &options
+        )
+        .unwrap());
+
+        // The shared resolver can materialize this option from model defaults.
+        let mut effective = payload.clone();
+        effective.insert("advanced".into(), serde_json::json!({"convRot":false}));
+        let options = RouteOptionFacts::from_payload_syntax(&effective)
+            .with_authored_presence(&RouteOptionFacts::from_payload_syntax(payload));
+        assert!(matches!(options.conv_rot, RouteField::Valid(false)));
+        assert!(!options.advanced_was_authored("convRot"));
+        assert!(native_route_claims_request_resolved(
+            "candle",
+            &JobType::ImageGenerate,
+            payload,
+            &options
+        )
+        .unwrap());
+
+        let mut authored = payload.clone();
+        authored.insert("advanced".into(), serde_json::json!({"convRot":false}));
+        let (_, options) =
+            crate::portable_admission::route_option_facts(&JobType::ImageGenerate, &authored)
+                .unwrap();
+        assert!(options.advanced_was_authored("convRot"));
+        assert!(!native_route_claims_request_resolved(
+            "candle",
+            &JobType::ImageGenerate,
+            &authored,
+            &options
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn selected_joycaption_repository_is_a_native_caption_route_only() {
         let selected = serde_json::json!({
             "id":"joycaption_beta_one", "type":"utility", "adapter":"joycaption",

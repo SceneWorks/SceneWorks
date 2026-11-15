@@ -1920,6 +1920,9 @@ fn sana_has_unsupported_quant_carrier_with_facts(
     facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     use crate::resolved_options::RouteField;
+    if !facts.advanced_was_authored("mlxQuantize") {
+        return false;
+    }
     match &facts.mlx_quantize {
         RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => false,
         RouteField::Valid(_) | RouteField::Invalid => true,

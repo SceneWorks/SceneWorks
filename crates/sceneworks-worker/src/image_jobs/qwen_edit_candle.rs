@@ -668,9 +668,9 @@ fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
 /// payloads keep their `guidanceScale`/manifest fallback.
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
     if let Some(value) = request
-        .advanced_f64("guidanceScale")
-        .or_else(|| request.advanced_f64("trueCfgScale"))
-        .or_else(|| request.advanced_f64("imageGuidanceScale"))
+        .authored_advanced_f64("guidanceScale")
+        .or_else(|| request.authored_advanced_f64("trueCfgScale"))
+        .or_else(|| request.authored_advanced_f64("imageGuidanceScale"))
     {
         return value as f32;
     }
@@ -1306,6 +1306,25 @@ mod qwen_edit_tier_reconcile_tests {
 
     #[test]
     fn edit_guidance_keeps_standard_and_lightning_defaults_and_explicit_values() {
+        let authored = json!({"projectId":"p","model":"qwen_image_edit_2511",
+            "advanced":{"trueCfgScale":6.0}});
+        let effective = json!({"projectId":"p","model":"qwen_image_edit_2511",
+            "advanced":{"trueCfgScale":6.0,"guidanceScale":1.0}});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(qwen_edit_candle_guidance(&request), 6.0);
+        let omitted = json!({"projectId":"p","model":"qwen_image_edit_2511"});
+        let effective = json!({"projectId":"p","model":"qwen_image_edit_2511",
+            "advanced":{"guidanceScale":1.0}});
+        let request = ImageRequest::from_resolved(
+            omitted.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(qwen_edit_candle_guidance(&request), 4.0);
         for (model, default) in [
             ("qwen_image_edit_2511", 4.0),
             ("qwen_image_edit_2511_lightning", 1.0),

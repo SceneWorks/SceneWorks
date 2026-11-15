@@ -65,8 +65,9 @@ pub(crate) fn route_option_facts(
     let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
         .map_err(ApiError::from)?;
     Ok((
-        authored,
-        RouteOptionFacts::from_payload_syntax(effective.as_payload()),
+        authored.clone(),
+        RouteOptionFacts::from_payload_syntax(effective.as_payload())
+            .with_authored_presence(&authored),
     ))
 }
 

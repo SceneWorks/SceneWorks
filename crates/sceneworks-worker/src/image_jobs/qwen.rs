@@ -677,9 +677,9 @@ pub(super) fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -
 /// Advanced guidance overrides the prompt-strength default; legacy aliases remain supported.
 pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
     request
-        .advanced_f64("guidanceScale")
-        .or_else(|| request.advanced_f64("trueCfgScale"))
-        .or_else(|| request.advanced_f64("imageGuidanceScale"))
+        .authored_advanced_f64("guidanceScale")
+        .or_else(|| request.authored_advanced_f64("trueCfgScale"))
+        .or_else(|| request.authored_advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance())
 }
