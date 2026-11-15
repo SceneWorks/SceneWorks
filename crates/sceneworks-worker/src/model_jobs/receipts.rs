@@ -440,7 +440,6 @@ mod artifact_provenance_tests {
         .is_err());
     }
 
-    #[cfg(not(windows))]
     fn settle(path: &Path) {
         std::fs::OpenOptions::new()
             .write(true)
@@ -450,14 +449,10 @@ mod artifact_provenance_tests {
             .unwrap();
     }
 
-    #[cfg(not(windows))]
     fn fingerprinted_trees() -> usize {
         FINGERPRINTED_PRODUCED_TREES.with(std::cell::Cell::get)
     }
 
-    /// Windows fingerprints produced trees fresh on every check (see
-    /// `sceneworks_core::verified_source_cache`), so this reuse case is Unix-only.
-    #[cfg(not(windows))]
     #[test]
     fn an_unchanged_produced_tree_is_fingerprinted_once_per_host() {
         let root = tempfile::tempdir().unwrap();

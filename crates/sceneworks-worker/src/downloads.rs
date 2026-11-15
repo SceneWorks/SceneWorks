@@ -3247,13 +3247,12 @@ mod atomic_cache_publication_tests {
             start + 1,
             "an unchanged cache hit is not read again"
         );
-        if cfg!(unix) {
-            // Same size and mtime, different bytes: ctime moves, so it is read and refused.
-            std::fs::write(&target, vec![b'x'; good.len()]).unwrap();
-            settle(&target, settled);
-            assert!(!check().await.unwrap());
-            assert_eq!(hashes(), start + 2);
-        }
+        // Same size and mtime, different bytes: ctime (Unix) or the NTFS change time (Windows)
+        // moves, so it is read and refused.
+        std::fs::write(&target, vec![b'x'; good.len()]).unwrap();
+        settle(&target, settled);
+        assert!(!check().await.unwrap());
+        assert_eq!(hashes(), start + 2);
     }
 
     /// Required fixture: an interrupted transfer resumes from the durable partial

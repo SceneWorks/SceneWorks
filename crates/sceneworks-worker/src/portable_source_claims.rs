@@ -1952,8 +1952,8 @@ thread_local! {
     pub(crate) static CAPTURE_HASHED_FILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Capture one file. With `store`, an unchanged file reuses the host's recorded digest; on
-/// Windows a mutable file is hashed fresh (see `sceneworks_core::verified_source_cache`).
+/// Capture one file. With `store`, an unchanged file (same stamp, see
+/// `sceneworks_core::verified_source_cache`) reuses the host's recorded digest.
 fn capture_one(
     store: Option<&VerifiedSourceCache>,
     path: &Path,
@@ -3552,8 +3552,7 @@ mod tests {
 
     /// A registered local source is read once per host across API admission and the worker: a
     /// digest the API recorded is reused here, an unchanged source is not read again, and a
-    /// same-size rewrite is read again. Windows hashes mutable files fresh, so Unix-only.
-    #[cfg(not(windows))]
+    /// same-size rewrite (ctime on Unix, NTFS change time on Windows) is read again.
     #[test]
     fn registered_source_capture_reads_each_unchanged_file_once_per_host() {
         let temp = tempfile::tempdir().unwrap();

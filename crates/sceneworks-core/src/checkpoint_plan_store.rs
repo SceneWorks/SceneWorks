@@ -54,7 +54,10 @@ pub const BINDINGS_DIR: &str = "bindings";
 /// time and therefore cannot be dated against [`SOURCE_STAMP_GRANULARITY_NANOS`]; v2 adds
 /// `observedNanos`. Bindings at any other version are read but never trusted — every stamp in them
 /// is re-hashed once and rewritten at the current version.
-pub const SOURCE_BINDINGS_SCHEMA_VERSION: u32 = 2;
+///
+/// Windows is at v3: its stamps gained the NTFS change time, volume serial number and file index,
+/// so a v2 Windows document is re-hashed once. Unix stamps did not change and stay at v2.
+pub const SOURCE_BINDINGS_SCHEMA_VERSION: u32 = if cfg!(windows) { 3 } else { 2 };
 /// The coarsest timestamp granularity this store may be asked to reason about, in nanoseconds.
 ///
 /// Windows FILETIME as observed through `last_write_time` advances on the ~15.625 ms system clock
@@ -277,6 +280,62 @@ pub struct SourceStampV1 {
     pub creation_time: u64,
     #[cfg(windows)]
     pub last_write_time: u64,
+    /// NTFS change time (`FILE_BASIC_INFO::ChangeTime`). Unlike the last-write time, no ordinary
+    /// timestamp API lets a caller restore it, so a same-length rewrite that puts the old
+    /// last-write time back still moves it. Absent (zero) on a stamp written before this field
+    /// existed, which therefore never matches a live stamp.
+    #[cfg(windows)]
+    #[serde(default)]
+    pub change_time: i64,
+    #[cfg(windows)]
+    #[serde(default)]
+    pub volume_serial_number: u64,
+    #[cfg(windows)]
+    #[serde(default)]
+    pub file_index: u64,
+}
+
+/// The NTFS change time, volume serial number and file index of `path` (links followed), read
+/// through an attribute-only handle. The one place this crate allows `unsafe`: std exposes none of
+/// these on the pinned toolchain (`MetadataExt::change_time` is unstable).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_file_identity(path: &Path) -> std::io::Result<(i64, u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    // Backup semantics so a directory (a linked component directory in a produced tree) opens too.
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let mut basic = FILE_BASIC_INFO::default();
+    let size =
+        u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).expect("FILE_BASIC_INFO fits in u32");
+    // SAFETY: `file` owns an open handle for the whole call, so the handle is valid; `basic` is a
+    // live, properly aligned `FILE_BASIC_INFO` and `size` is exactly its size, which is what the
+    // `FileBasicInfo` class writes; the BOOL result is checked before `basic` is read.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            std::ptr::from_mut(&mut basic).cast(),
+            size,
+        )
+    };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let information = winapi_util::file::information(&file)?;
+    Ok((
+        basic.ChangeTime,
+        information.volume_serial_number(),
+        information.file_index(),
+    ))
 }
 
 impl SourceStampV1 {
@@ -289,6 +348,8 @@ impl SourceStampV1 {
         // claims to describe, or a write racing this call could look older than it is.
         let observed_nanos = clock.now_nanos();
         let metadata = fs::metadata(path)?;
+        #[cfg(windows)]
+        let (change_time, volume_serial_number, file_index) = windows_file_identity(path)?;
         Ok(Self {
             observed_nanos,
             size_bytes: metadata.len(),
@@ -311,6 +372,12 @@ impl SourceStampV1 {
             creation_time: metadata.creation_time(),
             #[cfg(windows)]
             last_write_time: metadata.last_write_time(),
+            #[cfg(windows)]
+            change_time,
+            #[cfg(windows)]
+            volume_serial_number,
+            #[cfg(windows)]
+            file_index,
         })
     }
 

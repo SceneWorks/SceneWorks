@@ -4,7 +4,8 @@
 //! filesystem identity is unchanged. A job that binds such a file verifies its SHA-256 against the
 //! frozen ledger once, records the verdict keyed by the file's real path and the same
 //! filesystem stamp the checkpoint-plan store trusts ([`SourceStampV1`]: size, mtime and, on Unix,
-//! device, inode and ctime), and later attempts reuse that verdict while the stamp is unchanged.
+//! device, inode and ctime; on Windows, volume serial number, file index and the NTFS change
+//! time, which a same-length rewrite that restores the last-write time still moves), and later attempts reuse that verdict while the stamp is unchanged.
 //! Any stamp change, a racy stamp (modified within one timestamp tick of its observation), a
 //! different expected digest or an unreadable record re-hashes the file. A mismatch is never
 //! recorded. A file with no ledger in advance (a local model captured by its bytes) records the
@@ -15,18 +16,10 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
-const RECORD_SCHEMA_VERSION: u32 = 1;
-
-/// Whether a filesystem stamp may stand in for a hash of a mutable local file (a user model,
-/// adapter, control or produced tree, as opposed to a content-addressed hub blob).
-///
-/// Not on Windows: there a same-length in-place rewrite that restores the last-write time leaves
-/// every field std exposes unchanged (size, creation time, last-write time). The NTFS change time,
-/// which no ordinary timestamp API lets a caller restore, is reachable only through
-/// `GetFileInformationByHandleEx` (std's `MetadataExt::change_time` is unstable at the pinned
-/// toolchain), and that FFI call needs `unsafe`, which this workspace forbids. So Windows hashes
-/// mutable local files fresh on every check.
-const STAMPS_IDENTIFY_MUTABLE_FILES: bool = cfg!(not(windows));
+/// Windows records are at v2: their stamps gained the NTFS change time, volume serial number and
+/// file index, so a v1 Windows record (which could not see a same-length rewrite that restores the
+/// last-write time) is never trusted and its file is hashed once more. Unix records stay at v1.
+const RECORD_SCHEMA_VERSION: u32 = if cfg!(windows) { 2 } else { 1 };
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -142,19 +135,13 @@ impl VerifiedSourceCache {
 
     /// The SHA-256 (`sha256:<hex>`) of `real_path` (already canonical) when no ledger names it in
     /// advance: the recorded digest while the file's stamp is unchanged, otherwise a fresh hash
-    /// that is then recorded. A file that changed while it was hashed is an error. On Windows
-    /// such a mutable file is always hashed fresh and never recorded
-    /// ([`STAMPS_IDENTIFY_MUTABLE_FILES`]).
+    /// that is then recorded. A file that changed while it was hashed is an error.
     pub fn sha256(
         &self,
         real_path: &Path,
         check: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<(String, SourceVerification)> {
         let before = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
-        if !STAMPS_IDENTIFY_MUTABLE_FILES {
-            let (digest, _) = Self::hash(real_path, &before, check)?;
-            return Ok((digest, SourceVerification::Hashed));
-        }
         if let Some(sha256) = self.recorded_sha256(real_path, &before) {
             return Ok((sha256, SourceVerification::Reused));
         }
@@ -198,20 +185,16 @@ impl VerifiedSourceCache {
 
     /// A whole-tree content fingerprint of `root`, computed by `fingerprint` at most once per host
     /// while every file `list_files` names keeps its stamp. The record is keyed by the root's real
-    /// path and a digest of every listed entry's relative path, link target and stamp (size, mtime
-    /// and, on Unix, device, inode and ctime), so a file added, removed, renamed or changed
+    /// path and a digest of every listed entry's relative path, link target and stamp (size, mtime and
+    /// device, inode and ctime on Unix; volume, file index and NTFS change time on Windows), so a file added, removed, renamed or changed
     /// anywhere re-runs `fingerprint`. A racy stamp, or a tree that changed while it was
-    /// fingerprinted, is never recorded. On Windows a produced tree is mutable local content and
-    /// is always fingerprinted fresh ([`STAMPS_IDENTIFY_MUTABLE_FILES`]).
+    /// fingerprinted, is never recorded.
     pub fn tree_fingerprint<E: From<io::Error>>(
         &self,
         root: &Path,
         list_files: impl Fn() -> Result<Vec<PathBuf>, E>,
         fingerprint: impl FnOnce() -> Result<String, E>,
     ) -> Result<(String, SourceVerification), E> {
-        if !STAMPS_IDENTIFY_MUTABLE_FILES {
-            return Ok((fingerprint()?, SourceVerification::Hashed));
-        }
         let real_root = std::fs::canonicalize(root)?;
         let record_path = self.tree_record_path(&real_root);
         let (before, _) = tree_stamp(root, &list_files()?)?;
@@ -365,45 +348,6 @@ mod tests {
         );
     }
 
-    /// Windows: a same-length rewrite that restores the last-write time is invisible to the stamp,
-    /// so a mutable file's digest and a produced tree's fingerprint are never reused there.
-    #[cfg(windows)]
-    #[test]
-    fn windows_hashes_mutable_files_fresh_after_a_timestamp_preserving_rewrite() {
-        let temp = tempfile::tempdir().unwrap();
-        let cache = VerifiedSourceCache::for_data_dir(temp.path());
-        let path = temp.path().join("blob");
-        std::fs::write(&path, b"weights").unwrap();
-        settle(&path);
-        let path = std::fs::canonicalize(&path).unwrap();
-        let ok = || Ok(());
-        assert_eq!(
-            cache.sha256(&path, &ok).unwrap(),
-            (sha(b"weights"), SourceVerification::Hashed)
-        );
-        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-        std::fs::write(&path, b"WEIGHTS").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
-        assert_eq!(
-            cache.sha256(&path, &ok).unwrap(),
-            (sha(b"WEIGHTS"), SourceVerification::Hashed)
-        );
-        let root = temp.path().join("tree");
-        std::fs::create_dir_all(&root).unwrap();
-        for _ in 0..2 {
-            let (_, verification) = cache
-                .tree_fingerprint(&root, || Ok::<_, io::Error>(Vec::new()), || Ok("fp".into()))
-                .unwrap();
-            assert_eq!(verification, SourceVerification::Hashed);
-        }
-    }
-
-    #[cfg(not(windows))]
     #[test]
     fn an_unledgered_digest_is_recorded_once_and_shared_with_verify() {
         let temp = tempfile::tempdir().unwrap();
@@ -426,11 +370,8 @@ mod tests {
             cache.verify(&path, &sha(b"weights"), &ok).unwrap(),
             SourceVerification::Reused
         );
-        // A same-size rewrite that restores the old mtime still moves the stamp (ctime). Windows
-        // stamps carry no ctime, so this case is Unix-only.
-        if cfg!(not(unix)) {
-            return;
-        }
+        // A same-size rewrite that restores the old mtime still moves the stamp (ctime on Unix, the
+        // NTFS change time on Windows): re-hashed by both `sha256` and `verify`.
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::fs::write(&path, b"WEIGHTS").unwrap();
         std::fs::OpenOptions::new()
@@ -439,6 +380,14 @@ mod tests {
             .unwrap()
             .set_modified(mtime)
             .unwrap();
+        // The record still names the old bytes; a stamp blind to the rewrite would reuse it.
+        assert_eq!(
+            cache
+                .verify(&path, &sha(b"weights"), &ok)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         assert_eq!(
             cache.sha256(&path, &ok).unwrap(),
             (sha(b"WEIGHTS"), SourceVerification::Hashed)
@@ -475,7 +424,6 @@ mod tests {
     }
 
     /// Lists every regular file under `root`, like a produced-artifact walk.
-    #[cfg(not(windows))]
     fn list(root: &Path) -> io::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(root)? {
@@ -484,7 +432,6 @@ mod tests {
         Ok(files)
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn a_tree_is_fingerprinted_once_until_any_file_is_added_removed_or_changed() {
         let temp = tempfile::tempdir().unwrap();
@@ -517,19 +464,17 @@ mod tests {
         assert_eq!(run().unwrap().1, SourceVerification::Hashed, "removed");
         assert_eq!(run().unwrap().1, SourceVerification::Reused);
 
-        if cfg!(unix) {
-            // Same size, the old mtime restored: ctime still moves.
-            let path = root.join("a.safetensors");
-            let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-            std::fs::write(&path, b"WEIGHTS").unwrap();
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(mtime)
-                .unwrap();
-            assert_eq!(run().unwrap().1, SourceVerification::Hashed, "substituted");
-        }
+        // Same size, the old mtime restored: ctime (Unix) or the NTFS change time (Windows) moves.
+        let path = root.join("a.safetensors");
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, b"WEIGHTS").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(run().unwrap().1, SourceVerification::Hashed, "substituted");
 
         // A freshly written file is racy: fingerprinted, never recorded.
         std::fs::write(root.join("c.json"), b"{}").unwrap();

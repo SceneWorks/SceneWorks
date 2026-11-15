@@ -4328,24 +4328,21 @@ mod tests {
         assert_eq!(member.files, pinned);
 
         // Same size and the same mtime, different bytes: the ctime/inode move, so the file is
-        // hashed again and refused with the existing message. (Windows stamps carry no ctime.)
-        if cfg!(unix) {
-            std::fs::write(&path, b"changed").unwrap();
-            settle_mtime(&path, settled);
-            let before = hashed_source_files();
-            let error = capture_receipted(&state, &pinned).expect_err("substitution is refused");
-            assert!(
-                error.detail.contains("files differ from the pinned source"),
-                "{}",
-                error.detail
-            );
-            assert_eq!(hashed_source_files(), before + 1);
-            let error =
-                capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
-                    .await
-                    .expect_err("substitution is refused at admission");
-            assert!(error.detail.contains("files differ from the pinned source"));
-        }
+        // hashed again and refused with the existing message (the NTFS change time on Windows).
+        std::fs::write(&path, b"changed").unwrap();
+        settle_mtime(&path, settled);
+        let before = hashed_source_files();
+        let error = capture_receipted(&state, &pinned).expect_err("substitution is refused");
+        assert!(
+            error.detail.contains("files differ from the pinned source"),
+            "{}",
+            error.detail
+        );
+        assert_eq!(hashed_source_files(), before + 1);
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("substitution is refused at admission");
+        assert!(error.detail.contains("files differ from the pinned source"));
     }
 
     #[tokio::test]
@@ -4401,12 +4398,8 @@ mod tests {
             Some(pinned.clone())
         );
         assert_eq!(hashed_source_files(), start, "the first job reads no bytes");
-        // Modified after the download (same size, mtime restored): hashed again and refused. Not
-        // on Windows: there this rewrite leaves the stamp unchanged, and whether ledger-verified
-        // files should hash fresh on Windows (or read the NTFS change time) is an open decision.
-        if cfg!(windows) {
-            return;
-        }
+        // Modified after the download (same size, mtime restored): ctime on Unix, the NTFS change
+        // time on Windows, moves, so it is hashed again and refused.
         std::fs::write(&path, b"changed").unwrap();
         settle_mtime(&path, settled);
         let error = capture_receipted(&state, &pinned).expect_err("modified install is refused");
@@ -4414,8 +4407,6 @@ mod tests {
         assert_eq!(hashed_source_files(), start + 1);
     }
 
-    /// Windows hashes mutable local files fresh (see `sceneworks_core::verified_source_cache`).
-    #[cfg(not(windows))]
     #[test]
     fn local_source_capture_is_hashed_once_while_its_stamp_is_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -4435,13 +4426,11 @@ mod tests {
             first
         );
         assert_eq!(hashed_source_files(), start + 1, "no bytes are read again");
-        if cfg!(unix) {
-            std::fs::write(&weights, b"WEIGHTS").unwrap();
-            settle_mtime(&weights, settled);
-            let changed = capture_local_source_files(&cache, &model, &roots).unwrap();
-            assert_eq!(hashed_source_files(), start + 2);
-            assert_ne!(changed, first, "the substituted bytes get their own digest");
-        }
+        std::fs::write(&weights, b"WEIGHTS").unwrap();
+        settle_mtime(&weights, settled);
+        let changed = capture_local_source_files(&cache, &model, &roots).unwrap();
+        assert_eq!(hashed_source_files(), start + 2);
+        assert_ne!(changed, first, "the substituted bytes get their own digest");
     }
 
     #[test]
