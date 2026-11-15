@@ -1058,6 +1058,10 @@ fn apply_imported_sampling_surface(
                 "negativePromptRequiresGuidance",
                 "guidanceOffValue",
                 "supportsSchedulerShift",
+                // An imported checkpoint runs on its provider's text encoder, so it has the
+                // provider's prompt limit and over-limit behaviour (SW-7163).
+                "maxPromptTokens",
+                "promptOverflow",
             ],
         };
         let target = object.entry(target.to_owned()).or_insert_with(|| json!({}));

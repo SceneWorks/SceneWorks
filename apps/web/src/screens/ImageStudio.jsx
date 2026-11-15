@@ -2086,7 +2086,7 @@ export function ImageStudio() {
   // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
   // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
-  const promptTokenNotice = promptTokenLimitHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel, mode);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =

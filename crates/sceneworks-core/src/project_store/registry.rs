@@ -59,7 +59,7 @@ struct RegistryFingerprint {
     #[cfg(unix)]
     changed_nanoseconds: i64,
     // Stable Rust does not expose the filesystem ChangeTime on Windows, and
-    // this workspace forbids unsafe Win32 calls. File identity covers atomic
+    // this workspace denies unsafe Win32 calls outside the source-stamp change time. File identity covers atomic
     // replacement; a fixed-size digest from the same open handle covers every
     // in-place rewrite even when length and last-write time are restored.
     #[cfg(windows)]

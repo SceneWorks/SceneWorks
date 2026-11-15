@@ -9,7 +9,8 @@
 //!
 //! [`ProducedFile`] hashes the bytes as they are written instead. When the producer closes it, the
 //! file's identity is captured as a [`SourceStampV1`] — the same stamp checkpoint source-drift
-//! detection uses (size, mtime, inode/device/ctime on Unix, creation/last-write time on Windows) —
+//! detection uses (size, mtime, inode/device/ctime on Unix; creation/last-write time, volume serial number, file
+//! index and NTFS change time on Windows) —
 //! and recorded beside the digest as a [`ProducedFileAttestation`]. Every later stage redeems the
 //! attestation only while a fresh stamp of the same path still identifies the same entry; any
 //! difference, or anything that makes the stamp untrustworthy, falls back to the real re-hash

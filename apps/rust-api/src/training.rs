@@ -1517,13 +1517,50 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let (model, tier, prompt) = validate_batch_describe_request(&payload)?;
+    let fit_to = match payload
+        .fit_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => {
+            let entry = crate::models::resolve_model_manifest_entry(&state, id).await?;
+            Some((id.to_owned(), fit_to_target_entry(id, entry)?))
+        }
+        None => None,
+    };
+    let condense_rows = validate_condense_rows(&payload, fit_to.is_some())?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
         move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
     })
     .await?;
-    let items = batch_describe_items(&dataset, &dataset_root, payload.item_ids.as_deref())?;
+    let item_ids = condense_rows
+        .as_ref()
+        .map(|rows| rows.keys().cloned().collect::<Vec<_>>());
+    let mut items = batch_describe_items(
+        &dataset,
+        &dataset_root,
+        item_ids.as_deref().or(payload.item_ids.as_deref()),
+    )?;
+    if let Some(rows) = &condense_rows {
+        for item in &mut items {
+            let row = item
+                .get("itemId")
+                .and_then(Value::as_str)
+                .and_then(|id| rows.get(id));
+            if let (Some(object), Some(row)) = (item.as_object_mut(), row) {
+                object.insert("fields".to_owned(), json!(row.fields));
+                object.insert("width".to_owned(), json!(row.width));
+                object.insert("height".to_owned(), json!(row.height));
+                object.insert("notice".to_owned(), json!(row.notice));
+                if payload.measure_only {
+                    object.insert("condensedText".to_owned(), json!(row.condensed_text));
+                }
+            }
+        }
+    }
     let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_batch_describe",
@@ -1542,11 +1579,28 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
+    // A tiered describer carries its tier on every request mode: a condense-only job reloads the
+    // tier the row was described with, never the default.
     if let Some(tier) = tier {
         job_payload.insert("variant".to_owned(), json!(tier));
     }
-    if let Some(prompt) = prompt {
+    if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
+    }
+    if let Some((id, entry)) = fit_to {
+        // A projection of the target's own catalog entry, so the worker reads the limit (and
+        // finds the target's tokenizer) from the server's catalog, never from a client number.
+        // It is not a model the job loads, so it rides outside the model-source carriers.
+        job_payload.insert("fitTo".to_owned(), json!(id));
+        job_payload.insert("fitToManifestEntry".to_owned(), fit_to_projection(&entry));
+    }
+    if condense_rows.is_some() {
+        let mode = if payload.measure_only {
+            "measureOnly"
+        } else {
+            "condenseOnly"
+        };
+        job_payload.insert(mode.to_owned(), json!(true));
     }
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -1554,7 +1608,9 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
-    if let Some(tier) = tier {
+    // A measure-only job counts tokens with the target's tokenizer and loads no describer, so
+    // its tier need not be installed. Describe and condense-only jobs load the tier.
+    if let Some(tier) = tier.filter(|_| !payload.measure_only) {
         ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
     }
     let requested_gpu = payload.requested_gpu;
@@ -1685,6 +1741,155 @@ fn ensure_describe_tier_installed(
         ),
         "model_artifact_incomplete",
     ))
+}
+
+/// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it
+/// for `id`: refused when the id is not in the catalog, or its entry declares no
+/// `image.maxPromptTokens` or one below `MIN_FIT_TO_PROMPT_TOKENS` (too small to hold every
+/// person's pose).
+pub(crate) fn fit_to_target_entry(id: &str, entry: Value) -> Result<Value, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{prompt_token_limit, MIN_FIT_TO_PROMPT_TOKENS};
+    if entry.as_object().is_none_or(|object| object.is_empty()) {
+        return Err(training_field_error(
+            "fitTo",
+            format!("Unknown Fit to model {id:?}."),
+        ));
+    }
+    match prompt_token_limit(&entry) {
+        None => Err(training_field_error(
+            "fitTo",
+            format!("Fit to model {id:?} declares no prompt token limit."),
+        )),
+        Some(limit) if limit < MIN_FIT_TO_PROMPT_TOKENS => Err(training_field_error(
+            "fitTo",
+            format!(
+                "Fit to model {id:?} reads only {limit} prompt tokens; a Fit to target needs at \
+                 least {MIN_FIT_TO_PROMPT_TOKENS} to keep every person's pose."
+            ),
+        )),
+        Some(_) => Ok(entry),
+    }
+}
+
+/// The part of a target's catalog entry the worker reads: its id, name, adapter (which picks its
+/// exact counter), `image` prompt facts, and each download's repository, revision, files and
+/// co-requisite flag (where its tokenizer is installed). Job listings carry this, not the entry.
+pub(crate) fn fit_to_projection(entry: &Value) -> Value {
+    let downloads: Vec<Value> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|download| {
+            json!({
+                "repo": download.get("repo"),
+                "revision": download.get("revision"),
+                "files": download.get("files"),
+                "coRequisite": download.get("coRequisite"),
+            })
+        })
+        .collect();
+    json!({
+        "id": entry.get("id"),
+        "name": entry.get("name"),
+        "adapter": entry.get("adapter"),
+        "image": {
+            "maxPromptTokens": entry.get("image").and_then(|image| image.get("maxPromptTokens")),
+            "promptOverflow": entry.get("image").and_then(|image| image.get("promptOverflow")),
+        },
+        "downloads": downloads,
+    })
+}
+
+/// A condense-only or measure-only request's rows by item id (SW-7163), `None` for an ordinary
+/// describe request. Condensing needs a Fit to target and a describer that condenses (JoyCaption
+/// has no text step), takes its items from the rows (so `itemIds` is refused beside them), and
+/// accepts at most one row per item. Each field is one of the seven and no longer than a described
+/// field can be; a row holds at most `MAX_CONDENSE_ROW_CHARS` across its fields and is never all
+/// empty. A measure-only row must carry its edited `condensedText`.
+pub(crate) fn validate_condense_rows(
+    payload: &DatasetBatchDescribeJobRequest,
+    has_fit_to: bool,
+) -> Result<Option<std::collections::BTreeMap<String, crate::dto::CondenseRowRequest>>, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        describer_condenses, DESCRIBE_FIELDS, MAX_CONDENSE_ROW_CHARS, MAX_DESCRIBE_FIELD_CHARS,
+    };
+    if has_fit_to && !describer_condenses(payload.model.as_deref()) {
+        return Err(training_field_error(
+            "fitTo",
+            "Fit to needs a describer with a text step; JoyCaption rows are not condensed.",
+        ));
+    }
+    let Some(rows) = payload.condense_rows.as_ref() else {
+        if payload.measure_only {
+            return Err(training_field_error(
+                "condenseRows",
+                "measureOnly needs condenseRows.",
+            ));
+        }
+        return Ok(None);
+    };
+    let refuse = |detail: String| Err(training_field_error("condenseRows", detail));
+    if !has_fit_to {
+        return refuse("condenseRows needs a fitTo target.".to_owned());
+    }
+    if payload.item_ids.is_some() {
+        return refuse("Send condenseRows or itemIds, not both.".to_owned());
+    }
+    if rows.is_empty() {
+        return refuse("condenseRows must hold at least one row.".to_owned());
+    }
+    let mut by_id = std::collections::BTreeMap::new();
+    for row in rows {
+        let id = &row.item_id;
+        if let Some(name) = row
+            .fields
+            .keys()
+            .find(|name| !DESCRIBE_FIELDS.contains(&name.as_str()))
+        {
+            return refuse(format!("Row {id} has an unknown field {name:?}."));
+        }
+        if let Some((name, _)) = row
+            .fields
+            .iter()
+            .find(|(_, text)| text.chars().count() > MAX_DESCRIBE_FIELD_CHARS)
+        {
+            return refuse(format!(
+                "Row {id} field {name:?} is longer than {MAX_DESCRIBE_FIELD_CHARS} characters."
+            ));
+        }
+        let total: usize = row.fields.values().map(|text| text.chars().count()).sum();
+        if total > MAX_CONDENSE_ROW_CHARS {
+            return refuse(format!(
+                "Row {id} has {total} characters across its fields; at most \
+                 {MAX_CONDENSE_ROW_CHARS} can be condensed."
+            ));
+        }
+        if row.fields.values().all(|text| text.trim().is_empty()) {
+            return refuse(format!("Row {id} has no text in any field to condense."));
+        }
+        let text_len = |text: &Option<String>| text.as_deref().map_or(0, |t| t.chars().count());
+        if text_len(&row.notice) > MAX_DESCRIBE_FIELD_CHARS
+            || text_len(&row.condensed_text) > MAX_DESCRIBE_FIELD_CHARS
+        {
+            return refuse(format!(
+                "Row {id} notice or condensed prompt is longer than {MAX_DESCRIBE_FIELD_CHARS} \
+                 characters."
+            ));
+        }
+        if payload.measure_only
+            && row
+                .condensed_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return refuse(format!("Row {id} has no condensed prompt to measure."));
+        }
+        if by_id.insert(id.clone(), row.clone()).is_some() {
+            return refuse(format!("Row {id} appears twice."));
+        }
+    }
+    Ok(Some(by_id))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
