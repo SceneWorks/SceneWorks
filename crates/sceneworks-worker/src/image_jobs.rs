@@ -237,7 +237,9 @@ fn requested_decoder_id(
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
+#[cfg(native_lane)]
 use sceneworks_core::request_validation::prompt_enhancement::FACT_KEY as PROMPT_ENHANCEMENT_FACT_KEY;
+#[cfg(any(test, native_lane))]
 fn parse_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
