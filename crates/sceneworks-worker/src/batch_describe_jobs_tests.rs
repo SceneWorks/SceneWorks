@@ -20,9 +20,10 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
     for rule in [
         "## LABELS — every person",
         "## NO PHYSICAL TRAITS — ever",
-        "## DESCRIPTION — the people, in minute detail",
+        "## LENGTH — a target for each field",
+        "## DESCRIPTION — the people",
         "## POSE — the pose field",
-        "## ENVIRONMENT — every detail",
+        "## ENVIRONMENT — the setting",
         "## STYLE — medium, era, and vintage look",
         "## CAMERA — the apparent gear and settings",
         "## COMPOSITION — framing",
@@ -39,6 +40,67 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
     );
     assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
     assert!(!instruction.contains("\"description\":"));
+}
+
+#[test]
+fn the_describing_prompt_gives_every_field_a_length_target() {
+    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
+    let start = instruction.find("## LENGTH").expect("a LENGTH section");
+    let end = start
+        + instruction[start + 1..]
+            .find("\n## ")
+            .expect("a next section")
+        + 1;
+    let length = &instruction[start..end];
+    for (field, target) in [
+        ("description", "3 to 5 sentences per person"),
+        (
+            "pose",
+            "each slot one clause or one short sentence; the left_arm, right_arm, left_leg and \
+             right_leg slots up to two sentences each",
+        ),
+        ("style", "2 sentences"),
+        ("camera", "1 sentence"),
+        ("composition", "1 to 2 sentences"),
+        ("lighting", "1 to 2 sentences"),
+        ("environment", "2 to 3 sentences"),
+    ] {
+        assert!(
+            length.contains(&format!("- {field}: {target}")),
+            "LENGTH sets a target for {field}"
+        );
+    }
+    assert!(length.contains("about 450 to 550 words"));
+    assert!(length.contains("each additional person adds about 200 words"));
+    assert!(length.contains(
+        "cut environment, style and camera detail first, before any pose slot. Never drop a \
+         person's pose entry to save length."
+    ));
+    // The wording that asked for exhaustive output is gone; the accuracy rules stay.
+    for asset in [
+        instruction.as_str(),
+        &default_describe_instruction(DescribeModel::JoyCaption),
+    ] {
+        for exhaustive in [
+            "exhaustively",
+            "every detail",
+            "in minute detail",
+            "every garment",
+        ] {
+            assert!(!asset.contains(exhaustive), "{exhaustive:?} is gone");
+        }
+    }
+    assert!(instruction.contains("## NO PHYSICAL TRAITS — ever"));
+    assert!(instruction.contains("quoted verbatim in single quotes"));
+    assert!(instruction.contains("check the three facts most often got wrong"));
+    // JoyCaption gets a short matching line and keeps its overall word cap.
+    let joy = default_describe_instruction(DescribeModel::JoyCaption);
+    assert!(joy.contains(
+        "LENGTH: description 3 to 5 sentences per person; pose one short clause per body part; \
+         style 2 sentences; camera 1; composition, lighting 1 to 2; environment 2 to 3."
+    ));
+    assert!(joy.contains("never drop a person's pose"));
+    assert!(joy.contains("Keep the whole reply under about 500 words"));
 }
 
 #[test]
