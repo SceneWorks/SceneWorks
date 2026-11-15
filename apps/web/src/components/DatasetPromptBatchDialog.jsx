@@ -24,12 +24,13 @@ import { formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
 import { saveExportFile } from "../saveExportFile.js";
+import { promptBudget } from "../styleComposer.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { issue, summarize } from "../validation/issues.js";
 import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 
 // "Create Prompt Batch from Dataset" (SW-7085, feature SW-F362). A vision model describes each
-// dataset image as six fields; the review table lets the user edit them, re-run one image, and save
+// dataset image as seven fields; the review table lets the user edit them, re-run one image, and save
 // the result as an Image Studio prompt batch (one `[W:H]` block per image, see promptBatchDescribe.js).
 //
 // The describe job (`dataset_batch_describe`) stores each image's result as it finishes (the job's
@@ -76,8 +77,10 @@ function describerInstalled(entry, tier) {
   return installedTiers(entry).includes(tier);
 }
 
+// `pose` is one line per person; a result stored before it existed reads as an empty pose.
 export const DESCRIBE_FIELDS = [
   ["description", "Description"],
+  ["pose", "Pose"],
   ["style", "Style"],
   ["camera", "Camera"],
   ["composition", "Composition"],
@@ -137,6 +140,8 @@ function rowFromResultItem(item, model = null, variant = null) {
     fields: Object.fromEntries(DESCRIBE_FIELDS.map(([key]) => [key, typeof item[key] === "string" ? item[key] : ""])),
     failed: Boolean(item.failed),
     error: item.error ?? null,
+    // Set when the reply was cut off at the describer's length limit and only part was kept.
+    notice: typeof item.notice === "string" && item.notice ? item.notice : null,
   };
 }
 
@@ -897,7 +902,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             value={prompt}
           />
           <span className="dataset-caption-field-hint" id="dataset-prompt-batch-prompt-hint">
-            The tool adds the JSON output format after this text, so edits never change the six fields.
+            The tool adds the JSON output format after this text, so edits never change the seven fields.
           </span>
         </label>
         <div className="dataset-prompt-batch-prompt-actions">
@@ -969,13 +974,26 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     {row.failed ? (
                       <p className="inline-warning" role="alert">Flagged: {row.error || "The describer could not describe this image."}</p>
                     ) : null}
+                    {!row.failed && row.notice ? (
+                      <p className="dataset-caption-mode-note" data-row-note="cut-off" role="status">{row.notice}</p>
+                    ) : null}
+                    {(() => {
+                      // Image generation refuses a prompt over PROMPT_MAX_CHARS; warn, never block.
+                      const budget = promptBudget(formatPromptBatch([row]).text);
+                      return budget.over ? (
+                        <p className="inline-warning" data-row-note="too-long">
+                          This prompt is {budget.length.toLocaleString()} characters; image generation accepts at most{" "}
+                          {budget.max.toLocaleString()}, so shorten it before generating.
+                        </p>
+                      ) : null;
+                    })()}
                     {DESCRIBE_FIELDS.map(([key, label]) => (
                       <label key={key}>
                         {label}
                         <textarea
                           disabled={busy}
                           onChange={(event) => updateField(row.itemId, key, event.target.value)}
-                          rows={key === "description" ? 3 : 2}
+                          rows={key === "description" || key === "pose" ? 3 : 2}
                           value={row.fields[key]}
                         />
                       </label>

@@ -329,6 +329,61 @@ describe("DatasetPromptBatchDialog", () => {
     expect(context.sendPromptBatchToImage).toHaveBeenCalledWith(expect.objectContaining({ id: "film_prints_prompts" }));
   });
 
+  it("shows a Pose field after Description and saves one Pose line per person; a six-field result has an empty pose", async () => {
+    await render();
+    const pose =
+      "woman_1 — Body line: upright; Stance: standing; Facing: front\nman_1 — Body line: horizontal; Stance: lying on their back; Facing: up";
+    await runWith([
+      described("item_a", 2400, 3200, { pose }),
+      // Stored before pose existed: no pose key at all.
+      described("item_b", 4000, 2250),
+    ]);
+    const labels = (itemId) =>
+      [...document.body.querySelectorAll(`[data-item-id="${itemId}"] label`)].map((node) => node.firstChild.textContent);
+    expect(labels("item_a").slice(0, 3)).toEqual(["Description", "Pose", "Style"]);
+    const textareas = (itemId) => [...document.body.querySelectorAll(`[data-item-id="${itemId}"] textarea`)];
+    expect(textareas("item_a")[1].value).toBe(pose);
+    expect(textareas("item_b")[1].value).toBe("");
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.prompts[0]).toBe(
+      "[3:4]\nDescription: A woman, {{woman_1}}, stands (item_a).\n" +
+        "Pose: {{woman_1}} — Body line: upright; Stance: standing; Facing: front\n" +
+        "Pose: {{man_1}} — Body line: horizontal; Stance: lying on their back; Facing: up\n" +
+        "Style: 1960s color negative print\nCamera: 35mm SLR\nComposition: Medium shot\nLighting: Window light\nEnvironment: A kitchen",
+    );
+    expect(payload.prompts[1]).not.toContain("Pose:");
+    expect(payload.variables.map((variable) => variable.key)).toEqual(["woman_1", "man_1"]);
+  });
+
+  it("shows a cut-off notice on a described row and keeps the row in the saved batch", async () => {
+    await render();
+    const notice =
+      "The reply reached the length limit: the pose covers only the first 2 people in this image; the other fields are complete.";
+    await runWith([described("item_a", 2400, 3200, { pose: "woman_1 — Body line: upright", notice }), described("item_b", 4000, 2250)]);
+    const rowNote = (itemId, kind) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="${kind}"]`);
+    expect(rowNote("item_a", "cut-off").textContent).toBe(notice);
+    expect(rowNote("item_b", "cut-off")).toBeNull();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch.mock.calls[0][0].prompts).toHaveLength(2);
+  });
+
+  it("warns, without blocking Save, on a row whose prompt is over the generation limit", async () => {
+    await render();
+    await runWith([described("item_a", 2400, 3200, { environment: "x".repeat(3900) }), described("item_b", 4000, 2250)]);
+    const tooLong = (itemId) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="too-long"]`);
+    expect(tooLong("item_a").textContent).toMatch(/^This prompt is 4,\d{3} characters; image generation accepts at most 4,000/);
+    expect(tooLong("item_b")).toBeNull();
+    // Editing the row under the limit clears the warning.
+    const environment = [...document.body.querySelectorAll('[data-item-id="item_a"] textarea')].at(-1);
+    await act(async () => setText(environment, "A kitchen"));
+    expect(tooLong("item_a")).toBeNull();
+    await act(async () => setText(environment, "y".repeat(3950)));
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
   it("exports the batch as the standard prompt-batch .json", async () => {
     await render();
     await runWith([described("item_a", 300, 400)]);

@@ -35,14 +35,23 @@ test('a complete result is accepted for its own tier', () => {
   assert.equal(accepted.gpu_memory.peak_mib, 21000);
   assert.deepEqual(Object.keys(accepted.fields), [...FIELDS]);
 });
-test('an empty camera field is accepted, as the output contract allows', () => {
+test('the validator lists the worker contract fields in order', async () => {
+  const source = await fs.readFile(fileURLToPath(new URL('../../crates/sceneworks-core/src/dataset_batch_describe.rs', import.meta.url)), 'utf8');
+  const block = source.match(/pub const DESCRIBE_FIELDS: \[&str; \d+\] = \[([^\]]*)\];/);
+  assert(block, 'DESCRIBE_FIELDS is declared in the shared contract');
+  assert.deepEqual([...block[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]), [...FIELDS]);
+});
+test('empty pose and camera fields are accepted, as the output contract allows', () => {
   const copy = result();
   copy.fields.camera = '';
-  assert.equal(validateResult(copy, 'q4').fields.camera, '');
+  copy.fields.pose = '';
+  const accepted = validateResult(copy, 'q4');
+  assert.equal(accepted.fields.camera, '');
+  assert.equal(accepted.fields.pose, '');
 });
 for (const name of FIELDS) {
   test(`reject an empty ${name} field`, () => {
-    for (const value of name === 'camera' ? [null, undefined] : ['', '   ', null, undefined]) {
+    for (const value of ['pose', 'camera'].includes(name) ? [null, undefined] : ['', '   ', null, undefined]) {
       const copy = result();
       copy.fields[name] = value;
       assert.throws(() => validateResult(copy, 'q4'), new RegExp(name));

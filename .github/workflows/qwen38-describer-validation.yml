@@ -2,8 +2,8 @@ name: Qwen3.8 27B describer CUDA validation
 
 # Real model inference is opt-in, never ordinary PR/main CI (SW-7120). Describes one synthetic scene
 # with the worker's Qwen3.8 27B describer on a provisioned Candle tier (see
-# qwen38-describer-provision.yml) and uploads the six described fields, wall time and peak GPU
-# memory. Fails if any field is empty. `image_side: 1536` draws the same scene at 1536x1536 to
+# qwen38-describer-provision.yml) and uploads the seven described fields, wall time and peak GPU
+# memory. Fails if any field other than pose or camera is empty, or if the reply was cut off. `image_side: 1536` draws the same scene at 1536x1536 to
 # measure the peak of a large image; `default` keeps the 512x384 scene.
 on:
   workflow_dispatch:
