@@ -12,8 +12,6 @@ import {
   JOY_CAPTION_MODEL_ID,
   VISION_CAPTION_MODEL_ID,
   VISION_CAPTION_MODEL_REPO,
-  VISION_DESCRIBE_MODEL_ID,
-  VISION_DESCRIBE_MODEL_REPO,
   terminalStatuses,
 } from "../constants.js";
 import { joyCaptionModel } from "../training/joyCaptionPrompts.js";
@@ -48,6 +46,10 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 // A describer with `tiers` runs one quant tier, sent as the job's `variant` (the first is the
 // default); the others take no `variant`.
+// Keep the larger describer's identifiers with this lazy-loaded dialog. Its quant tier travels
+// as the describe request's `variant`.
+export const VISION_DESCRIBE_MODEL_ID = "vision_describe_qwen3_8_27b";
+export const VISION_DESCRIBE_MODEL_REPO = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
 export const DESCRIBE_MODELS = [
 // `condenses`: the describer has a text-only step that "Fit to" condenses with (SW-7163).
   { id: VISION_CAPTION_MODEL_ID, repo: VISION_CAPTION_MODEL_REPO, label: "Vision Captioner (Qwen3-VL-8B)", condenses: true },

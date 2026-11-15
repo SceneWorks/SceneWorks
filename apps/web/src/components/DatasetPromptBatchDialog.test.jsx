@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, settle, unmountRoot } from "../testUtils/dom.js";
 import { AppContext } from "../context/AppContext.js";
-import { VISION_CAPTION_MODEL_REPO, VISION_DESCRIBE_MODEL_REPO } from "../constants.js";
+import { VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { formatTierBytes } from "../formatting.js";
 
 vi.mock("../api/trainingResources.js", () => ({
@@ -24,7 +24,7 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DESCRIBE_MODELS, DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted } = await import("./DatasetPromptBatchDialog.jsx");
+const { DESCRIBE_MODELS, DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted, VISION_DESCRIBE_MODEL_REPO } = await import("./DatasetPromptBatchDialog.jsx");
 const { default: candidateCatalog } = await import("../testUtils/catalogBaseline/candidate-catalog.json");
 const { readFileSync } = await import("node:fs");
 

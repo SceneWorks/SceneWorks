@@ -1,10 +1,11 @@
 // Measure the actual Image Studio React input path with the controlled HTTP API fixture.
-// Build with `npm run build -- --config vite.verify.config.mjs`, then start
-// `npm exec -- vite preview --config vite.verify.config.mjs --port 5317` in apps/web.
+// Build with `npm run build`, then start
+// `npm exec -- vite preview --config vite.verify.config.mjs --host localhost --port 8000`
+// in apps/web. The production bundle's default API base is http://localhost:8000.
 // The production bundle and controlled API are both served from that origin.
-// node scripts/measure-options-react.mjs --origin http://127.0.0.1:5317 --samples 30
+// node scripts/measure-options-react.mjs --origin http://localhost:8000 --samples 30
 // For a deployed proxy, keep the fixture preview running locally and add
-// `--fixture-origin http://127.0.0.1:5317`. Assets still load from --origin.
+// `--fixture-origin http://localhost:8000`. Assets still load from --origin.
 import { chromium } from "playwright";
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => {
