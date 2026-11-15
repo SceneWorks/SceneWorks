@@ -1505,10 +1505,11 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
-/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
-/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
-/// Captioner, `training_caption` for JoyCaption). The worker
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner, JoyCaption (SW-7083) or
+/// the Qwen3.8 27B describer at a tier describes each image of the dataset (or of `itemIds`, in
+/// dataset order) as seven JSON fields plus its pixel size; `fitTo` and `condenseRows` add or run
+/// only the condensing step. The job routes by the capability of its model (`prompt_refine` for
+/// the Vision Captioner-class describers, `training_caption` for JoyCaption). The worker
 /// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
 /// the user's instruction.
 pub(crate) async fn create_training_dataset_batch_describe_job(

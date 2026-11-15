@@ -66998,7 +66998,12 @@
           "default": true,
           "estimatedSizeBytes": 19995477764,
           "files": [
-            "q4/*"
+            "q4/config.json",
+            "q4/generation_config.json",
+            "q4/chat_template.jinja",
+            "q4/tokenizer.json",
+            "q4/tokenizer_config.json",
+            "q4/model.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 19995477764
@@ -67014,7 +67019,12 @@
         {
           "estimatedSizeBytes": 32371297322,
           "files": [
-            "q8/*"
+            "q8/config.json",
+            "q8/generation_config.json",
+            "q8/chat_template.jinja",
+            "q8/tokenizer.json",
+            "q8/tokenizer_config.json",
+            "q8/model.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 32371297322
@@ -67031,7 +67041,12 @@
           "default": true,
           "estimatedSizeBytes": 19995370331,
           "files": [
-            "q4/*"
+            "q4/config.json",
+            "q4/generation_config.json",
+            "q4/chat_template.jinja",
+            "q4/tokenizer.json",
+            "q4/tokenizer_config.json",
+            "q4/model.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 19995370331
@@ -67048,7 +67063,12 @@
         {
           "estimatedSizeBytes": 32371188675,
           "files": [
-            "q8/*"
+            "q8/config.json",
+            "q8/generation_config.json",
+            "q8/chat_template.jinja",
+            "q8/tokenizer.json",
+            "q8/tokenizer_config.json",
+            "q8/model.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 32371188675

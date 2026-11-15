@@ -894,8 +894,9 @@ async fn queue_catalog_download(
     requested_gpu: String,
     binding: Value,
 ) -> Result<JobSnapshot, ApiError> {
-    create_generation_job_with_binding(
-        state,
+    let row = binding.get("row").cloned();
+    let job = create_generation_job_with_binding(
+        state.clone(),
         JobType::ModelDownload,
         None,
         None,
@@ -903,7 +904,16 @@ async fn queue_catalog_download(
         requested_gpu,
         (None, Some(binding)),
     )
-    .await
+    .await?;
+    // Record the row's trusted pinned-file ledger now, while the hub is reachable, so a job that
+    // binds this source after the download is admitted offline. In the background: the download
+    // request never waits on it.
+    if let Some(row) = row {
+        tokio::spawn(async move {
+            crate::portable_admission::record_trusted_pinned_files_for_download(&state, &row).await;
+        });
+    }
+    Ok(job)
 }
 
 fn catalog_download_binding(

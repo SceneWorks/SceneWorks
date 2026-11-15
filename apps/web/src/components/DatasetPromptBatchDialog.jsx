@@ -57,9 +57,9 @@ export const DESCRIBE_MODELS = [
     label: "Vision Describer (Qwen3.8-27B)",
     condenses: true,
     tiers: [
-      ["q4", "q4 (20 GB)"],
-      ["q8", "q8 (32 GB)"],
-      ["bf16", "Full precision (56 GB)"],
+      ["q4", "q4"],
+      ["q8", "q8"],
+      ["bf16", "Full precision"],
     ],
   },
   { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one", condenses: false },
@@ -70,6 +70,14 @@ export const DESCRIBE_MODELS = [
 function describerTier(entry, tier) {
   if (!entry?.tiers) return null;
   return entry.tiers.some(([key]) => key === tier) ? tier : entry.tiers[0][0];
+}
+
+// A tier's size as the catalog serves it (its footprint, else its download size), printed the way
+// the download panel prints it, so a tier shows one figure in one unit; null when none is served.
+function tierSize(entry, tier) {
+  const variant = entry?.variants?.find((candidate) => candidate?.variant === tier);
+  const bytes = variant?.footprint?.diskSizeBytes ?? variant?.downloadSizeBytes;
+  return typeof bytes === "number" && bytes > 0 ? formatTierBytes(bytes) : null;
 }
 
 // Whether the catalog `entry` can run `tier` (null: the model as a whole) on this install.
@@ -91,6 +99,8 @@ export const DESCRIBE_FIELDS = [
 ];
 
 const POLL_MS = 1000;
+// How long a start request may go unanswered before the dialog says it is checking model files.
+export const SLOW_START_MS = 4000;
 // Describe jobs read per page of the dataset's history while restoring the table.
 export const RESTORE_JOBS_PAGE = 50;
 // The wait before each retry of a failed job or items read. A read still failing after the last
@@ -468,6 +478,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // second click synchronously, before React re-renders the disabled buttons; the state disables them.
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
+  // The start request has been waiting for a while: the API is checking the model files.
+  const [slowStart, setSlowStart] = useState(false);
   // Why monitoring stopped while the job was still active (its reads kept failing), or "".
   const [monitorError, setMonitorError] = useState("");
   // True until the earlier runs' results are loaded into the table; runs stay blocked meanwhile.
@@ -492,7 +504,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // recorded tier the model does not offer is kept as `unknownTier` (its re-run is blocked), never
   // replaced by another tier.
   const rowDescriber = (row) => {
-    const entry = DESCRIBE_MODELS.find((candidate) => candidate.repo === row.model);
+    // A row stored before describers were recorded was described by the default Vision Captioner,
+    // the same fallback its condensing (`describerCondenses`, the condense request) uses.
+    const repo = row.model ?? VISION_CAPTION_MODEL_REPO;
+    const entry = DESCRIBE_MODELS.find((candidate) => candidate.repo === repo);
     if (!entry) return { entry: model, tier };
     const unknownTier = Boolean(entry.tiers && row.variant && !entry.tiers.some(([key]) => key === row.variant));
     return { entry, tier: unknownTier ? row.variant : describerTier(entry, row.variant), unknownTier };
@@ -580,20 +595,23 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // (named with its tier), whose download installs only that tier.
   // The tier's own size, as the Model Manager's tier panel reads it; none rather than the model-level
   // size, which describes the default tier.
-  const tierVariant = tier ? selectedEntry?.variants?.find((variant) => variant?.variant === tier) : null;
-  const tierBytes = tierVariant?.footprint?.diskSizeBytes ?? tierVariant?.downloadSizeBytes;
   const missingModels = tier
     ? selectedEntry && !selectedAvailable
       ? [
           {
             ...selectedEntry,
             name: `${selectedEntry.name ?? model.label} ${tierLabel}`,
-            downloadSizeLabel: typeof tierBytes === "number" && tierBytes > 0 ? formatTierBytes(tierBytes) : null,
+            downloadSizeLabel: tierSize(selectedEntry, tier),
             downloadSizeEstimated: false,
           },
         ]
       : []
-    : missingRequiredModels(models, [model.id]);
+    : // The same unit the tier radios and a tier's panel print, so the dialog shows one unit.
+      missingRequiredModels(models, [model.id]).map((entry) =>
+        typeof entry.downloadSizeBytes === "number" && entry.downloadSizeBytes > 0
+          ? { ...entry, downloadSizeLabel: formatTierBytes(entry.downloadSizeBytes) }
+          : entry,
+      );
   const downloadJobs = useMemo(
     () => jobs.filter((entry) => entry.type === "model_download" && (!tier || entry.payload?.variant === tier)),
     [jobs, tier],
@@ -886,6 +904,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       const controller = new AbortController();
       pollAbort.current = controller;
       let created;
+      // A start that has not answered after a few seconds is the API checking the model's files
+      // (hashing them once, after an install that recorded no check): say so instead of a bare
+      // spinner. Cleared as soon as the request answers.
+      const slowTimer = new AbortController();
+      abortableDelay(SLOW_START_MS, slowTimer.signal).then(
+        () => {
+          if (!slowTimer.signal.aborted) setSlowStart(true);
+        },
+        () => {},
+      );
       try {
         created = await trainingApi.batchDescribeJobs(projectId, dataset.id, token, {
           method: "POST",
@@ -895,6 +923,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       } catch (error) {
         if (!isAbortError(error)) setRunError(errorMessage(error, "Could not run the describe job."));
         return;
+      } finally {
+        slowTimer.abort();
+        setSlowStart(false);
       }
       if (!itemIds && !condense) setRows([]);
       itemsRead.current = { jobId: created.id, count: 0, provisional: new Set() };
@@ -1116,10 +1147,18 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   // Why a row's re-run, which runs the row's own describer and tier, cannot start: that model or
   // tier is not installed, or an edited prompt is over that model's limit. "" when it can.
+  // The model (and tier) a row's re-run runs: the ones that described it, shown on the row so a
+  // different selection above never reads as the one it uses.
+  function rerunDescriberName(row) {
+    const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+    if (unknownTier || !rowTier) return entry.label;
+    return `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}`;
+  }
+
   function rerunIssue(row) {
     const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
     if (unknownTier) return `${entry.label} has no tier “${rowTier}”, the tier that described this image.`;
-    const name = rowTier ? `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}` : entry.label;
+    const name = rerunDescriberName(row);
     if (!modelAvailable(entry.id, rowTier)) return `${name} is not installed.`;
     const rowDefault = defaults[entry.repo];
     if (!rowDefault) return promptErrors[entry.repo] || "Loading the describing prompt…";
@@ -1143,7 +1182,11 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         <fieldset className="dataset-prompt-batch-models">
           <legend>Describing model</legend>
           {DESCRIBE_MODELS.map((entry) => {
-            const available = modelAvailable(entry.id, entry.id === model.id ? tier : null);
+            // A tiered describer is unavailable only when no tier is installed; a missing selected
+            // tier is marked on its own radio below.
+            const available = entry.tiers
+              ? entry.tiers.some(([key]) => modelAvailable(entry.id, key))
+              : modelAvailable(entry.id);
             return (
               <label className="training-toggle-line" key={entry.id}>
                 <input
@@ -1177,6 +1220,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                 />
                 <span>
                   {label}
+                  {tierSize(selectedEntry, key) ? ` (${tierSize(selectedEntry, key)})` : ""}
                   {modelAvailable(model.id, key) ? null : (
                     <small className="dataset-prompt-batch-unavailable"> — not installed</small>
                   )}
@@ -1295,6 +1339,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         {restoring ? <p className="dataset-caption-mode-note" role="status">Loading results of earlier runs…</p> : null}
         {runError ? <p className="inline-warning" role="alert">{runError}</p> : null}
         {runMessage ? <p className="dataset-caption-mode-note" role="status">{runMessage}</p> : null}
+        {submitting && slowStart ? (
+          <p className="dataset-caption-mode-note" data-run-note="checking-files" role="status">
+            Checking the model files before the job starts. This happens once after a model is installed and
+            can take about two minutes for a large model.
+          </p>
+        ) : null}
 
         {rows.length ? (
           <div className="dataset-prompt-batch-table" role="table" aria-label="Described images">
@@ -1323,6 +1373,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     >
                       {rerunItemId === row.itemId ? "Re-running…" : "Re-run"}
                     </button>
+                    <span className="dataset-prompt-batch-size" data-row-note="rerun-with">
+                      Re-runs with {rerunDescriberName(row)}
+                    </span>
                   </div>
                   <div className="dataset-prompt-batch-fields" role="cell">
                     {row.failed ? (

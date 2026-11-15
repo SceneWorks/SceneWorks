@@ -33,6 +33,26 @@ pub const QWEN38_27B_DESCRIBER_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
 /// The tier a Qwen3.8 27B request without a `tier` describes with.
 pub const QWEN38_27B_DESCRIBER_DEFAULT_TIER: &str = "q4";
 
+/// The file selectors the shipped catalog row of the Qwen3.8 27B `tier` served from `repo` names:
+/// the exact files of a quantised tier's folder, or full precision's named files plus its
+/// `model-*.safetensors` shard glob. Empty when the catalog has no such row. The API's install
+/// state, the job's tier check and the worker all require every one of these to be present.
+pub fn qwen38_tier_files(repo: &str, tier: &str) -> Vec<String> {
+    crate::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)
+        .and_then(|entry| entry.get("downloads")?.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .find(|row| {
+            row.get("repo").and_then(Value::as_str) == Some(repo)
+                && row.get("variant").and_then(Value::as_str) == Some(tier)
+        })
+        .and_then(|row| row.get("files")?.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Whether `model` (the request's `model` value) selects the Qwen3.8 27B describer.
 pub fn is_qwen38_27b_describer(model: Option<&str>) -> bool {
     model.map(str::trim) == Some(QWEN38_27B_DESCRIBER_REPO)
@@ -311,7 +331,12 @@ mod tests {
             assert_eq!(downloads.len(), 1, "{platform} {variant:?}: {downloads:?}");
             (
                 downloads[0]["repo"].as_str().expect("repo").to_owned(),
-                downloads[0]["files"][0].as_str().expect("file").to_owned(),
+                downloads[0]["files"]
+                    .as_array()
+                    .expect("files")
+                    .iter()
+                    .map(|file| file.as_str().expect("file").to_owned())
+                    .collect::<Vec<_>>(),
             )
         };
         // Each engine stores a quantised tier in its own format, so each platform selects its
@@ -324,7 +349,19 @@ mod tests {
             for tier in ["q4", "q8"] {
                 let (repo, files) = selected(platform, Some(tier));
                 assert_eq!(repo, rehost, "{platform} {tier}");
-                assert_eq!(files, format!("{tier}/*"));
+                // Every file of the tier's folder, named one by one (never a `<tier>/*` glob, which
+                // one file satisfies), the list every install check requires.
+                let expected = [
+                    "config.json",
+                    "generation_config.json",
+                    "chat_template.jinja",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "model.safetensors",
+                ]
+                .map(|name| format!("{tier}/{name}"));
+                assert_eq!(files, expected, "{platform} {tier}");
+                assert_eq!(files, qwen38_tier_files(rehost, tier));
             }
             assert_eq!(
                 selected(platform, Some("bf16")).0,
@@ -333,9 +370,11 @@ mod tests {
             );
             // A request without a variant gets the default tier's row, the tier the job
             // defaults to.
-            assert_eq!(
-                selected(platform, None).1,
-                format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/*"),
+            assert!(
+                selected(platform, None)
+                    .1
+                    .iter()
+                    .all(|file| file.starts_with(&format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/"))),
                 "{platform}"
             );
             // Every tier in the request vocabulary has a row.

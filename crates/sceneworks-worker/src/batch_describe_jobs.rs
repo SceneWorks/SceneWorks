@@ -176,25 +176,53 @@ pub(crate) fn qwen38_describer_weights_dir(
              in the Model Manager, or choose a tier that is installed."
         ))
     };
-    let dir = if tier == "bf16" {
-        resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label)
-            .map_err(|_| not_installed())?
+    let repo = if tier == "bf16" {
+        QWEN38_27B_DESCRIBER_REPO
+    } else if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
     } else {
-        let repo = if cfg!(target_os = "macos") {
-            QWEN38_27B_DESCRIBER_MLX_REPO
-        } else {
-            QWEN38_27B_DESCRIBER_CANDLE_REPO
-        };
-        resolve_app_managed_model_dir(settings, repo, label)
-            .map_err(|_| not_installed())?
-            .join(tier)
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
     };
-    // A snapshot folder alone is not an install: a partial download leaves one without its config.
-    if dir.join("config.json").is_file() {
-        Ok(dir)
-    } else {
-        Err(not_installed())
+    let snapshot =
+        resolve_app_managed_model_dir(settings, repo, label).map_err(|_| not_installed())?;
+    // Installed means every file the catalog row pins is in this snapshot, the same rule the API's
+    // install state and the job's tier check apply: a cancelled download leaves a folder with
+    // some of them, never an install.
+    let files = sceneworks_core::dataset_batch_describe::qwen38_tier_files(repo, tier);
+    if files.is_empty() || !qwen38_snapshot_holds(&snapshot, &files) {
+        return Err(not_installed());
     }
+    Ok(if tier == "bf16" {
+        snapshot
+    } else {
+        snapshot.join(tier)
+    })
+}
+
+/// Whether `snapshot` holds every file in `files`. A `model-*.safetensors` shard glob is satisfied
+/// by the shards the snapshot's `model.safetensors.index.json` names, every one of them present.
+#[cfg(native_lane)]
+fn qwen38_snapshot_holds(snapshot: &Path, files: &[String]) -> bool {
+    files.iter().all(|file| {
+        if !file.contains('*') {
+            return snapshot.join(file).is_file();
+        }
+        let Some(shards) = std::fs::read_to_string(snapshot.join("model.safetensors.index.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|index| {
+                index.get("weight_map")?.as_object().map(|map| {
+                    map.values()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+            })
+        else {
+            return false;
+        };
+        !shards.is_empty() && shards.iter().all(|shard| snapshot.join(shard).is_file())
+    })
 }
 
 /// The catalog's pinned snapshot of a Qwen3.8 27B tier, as [`qwen38_describer_weights_dir`]
@@ -289,16 +317,17 @@ pub(crate) fn qwen38_fit_refusal(
             needed_gb,
             available_gb,
         } => Err(WorkerError::InvalidPayload(format!(
-            "The {tier} tier of the Qwen3.8 27B describer needs {needed_gb:.0} GB of memory, but \
-             this worker has {available_gb:.0} GB for it. Choose a smaller tier."
+            "The {tier} tier of the Qwen3.8 27B describer needs {needed_gb:.1} GB of memory, but \
+             this worker has {available_gb:.1} GB for it. Choose a smaller tier."
         ))),
         _ => Ok(()),
     }
 }
 
 /// The Candle decision once the refine cache has answered: a tier already resident there is reused
-/// and needs no new VRAM, so only a cold load is checked against the free VRAM it will see (read
-/// after any other cached refiner was dropped). Pure, so it runs without a GPU.
+/// and needs no new VRAM, so only a cold load is checked against the free VRAM it will see (with
+/// any other cached refiner's weights credited, since the load drops it first). Pure, so it runs
+/// without a GPU.
 #[cfg(native_lane)]
 #[cfg_attr(
     not(all(not(target_os = "macos"), feature = "backend-candle")),
@@ -316,10 +345,12 @@ pub(crate) fn qwen38_cached_fit_refusal(
     }
 }
 
-/// The free VRAM (GB) a cold Candle load is checked against, read only after everything this worker
-/// can drop is gone: the cached image/video generator is evicted first (as the depth, training and
-/// image admissions do), then `probe_free_gb` reads the card. A warm tier is reused and needs no
-/// reading, so nothing is evicted for it. The evict and the probe are injected so the order is
+/// The free VRAM (GB) a cold Candle load is checked against. The cached image/video generator is
+/// evicted first (as the depth, training and image admissions do), then `probe_budget` reads the
+/// card, and `refiner_credit_gb` (the weights of a different cached refiner, which the load's own
+/// evict-before-load drops) is added, capped at the card's total. The refiner itself is not
+/// evicted here, so a job this check refuses leaves it resident. A warm tier is reused and needs
+/// no reading, so nothing is evicted for it. The evict and the probe are injected so the order is
 /// testable without a GPU.
 #[cfg(native_lane)]
 #[cfg_attr(
@@ -328,12 +359,13 @@ pub(crate) fn qwen38_cached_fit_refusal(
 )]
 pub(crate) async fn qwen38_free_gb_after_eviction<Evict, Probe>(
     access: crate::cache_thread::CacheAccess,
+    refiner_credit_gb: f64,
     evict_generator: impl FnOnce() -> Evict,
-    probe_free_gb: impl FnOnce() -> Probe,
+    probe_budget: impl FnOnce() -> Probe,
 ) -> WorkerResult<Option<f64>>
 where
     Evict: std::future::Future<Output = WorkerResult<bool>>,
-    Probe: std::future::Future<Output = WorkerResult<Option<f64>>>,
+    Probe: std::future::Future<Output = WorkerResult<Option<crate::fit_gate::VramBudget>>>,
 {
     if access == crate::cache_thread::CacheAccess::Warm {
         return Ok(None);
@@ -344,7 +376,18 @@ where
             "Qwen3.8 27B describer admission: evicted the cached generator before reading free VRAM"
         );
     }
-    probe_free_gb().await
+    Ok(probe_budget()
+        .await?
+        .map(|budget| crate::fit_gate::with_reclaimable(budget, refiner_credit_gb).free_gb))
+}
+
+/// The weights (GB) a cached refiner at `source` holds: the bytes of its safetensors payload, what
+/// dropping it releases. 0 when it cannot be read, so an unreadable entry is never over-credited.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn cached_refiner_weights_gb(source: &Path) -> f64 {
+    gen_core::core_llm::checkpoint_payload_bytes(source)
+        .map(|bytes| bytes as f64 / (1u64 << 30) as f64)
+        .unwrap_or(0.0)
 }
 
 /// Whether this worker can hold the job's tier, checked before any image.
@@ -354,10 +397,10 @@ where
 /// nothing is evicted here: eviction could not change the decision.
 ///
 /// Candle: the CUDA fit gate's own floor reader against FREE VRAM, which a cached model does lower.
-/// So the refine cache is asked first: the same tier resident there is reused (admitted with no
-/// check), and a different cached refiner is dropped, as the load's own evict-before-load would.
-/// A cold load also evicts the cached image/video generator before free VRAM is read fresh
-/// ([`qwen38_free_gb_after_eviction`]).
+/// So the refine cache is asked first, without evicting: the same tier resident there is reused
+/// (admitted with no check); a different cached refiner stays resident and its weights are
+/// credited, because the load's own evict-before-load drops it. A cold load evicts the cached
+/// image/video generator before free VRAM is read fresh ([`qwen38_free_gb_after_eviction`]).
 #[cfg(native_lane)]
 async fn qwen38_memory_admission(
     settings: &Settings,
@@ -377,21 +420,24 @@ async fn qwen38_memory_admission(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         let (spec, requirements) = vision_describer_load(weights_dir);
-        let access =
-            crate::refine_model_cache::prepare_refiner_admission(&spec, &requirements).await?;
+        let (access, cached_refiner) =
+            crate::refine_model_cache::refiner_admission_access(&spec, &requirements).await?;
         let needed_gb = qwen38_catalog_entry(payload)
             .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
+        let credit_gb = cached_refiner
+            .as_deref()
+            .map_or(0.0, cached_refiner_weights_gb);
         let gpu_id = settings.gpu_id.clone();
         let available_gb = qwen38_free_gb_after_eviction(
             access,
+            credit_gb,
             crate::generator_cache::evict_cached_generator,
             || async move {
-                Ok(crate::load_progress::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
                 })
                 .await
-                .map_err(|error| task_join_error("describer VRAM probe", error))?
-                .map(|budget| budget.free_gb))
+                .map_err(|error| task_join_error("describer VRAM probe", error))
             },
         )
         .await?;
@@ -1077,8 +1123,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
                         return Ok(Err(format!("The image could not be prepared: {error}")))
                     }
                 };
-                // The Vision Captioner has no thinking mode; a no-think request keeps the JSON
-                // mask safe to apply from the first token.
+                // Thinking is always off: the 8B Vision Captioner has no thinking mode, and the
+                // Qwen3.8 27B has one that this request disables. A no-think request keeps the
+                // JSON mask safe to apply from the first token.
                 let thinking = ThinkingMode::Disabled;
                 let constraint = crate::prompt_refine_jobs::json_decode_constraint(
                     true,

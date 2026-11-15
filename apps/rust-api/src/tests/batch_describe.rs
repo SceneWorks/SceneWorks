@@ -676,6 +676,63 @@ async fn a_qwen38_job_is_claimed_by_a_capable_worker_on_each_lane() {
     }
 }
 
+/// A partial tier (a cancelled download: every pinned file but the weights) is not installed:
+/// the catalog reports it missing, so the dialog's tier radio shows it unavailable, and the POST
+/// is refused with the same 409.
+#[tokio::test]
+async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    serve_builtin_models(&temp_dir, &[QWEN38_27B_DESCRIBER_MODEL_ID]);
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    let row = qwen38_tier_row(std::env::consts::OS, "q4");
+    let cache =
+        huggingface_repo_cache_path(&state.settings.data_dir, row["repo"].as_str().unwrap())
+            .unwrap();
+    std::fs::remove_file(
+        cache
+            .join("snapshots")
+            .join(row["revision"].as_str().unwrap())
+            .join("q4/model.safetensors"),
+    )
+    .expect("drop the q4 weights");
+
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .find(|entry| entry["id"] == QWEN38_27B_DESCRIBER_MODEL_ID)
+        .expect("the 27B is listed");
+    let q4 = entry["variants"]
+        .as_array()
+        .expect("tier states")
+        .iter()
+        .find(|variant| variant["variant"] == "q4")
+        .expect("a q4 state");
+    assert_ne!(q4["installState"], "installed", "{q4}");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("detail")
+            .starts_with("The q4 tier of Vision Describer (Qwen3.8-27B) is not installed."),
+        "{body}"
+    );
+}
+
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
 /// message that names the tier and what to do. Another installed tier does not stand in for it.
 #[tokio::test]
@@ -804,6 +861,26 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
     );
 }
 
+/// Serve exactly these shipped builtin entries as this app's model catalog.
+fn serve_builtin_models(temp_dir: &tempfile::TempDir, ids: &[&str]) {
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let models: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            sceneworks_core::builtin_manifests::builtin_model_entry(id)
+                .unwrap_or_else(|| panic!("{id} is a builtin"))
+                .clone()
+        })
+        .collect();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": models }).to_string(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+}
+
 /// AC1: installing the q4 tier downloads the q4 folder of this platform's re-host and nothing
 /// else (never the full-precision files), and it is the same pinned source a q4 describe job binds
 /// for this platform's worker, so the installed tier is the one the worker loads.
@@ -838,7 +915,7 @@ async fn installing_the_q4_tier_downloads_only_the_q4_files_the_q4_job_loads() {
     assert_eq!(payload["repo"], row["repo"]);
     assert_ne!(payload["repo"], QWEN38_27B_DESCRIBER_REPO);
     assert_eq!(payload["revision"], row["revision"]);
-    assert_eq!(payload["files"], json!(["q4/*"]));
+    assert_eq!(payload["files"], row["files"]);
     assert_eq!(payload["variant"], "q4");
 
     seed_qwen38_tier(&state.settings.data_dir, "q4");
@@ -1122,4 +1199,74 @@ async fn a_measure_only_job_prepares_no_describer_source_and_condense_only_prepa
         .filter_map(|entry| entry["id"].as_str())
         .collect();
     assert_eq!(entries, vec!["vision_caption_qwen3vl_8b"]);
+}
+
+/// Offline admission of an installed describer. With the hub unreachable and no trusted file
+/// ledger on this host, a describe job cannot bind its source and is refused up front (on `main`
+/// the job was queued unbound and then could not be bound to run either). A model download made
+/// while online records that ledger, so after a restart the same describe job is admitted
+/// offline from it without a network request.
+#[tokio::test]
+async fn an_installed_describer_is_admitted_offline_once_its_download_recorded_the_ledger() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    serve_builtin_models(&temp_dir, &["vision_caption_qwen3vl_8b"]);
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    // A base URL of this test's own keeps its pinned-metadata cache keys apart from other tests'.
+    *state.test_hooks.huggingface_base_url.lock() =
+        Some("https://hub.offline-describer.invalid".to_owned());
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let mut entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("vision_caption_qwen3vl_8b")
+            .expect("the 8B is a builtin")
+            .clone(),
+    );
+    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
+    let row = entry["downloads"][0].clone();
+    let offline = || {
+        *state.test_hooks.pinned_metadata_remote.lock() = Some(std::sync::Arc::new(|_, _, _| {
+            Err("network unreachable".to_owned())
+        }));
+    };
+
+    offline();
+    let (status, body) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("pinned metadata could not be fetched"),
+        "{body}"
+    );
+
+    // Online: the download records the row's trusted ledger in the background.
+    *state.test_hooks.pinned_metadata_remote.lock() =
+        Some(std::sync::Arc::new(|repo, revision, selectors| {
+            crate::portable_admission::test_network::offline_pinned_files(repo, revision, selectors)
+        }));
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/vision_caption_qwen3vl_8b/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let mut recorded = false;
+    for _ in 0..100 {
+        if crate::portable_admission::trusted_pinned_ledger_recorded(&state, &row) {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(recorded, "the download recorded the trusted ledger");
+
+    // Restart offline: the process cache is gone, the ledger answers.
+    crate::portable_admission::forget_pinned_metadata_for_test(row["repo"].as_str().unwrap());
+    offline();
+    let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
 }

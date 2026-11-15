@@ -2969,6 +2969,71 @@ async fn capture_download_member(
     Ok(member)
 }
 
+/// The file selectors a job's binding captures for a catalog download `row`: its `files`, or the
+/// whole pinned snapshot (`*`) for the legacy `files: []`. One spelling shared by the binding and
+/// the download-time ledger record below, so both key the same ledger.
+fn download_row_selectors(row: &Value) -> Option<Vec<String>> {
+    let mut selectors = row
+        .get("files")?
+        .as_array()?
+        .iter()
+        .map(|file| {
+            file.as_str()
+                .filter(|file| !file.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if selectors.is_empty() {
+        selectors.push("*".to_owned());
+    }
+    Some(selectors)
+}
+
+/// Record this host's trusted pinned-file ledger for a catalog download `row` while the host
+/// reaches the hub: a model download starts only then, so a job that later binds the same source
+/// (a describe, a caption, a refine) is admitted offline from the persisted ledger. Best-effort:
+/// a failure only logs, and the job's own admission fetches or refuses as before.
+pub(crate) async fn record_trusted_pinned_files_for_download(state: &AppState, row: &Value) {
+    let (Some(repo), Some(revision), Some(selectors)) = (
+        row.get("repo").and_then(Value::as_str),
+        row.get("revision").and_then(Value::as_str),
+        download_row_selectors(row),
+    ) else {
+        return;
+    };
+    if let Err(error) = resolve_trusted_pinned_files(state, repo, revision, &selectors).await {
+        tracing::info!(repo, revision, detail = %error.detail,
+            "the pinned-file ledger was not recorded at download; a later job fetches it");
+    }
+}
+
+/// Whether this host holds a persisted trusted ledger for `row` (test introspection).
+#[cfg(test)]
+pub(crate) fn trusted_pinned_ledger_recorded(state: &AppState, row: &Value) -> bool {
+    let (Some(repo), Some(revision), Some(selectors)) = (
+        row.get("repo").and_then(Value::as_str),
+        row.get("revision").and_then(Value::as_str),
+        download_row_selectors(row),
+    ) else {
+        return false;
+    };
+    let base_url = huggingface_base_url(state);
+    let key = format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"));
+    trusted_pinned_ledger_path(&state.settings.data_dir, &key).is_file()
+}
+
+/// Drop this process's cached pinned metadata for `repo`, as an API restart does (test seam).
+#[cfg(test)]
+pub(crate) fn forget_pinned_metadata_for_test(repo: &str) {
+    let marker = format!("\0{repo}\0");
+    if let Some(cache) = PINNED_METADATA_CACHE.get() {
+        cache
+            .lock()
+            .unwrap()
+            .retain(|key, _| !key.contains(&marker));
+    }
+}
+
 /// A completed local receipt has no content hashes, so it never substitutes for the immutable
 /// upstream file proof. Successful pinned metadata is cacheable: a commit and concrete file
 /// selectors cannot change without an upstream integrity failure. It is cached for this process

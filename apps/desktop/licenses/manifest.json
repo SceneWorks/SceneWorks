@@ -1306,11 +1306,11 @@
       "publisher": "Alibaba Qwen Team",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated",
-      "usage": "Vision-language describer for dataset prompt batches (utility model). Downloaded on first use. The full-precision files come from the upstream repository; the quantised tiers are re-hosted by SceneWorks.",
+      "usage": "Vision-language describer for dataset prompt batches (utility model). Optional download: each tier is fetched only when you download it in the Model Manager. The full-precision files come from the upstream repository; the quantised tiers are re-hosted by SceneWorks.",
       "documents": [
         {
           "label": "Apache License 2.0",
-          "key": "qwen3-vl-caption-apache"
+          "key": "qwen3.8-27b-describer-apache"
         }
       ]
     },
