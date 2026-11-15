@@ -1489,6 +1489,73 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
     assert_eq!(result["variant"], "q8");
 }
 
+/// The pinned snapshot the CUDA smoke checks for each tier comes from the shipped catalog's rows:
+/// the engine's re-host `<tier>/` folder for q4 and q8, the upstream repository's root for bf16.
+/// The production resolver lands on exactly that folder when it is the cached snapshot.
+#[test]
+fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        QWEN38_27B_DESCRIBER_MODEL_ID, QWEN38_27B_DESCRIBER_TIERS,
+    };
+    let entry = crate::test_env::shipped_catalog_entry(QWEN38_27B_DESCRIBER_MODEL_ID);
+    let is_revision =
+        |value: &str| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    for rehost in [
+        QWEN38_27B_DESCRIBER_CANDLE_REPO,
+        QWEN38_27B_DESCRIBER_MLX_REPO,
+    ] {
+        for tier in ["q4", "q8"] {
+            let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("quantised row");
+            assert_eq!(pinned.repo, rehost);
+            assert!(is_revision(&pinned.revision), "{rehost} {tier}: {pinned:?}");
+            assert_eq!(
+                pinned.relative_dir,
+                Path::new(&format!("models--{}", rehost.replace('/', "--")))
+                    .join("snapshots")
+                    .join(&pinned.revision)
+                    .join(tier)
+            );
+        }
+        // Full precision is the upstream repository on every lane, at its root.
+        let bf16 = qwen38_pinned_snapshot(&entry, "bf16", rehost).expect("bf16 row");
+        assert_eq!(bf16.repo, QWEN38_27B_DESCRIBER_REPO);
+        assert!(is_revision(&bf16.revision), "{bf16:?}");
+        assert_eq!(
+            bf16.relative_dir,
+            Path::new("models--huihui-ai--Huihui-Qwen3.8-27B-abliterated")
+                .join("snapshots")
+                .join(&bf16.revision)
+        );
+        assert_eq!(qwen38_pinned_snapshot(&entry, "q2", rehost), None);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    for tier in QWEN38_27B_DESCRIBER_TIERS {
+        let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("pinned row");
+        let folder = hf_cache.path().join(&pinned.relative_dir);
+        std::fs::create_dir_all(&folder).expect("snapshot folder");
+        std::fs::write(folder.join("config.json"), b"{}").expect("config");
+        let resolved = qwen38_describer_weights_dir(&settings, tier).expect("installed");
+        assert!(
+            resolved.ends_with(&pinned.relative_dir),
+            "{tier} resolved to {}",
+            resolved.display()
+        );
+    }
+}
+
 /// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is
 /// the upstream snapshot; a tier folder without its `config.json` is refused by name.
 #[test]

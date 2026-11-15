@@ -2,8 +2,9 @@
 //!
 //! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow, under the exact-UUID
 //! CUDA guard (`scripts/ci/windows_cuda_execution.py`); it is never part of ordinary PR or push CI.
-//! It resolves a pre-quantised Candle tier through the production path
-//! (`qwen38_describer_weights_dir`), describes one synthetic scene generated here with the production
+//! It resolves a Candle tier (pre-quantised q4/q8 from the re-host, or full-precision bf16 from the
+//! upstream repository) through the production path (`qwen38_describer_weights_dir`), checks it is
+//! the catalog's pinned snapshot for that tier, describes one synthetic scene generated here with the production
 //! describer (`VisionCaptionerDescriber`, the same one a `dataset_batch_describe` job runs), and
 //! requires the described fields to be filled (`pose` and `camera` may be empty: the scene has no
 //! people and no camera character) from a complete reply: a reply cut off at the reply budget fails
@@ -25,7 +26,7 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke -- --ignored --nocapture --test-threads=1
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -42,22 +43,17 @@ const TIER_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_TIER";
 const IMAGE_SIDE_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE";
 const CATALOG_ID: &str = "vision_describe_qwen3_8_27b";
 
-/// The catalog's pinned revision of the Candle re-host for `tier`.
-fn catalog_candle_revision(tier: &str) -> String {
+/// The catalog's pinned snapshot of `tier` on the Candle lane: the re-host's `<tier>/` folder for
+/// q4 and q8, the upstream repository's root for full precision (`bf16`).
+fn pinned_candle_snapshot(tier: &str) -> crate::batch_describe_jobs::Qwen38PinnedSnapshot {
     use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO;
     let entry = crate::test_env::shipped_catalog_entry(CATALOG_ID);
-    entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|rows| {
-            rows.iter().find(|row| {
-                row.get("repo").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_CANDLE_REPO)
-                    && row.get("variant").and_then(Value::as_str) == Some(tier)
-            })
-        })
-        .and_then(|row| row.get("revision").and_then(Value::as_str))
-        .unwrap_or_else(|| panic!("the catalog has no pinned Candle {tier} row for {CATALOG_ID}"))
-        .to_owned()
+    crate::batch_describe_jobs::qwen38_pinned_snapshot(
+        &entry,
+        tier,
+        QWEN38_27B_DESCRIBER_CANDLE_REPO,
+    )
+    .unwrap_or_else(|| panic!("the catalog has no pinned Candle {tier} row for {CATALOG_ID}"))
 }
 
 /// The scene size `$SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE` selects: unset, blank or `default` is
@@ -106,13 +102,12 @@ fn synthetic_scene(width: u32, height: u32) -> image::DynamicImage {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight describer GPU validation; needs a pinned Candle tier of the Qwen3.8 27B describer under HF_HUB_CACHE and a CUDA device"]
 async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
-    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO;
-
-    let tier = std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV} to q4 or q8"));
+    let tier =
+        std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV} to q4, q8 or bf16"));
     let tier = tier.trim().to_owned();
     assert!(
-        tier == "q4" || tier == "q8",
-        "${TIER_ENV} must be q4 or q8, got {tier:?}"
+        matches!(tier.as_str(), "q4" | "q8" | "bf16"),
+        "${TIER_ENV} must be q4, q8 or bf16, got {tier:?}"
     );
     let hf_hub_cache = PathBuf::from(
         std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
@@ -129,16 +124,10 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
     let settings = Settings::for_test(temp.path().join("data"));
     let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
         .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
-    let revision = catalog_candle_revision(&tier);
-    let pinned_suffix = Path::new(&format!(
-        "models--{}",
-        QWEN38_27B_DESCRIBER_CANDLE_REPO.replace('/', "--")
-    ))
-    .join("snapshots")
-    .join(&revision)
-    .join(&tier);
+    let pinned = pinned_candle_snapshot(&tier);
+    let pinned_suffix = &pinned.relative_dir;
     assert!(
-        weights_dir.ends_with(&pinned_suffix),
+        weights_dir.ends_with(pinned_suffix),
         "the {tier} tier resolved to {} instead of the pinned snapshot {}",
         weights_dir.display(),
         pinned_suffix.display()
@@ -228,8 +217,8 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         let result = json!({
             "schema_version": 1,
             "test_fqn": test_fqn,
-            "repo": QWEN38_27B_DESCRIBER_CANDLE_REPO,
-            "revision": revision,
+            "repo": pinned.repo,
+            "revision": pinned.revision,
             "tier": tier,
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },

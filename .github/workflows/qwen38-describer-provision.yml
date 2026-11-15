@@ -1,11 +1,21 @@
 name: Qwen3.8 27B describer weight provisioning
 
-# Dispatch-only (SW-7120). Downloads the pinned Candle q4/ and q8/ tiers of
-# SceneWorks/qwen3.8-27b-abliterated-candle into the CUDA real-weights runner's hub cache, in the
-# standard hub layout, for qwen38-describer-validation.yml. Runs no model. Does nothing when every
-# file is already present at its published size; refuses before downloading with under 70 GB free.
+# Dispatch-only (SW-7120). Downloads pinned Candle tiers of the Qwen3.8 27B describer into the CUDA
+# real-weights runner's hub cache, in the standard hub layout, for qwen38-describer-validation.yml.
+# `tiers: quantised` (the default) is the q4/ and q8/ folders of
+# SceneWorks/qwen3.8-27b-abliterated-candle (~52.4 GB; refuses with under 70 GB free). `tiers: bf16`
+# is the full-precision huihui-ai/Huihui-Qwen3.8-27B-abliterated snapshot the catalog's bf16 row
+# names (~55.6 GB; refuses with under 75 GB free). Runs no model. Does nothing when every file is
+# already present at its published size.
 on:
   workflow_dispatch:
+    inputs:
+      tiers:
+        description: quantised (q4 and q8 from the re-host) or bf16 (full precision from upstream)
+        required: true
+        type: choice
+        options: [quantised, bf16]
+        default: quantised
 
 permissions:
   contents: read
@@ -36,9 +46,10 @@ jobs:
           }
       - name: Test the provisioning checks without network
         run: python -I -B scripts/ci/qwen38_describer_provision_test.py
-      - name: Provision the pinned q4 and q8 tiers
+      - name: Provision the pinned ${{ inputs.tiers }} tiers
         shell: powershell
         env:
+          SCENEWORKS_QWEN38_DESCRIBER_PROVISION: ${{ inputs.tiers }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
           HF_HUB_DISABLE_TELEMETRY: "1"

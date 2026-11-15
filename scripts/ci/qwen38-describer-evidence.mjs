@@ -4,15 +4,37 @@
 // `camera` may be empty strings: the output contract allows them when the image shows no people or
 // no camera character.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const FIELDS = Object.freeze(['description', 'pose', 'style', 'camera', 'composition', 'lighting', 'environment']);
 // Fields the output contract allows to be empty.
 export const MAY_BE_EMPTY = Object.freeze(['pose', 'camera']);
-export const TIERS = Object.freeze(['q4', 'q8']);
-export const REPO = 'SceneWorks/qwen3.8-27b-abliterated-candle';
+export const TIERS = Object.freeze(['q4', 'q8', 'bf16']);
+// The Candle lane's quantised tiers come from this re-host; full precision from the upstream repository.
+export const REHOST_REPO = 'SceneWorks/qwen3.8-27b-abliterated-candle';
+export const UPSTREAM_REPO = 'huihui-ai/Huihui-Qwen3.8-27B-abliterated';
+export const CATALOG_ID = 'vision_describe_qwen3_8_27b';
+const SPECS_FILE = fileURLToPath(new URL('../../config/manifests/registry/specs.json', import.meta.url));
+
+// Each tier's pinned snapshot on the Candle lane, read from the compiled catalog (the source the
+// worker's catalog reads): the repository, its pinned revision, and the weights folder relative to
+// the hub cache (`models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier).
+export function pinnedSnapshots(specs = JSON.parse(readFileSync(SPECS_FILE, 'utf8'))) {
+  const rows = specs?.[CATALOG_ID]?.product?.downloads ?? [];
+  return Object.freeze(Object.fromEntries(TIERS.map((tier) => {
+    const repo = tier === 'bf16' ? UPSTREAM_REPO : REHOST_REPO;
+    const matches = rows.filter((row) => row.repo === repo && row.variant === tier);
+    assert.equal(matches.length, 1, `the catalog has one ${repo} ${tier} row`);
+    const { revision } = matches[0];
+    assert.match(String(revision), /^[a-f0-9]{40}$/, `the catalog pins ${repo} ${tier} to an exact revision`);
+    const relativeDir = [`models--${repo.replace('/', '--')}`, 'snapshots', revision, ...(tier === 'bf16' ? [] : [tier])].join('/');
+    return [tier, Object.freeze({ repo, revision, relativeDir })];
+  })));
+}
+
 export const TEST_NAME = 'qwen38_describer_describes_a_synthetic_scene_on_cuda';
 export const GUARD_ACTOR = 'qwen38-describer';
 // The workflow's `image_side` input and the scene size the smoke draws for it.
@@ -20,15 +42,19 @@ export const IMAGE_SIZES = Object.freeze({ default: [512, 384], 1536: [1536, 153
 // The worker caps one field at 16,000 characters; seven of them, JSON-escaped, stay far below this.
 const MAX_INPUT_BYTES = 1024 * 1024;
 
-export function validateResult(result, tier, imageSide = 'default') {
+export function validateResult(result, tier, imageSide = 'default', pinned = pinnedSnapshots()) {
   assert(TIERS.includes(tier), `requested tier must be one of ${TIERS.join(', ')}`);
   assert(Object.hasOwn(IMAGE_SIZES, imageSide), `requested image side must be one of ${Object.keys(IMAGE_SIZES).join(', ')}`);
   assert.equal(result?.schema_version, 1, 'unknown describer result schema');
   assert.equal(typeof result.test_fqn, 'string');
   assert.equal(result.test_fqn.split('::').at(-1), TEST_NAME, 'result is not from the describer smoke');
-  assert.equal(result.repo, REPO);
-  assert.match(String(result.revision), /^[a-f0-9]{40}$/, 'result must name the pinned revision');
   assert.equal(result.tier, tier, 'result tier differs from the requested tier');
+  const expected = pinned[tier];
+  assert.equal(result.repo, expected.repo, `the ${tier} tier must load from ${expected.repo}`);
+  assert.equal(result.revision, expected.revision, `the ${tier} tier must load the pinned revision ${expected.revision}`);
+  assert(typeof result.weights_dir === 'string'
+    && result.weights_dir.replaceAll('\\', '/').replace(/\/+$/, '').endsWith(`/${expected.relativeDir}`),
+  `weights_dir must be the pinned snapshot folder .../${expected.relativeDir}`);
   assert.deepEqual([result.image?.width, result.image?.height], IMAGE_SIZES[imageSide],
     'result image size differs from the requested image side');
   const empty = FIELDS.filter((name) => typeof result.fields?.[name] !== 'string'
