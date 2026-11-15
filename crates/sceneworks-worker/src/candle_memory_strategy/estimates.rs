@@ -596,6 +596,7 @@ pub(crate) fn floor_pseudo_anchor(
         tier: String::new(),
         transformer_variant: None,
         decoder: None,
+        regime: None,
         mode: String::new(),
         overlay: None,
         reference_count: 0,

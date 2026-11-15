@@ -96,6 +96,7 @@ fn store_of(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: bounds,
     }
@@ -110,6 +111,7 @@ fn bernini_bound_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: vec![anchor::ExceededBound {
             id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),

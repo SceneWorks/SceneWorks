@@ -534,12 +534,18 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
     let mut overridden = 0_usize;
     let mut forced = 0_usize;
 
+    let mut optimized_rows = 0_usize;
     for (key, row) in anchors.iter() {
+        // SW-F363: an optional fourth segment names one of the cell's regime anchors.
         let coordinates: Vec<&str> = key.split(':').collect();
-        let [_model_id, tier, backend] = coordinates.as_slice() else {
-            panic!("anchor key {key} must be <modelId>:<tier>:<backend>")
+        let (tier, backend, regime) = match coordinates.as_slice() {
+            [_model_id, tier, backend] => (*tier, *backend, None),
+            [_model_id, tier, backend, regime @ ("resident" | "optimized" | "lora")] => {
+                (*tier, *backend, Some(*regime))
+            }
+            _ => panic!("anchor key {key} must be <modelId>:<tier>:<backend>[:<regime>]"),
         };
-        if *backend != lane {
+        if backend != lane {
             continue;
         }
         let provider = row["provider"].as_str().expect("anchor provider");
@@ -555,7 +561,7 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
 
         let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
             .with_load_shape(load_shape);
-        let quant = match *tier {
+        let quant = match tier {
             "q4" => Some(gen_core::Quant::Q4),
             "q8" => Some(gen_core::Quant::Q8),
             "fp8r" => Some(gen_core::Quant::Fp8Rowwise),
@@ -716,11 +722,44 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         let as_strategy = |rung: &str| match rung {
             "resident" => MemoryStrategy::Resident,
             "staged_residency" => MemoryStrategy::StagedResidency,
+            // SW-F363: only an `optimized` regime row may select a bounded rung.
+            "bounded_decode" if regime == Some("optimized") => MemoryStrategy::BoundedDecode,
+            "bounded_attention" if regime == Some("optimized") => MemoryStrategy::BoundedAttention,
+            "bounded_transformer_residency" if regime == Some("optimized") => {
+                MemoryStrategy::BoundedTransformerResidency
+            }
             other => panic!("{key}: plans a rung an anchor may not plan: {other}"),
+        };
+        // The row's one exact parameter tuple (SW-F363) — the `planned.strategy.parameters` the
+        // adapter reads — so a bounded rung is validated at the values it will execute.
+        let planned_parameters = &row["strategy"]["parameters"];
+        let parameter = |name: &str| {
+            planned_parameters[name].as_u64().map(|value| {
+                u32::try_from(value).unwrap_or_else(|_| panic!("{key}: {name} exceeds u32"))
+            })
+        };
+        let parameters = gen_core::MemoryStrategyParameters {
+            stage_residency: planned_parameters["stageResidency"].as_bool(),
+            decode_tile_edge: parameter("decodeTileEdge"),
+            decode_overlap: parameter("decodeOverlap"),
+            attention_chunk_size: parameter("attentionChunkSize"),
+            transformer_window_size: parameter("transformerWindowSize"),
+            transformer_window_component: match planned_parameters["transformerWindowComponent"]
+                .as_str()
+            {
+                None => None,
+                Some("dit") => Some(gen_core::TransformerComponent::Dit),
+                Some("both") => Some(gen_core::TransformerComponent::Both),
+                Some(other) => panic!("{key}: unknown transformerWindowComponent {other}"),
+            },
         };
         let selection_for = |strategy: MemoryStrategy| MemorySelection {
             strategy,
-            parameters: gen_core::MemoryStrategyParameters::default(),
+            parameters: if strategy == as_strategy(planned_rung) {
+                parameters
+            } else {
+                gen_core::MemoryStrategyParameters::default()
+            },
             tier: gen_core::MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant,
@@ -735,6 +774,46 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
                  the anchor would fail at `contract.validate_selection` on every attempt: {error}"
             )
             });
+        // SW-F363: the regime rows state their composition rather than inheriting it, so the
+        // forced-override rule below is not theirs. A `resident` row is the resident composition
+        // (validated above); an `optimized` row must engage EVERY rung this contract implements
+        // at the row's load shape — "fully optimized" is the contract's answer, not the plan's —
+        // and attest exactly that set.
+        if let Some(regime @ ("resident" | "optimized")) = regime {
+            if regime == "optimized" {
+                let engaged = contract
+                    .engaged_composition_for_selection(&selection_for(as_strategy(planned_rung)));
+                let implemented: Vec<MemoryStrategy> = MemoryStrategy::ALL
+                    .into_iter()
+                    .filter(|rung| {
+                        matches!(
+                            contract
+                                .capability(*rung)
+                                .map(|capability| &capability.support),
+                            Some(gen_core::MemoryStrategySupport::Implemented)
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    engaged, implemented,
+                    "{key}: an optimized anchor engages every rung the {provider} contract \
+                     implements at {load_shape:?}"
+                );
+                let planned_engaged: Vec<MemoryStrategy> = row["strategy"]["engagedRungs"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{key}: an optimized row states engagedRungs"))
+                    .iter()
+                    .map(|rung| as_strategy(rung.as_str().expect("rung name")))
+                    .collect();
+                assert_eq!(
+                    planned_engaged, engaged,
+                    "{key}: the planned engaged set is the one the contract attests"
+                );
+                optimized_rows += 1;
+            }
+            checked += 1;
+            continue;
+        }
         // An override is DERIVED, never picked (sc-22734, sc-22736): a row may move off the lane
         // default only because the contract refuses that default — SenseNova classifies
         // `StagedResidency` structurally not applicable, Candle SCAIL-2 implements `Resident`
@@ -780,6 +859,10 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
     assert!(
         overridden > 0,
         "{lane}: the plan exercises the strategy override at least once"
+    );
+    assert!(
+        optimized_rows > 0,
+        "{lane}: the plan carries at least one fully optimized regime anchor (SW-F363)"
     );
 }
 

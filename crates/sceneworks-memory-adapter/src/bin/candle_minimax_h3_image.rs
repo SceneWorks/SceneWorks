@@ -13,6 +13,12 @@
 //! probe's idle baseline, and each phase carries its wall time. The contract publishes its
 //! calibration identity on every load ([`plan_fingerprint`], the engine constant), and the plan
 //! row runs at this lane's default staged-residency rung, which the contract implements.
+//!
+//! SW-F363: the same arm captures the cell's regime anchors — `:resident` (the resident rung, eager),
+//! `:optimized` (a deferred load engaging every rung the contract implements, at the row's exact
+//! parameter tuple, under the same request scope) and `:lora` (the base composition with the
+//! pinned community LoRA installed through `LoadSpec::adapters`, overlay `lora` on the context as
+//! the worker's Candle image path states it).
 
 use super::*;
 use runtime_cuda::gen_core::MemoryCalibrationIdentity;
@@ -38,10 +44,13 @@ pub(super) fn plan_fingerprint() -> &'static str {
 
 use protocol::elapsed_millis as millis;
 
+#[allow(clippy::too_many_arguments)]
 fn context(
     selection: MemorySelection,
     calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
+    load_shape: LoadShape,
+    overlay: Option<&str>,
     total_bytes: u64,
     predicted_peak_bytes: u64,
 ) -> MemoryRunContext {
@@ -51,7 +60,7 @@ fn context(
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
-        load_shape: LoadShape::EagerMaterialization,
+        load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -64,7 +73,7 @@ fn context(
             reference_count: 0,
         },
         reference_resources: None,
-        overlay: None,
+        overlay: overlay.map(str::to_owned),
         budget: MemoryBudget {
             total_bytes,
             committed_bytes: 0,
@@ -142,11 +151,17 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // Provider, mode, tier, the still, overlay, load shape, fixture and identity — all before an
     // env var or a weight.
     let planned_fingerprint = plan_fingerprint();
-    let (width, height, tier) =
-        protocol::validate_minimax_h3_image_plan(request, LANE, planned_fingerprint)?;
+    let plan = protocol::validate_minimax_h3_image_plan(request, LANE, planned_fingerprint)?;
+    let (width, height, tier) = (plan.width, plan.height, plan.tier);
     let selection = planned_selection(request)?;
     let inputs = protocol::minimax_h3_image_inputs(ENVS, tier)?;
-    let spec = protocol::minimax_h3_image_load_spec(&inputs);
+    let adapters = if plan.lora {
+        vec![protocol::minimax_h3_image_lora_adapter()?]
+    } else {
+        Vec::new()
+    };
+    let overlay = plan.lora.then_some("lora");
+    let spec = protocol::minimax_h3_image_load_spec(&inputs, plan.load_shape, adapters);
 
     let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
@@ -168,7 +183,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let strategy = measured_strategy(
         request,
         &selection,
-        &contract.engaged_composition(selection.strategy),
+        &contract.engaged_composition_for_selection(&selection),
     )?;
     let calibration = contract.calibration.as_ref().ok_or_else(|| {
         "the loaded minimax_h3_image contract published no calibration identity".to_owned()
@@ -179,10 +194,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    if contract.load_shape != LoadShape::EagerMaterialization {
+    if contract.load_shape != plan.load_shape {
         return Err(format!(
             "plan/provider load-shape mismatch: plan={}, pinned provider={}",
-            protocol::LOAD_SHAPE_EAGER,
+            load_shape_key(plan.load_shape),
             load_shape_key(contract.load_shape)
         ));
     }
@@ -191,7 +206,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let admitted = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        context(selection, calibration, fingerprint, total_bytes, predicted)
+        context(
+            selection,
+            calibration,
+            fingerprint,
+            plan.load_shape,
+            overlay,
+            total_bytes,
+            predicted,
+        )
     };
     // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the rejections below
     // cannot pass through a blanket refusal.
@@ -276,13 +299,17 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         "for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the ",
         "full promotion-quality, negative-mutation and lifecycle scenario suite"
     );
-    let execution_path = "the minimax_h3_image staged text-to-image path";
+    let execution_path = if plan.lora {
+        "the minimax_h3_image staged text-to-image path with one community LoRA"
+    } else {
+        "the minimax_h3_image staged text-to-image path"
+    };
     let mut fragment = json!({
         "status": "gated",
         "strategy": strategy,
-        "loadShape": load_shape_key(LoadShape::EagerMaterialization),
+        "loadShape": load_shape_key(plan.load_shape),
         "artifact": inputs.artifact_json(),
-        "sweep": protocol::reference_sweep(request, "passed")?,
+        "sweep": protocol::exact_tuple_sweep(request, "passed")?,
         "scenarios": [
             { "name": "exact_fit", "result": "not_run", "reason": blocker },
             { "name": "unknown_budget", "result": "passed", "reason": "the loaded MiniMax-H3-Image admission check rejected a zero/unknown budget" },
@@ -326,7 +353,18 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         ),
         "capturedAt": protocol::captured_at(),
     });
-    protocol::settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    if plan.lora {
+        protocol::settle_exact_overlay_scenario(
+            request,
+            &mut fragment,
+            "lora",
+            execution_path,
+            "the pinned community LoRA was installed through LoadSpec adapters for the load and \
+             the measured render; its factors are resident for the whole render at every rung",
+        )?;
+    } else {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    }
     Ok(fragment)
 }
 
@@ -346,11 +384,14 @@ mod tests {
         );
     }
 
-    /// The planned rows are the ones this arm captures, the dispatch const is the engine id, and
-    /// every row names the engine's own identity.
+    /// Every planned Candle MiniMax-H3-Image row — the three base rows and their SW-F363 regime
+    /// rows — is one this arm captures: the plan validates under the engine's own identity, the
+    /// dispatch const is the engine id, and the weights-free contract built at the row's own load
+    /// shape and adapter stack accepts the row's selection and attests exactly its engaged set.
+    /// The `:optimized` rows engage every rung that contract implements.
     ///
-    /// *Mutation that reds this:* change a row's fixture, identity, tier or geometry in
-    /// `config/memory-calibration-plan.json`.
+    /// *Mutation that reds this:* change a row's fixture, identity, tier, geometry, load shape,
+    /// overlay or strategy tuple in `config/memory-calibration-plan.json`, or drop a regime row.
     #[test]
     fn the_planned_minimax_h3_image_rows_are_the_ones_this_arm_captures() {
         assert_eq!(MINIMAX_H3_IMAGE_ID, protocol::MINIMAX_H3_IMAGE_PROVIDER);
@@ -362,31 +403,113 @@ mod tests {
             "../../../../config/memory-calibration-plan.json"
         ))
         .expect("the anchor plan parses");
-        for tier in protocol::MINIMAX_H3_IMAGE_TIERS {
-            let entry = &plan["anchors"][format!("minimax_h3_image:{tier}:candle")];
-            assert!(
-                entry.get("strategy").is_none(),
-                "the lane default is staged"
-            );
+        let mut regimes = Vec::new();
+        for (key, entry) in plan["anchors"].as_object().unwrap() {
+            if !key.starts_with("minimax_h3_image:") || !key.contains(":candle") {
+                continue;
+            }
+            let parts: Vec<&str> = key.split(':').collect();
+            let (tier, regime) = (parts[1], parts.get(3).copied());
+            regimes.push((tier.to_owned(), regime.map(str::to_owned)));
+            if regime.is_none() {
+                assert!(
+                    entry.get("strategy").is_none(),
+                    "{key}: the lane default is staged"
+                );
+            }
+            let mut target = json!({
+                "provider": entry["provider"],
+                "mode": entry["mode"],
+                "tier": tier,
+                "overlay": entry["overlay"],
+                "geometry": entry["geometry"],
+            });
+            if let Some(regime) = regime {
+                target["anchorRegime"] = json!(regime);
+            }
+            let strategy = entry.get("strategy").cloned().unwrap_or_else(|| {
+                json!({ "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"] })
+            });
             let request = json!({
                 "planned": {
                     "backend": LANE,
                     "loadShape": entry["loadShape"],
                     "calibrationFingerprint": entry["calibrationFingerprint"],
                     "fixture": entry["fixture"],
-                    "target": {
-                        "provider": entry["provider"],
-                        "mode": entry["mode"],
-                        "tier": tier,
-                        "overlay": entry["overlay"],
-                        "geometry": entry["geometry"],
+                    "target": target,
+                    "strategy": {
+                        "rung": strategy["rung"],
+                        "engagedRungs": strategy["engagedRungs"],
+                        "parameters": strategy.get("parameters").cloned().unwrap_or(json!({})),
                     },
                 },
             });
+            let plan = protocol::validate_minimax_h3_image_plan(&request, LANE, plan_fingerprint())
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
             assert_eq!(
-                protocol::validate_minimax_h3_image_plan(&request, LANE, plan_fingerprint()),
-                Ok((1024, 1024, tier))
+                (plan.width, plan.height, plan.tier),
+                (1024, 1024, tier),
+                "{key}"
             );
+            let mut spec = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+                .with_load_shape(plan.load_shape);
+            if plan.lora {
+                spec = spec.with_adapters(vec![AdapterSpec::new(
+                    "fixture-lora.safetensors".into(),
+                    1.0,
+                    AdapterKind::Lora,
+                )]);
+            }
+            let contract =
+                runtime_cuda::providers::minimax_h3::image_memory_strategy::weights_free_contract(
+                    &spec,
+                )
+                .expect("weights-free contract");
+            let selection = planned_selection(&request).unwrap();
+            contract
+                .validate_selection(&selection)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let engaged = contract.engaged_composition_for_selection(&selection);
+            assert_eq!(
+                measured_strategy(&request, &selection, &engaged)
+                    .unwrap_or_else(|error| panic!("{key}: {error}")),
+                request["planned"]["strategy"],
+                "{key}"
+            );
+            if regime == Some("optimized") {
+                let implemented: Vec<MemoryStrategy> = MemoryStrategy::ALL
+                    .into_iter()
+                    .filter(|rung| {
+                        matches!(
+                            contract
+                                .capability(*rung)
+                                .map(|capability| &capability.support),
+                            Some(runtime_cuda::gen_core::MemoryStrategySupport::Implemented)
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    engaged, implemented,
+                    "{key}: every implemented rung is engaged"
+                );
+            }
         }
+        regimes.sort();
+        let expected: Vec<(String, Option<String>)> = [
+            ("bf16", None),
+            ("bf16", Some("optimized")),
+            ("bf16", Some("resident")),
+            ("q4", None),
+            ("q4", Some("lora")),
+            ("q4", Some("optimized")),
+            ("q4", Some("resident")),
+            ("q8", None),
+            ("q8", Some("optimized")),
+            ("q8", Some("resident")),
+        ]
+        .into_iter()
+        .map(|(tier, regime)| (tier.to_owned(), regime.map(str::to_owned)))
+        .collect();
+        assert_eq!(regimes, expected);
     }
 }

@@ -963,8 +963,8 @@ pub const MINIMAX_H3_IMAGE_PROVIDER: &str = "minimax_h3_image";
 /// The upstream snapshot that is the load ROOT on every tier (`vae_diffusers/`, `tokenizer/`), and
 /// whose own `transformer_diffusers/` IS the bf16 tier — the worker's `load_root`.
 pub const MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3-Image";
-/// The packed `q8/` / `q4/` DiT re-host. Both tiers are `pendingArtifact` downloads until the
-/// feature's terminal upload pins them; a capture refuses an unpublished tier by name.
+/// The packed `q8/` / `q4/` DiT re-host, published at the revision the catalog pins. A capture still
+/// refuses by name any tier the catalog marks `pendingArtifact`.
 pub const MINIMAX_H3_IMAGE_REPOSITORY: &str = "SceneWorks/minimax-h3-image-mlx";
 /// The staged DiT component (a packed tier's `transformer_diffusers/`).
 pub const MINIMAX_H3_IMAGE_DIT_COMPONENT: &str = "transformer_diffusers";
@@ -982,6 +982,18 @@ pub const MINIMAX_H3_IMAGE_STEPS: u32 = gen_core::h3_image::FIXED_STEPS;
 /// The prompt every MiniMax-H3-Image capture renders.
 pub const MINIMAX_H3_IMAGE_PROMPT: &str =
     "a portrait of a person in a sunlit studio, editorial photograph";
+/// The community LoRA the `:lora` regime anchors install through `LoadSpec::adapters` (SW-F363): a
+/// ComfyUI-layout file (`diffusion_model.blocks.*`, fused qkv, no alpha), 155 MB at rank 16 — the
+/// inference repo's `minimax-h3-image-community-lora-tanaami` row in
+/// `release/real-weight-models.toml`. Not a catalog download (a user installs a LoRA), so the
+/// capture is handed its snapshot through `SCENEWORKS_MINIMAX_H3_IMAGE_LORA_*`, the env family the
+/// catalog runner's `MINIMAX_H3_IMAGE_COMMUNITY_LORA` exports; a test binds the two.
+pub const MINIMAX_H3_IMAGE_LORA_REPOSITORY: &str = "syntaxdiffusion/tanaami-style-h3-image-lora";
+pub const MINIMAX_H3_IMAGE_LORA_REVISION: &str = "3804b381526a3e537c7961942ba4861a831b2d39";
+pub const MINIMAX_H3_IMAGE_LORA_FILE: &str = "tanaami_h3_image_lora_2000.safetensors";
+/// The regime suffixes a MiniMax-H3-Image plan row may carry (`<cell>:<regime>`, SW-F363), as the
+/// harness writes them into `planned.target.anchorRegime`.
+pub const MINIMAX_H3_IMAGE_REGIMES: [&str; 3] = ["resident", "optimized", "lora"];
 
 /// The env family one lane's MiniMax-H3-Image arm reads. Each arm spells its own names out,
 /// because the catalog runner's env-name binding test reads them off each lane's own sources.
@@ -996,26 +1008,72 @@ pub struct MinimaxH3ImageEnvs {
     pub text_encoder_env: &'static str,
 }
 
-/// The fixture a lane's MiniMax-H3-Image plan row must name for `tier`.
-pub fn minimax_h3_image_fixture(lane: &str, tier: &str) -> String {
+/// The fixture a lane's MiniMax-H3-Image plan row must name for `tier` — and, for a regime row
+/// (SW-F363), its regime as a final segment.
+pub fn minimax_h3_image_fixture(lane: &str, tier: &str, regime: Option<&str>) -> String {
+    let suffix = regime
+        .map(|regime| format!("-{regime}"))
+        .unwrap_or_default();
     format!(
-        "minimax-h3-image-{lane}-{tier}-{MINIMAX_H3_IMAGE_EDGE}-seed{MINIMAX_H3_IMAGE_SEED}-step{MINIMAX_H3_IMAGE_STEPS}"
+        "minimax-h3-image-{lane}-{tier}-{MINIMAX_H3_IMAGE_EDGE}-seed{MINIMAX_H3_IMAGE_SEED}-step{MINIMAX_H3_IMAGE_STEPS}{suffix}"
     )
 }
 
+/// The regime anchor a plan row is (`planned.target.anchorRegime`, SW-F363), or `None` for the
+/// cell's base row. An unknown regime is refused rather than read as a base row.
+pub fn minimax_h3_image_regime(request: &Value) -> Result<Option<&'static str>, String> {
+    match planned(request)?.pointer("/target/anchorRegime") {
+        None => Ok(None),
+        Some(value) => {
+            let regime = value.as_str().unwrap_or_default();
+            MINIMAX_H3_IMAGE_REGIMES
+                .into_iter()
+                .find(|known| *known == regime)
+                .map(Some)
+                .ok_or_else(|| format!("planned.target.anchorRegime {value} is not a known regime"))
+        }
+    }
+}
+
+/// What one validated MiniMax-H3-Image plan row asks the arm to execute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinimaxH3ImagePlan {
+    pub width: u32,
+    pub height: u32,
+    pub tier: &'static str,
+    /// The row's regime (`None` for the cell's base row).
+    pub regime: Option<&'static str>,
+    /// The materialization shape the row loads under: deferred exactly when its rung is
+    /// `bounded_transformer_residency`, the rung's own prerequisite on both engines.
+    pub load_shape: gen_core::LoadShape,
+    /// The row installs the community LoRA ([`MINIMAX_H3_IMAGE_LORA_REPOSITORY`]).
+    pub lora: bool,
+}
+
 /// What a MiniMax-H3-Image capture must agree with BEFORE any environment variable or weight is
-/// read: the provider, text-to-image, a declared tier, the square still, no overlay, eager
-/// materialization (the worker's load shape), the lane's own fixture, and the identity the lane
-/// names (`expected_fingerprint`: the engine constant on Candle, the adapter-owned label on MLX,
-/// whose production contract publishes none). Returns `(width, height, tier)`.
+/// read: the provider, text-to-image, a declared tier, the square still, the overlay its regime
+/// installs (`lora` exactly on a `:lora` row, else none), the load shape its rung needs (deferred
+/// exactly for `bounded_transformer_residency`, else eager — the worker's shape), the lane's own
+/// fixture for that regime, and the identity the lane names (`expected_fingerprint`: the engine
+/// constant on Candle, the adapter-owned label on MLX, whose production contract publishes none).
 pub fn validate_minimax_h3_image_plan(
     request: &Value,
     lane: &str,
     expected_fingerprint: &str,
-) -> Result<(u32, u32, &'static str), String> {
+) -> Result<MinimaxH3ImagePlan, String> {
     let label = format!("{MINIMAX_H3_IMAGE_PROVIDER} calibration");
     validate_still_geometry(request, &label)?;
-    validate_plain_overlay_target(request, "the minimax_h3_image staged text-to-image path")?;
+    let regime = minimax_h3_image_regime(request)?;
+    let lora = regime == Some("lora");
+    if lora {
+        validate_exact_overlay_target(
+            request,
+            "lora",
+            "the minimax_h3_image staged text-to-image path with one community LoRA",
+        )?;
+    } else {
+        validate_plain_overlay_target(request, "the minimax_h3_image staged text-to-image path")?;
+    }
     let provider = planned_str(request, "/target/provider")?;
     if provider != MINIMAX_H3_IMAGE_PROVIDER {
         return Err(format!(
@@ -1036,15 +1094,26 @@ pub fn validate_minimax_h3_image_plan(
         .ok_or_else(|| {
             format!("{MINIMAX_H3_IMAGE_PROVIDER} declares no {planned_tier:?} tier to measure")
         })?;
-    match planned(request)?.get("loadShape").and_then(Value::as_str) {
-        Some(LOAD_SHAPE_EAGER) => {}
-        other => {
+    let windowed = planned_rung(request)? == "bounded_transformer_residency";
+    let load_shape = match (
+        planned(request)?.get("loadShape").and_then(Value::as_str),
+        windowed,
+    ) {
+        (Some(LOAD_SHAPE_EAGER), false) => gen_core::LoadShape::EagerMaterialization,
+        (Some(LOAD_SHAPE_DEFERRED), true) => gen_core::LoadShape::DeferredMaterialization,
+        (other, false) => {
             return Err(format!(
-                "{MINIMAX_H3_IMAGE_PROVIDER} anchors are eager (planned.loadShape {other:?}); the \
-                 worker loads this route with eager materialization"
+                "{MINIMAX_H3_IMAGE_PROVIDER} anchors below rung 4 are eager (planned.loadShape \
+                 {other:?}); the worker loads this route with eager materialization"
             ))
         }
-    }
+        (other, true) => {
+            return Err(format!(
+                "a {MINIMAX_H3_IMAGE_PROVIDER} bounded_transformer_residency anchor is deferred \
+                 (planned.loadShape {other:?}); the rung's prerequisite is a deferred load"
+            ))
+        }
+    };
     let (width, height) = target_geometry(request)?;
     if (width, height) != (MINIMAX_H3_IMAGE_EDGE, MINIMAX_H3_IMAGE_EDGE) {
         return Err(format!(
@@ -1053,7 +1122,7 @@ pub fn validate_minimax_h3_image_plan(
         ));
     }
     let fixture = planned_str(request, "/fixture")?;
-    let expected_fixture = minimax_h3_image_fixture(lane, tier);
+    let expected_fixture = minimax_h3_image_fixture(lane, tier, regime);
     if fixture != expected_fixture {
         return Err(format!(
             "planned.fixture {fixture:?} is not the {lane} {tier} MiniMax-H3-Image capture: \
@@ -1067,7 +1136,105 @@ pub fn validate_minimax_h3_image_plan(
              identity {expected_fingerprint:?}"
         ));
     }
-    Ok((width, height, tier))
+    Ok(MinimaxH3ImagePlan {
+        width,
+        height,
+        tier,
+        regime,
+        load_shape,
+        lora,
+    })
+}
+
+/// The one pinned community LoRA a `:lora` row installs, from the
+/// `SCENEWORKS_MINIMAX_H3_IMAGE_LORA_*` family: the pinned file in the pinned snapshot, as a single
+/// LoRA at scale 1.0 — the shape a user-installed LoRA reaches the worker's `LoadSpec` in.
+pub fn minimax_h3_image_lora_adapter() -> Result<gen_core::AdapterSpec, String> {
+    minimax_h3_image_lora_adapter_at(
+        &required_env("SCENEWORKS_MINIMAX_H3_IMAGE_LORA_REPOSITORY")?,
+        &required_env("SCENEWORKS_MINIMAX_H3_IMAGE_LORA_REVISION")?,
+        Path::new(&required_env("SCENEWORKS_MINIMAX_H3_IMAGE_LORA_ROOT")?),
+    )
+}
+
+/// The env-free half of [`minimax_h3_image_lora_adapter`].
+pub fn minimax_h3_image_lora_adapter_at(
+    repository: &str,
+    revision: &str,
+    root: &Path,
+) -> Result<gen_core::AdapterSpec, String> {
+    validate_artifact_identity(repository, revision, MINIMAX_H3_IMAGE_LORA_REPOSITORY)?;
+    if revision != MINIMAX_H3_IMAGE_LORA_REVISION {
+        return Err(format!(
+            "the {MINIMAX_H3_IMAGE_PROVIDER} community LoRA is {repository}@{revision}, not the \
+             pinned {MINIMAX_H3_IMAGE_LORA_REPOSITORY}@{MINIMAX_H3_IMAGE_LORA_REVISION}"
+        ));
+    }
+    let root = std::fs::canonicalize(root).map_err(|error| {
+        format!(
+            "canonicalize SCENEWORKS_MINIMAX_H3_IMAGE_LORA_ROOT {}: {error}",
+            root.display()
+        )
+    })?;
+    validate_huggingface_revision_root(
+        &root,
+        repository,
+        revision,
+        MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+    )?;
+    let path = root.join(MINIMAX_H3_IMAGE_LORA_FILE);
+    if !path.is_file() {
+        return Err(format!(
+            "the {MINIMAX_H3_IMAGE_PROVIDER} community LoRA is not at {}",
+            path.display()
+        ));
+    }
+    Ok(gen_core::AdapterSpec::new(
+        path,
+        1.0,
+        gen_core::AdapterKind::Lora,
+    ))
+}
+
+/// One exact parameter tuple as a sweep: every numeric parameter is an axis of one tested value,
+/// and a non-numeric one (rung 4's `transformerWindowComponent`) stays in the case without being
+/// promoted to an axis — the shape `mlx_minimax_family::minimax_complete_sweep` established. An
+/// empty tuple is the one empty case [`reference_sweep`] writes.
+pub fn exact_tuple_sweep(request: &Value, result: &str) -> Result<Value, String> {
+    let parameters = strategy_parameters(request)?;
+    let axes = parameters
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|value| (name, value)))
+        .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "axes": axes,
+        "cases": [{ "parameters": parameters, "result": result }],
+        "rangeVerified": false,
+    }))
+}
+
+/// Settle the overlay scenario of a fragment whose render DID install `expected_overlay`: the
+/// declared target must be exactly that overlay, so an overlay-free plan can never pick up a
+/// `passed` overlay verdict. `reason` states what participated in the measured renders.
+pub fn settle_exact_overlay_scenario(
+    request: &Value,
+    fragment: &mut Value,
+    expected_overlay: &str,
+    execution_path: &str,
+    reason: &str,
+) -> Result<(), String> {
+    validate_exact_overlay_target(request, expected_overlay, execution_path)?;
+    let scenarios = fragment
+        .get_mut("scenarios")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "provider fragment.scenarios must be an array".to_owned())?;
+    let overlay_index = scenarios
+        .iter()
+        .position(|scenario| scenario.get("name").and_then(Value::as_str) == Some("overlay"))
+        .ok_or_else(|| "provider fragment is missing the required overlay scenario".to_owned())?;
+    scenarios[overlay_index] = json!({ "name": "overlay", "result": "passed", "reason": reason });
+    Ok(())
 }
 
 /// The shipped catalog entry, narrowed to this host's platform rows exactly as the worker narrows
@@ -1360,14 +1527,20 @@ pub fn minimax_h3_image_inputs_at(
     })
 }
 
-/// The spec the worker builds (`attach_components` over its resident, eager base spec): the
-/// upstream root as `weights`, the tier's quant, MiniMax-H3's text encoder, and — packed tiers
-/// only — the tier's DiT.
-pub fn minimax_h3_image_load_spec(inputs: &MinimaxH3ImageInputs) -> gen_core::LoadSpec {
+/// The spec the worker builds (`attach_components` over its resident base spec): the upstream root
+/// as `weights`, the tier's quant, MiniMax-H3's text encoder, and — packed tiers only — the tier's
+/// DiT, under the row's load shape (eager, or deferred for rung 4) with the row's adapter stack
+/// (empty, or the one community LoRA of a `:lora` row).
+pub fn minimax_h3_image_load_spec(
+    inputs: &MinimaxH3ImageInputs,
+    load_shape: gen_core::LoadShape,
+    adapters: Vec<gen_core::AdapterSpec>,
+) -> gen_core::LoadSpec {
     let mut spec =
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(inputs.upstream.root.clone()))
             .with_offload_policy(gen_core::OffloadPolicy::Resident)
-            .with_load_shape(gen_core::LoadShape::EagerMaterialization)
+            .with_load_shape(load_shape)
+            .with_adapters(adapters)
             .with_component(
                 MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT,
                 gen_core::WeightsSource::Dir(inputs.text_encoder.clone()),
@@ -1411,7 +1584,8 @@ mod minimax_h3_image_tests {
                 "backend": lane,
                 "loadShape": LOAD_SHAPE_EAGER,
                 "calibrationFingerprint": fingerprint,
-                "fixture": minimax_h3_image_fixture(lane, tier),
+                "fixture": minimax_h3_image_fixture(lane, tier, None),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
                 "target": {
                     "provider": MINIMAX_H3_IMAGE_PROVIDER,
                     "mode": "text_to_image",
@@ -1427,8 +1601,12 @@ mod minimax_h3_image_tests {
     #[test]
     fn the_fixture_and_request_are_the_engines_fixed_contract() {
         assert_eq!(
-            minimax_h3_image_fixture("mlx", "bf16"),
+            minimax_h3_image_fixture("mlx", "bf16", None),
             "minimax-h3-image-mlx-bf16-1024-seed7100-step6"
+        );
+        assert_eq!(
+            minimax_h3_image_fixture("candle", "q4", Some("optimized")),
+            "minimax-h3-image-candle-q4-1024-seed7100-step6-optimized"
         );
         let request = minimax_h3_image_capture_request();
         gen_core::h3_image::validate_request(
@@ -1452,7 +1630,14 @@ mod minimax_h3_image_tests {
             for tier in MINIMAX_H3_IMAGE_TIERS {
                 assert_eq!(
                     validate_minimax_h3_image_plan(&planned(lane, tier, "id"), lane, "id"),
-                    Ok((1024, 1024, tier))
+                    Ok(MinimaxH3ImagePlan {
+                        width: 1024,
+                        height: 1024,
+                        tier,
+                        regime: None,
+                        load_shape: gen_core::LoadShape::EagerMaterialization,
+                        lora: false,
+                    })
                 );
             }
             for (pointer, value, needle) in [
@@ -1499,6 +1684,116 @@ mod minimax_h3_image_tests {
             validate_minimax_h3_image_plan(&planned(other, "bf16", "id"), lane, "id")
                 .expect_err("the other lane's fixture");
         }
+    }
+
+    /// SW-F363. The regime rows: an optimized row loads deferred exactly because its rung is rung
+    /// 4, a lora row installs the LoRA exactly because it is the lora regime, and each names its
+    /// own fixture.
+    ///
+    /// *Mutation that reds this:* accept a deferred load below rung 4, an eager load at rung 4, a
+    /// LoRA overlay on a non-lora row, a lora row without the overlay, or a base-row fixture on a
+    /// regime row.
+    #[test]
+    fn a_regime_row_is_held_to_its_load_shape_overlay_and_fixture() {
+        let regime_row = |regime: &str| {
+            let mut row = planned("mlx", "q4", "id");
+            row["planned"]["target"]["anchorRegime"] = json!(regime);
+            row["planned"]["fixture"] = json!(minimax_h3_image_fixture("mlx", "q4", Some(regime)));
+            row
+        };
+        let mut optimized = regime_row("optimized");
+        optimized["planned"]["loadShape"] = json!(LOAD_SHAPE_DEFERRED);
+        optimized["planned"]["strategy"]["rung"] = json!("bounded_transformer_residency");
+        let plan = validate_minimax_h3_image_plan(&optimized, "mlx", "id").unwrap();
+        assert_eq!(plan.regime, Some("optimized"));
+        assert_eq!(
+            plan.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+        assert!(!plan.lora);
+        let mut eager_rung4 = optimized.clone();
+        eager_rung4["planned"]["loadShape"] = json!(LOAD_SHAPE_EAGER);
+        assert!(validate_minimax_h3_image_plan(&eager_rung4, "mlx", "id")
+            .unwrap_err()
+            .contains("deferred"));
+        let mut base_fixture = optimized.clone();
+        base_fixture["planned"]["fixture"] = json!(minimax_h3_image_fixture("mlx", "q4", None));
+        assert!(validate_minimax_h3_image_plan(&base_fixture, "mlx", "id").is_err());
+
+        let mut lora = regime_row("lora");
+        lora["planned"]["target"]["overlay"] = json!("lora");
+        let plan = validate_minimax_h3_image_plan(&lora, "mlx", "id").unwrap();
+        assert!(plan.lora);
+        assert_eq!(plan.load_shape, gen_core::LoadShape::EagerMaterialization);
+        let mut lora_without_overlay = lora.clone();
+        lora_without_overlay["planned"]["target"]["overlay"] = json!("none");
+        assert!(validate_minimax_h3_image_plan(&lora_without_overlay, "mlx", "id").is_err());
+        let mut overlay_without_regime = planned("mlx", "q4", "id");
+        overlay_without_regime["planned"]["target"]["overlay"] = json!("lora");
+        assert!(validate_minimax_h3_image_plan(&overlay_without_regime, "mlx", "id").is_err());
+        let mut unknown = regime_row("staged");
+        unknown["planned"]["fixture"] = json!("x");
+        assert!(validate_minimax_h3_image_plan(&unknown, "mlx", "id")
+            .unwrap_err()
+            .contains("anchorRegime"));
+    }
+
+    /// SW-F363. The LoRA binds only the pinned file in the pinned snapshot, and installs as one
+    /// LoRA at scale 1.0 on the spec the arm loads.
+    #[test]
+    fn the_community_lora_binds_its_pin_and_rides_the_load_spec() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = snapshot(
+            temporary.path(),
+            MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+            MINIMAX_H3_IMAGE_LORA_REVISION,
+        );
+        let missing = minimax_h3_image_lora_adapter_at(
+            MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+            MINIMAX_H3_IMAGE_LORA_REVISION,
+            &root,
+        )
+        .expect_err("no LoRA file yet");
+        assert!(missing.contains(MINIMAX_H3_IMAGE_LORA_FILE), "{missing}");
+        touch(root.join(MINIMAX_H3_IMAGE_LORA_FILE));
+        let adapter = minimax_h3_image_lora_adapter_at(
+            MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+            MINIMAX_H3_IMAGE_LORA_REVISION,
+            &root,
+        )
+        .unwrap();
+        assert_eq!(adapter.scale, 1.0);
+        assert_eq!(adapter.kind, gen_core::AdapterKind::Lora);
+        assert!(adapter.path.ends_with(MINIMAX_H3_IMAGE_LORA_FILE));
+        assert!(minimax_h3_image_lora_adapter_at(
+            MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+            &"1".repeat(40),
+            &root,
+        )
+        .is_err());
+        assert!(minimax_h3_image_lora_adapter_at(
+            "someone/else",
+            MINIMAX_H3_IMAGE_LORA_REVISION,
+            &root
+        )
+        .is_err());
+    }
+
+    /// SW-F363. A rung-4 tuple's component name rides the case without becoming an axis.
+    #[test]
+    fn an_exact_tuple_sweep_promotes_only_numeric_parameters() {
+        let request = json!({ "planned": { "strategy": { "parameters": {
+            "decodeTileEdge": 256, "transformerWindowComponent": "both"
+        } } } });
+        let sweep = exact_tuple_sweep(&request, "passed").unwrap();
+        assert_eq!(
+            sweep["axes"],
+            json!([{ "parameter": "decodeTileEdge", "testedValues": [256] }])
+        );
+        assert_eq!(
+            sweep["cases"][0]["parameters"]["transformerWindowComponent"],
+            "both"
+        );
     }
 
     fn snapshot(base: &Path, repo: &str, revision: &str) -> PathBuf {
@@ -1551,7 +1846,8 @@ mod minimax_h3_image_tests {
         let inputs =
             minimax_h3_image_inputs_at(&entry, "bf16", upstream.clone(), None, bf16_te.clone())
                 .unwrap();
-        let spec = minimax_h3_image_load_spec(&inputs);
+        let spec =
+            minimax_h3_image_load_spec(&inputs, gen_core::LoadShape::EagerMaterialization, vec![]);
         assert_eq!(
             spec.weights,
             gen_core::WeightsSource::Dir(std::fs::canonicalize(&root).unwrap())
@@ -1609,8 +1905,21 @@ mod minimax_h3_image_tests {
         let inputs =
             minimax_h3_image_inputs_at(&entry, "q8", upstream, Some(packed.clone()), q8_te)
                 .unwrap();
-        let spec = minimax_h3_image_load_spec(&inputs);
+        let spec = minimax_h3_image_load_spec(
+            &inputs,
+            gen_core::LoadShape::DeferredMaterialization,
+            vec![gen_core::AdapterSpec::new(
+                PathBuf::from("lora.safetensors"),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )],
+        );
         assert_eq!(spec.quantize, Some(gen_core::Quant::Q8));
+        assert_eq!(
+            spec.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+        assert_eq!(spec.adapters.len(), 1);
         assert_eq!(
             spec.components.get(MINIMAX_H3_IMAGE_DIT_COMPONENT),
             Some(&gen_core::WeightsSource::Dir(

@@ -14,6 +14,7 @@ import {
   LTX25_CAPTURE_REVISION, SCHEMA_VERSION, atomicWrite, canonicalJson, captureAnchor,
   projectPhaseMetricsToSchemaV5,
   evidenceSemantics, logicalCaseId, parseAnchorKey, planAnchor, planAnchors, recordId,
+  ANCHOR_REGIMES, baseAnchorKey,
   ltx25ProviderEnvironment, parsePhysicalMlxAvContent, physicalMlxSessionId,
   prepareLtx25CaptureArtifacts, validateBundle, validateRecord, validatePlan,
   validatePhysicalMlxAvContentsAgainstRecord,
@@ -1230,9 +1231,11 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   // 1. ONE anchor per (model, tier, lane), enforced by the anchor set being a JSON OBJECT keyed on
   //    that triple. A duplicate key is not a rejected document; it is not a document at all.
   assert.equal(ANCHOR_PLAN_SCHEMA.properties.anchors.type, "object");
+  // SW-F363: the optional fourth segment is a CLOSED regime enum — the cell's resident, fully
+  // optimized and LoRA anchors — never a free name.
   assert.equal(
     ANCHOR_PLAN_SCHEMA.properties.anchors.propertyNames.pattern,
-    "^[a-z][a-z0-9_]*:(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$",
+    "^[a-z][a-z0-9_]*:(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)(:(resident|optimized|lora))?$",
   );
   const keys = Object.keys(plan.anchors);
   assert.equal(new Set(keys).size, keys.length);
@@ -1245,7 +1248,7 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
 
   // 2. A key outside the (model, tier, lane) vocabulary — the only way to write a second entry for
   //    one cell — is rejected.
-  for (const key of ["krea_2_turbo:q4:mlx:second", "krea_2_turbo:q4", "krea_2_turbo:q4:cuda", "krea_2_turbo:fp8:mlx"]) {
+  for (const key of ["krea_2_turbo:q4:mlx:second", "krea_2_turbo:q4:mlx:staged", "krea_2_turbo:q4:mlx:optimized:2", "krea_2_turbo:q4", "krea_2_turbo:q4:cuda", "krea_2_turbo:fp8:mlx"]) {
     const duplicate = structuredClone(plan);
     duplicate.anchors[key] = structuredClone(plan.anchors["krea_2_turbo:q4:mlx"]);
     assert.throws(() => validatePlan(duplicate), /anchor plan is invalid/, key);
@@ -1312,6 +1315,71 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   const batched = structuredClone(plan);
   batched.anchors["krea_2_turbo:q4:mlx"].geometry.batch = 2;
   assert.throws(() => validatePlan(batched), /anchor plan is invalid/);
+});
+
+// SW-F363. A regime row is the SAME cell's request rendered at a different composition: it needs
+// its base row, shares its request, and is held to its regime. Mutations this kills: a regime row
+// without its base row; a regime row that moves the geometry, mode or provider; a `:resident` row
+// on a lane whose base row is already resident; an `:optimized` row that engages nothing more than
+// its base row, selects a shallower rung than it engages, or omits/adds a bounded rung's parameter;
+// a `:lora` row without the overlay or at another composition; `planAnchor` dropping the regime
+// from the target or the parameters from the strategy.
+test("a regime row is held to its base row and to its regime", () => {
+  const base = "fixture_model:q4:candle";
+  const ALL = ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"];
+  const parameters = { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 8388608, transformerWindowSize: 1, transformerWindowComponent: "both" };
+  const optimized = { rung: "bounded_transformer_residency", engagedRungs: ALL, parameters };
+  const plan = (rows) => {
+    const fixture = anchorPlanFixture(base);
+    for (const [suffix, overrides] of Object.entries(rows)) {
+      fixture.anchors[`${base}:${suffix}`] = { ...structuredClone(fixture.anchors[base]), ...overrides };
+    }
+    return fixture;
+  };
+  assert.deepEqual(ANCHOR_REGIMES, ["resident", "optimized", "lora"]);
+  assert.equal(baseAnchorKey(`${base}:lora`), base);
+  assert.deepEqual(parseAnchorKey(`${base}:optimized`), { modelId: "fixture_model", tier: "q4", backend: "candle", regime: "optimized" });
+  assert.equal(parseAnchorKey(base).regime, null);
+
+  const good = plan({
+    resident: { strategy: { rung: "resident", engagedRungs: ["resident"] } },
+    optimized: { strategy: optimized, loadShape: "deferred_materialization" },
+    lora: { overlay: "lora" },
+  });
+  assert.equal(validatePlan(good), good);
+  const planned = planAnchor(good, `${base}:optimized`);
+  assert.equal(planned.target.anchorRegime, "optimized");
+  assert.deepEqual(planned.strategy, optimized);
+  assert.equal(planAnchor(good, `${base}:lora`).target.overlay, "lora");
+  assert.deepEqual(planAnchor(good, `${base}:lora`).strategy, planAnchor(good, base).strategy);
+  // A base row's case identity is untouched by the axis: no `anchorRegime` key at all.
+  assert.equal(Object.hasOwn(planAnchor(good, base).target, "anchorRegime"), false);
+  assert.equal(new Set(planAnchors(good).map((row) => row.logicalCaseId)).size, 4);
+
+  const refusals = [
+    [{ optimized: { strategy: optimized } }, null, "needs its base row", (fixture) => delete fixture.anchors[base]],
+    [{ optimized: { strategy: optimized, geometry: { width: 512, height: 512, batch: 1, frames: 1 } } }, null, "geometry must equal"],
+    [{ resident: { strategy: { rung: "resident", engagedRungs: ["resident"] } } }, "fixture_model:q4:mlx", "already plans the resident composition"],
+    [{ resident: {} }, null, "states its strategy"],
+    [{ resident: { strategy: { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] } } }, null, "resident rung alone"],
+    [{ optimized: { strategy: { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] } } }, null, "strictly more"],
+    [{ optimized: { strategy: { ...optimized, rung: "bounded_decode" } } }, null, "deepest engaged rung"],
+    [{ optimized: { strategy: { ...optimized, parameters: { ...parameters, attentionChunkSize: undefined } } } }, null, "parameters.attentionChunkSize"],
+    [{ optimized: { strategy: { rung: "bounded_decode", engagedRungs: ["resident", "staged_residency", "bounded_decode"], parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, transformerWindowSize: 1 } } } }, null, "belongs to no rung"],
+    [{ optimized: { strategy: { ...optimized, parameters: { ...parameters, stageResidency: undefined } } } }, null, "stageResidency"],
+    [{ lora: {} }, null, "overlay \"lora\""],
+    [{ lora: { overlay: "lora", strategy: { rung: "resident", engagedRungs: ["resident"] } } }, null, "base row"],
+  ];
+  for (const [rows, rekey, needle, mutate] of refusals) {
+    let fixture = plan(JSON.parse(JSON.stringify(rows)));
+    if (rekey) {
+      fixture = { schemaVersion: 1, anchors: Object.fromEntries(
+        Object.entries(fixture.anchors).map(([key, row]) => [key.replace(base, rekey), row]),
+      ) };
+    }
+    mutate?.(fixture);
+    assert.throws(() => validatePlan(fixture), (error) => error.message.includes(needle), `${JSON.stringify(rows)} -> ${needle}`);
+  }
 });
 
 // sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —

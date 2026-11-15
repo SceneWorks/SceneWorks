@@ -1578,13 +1578,145 @@ function loadAnchorStrategy() {
 
 export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
-/** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
-const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$/;
+/**
+ * `<modelId>:<tier>:<backend>[:<regime>]` — the anchor plan's key. The first three segments are the
+ * cell identity itself; the optional fourth names one of the cell's regime anchors (SW-F363):
+ *
+ * - `resident`  — no memory optimization engaged. Only where the base row does not ALREADY plan
+ *   the resident composition (the candle lane default is `staged_residency`); on MLX the base row
+ *   is the resident anchor and a `:resident` row would measure it twice.
+ * - `optimized` — every optimization the provider contract implements, engaged at once, with the
+ *   one exact parameter tuple each bounded rung executes at.
+ * - `lora`      — the base row's composition with one LoRA installed through `LoadSpec::adapters`.
+ *
+ * Together with the base row that is the AGENTS.md two-anchor rule (the lowest- and highest-memory
+ * fits are measured, everything between is derived) plus one overlay witness. The enum is closed,
+ * so a regime grid is as unwritable as a rung grid.
+ */
+export const ANCHOR_REGIMES = Object.freeze(["resident", "optimized", "lora"]);
+const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)(?::(resident|optimized|lora))?$/;
 
 export function parseAnchorKey(key) {
   const match = ANCHOR_KEY.exec(typeof key === "string" ? key : "");
-  if (!match) fail(`anchor key ${JSON.stringify(key)} must be <modelId>:<tier>:<backend>`);
-  return { modelId: match[1], tier: match[2], backend: match[3] };
+  if (!match) fail(`anchor key ${JSON.stringify(key)} must be <modelId>:<tier>:<backend>[:<regime>]`);
+  return { modelId: match[1], tier: match[2], backend: match[3], regime: match[4] ?? null };
+}
+
+/** The base (cell) key a regime key belongs to; a base key is its own. */
+export function baseAnchorKey(key) {
+  const { modelId, tier, backend } = parseAnchorKey(key);
+  return `${modelId}:${tier}:${backend}`;
+}
+
+/**
+ * The parameter(s) each bounded rung executes at — gen-core's `validate_selected_parameters`
+ * requires exactly these for an engaged rung (`transformerWindowComponent` has a DiT default, so it
+ * is optional) and refuses them for a rung the selection does not engage.
+ */
+const RUNG_PARAMETERS = Object.freeze({
+  // gen-core's cost order never engages staging under a deeper rung (`MemoryStrategy::engages`):
+  // only selecting it, or `stageResidency: true` beside a deeper rung, does. So the flag is
+  // required exactly when a deeper rung engages it — see `validateStrategyParameters`.
+  staged_residency: Object.freeze({ required: [], optional: ["stageResidency"] }),
+  bounded_decode: Object.freeze({ required: ["decodeTileEdge", "decodeOverlap"], optional: [] }),
+  bounded_attention: Object.freeze({ required: ["attentionChunkSize"], optional: [] }),
+  bounded_transformer_residency: Object.freeze({
+    required: ["transformerWindowSize"],
+    optional: ["transformerWindowComponent"],
+  }),
+});
+
+/** The composition `planAnchor` sends for a row: its own `strategy`, else the lane default. */
+export function plannedAnchorStrategy(anchor, backend) {
+  const strategy = anchor.strategy ?? ANCHOR_STRATEGY[backend];
+  return {
+    rung: strategy.rung,
+    engagedRungs: [...strategy.engagedRungs],
+    parameters: { ...(strategy.parameters ?? {}) },
+  };
+}
+
+function validateStrategyParameters(key, strategy) {
+  const engaged = new Set(strategy.engagedRungs);
+  const allowed = new Set();
+  for (const [rung, { required, optional }] of Object.entries(RUNG_PARAMETERS)) {
+    if (!engaged.has(rung)) continue;
+    for (const name of required) {
+      if (!Object.hasOwn(strategy.parameters, name)) {
+        fail(`anchor plan is invalid: ${key}: strategy engages ${rung} but names no parameters.${name}`);
+      }
+      allowed.add(name);
+    }
+    for (const name of optional) allowed.add(name);
+  }
+  const explicitStaging = engaged.has("staged_residency") && strategy.rung !== "staged_residency";
+  if (explicitStaging !== (strategy.parameters.stageResidency === true)) {
+    fail(
+      `anchor plan is invalid: ${key}: parameters.stageResidency is true exactly when a rung deeper ` +
+        "than staged_residency engages it (gen-core engages staging under a deeper rung only on that flag)",
+    );
+  }
+  for (const name of Object.keys(strategy.parameters)) {
+    if (!allowed.has(name)) {
+      fail(`anchor plan is invalid: ${key}: strategy.parameters.${name} belongs to no rung the strategy engages`);
+    }
+  }
+}
+
+/** The fields a regime row shares with its base row: the cell's request, not its composition. */
+const REGIME_SHARED_FIELDS = Object.freeze([
+  "provider", "mode", "referenceCount", "transformerVariant", "decoder", "geometry", "evidenceScope",
+]);
+
+/** Hold one regime row to its base row and to its regime (SW-F363). */
+function validateRegimeRow(plan, key, regime, backend) {
+  const anchor = plan.anchors[key];
+  const baseKey = baseAnchorKey(key);
+  const base = plan.anchors[baseKey];
+  if (!base) fail(`anchor plan is invalid: ${key}: a regime row needs its base row ${baseKey}`);
+  for (const field of REGIME_SHARED_FIELDS) {
+    if (!equal(anchor[field], base[field])) {
+      fail(`anchor plan is invalid: ${key}: ${field} must equal the base row ${baseKey}'s — a regime changes the composition, never the request`);
+    }
+  }
+  const strategy = plannedAnchorStrategy(anchor, backend);
+  const baseStrategy = plannedAnchorStrategy(base, backend);
+  if (regime === "lora") {
+    if (anchor.overlay !== "lora" || base.overlay !== "none") {
+      fail(`anchor plan is invalid: ${key}: a lora regime row plans overlay "lora" over an overlay-free base row`);
+    }
+    if (!equal(strategy, baseStrategy)) {
+      fail(`anchor plan is invalid: ${key}: a lora regime row renders the base row ${baseKey}'s composition`);
+    }
+    return;
+  }
+  if (anchor.overlay !== base.overlay) {
+    fail(`anchor plan is invalid: ${key}: overlay must equal the base row ${baseKey}'s`);
+  }
+  if (!anchor.strategy) fail(`anchor plan is invalid: ${key}: a ${regime} regime row states its strategy`);
+  if (regime === "resident") {
+    if (!equal(strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} })) {
+      fail(`anchor plan is invalid: ${key}: the resident regime engages the resident rung alone`);
+    }
+    if (baseStrategy.rung === "resident") {
+      fail(`anchor plan is invalid: ${key}: the base row ${baseKey} already plans the resident composition`);
+    }
+    return;
+  }
+  // optimized: the deepest engaged rung is the selected one, and it engages strictly more than the
+  // base row does. That every rung the CONTRACT implements is engaged is the contract's question,
+  // answered weights-free by crates/sceneworks-worker/src/inference_runtime.rs.
+  const order = [...RUNG_SET];
+  const deepest = [...strategy.engagedRungs].sort((left, right) => order.indexOf(left) - order.indexOf(right)).at(-1);
+  if (strategy.rung !== deepest) {
+    fail(`anchor plan is invalid: ${key}: the optimized regime selects its deepest engaged rung ${deepest}, not ${strategy.rung}`);
+  }
+  if (
+    !baseStrategy.engagedRungs.every((rung) => strategy.engagedRungs.includes(rung))
+    || strategy.engagedRungs.length <= baseStrategy.engagedRungs.length
+  ) {
+    fail(`anchor plan is invalid: ${key}: the optimized regime engages strictly more than the base row ${baseKey}`);
+  }
 }
 
 /**
@@ -1659,6 +1791,9 @@ export function validatePlan(plan) {
     if (modelId !== "ltx_2_5" && (anchor.transformerVariant || anchor.decoder)) {
       fail(`${key}: transformerVariant/decoder are LTX-2.5 axes only`);
     }
+    const { backend, regime } = parseAnchorKey(key);
+    validateStrategyParameters(key, plannedAnchorStrategy(anchor, backend));
+    if (regime) validateRegimeRow(plan, key, regime, backend);
   }
   return plan;
 }
@@ -1679,7 +1814,7 @@ export function planAnchors(plan) {
  */
 export function planAnchor(plan, key) {
   validatePlan(plan);
-  const { modelId, tier, backend } = parseAnchorKey(key);
+  const { modelId, tier, backend, regime } = parseAnchorKey(key);
   const anchor = plan.anchors[key];
   if (!anchor) {
     fail(`unknown anchor ${JSON.stringify(key)}; the plan declares: ${Object.keys(plan.anchors).sort().join(", ")}`);
@@ -1697,13 +1832,13 @@ export function planAnchor(plan, key) {
       overlay: anchor.overlay,
       ...(anchor.transformerVariant ? { transformerVariant: anchor.transformerVariant } : {}),
       ...(anchor.decoder ? { decoder: anchor.decoder } : {}),
+      // SW-F363: present on a regime row only, so a base row's case and record ids are unchanged.
+      ...(regime ? { anchorRegime: regime } : {}),
       geometry: anchor.geometry,
     },
-    strategy: {
-      rung: (anchor.strategy ?? ANCHOR_STRATEGY[backend]).rung,
-      engagedRungs: [...(anchor.strategy ?? ANCHOR_STRATEGY[backend]).engagedRungs],
-      parameters: {},
-    },
+    // The row's one exact parameter tuple travels with its rung (SW-F363); a row without a bounded
+    // rung sends `{}`, exactly as before.
+    strategy: plannedAnchorStrategy(anchor, backend),
     ...(anchor.sourceProvenance ? { sourceProvenance: anchor.sourceProvenance } : {}),
     calibrationFingerprint: anchor.calibrationFingerprint,
     fixture: anchor.fixture,

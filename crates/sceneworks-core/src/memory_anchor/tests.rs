@@ -1762,6 +1762,7 @@ fn candle_record_anchor(raw: &str) -> MemoryAnchor {
         tier: str_at(target, "tier"),
         transformer_variant: None,
         decoder: None,
+        regime: None,
         mode: str_at(target, "mode"),
         overlay: None,
         reference_count: 0,
@@ -2744,6 +2745,7 @@ fn bound_store(bounds: Vec<ExceededBound>) -> MemoryAnchorStore {
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
         exceeded_bounds: bounds,
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
     }
 }
@@ -4072,6 +4074,7 @@ fn axis_free_video_anchor() -> MemoryAnchor {
         tier: "bf16".to_owned(),
         transformer_variant: None,
         decoder: None,
+        regime: None,
         mode: "image_to_video".to_owned(),
         overlay: None,
         reference_count: 1,
@@ -4225,6 +4228,7 @@ fn the_store_resolves_an_axis_free_video_anchor_only_for_an_axis_free_request() 
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
         exceeded_bounds: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
     };
     assert_eq!(
@@ -5115,4 +5119,47 @@ fn a_doctored_phase_allocator_or_empty_underived_reason_is_rejected() {
     let error = load_memory_anchors(&unexplained.to_string())
         .expect_err("an empty underived reason must be rejected");
     assert!(error.contains("without a reason"), "{error}");
+}
+
+/// SW-F363: a regime anchor lives in `regimeAnchors` and nowhere else, names its regime, is
+/// unique per (cell, pipeline axes, regime), and is bound to its source record's
+/// `target.anchorRegime` — so a base-row record can never be filed as a regime and a regime row can
+/// never shadow the cell's derivation anchor. An empty `regimeAnchors` is not serialized at all.
+///
+/// *Mutations this kills:* drop any of the four refusals in `load_memory_anchors` /
+/// `validate_anchor`, or serialize an empty `regimeAnchors`.
+#[test]
+fn regime_anchors_are_filed_apart_named_unique_and_bound_to_their_record() {
+    let packaged = store().clone();
+    let serialized = serde_json::to_value(&packaged).unwrap();
+    assert!(serialized.get("regimeAnchors").is_none());
+    let load =
+        |store: &MemoryAnchorStore| load_memory_anchors(&serde_json::to_string(store).unwrap());
+    let base = packaged.anchors[0].clone();
+
+    let mut regime_among_anchors = packaged.clone();
+    regime_among_anchors.anchors[0].regime = Some(AnchorRegime::Optimized);
+    assert!(load(&regime_among_anchors)
+        .unwrap_err()
+        .contains("belong in regimeAnchors"));
+
+    let mut unnamed = packaged.clone();
+    unnamed.regime_anchors = vec![base.clone()];
+    assert!(load(&unnamed).unwrap_err().contains("names no regime"));
+
+    let mut duplicate = packaged.clone();
+    let mut regime = base.clone();
+    regime.regime = Some(AnchorRegime::Optimized);
+    duplicate.regime_anchors = vec![regime.clone(), regime.clone()];
+    assert!(load(&duplicate)
+        .unwrap_err()
+        .contains("duplicate regime anchor"));
+
+    // The packaged record is a base-row capture (no `target.anchorRegime`), so filing it as a
+    // regime disagrees with its source.
+    let mut misfiled = packaged.clone();
+    misfiled.regime_anchors = vec![regime];
+    assert!(load(&misfiled)
+        .unwrap_err()
+        .contains("identity disagrees with its source record"));
 }

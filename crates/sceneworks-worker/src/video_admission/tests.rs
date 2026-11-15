@@ -4643,6 +4643,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
             tier: "bf16".to_owned(),
             transformer_variant: None,
             decoder: None,
+            regime: None,
             mode: "image_to_video".to_owned(),
             overlay: None,
             reference_count: 1,
@@ -4680,6 +4681,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
         }],
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: Vec::new(),
     }
@@ -5089,6 +5091,7 @@ fn bernini_bound_store(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: vec![anchor::ExceededBound {
             id: "exceeded:bernini:mlx:q8:base:base:fp:exc-0".to_owned(),

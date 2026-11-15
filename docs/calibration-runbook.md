@@ -161,6 +161,26 @@ fresh-five-rung-z-image-q4-768-seed16402-step2`.
 Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` anchor derives no
 digest and can never be current evidence.
 
+**Regime rows (SW-F363): `<modelId>:<tier>:<backend>:<regime>`.** A cell may carry up to three
+more rows beside its base row, each the same request rendered at a different composition — the
+AGENTS.md two-anchor rule (measure the lowest- and highest-memory fits, derive everything between)
+plus one overlay witness. The suffix is a closed enum, so a regime grid is as unwritable as a rung
+grid:
+
+| suffix | composition | rule (`validatePlan`, `memory-calibration-harness.mjs`) |
+|---|---|---|
+| `resident` | the resident rung alone | only where the base row is not already resident (the candle lane default is `staged_residency`; on MLX the base row IS the resident anchor) |
+| `optimized` | every rung the contract implements, engaged at once, with each bounded rung's one exact parameter tuple (`strategy.parameters`) | strictly deeper than the base row, rung = deepest engaged rung; `inference_runtime.rs` checks against the weights-free contract that the engaged set is EVERY implemented rung |
+| `lora` | the base row's composition, overlay `lora` | the adapter arm installs one pinned community LoRA through `LoadSpec::adapters`; the catalog runner resolves and `--download-missing` fetches it as the family's `overlayArtifact` |
+
+A regime row shares its base row's provider, mode, geometry, reference count and scope. The harness
+writes the suffix into `planned.target.anchorRegime`, so the record says which regime it is; the
+extractor files it under the store's `regimeAnchors` (never under `anchors`, which the derivation
+reads), `--stamp-anchors` keys it like any anchor, and `--list` / `--skip-current` track it under
+its own key. `node scripts/measure-memory-catalog.mjs --backend <lane> --campaign <c> --model
+minimax_h3_image --list` lists the model's regime rows; `--dry-run` prints every row's strategy,
+parameters, overlay and load shape.
+
 🔴 **The anchor's `geometry` is a FREE PLAN CHOICE, not a restatement of the geometry the packaged
 anchor was captured at, and the two are allowed to disagree.** The packaged anchors in
 `config/memory-anchors.json` (surfaced as `anchors[].geometry` in `docs/generated/memory-matrix.json`)

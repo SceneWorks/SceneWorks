@@ -544,7 +544,34 @@ pub struct Target {
     /// LTX-2.5's ConvVAE and DiffVAE have different decode paths and ladder compositions.
     /// Required for `ltx_2_5` records; absent for unrelated families.
     pub decoder: Option<Ltx25Decoder>,
+    /// SW-F363: which regime anchor of its cell this capture is (the plan key's fourth segment).
+    /// Absent on a base-row capture — every record written before the axis existed.
+    pub anchor_regime: Option<AnchorRegime>,
     pub geometry: Geometry,
+}
+
+/// The three regime anchors a cell may carry beside its derivation anchor (SW-F363): the
+/// two-anchor memory-evidence rule's lowest- and highest-memory fits, plus one overlay witness.
+/// `packages/schemas/memory-anchor-plan.schema.json` closes the plan-key suffix to exactly these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorRegime {
+    /// No memory optimization engaged.
+    Resident,
+    /// Every optimization the provider contract implements, engaged at once.
+    Optimized,
+    /// The base composition with one LoRA installed through `LoadSpec::adapters`.
+    Lora,
+}
+
+impl AnchorRegime {
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Resident => "resident",
+            Self::Optimized => "optimized",
+            Self::Lora => "lora",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
