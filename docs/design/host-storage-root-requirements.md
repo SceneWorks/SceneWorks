@@ -233,9 +233,10 @@ The system drive holds only source code, apps, toolchains, personal files
       run.sh`. Runner self-update runs inside `run-helper.sh`, so it isn't
       affected. While the volume is missing, launchd retries every 10 s,
       which is accepted.
-    - On Windows, the runner service's command line, if the service
-      configuration permits it (unverified). Otherwise the pre-job hook
-      alone covers Windows.
+    - Not the Windows runner services. `D:` on the CUDA machine is an
+      internal NVMe drive that is never missing (Michael, 2026-11-15), so
+      the pre-job hook alone covers Windows: it still catches an unset
+      `DEV_HOST_ROOT` or a missing marker.
     - The SessionStart hook for agents, the `cargo` shim, and the lock
       helpers (E3).
   - Docker Desktop on macOS starts only after the check passes. It's
@@ -383,8 +384,9 @@ The system drive holds only source code, apps, toolchains, personal files
      same way;
    - nothing is created under the plain folder or in `<repo>/target`.
 
-   Repeat on Windows with `D:` offline, for the pre-job hook and the lock
-   helper.
+   On Windows, where `D:` is internal and never missing, rename the
+   marker instead: the pre-job hook and the lock helper fail naming the
+   marker.
 3. **Locks stay exclusive across the transition.** Using the CPU-only test
    seams of each implementation:
    - on Mac and Windows, an old-only holder and a dual holder never hold

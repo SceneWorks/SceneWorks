@@ -63,8 +63,8 @@ No two items share both a mechanism and a repo.
     - each runner `.env` sets `DEV_HOST_ROOT` and
       `ACTIONS_RUNNER_HOOK_JOB_STARTED`, and the hook only runs
       `dev-host check`;
-    - the launchd plist runs `dev-host check && exec run.sh`, and the
-      Windows service is wrapped where it allows;
+    - the launchd plist runs `dev-host check && exec run.sh` (the Windows
+      services stay as they are: `D:` is internal);
     - the per-host budget config and the cleanup schedule are installed;
     - the stale LensWorks plist is removed.
 
@@ -398,7 +398,7 @@ No two items share both a mechanism and a repo.
   - SceneWorks's old lock paths are removed in a PR that also bumps the pin
     to include INF-3. `/Users/Shared/SceneWorks` is deleted.
   - Acceptance tests 1, 2, 4, 7 and 8 pass once on this Mac, and test 2's
-    Windows part passes once on a CUDA runner. The plain-folder case of
+    Windows part (marker renamed) passes once on a CUDA runner. The plain-folder case of
     test 2 needs admin rights; Michael runs it.
   - `dev-host guard --all` and `--docs` pass in all five repos.
 - **Inherits:** all
