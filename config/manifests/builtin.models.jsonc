@@ -18277,14 +18277,6 @@
               "overlays": ["none", "lora", "identity"],
               "loadProfiles": ["plain", "lora", "ip_adapter", "lora_ip_adapter"],
               "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/sdxl"
-            },
-            {
-              "rung": "bounded_decode",
-              "tiers": ["bf16", "q8"],
-              "modes": ["text_to_image", "edit_image", "image_detail", "character_image"],
-              "overlays": ["none", "lora", "identity"],
-              "loadProfiles": ["plain", "lora", "ip_adapter", "lora_ip_adapter"],
-              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/sdxl"
             }
             // END generated-from-engine-capabilities
           ]
