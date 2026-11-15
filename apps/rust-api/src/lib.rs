@@ -540,13 +540,44 @@ where
         let Json(mut value) = Json::<Value>::from_request(request, state)
             .await
             .map_err(json_rejection_response)?;
+        if value.is_object() {
+            let carrier = if std::any::TypeId::of::<T>()
+                == std::any::TypeId::of::<JobCreateRequest>()
+            {
+                let interleave = value
+                    .get("type")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<JobType>(value).ok())
+                    == Some(JobType::ImageInterleave);
+                sceneworks_core::options::upgrade::job_carrier(if interleave {
+                    "interleave"
+                } else {
+                    ""
+                })
+            } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<InterleaveJobRequest>()
+            {
+                sceneworks_core::options::upgrade::Carrier::InterleaveRequest
+            } else {
+                sceneworks_core::options::upgrade::Carrier::Request
+            };
+            value =
+                sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(|error| {
+                    ApiError::typed(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        error.to_string(),
+                        error.code,
+                        json!({ "field": error.field }),
+                    )
+                    .into_response()
+                })?;
+        }
         if let Some(kind) = generation_wire_kind::<T>() {
             let payload = value.as_object().ok_or_else(|| {
                 ApiError::bad_request("Generation request must be an object").into_response()
             })?;
             sceneworks_core::request_validation::validate_shape(kind, payload)
                 .map_err(|error| ApiError::from(error).into_response())?;
-            // The canonical upgrader has checked this envelope field. Strict DTOs only own options.
+            // The upgrader checked this envelope field; strict DTOs only own options.
             value
                 .as_object_mut()
                 .expect("request object")
@@ -554,7 +585,7 @@ where
         }
         serde_json::from_value(value)
             .map(Self)
-            .map_err(|error| ApiError::bad_request(error.to_string()).into_response())
+            .map_err(|error| json_decode_error_response(error.to_string()))
     }
 }
 
@@ -2591,3 +2622,38 @@ use test_hooks::{
     TEST_MAX_LORA_UPLOAD_BYTES, TEST_MAX_MODEL_UPLOAD_BYTES, TEST_MAX_WORKFLOW_INSPECT_BYTES,
     TEST_TRASH_OUTCOMES,
 };
+
+#[cfg(test)]
+mod option_upgrade_boundary_tests {
+    use super::*;
+    #[tokio::test]
+    async fn http_raw_upgrade_refuses_alias_conflicts_and_future_versions_before_dto_defaults() {
+        for (body, code) in [
+            (
+                json!({"optionsSchemaVersion":9}),
+                "UnsupportedSchemaVersion",
+            ),
+            (
+                json!({"advanced":{"schedulerShift":3,"timestepShift":4}}),
+                "ConflictingAliases",
+            ),
+        ] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = match ApiJson::<Value>::from_request(request, &()).await {
+                Ok(_) => panic!("future/conflicting input was accepted"),
+                Err(response) => response,
+            };
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+                .await
+                .unwrap();
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["code"], code);
+            assert!(error["context"]["field"].is_string());
+        }
+    }
+}
