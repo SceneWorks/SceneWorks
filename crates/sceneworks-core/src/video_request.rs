@@ -360,6 +360,7 @@ impl VideoRequest {
         let mut request = Self::from_payload(effective);
         request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
         request.advanced = object_or_empty(authored, "advanced");
+        request.duration_was_explicit = parse_safe_float(authored.get("duration")).is_some();
         Ok(request)
     }
 
@@ -1575,6 +1576,21 @@ mod tests {
             request.options().steps.as_ref().map(|bound| bound.value),
             Some(8)
         );
+    }
+
+    #[test]
+    fn resolved_video_keeps_authored_duration_presence() {
+        let effective = payload(json!({"model":"ltx_2_5", "duration":6.0}));
+        let absent = payload(json!({"model":"ltx_2_5"}));
+        let automatic = VideoRequest::from_resolved(&absent, &effective).unwrap();
+        assert_eq!(automatic.duration, 6.0);
+        assert!(!automatic.duration_was_explicit);
+
+        let authored = payload(json!({"model":"ltx_2_5", "duration":"7.5"}));
+        let effective = payload(json!({"model":"ltx_2_5", "duration":7.5}));
+        let fixed = VideoRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(fixed.duration, 7.5);
+        assert!(fixed.duration_was_explicit);
     }
 
     // ----------------------------------------------------------------------------------------

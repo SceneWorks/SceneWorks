@@ -1,8 +1,8 @@
 use super::*;
 use crate::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
 use crate::model_artifacts::portable_binding::{
-    canonical_authored_options_sha256, PortableJobBinding, PortableModelBinding,
-    PortableRouteBinding,
+    canonical_authored_options_sha256, PortableExpectedProvider, PortableJobBinding,
+    PortableModelBinding, PortableRouteBinding,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -234,7 +234,15 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             .clone(),
     )
     .unwrap();
-    let route = PortableRouteBinding::new("mlx", std::env::consts::OS, vec![model]).unwrap();
+    let route = PortableRouteBinding::new("mlx", std::env::consts::OS, vec![model])
+        .unwrap()
+        .with_expected_provider(PortableExpectedProvider {
+            model_slot: "modelManifestEntry".into(),
+            model_id: "sdxl".into(),
+            operation: "image_generate".into(),
+            provider_id: "sdxl".into(),
+        })
+        .unwrap();
     let binding = serde_json::to_value(
         PortableJobBinding::new(authored, BTreeMap::from([(route.key(), route.clone())])).unwrap(),
     )

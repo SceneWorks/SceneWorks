@@ -668,8 +668,30 @@ pub(super) fn minimax_h3_sampling(
         ));
     };
     Ok((
-        resolved_video_u32(request, "steps").or(Some(recipe.steps)),
-        resolved_video_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
+        request
+            .options()
+            .steps
+            .as_ref()
+            .filter(|bound| {
+                matches!(
+                    bound.origin,
+                    sceneworks_core::resolved_options::Origin::Authored { .. }
+                )
+            })
+            .and_then(|bound| u32::try_from(bound.value).ok())
+            .or(Some(recipe.steps)),
+        request
+            .options()
+            .scheduler_shift
+            .as_ref()
+            .filter(|bound| {
+                matches!(
+                    bound.origin,
+                    sceneworks_core::resolved_options::Origin::Authored { .. }
+                )
+            })
+            .map(|bound| bound.value as f32)
+            .or(Some(recipe.video_shift)),
         Some(recipe),
     ))
 }

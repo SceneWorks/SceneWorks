@@ -170,7 +170,18 @@ fn is_engine_load_failure(error: &WorkerError) -> bool {
 /// outside the data dir is ever hashed or marked.
 #[cfg(native_lane)]
 fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBuf> {
-    let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
+    // Diagnosis needs only modelPath. Other authored controls may still use spellings that
+    // require portable resolution, which is unavailable on this error-only path.
+    let mut diagnostic = payload.clone();
+    if let Some(advanced) = diagnostic
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+    {
+        advanced.retain(|key, _| key == "modelPath");
+    }
+    let request =
+        sceneworks_core::image_request::ImageRequest::from_resolved(&diagnostic, &diagnostic)
+            .ok()?;
     crate::image_jobs::resolve_model_path_dir(&request, settings)
         .ok()
         .flatten()
@@ -453,7 +464,10 @@ mod tests {
         std::fs::create_dir_all(&installed).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         let mut aimed = payload(&installed);
-        aimed.insert("advanced".to_owned(), json!({ "modelPath": other }));
+        aimed.insert(
+            "advanced".to_owned(),
+            json!({ "modelPath": other, "steps": "20" }),
+        );
         let judged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let error = explain_failed_load_with(
             &settings,

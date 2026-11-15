@@ -193,7 +193,37 @@ pub fn validate_worker_receipt(
             ));
         }
         for stage in &output.stages {
-            validate_execution_identity(&stage.execution, 1)?;
+            let shared_base = stage.stage == "base_render"
+                && stage
+                    .execution
+                    .pointer("/identity/output_units")
+                    .and_then(Value::as_u64)
+                    == Some(submitted.outputs.len() as u64)
+                && submitted.outputs.len() > 1;
+            if shared_base
+                && !submitted.outputs.iter().all(|other| {
+                    other
+                        .stages
+                        .first()
+                        .filter(|first| first.stage == "base_render")
+                        .map(|first| &first.execution)
+                        .or(other.execution.as_ref())
+                        == Some(&stage.execution)
+                })
+            {
+                return Err(ReplayUnavailable::new(
+                    "invalid_execution_identity",
+                    "outputs.stages",
+                ));
+            }
+            validate_execution_identity(
+                &stage.execution,
+                if shared_base {
+                    submitted.outputs.len()
+                } else {
+                    1
+                },
+            )?;
         }
     }
     let voice_stages = submitted.stages.len() == 2
@@ -662,10 +692,10 @@ mod tests {
         let mut variants = worker_receipt();
         variants.outputs[0].artifact_ids.push("upscaled-a".into());
         variants.outputs[0].artifact_sha256.push("c".repeat(64));
-        let variant_result = json!({"expectedCount":2,"assetWrites":[
+        let variant_result = json!({"expectedCount":3,"assetWrites":[
             {"assetId":"a","index":0},{"assetId":"b","index":1},{"assetId":"upscaled-a","index":0}
         ]});
-        assert!(validate_worker_receipt(&variants, variant_result.as_object().unwrap()).is_ok());
+        validate_worker_receipt(&variants, variant_result.as_object().unwrap()).unwrap();
         let mut swapped = variants;
         swapped.outputs.swap(0, 1);
         swapped.outputs[0].output_index = 0;
@@ -675,6 +705,48 @@ mod tests {
                 .unwrap_err()
                 .reason,
             "output_artifacts_changed"
+        );
+    }
+
+    #[test]
+    fn inline_children_keep_the_shared_batch_base_report() {
+        let mut receipt = worker_receipt();
+        let base = receipt.execution.clone();
+        let child =
+            serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default())
+                .unwrap();
+        receipt.execution = child.clone();
+        let mut writes = Vec::new();
+        for (index, output) in receipt.outputs.iter_mut().enumerate() {
+            let base_id = format!("base-{index}");
+            let child_id = format!("child-{index}");
+            output.artifact_ids = vec![base_id.clone(), child_id.clone()];
+            output.artifact_sha256 = vec!["a".repeat(64), "b".repeat(64)];
+            output.stages = vec![
+                ExecutionStageBinding {
+                    stage: "base_render".into(),
+                    execution: base.clone(),
+                },
+                ExecutionStageBinding {
+                    stage: "child_transform".into(),
+                    execution: child.clone(),
+                },
+            ];
+            writes.push(json!({"assetId":base_id,"index":index,"workerExecutionReport":base}));
+            writes.push(
+                json!({"assetId":child_id,"index":index,"sourceAssetId":base_id,
+                "workerExecutionReport":base,"workerChildExecutionReport":child}),
+            );
+        }
+        let result = json!({"expectedCount":4,"assetWrites":writes});
+        validate_worker_receipt(&receipt, result.as_object().unwrap()).unwrap();
+
+        receipt.outputs[1].stages[0].execution = child;
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_identity"
         );
     }
 

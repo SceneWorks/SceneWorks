@@ -18051,6 +18051,36 @@ fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
     request(payload)
 }
 
+#[cfg(native_lane)]
+#[test]
+fn h3_turbo_schedule_wins_over_resolved_model_defaults() {
+    let authored = json!({
+        "model":"minimax_h3",
+        "loras":[{"id":"minimax_h3_turbo_4step_768p"}]
+    });
+    let mut effective = authored.clone();
+    effective["advanced"] = json!({"steps":50,"schedulerShift":12.0});
+    let request = VideoRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    let (steps, shift, recipe) = super::minimax_h3::minimax_h3_sampling(&request).unwrap();
+    assert_eq!((steps, shift), (Some(4), Some(6.0)));
+    assert!(recipe.is_some());
+
+    let mut authored = authored;
+    authored["advanced"] = json!({"steps":7,"schedulerShift":9.0});
+    effective["advanced"] = authored["advanced"].clone();
+    let request = VideoRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    let (steps, shift, _) = super::minimax_h3::minimax_h3_sampling(&request).unwrap();
+    assert_eq!((steps, shift), (Some(7), Some(9.0)));
+}
+
 /// Write ONE MiniMax-H3 DiT partition under tier dir `dir`: the `config.json` the engine parses plus
 /// a shard index naming `shards`, all of which land.
 ///
