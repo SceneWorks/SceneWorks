@@ -313,7 +313,13 @@ fn windows_file_identity(path: &Path) -> std::io::Result<(i64, u64, u64)> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    let mut basic = FILE_BASIC_INFO::default();
+    let mut basic = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: 0,
+    };
     let size =
         u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).expect("FILE_BASIC_INFO fits in u32");
     // SAFETY: `file` owns an open handle for the whole call, so the handle is valid; `basic` is a

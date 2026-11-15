@@ -58,6 +58,9 @@ sha2 = { version = "0.10" }
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.7" }
 base64 = { version = "0.22" }
+# Windows-only: desktop (job objects) and core (source-stamp change time) each add their own
+# features. 0.59 is the version tauri already locks.
+windows-sys = { version = "0.59" }
 fs2 = { version = "0.4" }
 glob = { version = "0.3" }
 parking_lot = { version = "0.12" }

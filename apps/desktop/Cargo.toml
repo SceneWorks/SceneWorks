@@ -87,7 +87,7 @@ futures-util = { workspace = true, features = ["alloc"] }
 # Object, so no orphan can outlive the desktop and pin the API's listening port on the
 # next launch (sc-11946). Already in the workspace lock (pulled transitively by tauri),
 # so no new locked version is added.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # Recover the UI when WebView2 kills its render process (webview_resilience.rs;
 # 2026-10-22 incident). Pinned to the exact version wry 0.55 builds against so the
 # ICoreWebView2Controller handed out by tauri's PlatformWebview and our handler
