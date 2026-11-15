@@ -45684,7 +45684,7 @@
       "minMemoryGbByTier": {
         "bf16": 58,
         "q8": 36,
-        "q4": 24
+        "q4": 22
       },
       "measured": false
     }

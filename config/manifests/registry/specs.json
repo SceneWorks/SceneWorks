@@ -66967,7 +66967,7 @@
         "minMemoryGb": 58,
         "minMemoryGbByTier": {
           "bf16": 58,
-          "q4": 24,
+          "q4": 22,
           "q8": 36
         }
       },

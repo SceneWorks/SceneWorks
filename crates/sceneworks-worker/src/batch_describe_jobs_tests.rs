@@ -889,7 +889,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [24.0, 36.0, 58.0])] {
+    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 36.0, 58.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -927,7 +927,7 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     let stage = stage("http://127.0.0.1:9".to_owned());
     let job = qwen38_job_payload(&stage, "q4");
     let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
-    assert_eq!(floor, Some(24.0));
+    assert_eq!(floor, Some(22.0));
     // A 32 GiB card holding the first job's q4 model (measured 21.48 GiB) has about 10 GiB free.
     let free_with_q4_cached = Some(32.0 - 21.48);
     let free_after_drop = Some(32.0);
@@ -957,7 +957,16 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     // A cold load that truly cannot fit is still refused.
     let error =
         qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
-    assert!(error.to_string().contains("needs 24 GB"), "{error}");
+    assert!(error.to_string().contains("needs 22 GB"), "{error}");
+
+    // A 24 GB card (24,564 MiB total) is admitted cold with 22,528 MiB free and refused below.
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(24_564.0 / 1024.0))
+        .expect("an idle 24 GB card admits q4");
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_528.0 / 1024.0))
+        .expect("22,528 MiB free admits q4");
+    assert!(
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_527.0 / 1024.0)).is_err()
+    );
 }
 
 /// A cold Candle load evicts the cached image/video generator BEFORE free VRAM is read, so a describe

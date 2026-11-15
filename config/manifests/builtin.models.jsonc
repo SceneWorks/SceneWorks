@@ -15646,10 +15646,17 @@
       // job reads its tier's floor on the worker's lane and refuses before any image when the
       // worker cannot hold it. The scalar `minMemoryGb` of each lane is the bf16 floor, the
       // conservative fallback for a tier with no row.
-      //   candle (free VRAM, measured peak above idle + the 2 GiB allocator slack, rounded up):
-      //     q4 24 — measured 21,993 MiB (21.48 GiB) on CUDA (qwen38-describer-validation run
-      //             43604077657)
-      //     q8 36 — measured 34,409 MiB (33.60 GiB) on CUDA (run 43604907453)
+      //   candle (checked as-is against the card's free VRAM; the gate adds no slack, so the floor
+      //   carries its own margin):
+      //     q4 22 — measured peak above baseline 21,993 MiB at 512x384 (qwen38-describer-validation
+      //             run 43604077657) and 21,995 MiB at 1536x1536 (run 43665994831, shared card):
+      //             the same 21.48 GiB at both image sizes. 22 is the smallest whole GiB above that
+      //             peak (22,528 MiB, a 533 MiB margin). A 24 GB card (24,564 MiB total) is
+      //             admitted with 22,528 MiB free, so up to 2,036 MiB may be in use already. The
+      //             old floor, 24, refused every 24 GB card.
+      //     q8 36 — measured 34,409 MiB (33.60 GiB) on CUDA (run 43604907453) + 2 GiB slack,
+      //             rounded up. The thinner q4 margin is not applied here: no common card size
+      //             falls between 34 and 36 GiB, so the extra slack refuses no card q8 could use.
       //     bf16 58 — UNMEASURED, derived: 51.76 GiB of bf16 files + the 3.45 GiB the q8 peak
       //               holds above its files + 2 GiB slack
       //   `candle.measured` stays false: the flag covers the whole block, including the scalar
