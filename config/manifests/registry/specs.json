@@ -66968,11 +66968,11 @@
     "evidence": {
       "candle": {
         "measured": false,
-        "minMemoryGb": 58,
+        "minMemoryGb": 65,
         "minMemoryGbByTier": {
-          "bf16": 58,
+          "bf16": 65,
           "q4": 22,
-          "q8": 36
+          "q8": 34
         }
       },
       "mlx": {

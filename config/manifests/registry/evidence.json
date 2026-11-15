@@ -45680,10 +45680,10 @@
       }
     },
     "candle": {
-      "minMemoryGb": 58,
+      "minMemoryGb": 65,
       "minMemoryGbByTier": {
-        "bf16": 58,
-        "q8": 36,
+        "bf16": 65,
+        "q8": 34,
         "q4": 22
       },
       "measured": false

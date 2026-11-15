@@ -1670,7 +1670,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 36.0, 58.0])] {
+    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 34.0, 65.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -1696,6 +1696,45 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     qwen38_fit_refusal("q4", Some(25.0), Some(32.0)).expect("fits");
     qwen38_fit_refusal("q4", None, Some(8.0)).expect("no floor refuses nothing");
     qwen38_fit_refusal("q4", Some(25.0), None).expect("no budget refuses nothing");
+}
+
+/// The Candle floors never admit a load the engine then refuses, nor one below its measured peak:
+/// each is the smallest whole GiB at or above both candle-llm's CUDA load requirement (from the
+/// shipped snapshots' safetensors headers, inference 4a36a7f) and the measured peak above baseline.
+#[test]
+fn each_candle_floor_covers_the_engine_load_requirement_and_the_measured_peak() {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    // (tier, engine load requirement in bytes, measured peak above baseline in MiB)
+    for (tier, engine_bytes, peak_mib) in [
+        ("q4", 22_279_852_166_u64, 21_995.0),
+        ("q8", 35_291_474_440, 34_409.0),
+        ("bf16", 69_520_866_634, 57_121.0),
+    ] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor_gb =
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier).expect("floor");
+        let need_mib = (engine_bytes as f64 / MIB).max(peak_mib);
+        assert!(
+            floor_gb * 1024.0 >= need_mib,
+            "{tier}: {floor_gb} GiB < {need_mib} MiB"
+        );
+        assert!(
+            (floor_gb - 1.0) * 1024.0 < need_mib,
+            "{tier}: {floor_gb} GiB is not the smallest whole GiB covering {need_mib} MiB"
+        );
+    }
+    // A 24 GB card (24,564 MiB total) admits q4 with up to 2,036 MiB in use, never q8 or bf16.
+    let card = 24_564.0 / 1024.0;
+    for (tier, admitted) in [("q4", true), ("q8", false), ("bf16", false)] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier);
+        assert_eq!(
+            qwen38_fit_refusal(tier, floor, Some(card - 2_036.0 / 1024.0)).is_ok(),
+            admitted,
+            "{tier}"
+        );
+    }
 }
 
 /// A second describe job for the tier the first job left in the refine cache is admitted: the
