@@ -343,7 +343,7 @@ export function SimpleImageStudio() {
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
   // sc-24215: the same native-size and prompt-token statements Image Studio shows.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
-  const promptTokenNotice = promptTokenLimitHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel, mode);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.

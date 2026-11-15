@@ -604,6 +604,12 @@ fn partial_download_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+#[cfg(all(test, native_lane))]
+/// Cache-hit checks that actually read each file (by the path hashed), process-wide; a reused
+/// record reads none.
+static CACHED_FILE_HASHES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 #[cfg(native_lane)]
 async fn cached_file_matches_expected(
     context: &DownloadContext<'_>,
@@ -620,7 +626,42 @@ async fn cached_file_matches_expected(
     let Some(expected_sha256) = expected_sha256 else {
         return Ok(expected_size.is_some());
     };
-    Ok(sha256_file(context.api, context.settings, context.job_id, path).await? == expected_sha256)
+    // A cache hit already verified on this host is not read again while its stamp is unchanged;
+    // otherwise the file is stamped, hashed, and its verdict recorded if the stamp held.
+    let store = context.settings.data_dir.is_absolute().then(|| {
+        sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &context.settings.data_dir,
+        )
+    });
+    let real = std::fs::canonicalize(path).ok();
+    let pinned = format!("sha256:{expected_sha256}");
+    let observed = match (&store, &real) {
+        (Some(store), Some(real)) => {
+            if store.recorded(real).as_deref() == Some(pinned.as_str()) {
+                return Ok(true);
+            }
+            store.observe(real).ok()
+        }
+        _ => None,
+    };
+    // Hash the very path that was stamped (see `verify_file_sha256`).
+    let hashed = real.as_deref().unwrap_or(path);
+    #[cfg(test)]
+    {
+        *CACHED_FILE_HASHES
+            .lock()
+            .unwrap()
+            .entry(hashed.to_path_buf())
+            .or_default() += 1;
+    }
+    let actual = sha256_file(context.api, context.settings, context.job_id, hashed).await?;
+    if actual != expected_sha256 {
+        return Ok(false);
+    }
+    if let (Some(store), Some(observed)) = (store, observed) {
+        let _ = store.record_hashed(observed, &pinned);
+    }
+    Ok(true)
 }
 
 async fn sync_completed_partial(partial: &Path) -> WorkerResult<()> {
@@ -1052,13 +1093,41 @@ pub(crate) async fn verify_file_sha256(
     let Some(expected) = normalize_sha256(expected) else {
         return Ok(None);
     };
-    let actual = sha256_file(api, settings, job_id, path).await?;
+    // Stamp the file's real path (a hub snapshot link resolves to its blob, as admission does)
+    // before hashing, so the verdict below covers exactly the bytes hashed.
+    // Skipped for a `.partial` staging file (renamed after verification, so a verdict under its
+    // path is never looked up) and for a relative data dir (another process can resolve it
+    // elsewhere, so it names no shared host store).
+    let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+        &settings.data_dir,
+    );
+    let observed = (settings.data_dir.is_absolute()
+        && path.extension() != Some(std::ffi::OsStr::new("partial")))
+    .then(|| {
+        std::fs::canonicalize(path)
+            .and_then(|real| cache.observe(&real))
+            .ok()
+    })
+    .flatten();
+    // Hash the very path that was stamped, so a link retargeted in between cannot attach one
+    // file's digest to another.
+    let hashed = observed.as_ref().map_or(
+        path,
+        sceneworks_core::verified_source_cache::ObservedSource::path,
+    );
+    let actual = sha256_file(api, settings, job_id, hashed).await?;
     if actual != expected {
         let _ = tokio::fs::remove_file(path).await;
         return Err(WorkerError::InvalidPayload(format!(
             "{label} failed its integrity check (sha256 {actual}, but the source declares {expected}); \
              the download was corrupted. Re-download the file."
         )));
+    }
+    // Hand the verified digest to the host's hash-once record, so the first job admitted after
+    // this download does not read the file again. Recorded only if the file is unchanged since
+    // the stamp above; a failure to record never fails the download.
+    if let Some(observed) = observed {
+        let _ = cache.record_hashed(observed, &format!("sha256:{actual}"));
     }
     Ok(Some(actual))
 }
@@ -1474,7 +1543,8 @@ pub(crate) async fn download_snapshot_into_cache(
     )
     .build()?;
     let mut commit: Option<String> = None;
-    let mut placements: Vec<(String, String)> = Vec::with_capacity(snapshot.files.len());
+    let mut placements: Vec<(String, String, Option<String>)> =
+        Vec::with_capacity(snapshot.files.len());
 
     for file in &snapshot.files {
         check_download_cancel(context).await?;
@@ -1515,7 +1585,7 @@ pub(crate) async fn download_snapshot_into_cache(
             progress,
         )
         .await?;
-        placements.push((file.path.clone(), etag));
+        placements.push((file.path.clone(), etag, file.sha256.clone()));
     }
 
     // Materialize the snapshot once every blob is present: refs/<rev> -> commit and
@@ -1532,7 +1602,7 @@ pub(crate) async fn download_snapshot_into_cache(
     tokio::fs::create_dir_all(&refs_dir).await?;
     tokio::fs::write(safe_join(&refs_dir, revision)?, commit.as_bytes()).await?;
     let snapshot_dir = safe_join(&repo_dir.join("snapshots"), &commit)?;
-    for (relpath, etag) in &placements {
+    for (relpath, etag, expected_sha256) in &placements {
         let link = safe_join(&snapshot_dir, relpath)?;
         if let Some(parent) = link.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -1572,6 +1642,15 @@ pub(crate) async fn download_snapshot_into_cache(
             )
             .await?;
         }
+        verify_snapshot_entry(
+            context,
+            &blobs_dir.join(etag),
+            &link,
+            expected_sha256.as_deref(),
+            relpath,
+            progress,
+        )
+        .await?;
     }
     Ok(commit)
 }
@@ -1624,6 +1703,52 @@ fn blob_fallback_name(path: &str) -> String {
         "path-{}",
         sceneworks_core::hashing::sha256_bytes(path.as_bytes())
     )
+}
+
+/// When a snapshot entry is not the blob itself — a Windows hard link, or the copy fallback —
+/// verify the entry once more at download time and record that verdict under the entry's own
+/// path, the one admission and the worker resolve. The blob's own verdict cannot stand in: every
+/// blob is verified before any entry is linked, and creating a hard link moves the change time,
+/// the only stamp field that sees a same-length rewrite with the modified time restored. So on
+/// Windows each downloaded file is read twice here (as a blob, then as its entry), and the first
+/// job after the download reads none. A symlinked entry (Unix) resolves to the blob and needs
+/// nothing. A mismatch fails the download with the usual integrity error.
+pub(crate) async fn verify_snapshot_entry(
+    context: &DownloadContext<'_>,
+    blob: &Path,
+    entry: &Path,
+    expected_sha256: Option<&str>,
+    label: &str,
+    progress: &DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    let (Ok(blob), Ok(entry_real)) = (std::fs::canonicalize(blob), std::fs::canonicalize(entry))
+    else {
+        return Ok(());
+    };
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(());
+    };
+    if blob == entry_real {
+        return Ok(());
+    }
+    if tokio::fs::metadata(entry).await?.len() >= VERIFY_PROGRESS_MIN_BYTES {
+        let _ = update_job(
+            context.api,
+            context.job_id,
+            progress.verifying_payload(label),
+        )
+        .await;
+    }
+    verify_file_sha256(
+        context.api,
+        context.settings,
+        context.job_id,
+        entry,
+        expected_sha256,
+        label,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it
@@ -3140,6 +3265,72 @@ mod atomic_cache_publication_tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A verified cache hit is read once per host while its stamp holds; a same-size rewrite is
+    /// read again and refused.
+    #[tokio::test]
+    async fn a_verified_cache_hit_is_not_read_again_until_it_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("predictor.safetensors");
+        let good = b"correct learned predictor";
+        let (url, server) = fixture_server(good.to_vec()).await;
+        publish_fixture(&target, &url, good).await.expect("publish");
+        server.abort();
+        let settle = |path: &Path, modified: std::time::SystemTime| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        };
+        let settled = std::time::SystemTime::now() - Duration::from_secs(10);
+        settle(&target, settled);
+        let settings = test_settings(dir.path().to_path_buf());
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let context = DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "cache-hit",
+            cancel_message: "canceled",
+            fresh_download: false,
+        };
+        let expected = format!("{:x}", Sha256::digest(good));
+        let check = || {
+            cached_file_matches_expected(
+                &context,
+                &target,
+                Some(good.len() as u64),
+                Some(&expected),
+            )
+        };
+        let real = std::fs::canonicalize(&target).unwrap();
+        let hashes = || {
+            CACHED_FILE_HASHES
+                .lock()
+                .unwrap()
+                .get(&real)
+                .copied()
+                .unwrap_or(0)
+        };
+        let start = hashes();
+        assert!(check().await.unwrap());
+        assert_eq!(hashes(), start + 1, "the first check reads the file");
+        assert!(check().await.unwrap());
+        assert_eq!(
+            hashes(),
+            start + 1,
+            "an unchanged cache hit is not read again"
+        );
+        // Same size and mtime, different bytes: ctime (Unix) or the NTFS change time (Windows)
+        // moves, so it is read and refused.
+        std::fs::write(&target, vec![b'x'; good.len()]).unwrap();
+        settle(&target, settled);
+        assert!(!check().await.unwrap());
+        assert_eq!(hashes(), start + 2);
     }
 
     /// Required fixture: an interrupted transfer resumes from the durable partial

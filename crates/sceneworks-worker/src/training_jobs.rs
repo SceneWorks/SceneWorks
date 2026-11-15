@@ -3145,6 +3145,9 @@ impl TrainerLoadInputs {
                 path
             };
             crate::iris_curricula::verify_repa_teacher_file(
+                &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+                    &settings.data_dir,
+                ),
                 &dir.join(sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_FILE),
             )
             .map_err(WorkerError::InvalidPayload)?;

@@ -86,7 +86,7 @@ fn process_physical_footprint() -> Result<PhysicalFootprintSample, String> {
 /// post-render reading cannot miss a short-lived peak. It captures kernel-accounted dirty/wired
 /// memory, including GPU allocations that process RSS and MLX's active-memory gauge can omit;
 /// clean reclaimable file-backed pages are not necessarily billed. The safe subprocess boundary
-/// preserves `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
+/// preserves `sceneworks-worker`'s crate-wide `deny(unsafe_code)` policy.
 struct PhysicalFootprintMeasurement {
     baseline_bytes: u64,
 }

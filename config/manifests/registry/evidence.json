@@ -45667,6 +45667,28 @@
       "minMemoryGb": 64
     }
   },
+  "vision_describe_qwen3_8_27b": {
+    "model": {
+      "minMemoryGb": 32
+    },
+    "mlx": {
+      "minMemoryGb": 65,
+      "minMemoryGbByTier": {
+        "bf16": 65,
+        "q8": 41,
+        "q4": 28
+      }
+    },
+    "candle": {
+      "minMemoryGb": 65,
+      "minMemoryGbByTier": {
+        "bf16": 65,
+        "q8": 34,
+        "q4": 22
+      },
+      "measured": false
+    }
+  },
   "kokoro_82m": {
     "candle": {
       "minMemoryGb": 2,

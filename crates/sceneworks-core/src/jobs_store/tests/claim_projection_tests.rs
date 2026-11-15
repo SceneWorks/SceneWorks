@@ -230,7 +230,9 @@ fn startup_reprojects_pre_flux3_tier_claim_facts() {
 /// (absent model included) needs `prompt_refine`. The persisted claim header agrees.
 #[test]
 fn batch_describe_routes_by_the_capability_of_its_model() {
-    use crate::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use crate::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     let directory = tempfile::tempdir().expect("temp directory");
     let db_path = directory.path().join("jobs.db");
     let store = JobsStore::new(&db_path);
@@ -241,6 +243,8 @@ fn batch_describe_routes_by_the_capability_of_its_model() {
     for (model, capability, served_by_refiner) in [
         (Some(VISION_CAPTIONER_REPO), "prompt_refine", true),
         (None, "prompt_refine", true),
+        // SW-7119: the Qwen3.8 27B describer runs on the Vision Captioner's TextLlm path.
+        (Some(QWEN38_27B_DESCRIBER_REPO), "prompt_refine", true),
         (Some(JOYCAPTION_REPO), "training_caption", false),
     ] {
         let mut payload = json!({ "datasetId": "ds-1" });

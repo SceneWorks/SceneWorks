@@ -18,10 +18,12 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
     let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
     assert!(instruction.starts_with("You are a meticulous scene describer."));
     for rule in [
-        "## LABELS — every person and animal",
+        "## LABELS — every person",
         "## NO PHYSICAL TRAITS — ever",
-        "## DESCRIPTION — the people, in minute detail",
-        "## ENVIRONMENT — every detail",
+        "## LENGTH — a target for each field",
+        "## DESCRIPTION — the people",
+        "## POSE — the pose field",
+        "## ENVIRONMENT — the setting",
         "## STYLE — medium, era, and vintage look",
         "## CAMERA — the apparent gear and settings",
         "## COMPOSITION — framing",
@@ -41,7 +43,68 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
 }
 
 #[test]
-fn the_output_contract_names_all_six_fields_and_is_always_appended() {
+fn the_describing_prompt_gives_every_field_a_length_target() {
+    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
+    let start = instruction.find("## LENGTH").expect("a LENGTH section");
+    let end = start
+        + instruction[start + 1..]
+            .find("\n## ")
+            .expect("a next section")
+        + 1;
+    let length = &instruction[start..end];
+    for (field, target) in [
+        ("description", "3 to 5 sentences per person"),
+        (
+            "pose",
+            "each slot one clause or one short sentence; the left_arm, right_arm, left_leg and \
+             right_leg slots up to two sentences each",
+        ),
+        ("style", "2 sentences"),
+        ("camera", "1 sentence"),
+        ("composition", "1 to 2 sentences"),
+        ("lighting", "1 to 2 sentences"),
+        ("environment", "2 to 3 sentences"),
+    ] {
+        assert!(
+            length.contains(&format!("- {field}: {target}")),
+            "LENGTH sets a target for {field}"
+        );
+    }
+    assert!(length.contains("about 450 to 550 words"));
+    assert!(length.contains("each additional person adds about 200 words"));
+    assert!(length.contains(
+        "cut environment, style and camera detail first, before any pose slot. Never drop a \
+         person's pose entry to save length."
+    ));
+    // The wording that asked for exhaustive output is gone; the accuracy rules stay.
+    for asset in [
+        instruction.as_str(),
+        &default_describe_instruction(DescribeModel::JoyCaption),
+    ] {
+        for exhaustive in [
+            "exhaustively",
+            "every detail",
+            "in minute detail",
+            "every garment",
+        ] {
+            assert!(!asset.contains(exhaustive), "{exhaustive:?} is gone");
+        }
+    }
+    assert!(instruction.contains("## NO PHYSICAL TRAITS — ever"));
+    assert!(instruction.contains("quoted verbatim in single quotes"));
+    assert!(instruction.contains("check the three facts most often got wrong"));
+    // JoyCaption gets a short matching line and keeps its overall word cap.
+    let joy = default_describe_instruction(DescribeModel::JoyCaption);
+    assert!(joy.contains(
+        "LENGTH: description 3 to 5 sentences per person; pose one short clause per body part; \
+         style 2 sentences; camera 1; composition, lighting 1 to 2; environment 2 to 3."
+    ));
+    assert!(joy.contains("never drop a person's pose"));
+    assert!(joy.contains("Keep the whole reply under about 500 words"));
+}
+
+#[test]
+fn the_output_contract_names_every_field_and_is_always_appended() {
     let (default, is_default) =
         DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
     assert!(is_default);
@@ -89,6 +152,136 @@ fn the_output_contract_names_all_six_fields_and_is_always_appended() {
     assert_eq!(blank, default);
 }
 
+#[test]
+fn the_vision_contract_asks_for_pose_as_eleven_named_slots_per_person() {
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    let contract = &prompt.output_contract;
+    assert!(
+        contract.contains("\"pose\": ["),
+        "pose is a list of entries"
+    );
+    assert!(contract.contains("\"label\":"));
+    for (key, _) in POSE_SLOTS {
+        assert!(
+            contract.contains(&format!("\"{key}\":")),
+            "contract names {key}"
+        );
+    }
+    assert_pose_is_written_last(contract);
+    assert!(contract.contains("write \"hidden\" for a limb that is hidden or out of frame"));
+    assert!(contract.contains("empty list when the image has no people or animals"));
+    assert!(contract.contains(
+        "in order of prominence (the same order the labels were assigned), plus one object with \
+         an empty \"label\" for each animal"
+    ));
+    assert!(!contract.contains("label order"));
+}
+
+/// The contract lists the six other fields in `DESCRIBE_FIELDS` order and `pose` LAST, so a reply
+/// cut off at the reply budget loses only pose entries, never another field.
+fn assert_pose_is_written_last(contract: &str) {
+    let at = |field: &str| {
+        contract
+            .find(&format!("\"{field}\":"))
+            .unwrap_or_else(|| panic!("contract names {field}"))
+    };
+    let others: Vec<&str> = DESCRIBE_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| *field != "pose")
+        .collect();
+    for pair in others.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+    }
+    assert!(at("environment") < at("pose"), "pose is written last");
+}
+
+/// The Qwen3.8 27B describer is a Vision Captioner-class describer: the same editable instruction
+/// and the same slot-style `[OUTPUT]` contract (pose as named slots, written last), never
+/// JoyCaption's plain-text one.
+#[test]
+fn the_qwen38_describer_uses_the_vision_captioner_prompt_and_slot_contract() {
+    assert_eq!(DescribeModel::Qwen38.output_section(), "OUTPUT");
+    let (qwen38, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    let (joy, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
+    assert_eq!(qwen38, vision);
+    assert_ne!(qwen38.output_contract, joy.output_contract);
+    assert_pose_is_written_last(&qwen38.output_contract);
+}
+
+#[test]
+fn both_contracts_take_precedence_over_an_old_preset_about_pose() {
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        // A preset saved from the old default still asks for pose inside the description.
+        let (prompt, _) = DescribePrompt::for_instruction(
+            model,
+            Some("Describe each person's clothing, accessories, pose, expression and demeanor."),
+        );
+        assert!(prompt.output_contract.contains("\"pose\":"), "{model:?}");
+        assert!(
+            prompt.output_contract.contains(
+                "This output format takes precedence over any earlier instruction about where \
+                 pose is written."
+            ),
+            "{model:?}"
+        );
+        assert!(prompt.system().ends_with(&prompt.output_contract));
+    }
+}
+
+#[test]
+fn the_describing_prompt_keeps_pose_out_of_description_and_labels_off_animals() {
+    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
+    let description = &instruction
+        [instruction.find("## DESCRIPTION").unwrap()..instruction.find("## POSE").unwrap()];
+    assert!(
+        !description.contains("- Pose:"),
+        "description no longer asks for pose"
+    );
+    assert!(description.contains("Do not describe pose in the description"));
+    let pose = &instruction
+        [instruction.find("## POSE").unwrap()..instruction.find("## ENVIRONMENT").unwrap()];
+    // The sides and angles rules and the three-facts check stay.
+    assert!(pose.contains("Never write a bare \"left\" or \"right\""));
+    assert!(pose.contains("about 45°"));
+    assert!(pose.contains("check the three facts most often got wrong"));
+    for (key, _) in POSE_SLOTS {
+        assert!(pose.contains(key), "the POSE rules explain {key}");
+    }
+    assert!(pose.contains("write \"hidden\" in its slot and what hides it"));
+    assert!(pose.contains("words like \"likely\", \"probably\" or \"presumably\" never belong"));
+    // A half-reclined body has its own body_line option; horizontal means the torso lies flat.
+    assert!(pose.contains("reclined and propped up"));
+    assert!(pose.contains("on an elbow, on a straight arm, or against a backrest"));
+    assert!(pose.contains("roughly how far the torso is from upright"));
+    assert!(pose.contains("Horizontal is only for a body whose torso lies flat"));
+    assert!(pose.contains(
+        "For a horizontal or reclined body, say at which side of the frame is the head and at \
+         which the feet."
+    ));
+    assert!(pose.contains("Give each animal its own entry with no label"));
+    assert!(pose.contains("The pose field is a list with one entry per person"));
+    assert!(pose.contains("in order of prominence (the same order the labels were assigned)"));
+    assert!(!instruction.contains("keyed by their label"));
+    // Interactions keep who looks at whom, contact and dynamic; position is the pose slots' job.
+    assert!(description.contains("who is looking at whom, physical contact"));
+    assert!(!description.contains("distance and orientation"));
+    assert!(instruction.contains("Animals never get a label."));
+    // No animal label anywhere in the asset (every section, every model).
+    for animal in ["dog_", "cat_", "horse_", "animal_"] {
+        assert!(
+            !IMAGE_BATCH_DESCRIBE_V1.contains(animal),
+            "the asset never shows an animal label like {animal}N"
+        );
+    }
+    let joy = default_describe_instruction(DescribeModel::JoyCaption);
+    assert!(joy.contains("Animals get no label"));
+    assert!(joy.contains("demeanor. No pose here."));
+    assert!(joy.contains("who looks at whom, physical contact, and the emotional dynamic"));
+    assert!(!joy.contains("distance and orientation"));
+}
+
 // ── Reply parsing ─────────────────────────────────────────────────────────────────────────────
 
 fn reply(fields: &[(&str, Value)]) -> String {
@@ -111,7 +304,7 @@ fn full_reply(tag: &str) -> String {
 }
 
 #[test]
-fn a_constrained_reply_parses_into_the_six_fields_in_order() {
+fn a_constrained_reply_parses_into_every_field_in_order() {
     let parsed = parse_described_fields(&full_reply("img")).expect("parses");
     for (field, text) in DESCRIBE_FIELDS.iter().zip(&parsed.fields) {
         assert_eq!(text, &format!("img {field}"));
@@ -138,20 +331,474 @@ fn unusable_replies_are_errors_not_silent_blanks() {
         ("not json at all", "not a JSON object"),
         ("[1, 2, 3]", "not a JSON object"),
         ("{\"description\": \"cut off mid", "not a JSON object"),
-        ("{}", "none of the six"),
+        ("{}", "none of the description fields"),
         (
             "{\"description\": \"\", \"style\": null}",
-            "none of the six",
+            "none of the description fields",
         ),
         (
             "{\"description\": {\"text\": \"x\"}}",
             "\"description\" field is not a string",
         ),
         ("{\"camera\": 35}", "\"camera\" field is not a string"),
+        ("{\"pose\": 3}", "\"pose\" field is not a string"),
+        (
+            "{\"description\": \"x\", \"pose\": [1]}",
+            "\"pose\" entry is not an object",
+        ),
     ] {
         let error = parse_described_fields(raw).expect_err(raw);
         assert!(error.contains(expect), "{raw}: {error}");
     }
+}
+
+// ── Pose ──────────────────────────────────────────────────────────────────────────────────────
+
+const POSE: usize = 1;
+
+/// A parsed field by name (indexes past `pose` read better by name than by position).
+fn field_text<'a>(parsed: &'a DescribedFields, name: &str) -> &'a str {
+    let index = DESCRIBE_FIELDS
+        .iter()
+        .position(|field| *field == name)
+        .unwrap_or_else(|| panic!("{name} is a describe field"));
+    &parsed.fields[index]
+}
+
+/// A pose entry for `label` whose every slot reads `<label> <slot key>`.
+fn pose_entry(label: &str) -> Value {
+    let mut entry = JsonObject::new();
+    entry.insert("label".to_owned(), json!(label));
+    for (key, _) in POSE_SLOTS {
+        entry.insert(key.to_owned(), json!(format!("{label} {key}")));
+    }
+    Value::Object(entry)
+}
+
+/// The stored line `pose_entry(label)` flattens to.
+fn pose_line_for(label: &str) -> String {
+    format!(
+        "{label} — Body line: {label} body_line; Stance: {label} stance; Facing: {label} facing; \
+         Torso: {label} torso; Head: {label} head; Left arm: {label} left_arm; \
+         Right arm: {label} right_arm; Left leg: {label} left_leg; Right leg: {label} right_leg; \
+         Depth: {label} depth; Placement: {label} placement"
+    )
+}
+
+#[test]
+fn a_two_person_pose_is_one_line_per_label_with_all_eleven_slots() {
+    let parsed = parse_described_fields(&reply(&[
+        ("description", json!("a woman, woman_1, and a man, man_1")),
+        ("pose", json!([pose_entry("woman_1"), pose_entry("man_1")])),
+        ("lighting", json!("soft")),
+    ]))
+    .expect("parses");
+    assert_eq!(parsed.fields[0], "a woman, woman_1, and a man, man_1");
+    assert_eq!(
+        parsed.fields[POSE],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1"))
+    );
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in lines {
+        assert_eq!(line.matches("; ").count(), POSE_SLOTS.len() - 1, "{line}");
+    }
+    assert_eq!(field_text(&parsed, "lighting"), "soft");
+}
+
+#[test]
+fn a_one_person_pose_keeps_slot_order_and_collapses_newlines() {
+    let mut entry = pose_entry("girl_1");
+    entry["left_arm"] = json!("  bent at the elbow,\n hand on their hip  ");
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        pose_line_for("girl_1").replace(
+            "Left arm: girl_1 left_arm",
+            "Left arm: bent at the elbow, hand on their hip"
+        )
+    );
+    // A lone entry object (not wrapped in a list) is the same one line.
+    let lone = parse_described_fields(&reply(&[("pose", pose_entry("girl_1"))])).unwrap();
+    assert_eq!(lone.fields[POSE], pose_line_for("girl_1"));
+}
+
+#[test]
+fn an_empty_pose_is_an_empty_field_not_an_error() {
+    for pose in [json!([]), Value::Null, json!(""), json!([{}, null])] {
+        let parsed = parse_described_fields(&reply(&[
+            ("description", json!("an empty beach")),
+            ("pose", pose.clone()),
+        ]))
+        .expect("parses");
+        assert_eq!(parsed.fields[POSE], "", "{pose}");
+    }
+    // A reply with no pose key at all reads the same.
+    let parsed = parse_described_fields(&reply(&[("description", json!("a chair"))])).unwrap();
+    assert_eq!(parsed.fields[POSE], "");
+}
+
+#[test]
+fn a_missing_or_blank_slot_is_not_stated_and_the_image_still_parses() {
+    let mut entry = pose_entry("woman_1");
+    let object = entry.as_object_mut().unwrap();
+    object.remove("right_leg");
+    object.insert("depth".to_owned(), json!("   "));
+    object.insert("torso".to_owned(), Value::Null);
+    object.insert("left_arm".to_owned(), json!("hidden"));
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    let line = &parsed.fields[POSE];
+    assert!(line.contains("Right leg: not stated;"), "{line}");
+    assert!(line.contains("Depth: not stated;"), "{line}");
+    assert!(line.contains("Torso: not stated;"), "{line}");
+    assert!(line.contains("Left arm: hidden;"), "{line}");
+    assert!(line.contains("Head: woman_1 head;"), "{line}");
+}
+
+#[test]
+fn an_animal_entry_has_no_label_prefix() {
+    let mut animal = pose_entry("");
+    animal["body_line"] = json!("a dog, horizontal, lying on its right side");
+    let parsed = parse_described_fields(&reply(&[("pose", json!([pose_entry("boy_1"), animal]))]))
+        .expect("parses");
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines[0], pose_line_for("boy_1"));
+    assert!(
+        lines[1].starts_with("Body line: a dog, horizontal, lying on its right side; Stance: "),
+        "{}",
+        lines[1]
+    );
+    assert!(!lines[1].contains(" — "));
+}
+
+#[test]
+fn a_joycaption_plain_text_pose_is_stored_as_written() {
+    let raw = "Sure:\n{\"description\": \"a man, man_1, in a coat\", \"Pose\": \"man_1 stands \
+               upright, chest toward frame-left; their left hand is hidden.\", \"lighting\": \"dusk\"}";
+    let parsed = parse_lenient_described_fields(raw).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        "man_1 stands upright, chest toward frame-left; their left hand is hidden."
+    );
+    assert_eq!(field_text(&parsed, "lighting"), "dusk");
+    // JoyCaption may still emit slots; they flatten the same way.
+    let slotted =
+        parse_lenient_described_fields(&reply(&[("pose", json!([pose_entry("woman_1")]))]))
+            .unwrap();
+    assert_eq!(slotted.fields[POSE], pose_line_for("woman_1"));
+}
+
+#[test]
+fn a_pose_map_keyed_by_label_is_one_entry_per_key() {
+    let mut man = pose_entry("man_1");
+    man.as_object_mut().unwrap().remove("label");
+    let mut woman = pose_entry("woman_1");
+    woman.as_object_mut().unwrap().remove("label");
+    let parsed = parse_described_fields(&reply(&[(
+        "pose",
+        json!({ "woman_1": woman, "man_1": man, "girl_1": "girl_1 sits cross-legged" }),
+    )]))
+    .expect("parses");
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines.len(), 3, "{}", parsed.fields[POSE]);
+    assert!(lines.contains(&pose_line_for("woman_1").as_str()));
+    assert!(lines.contains(&pose_line_for("man_1").as_str()));
+    assert!(lines.contains(&"girl_1 — girl_1 sits cross-legged"));
+    // A lone entry object (it names slots) is still one entry, not a map.
+    let lone = parse_described_fields(&reply(&[("pose", pose_entry("boy_1"))])).unwrap();
+    assert_eq!(lone.fields[POSE], pose_line_for("boy_1"));
+}
+
+#[test]
+fn a_list_or_object_slot_is_flattened_not_dropped() {
+    let mut entry = pose_entry("woman_1");
+    entry["left_arm"] = json!({
+        "upper_arm": "down along their side",
+        "elbow": "bent about 45°",
+        "hand": ["on their hip", "fingers spread"],
+    });
+    entry["right_leg"] = json!(["straight", "", "heel lifted", null]);
+    entry["depth"] = json!([]);
+    entry["torso"] = json!({ "lean": null });
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    let line = &parsed.fields[POSE];
+    assert!(
+        line.contains(
+            "Left arm: upper arm: down along their side, elbow: bent about 45°, hand: on their \
+             hip, fingers spread;"
+        ),
+        "{line}"
+    );
+    assert!(line.contains("Right leg: straight, heel lifted;"), "{line}");
+    // Only a missing, null or blank slot (an empty list or object counts as blank) is not stated.
+    assert!(line.contains("Depth: not stated;"), "{line}");
+    assert!(line.contains("Torso: not stated;"), "{line}");
+}
+
+/// One pose entry as compact JSON text, its members in contract order (written by hand so the
+/// order never depends on how a JSON map orders its keys).
+fn entry_json(label: &str, with_label: bool) -> String {
+    let mut members = Vec::new();
+    if with_label {
+        members.push(format!("\"label\":{}", json!(label)));
+    }
+    for (key, _) in POSE_SLOTS {
+        members.push(format!("\"{key}\":{}", json!(format!("{label} {key}"))));
+    }
+    format!("{{{}}}", members.join(","))
+}
+
+/// A Vision Captioner reply in contract order (pose last) for `labels`, as compact JSON.
+fn contract_order_reply(labels: &[&str]) -> String {
+    let mut members: Vec<String> = DESCRIBE_FIELDS
+        .iter()
+        .filter(|field| **field != "pose")
+        .map(|field| format!("\"{field}\":{}", json!(format!("full {field}"))))
+        .collect();
+    let entries: Vec<String> = labels.iter().map(|label| entry_json(label, true)).collect();
+    members.push(format!("\"pose\":[{}]", entries.join(",")));
+    format!("{{{}}}", members.join(","))
+}
+
+/// `reply` cut just before the start of the pose entry for `label` plus `keep` more bytes.
+fn cut_at_entry(reply: &str, label: &str, keep: usize) -> String {
+    let entry = reply
+        .find(&format!("{{\"label\":\"{label}\""))
+        .unwrap_or_else(|| panic!("entry {label} in {reply}"));
+    reply[..entry + keep].to_owned()
+}
+
+#[test]
+fn a_reply_cut_after_two_complete_pose_entries_keeps_them_and_every_other_field() {
+    let full = contract_order_reply(&["woman_1", "man_1", "girl_1"]);
+    let raw = cut_at_entry(&full, "girl_1", 40);
+    let error = parse_described_fields(&raw).expect_err("a cut-off reply does not parse");
+    assert!(error.contains("not a JSON object"), "{error}");
+    let recovered = recover_cut_off_reply(&raw)
+        .expect("a cut-off object")
+        .expect("described");
+    assert_eq!(
+        recovered.fields[POSE],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1")),
+        "the third entry, cut part-way, is dropped"
+    );
+    for (field, text) in DESCRIBE_FIELDS.iter().zip(&recovered.fields) {
+        if *field != "pose" {
+            assert_eq!(text, &format!("full {field}"));
+        }
+    }
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: the pose covers only the first 2 people in \
+             this image; the other fields are complete."
+        )
+    );
+}
+
+#[test]
+fn a_reply_cut_inside_the_first_pose_entry_keeps_the_other_fields_and_no_pose() {
+    let full = contract_order_reply(&["woman_1", "man_1"]);
+    let raw = cut_at_entry(&full, "woman_1", 60);
+    let recovered = recover_cut_off_reply(&raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], "", "a half entry is never kept");
+    assert_eq!(recovered.fields[0], "full description");
+    assert_eq!(field_text(&recovered, "environment"), "full environment");
+    let notice = recovered.notice.expect("the cut is reported");
+    assert!(
+        notice.starts_with("The reply reached the length limit: the pose was cut off"),
+        "{notice}"
+    );
+    assert!(
+        notice.ends_with("the other fields are complete."),
+        "{notice}"
+    );
+    // A fenced reply cut off (its closing fence never came) recovers the same way.
+    let fenced = recover_cut_off_reply(&format!("```json\n{raw}"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fenced.fields[0], "full description");
+    // A reply cut inside a later text field keeps what completed and names what did not.
+    let early = &full[..full.find("\"lighting\"").unwrap() + 20];
+    let recovered = recover_cut_off_reply(early).unwrap().expect("described");
+    assert_eq!(
+        field_text(&recovered, "lighting"),
+        "",
+        "the cut lighting is dropped"
+    );
+    assert_eq!(field_text(&recovered, "composition"), "full composition");
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: the pose is missing; lighting, environment \
+             were cut off."
+        )
+    );
+}
+
+#[test]
+fn a_reply_cut_before_the_description_completes_is_a_plain_failure() {
+    for raw in [
+        "{\"description\": \"a woman, woman_1, in a long",
+        "{\"descrip",
+        "{",
+        "```json\n{\"description\"",
+    ] {
+        assert_eq!(
+            recover_cut_off_reply(raw),
+            Some(Err(CUT_OFF_BEFORE_DESCRIPTION.to_owned())),
+            "{raw}"
+        );
+    }
+    // A reply that closes, or is malformed rather than cut off, is not recovered.
+    for raw in [
+        "no json",
+        "{}",
+        "{\"description\": \"x\"}",
+        "{\"description\" \"x\", \"pose\": [",
+    ] {
+        assert_eq!(recover_cut_off_reply(raw), None, "{raw}");
+    }
+}
+
+#[test]
+fn a_cut_off_map_shaped_pose_keeps_its_complete_entries() {
+    let full = format!(
+        "{{\"description\":\"two people\",\"pose\":{{\"woman_1\":{},\"man_1\":{}}}}}",
+        entry_json("woman_1", false),
+        entry_json("man_1", false)
+    );
+    let raw = &full[..full.find("\"man_1\"").unwrap() + 30];
+    let recovered = recover_cut_off_reply(raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("woman_1"));
+    let notice = recovered.notice.unwrap();
+    assert!(
+        notice.contains("the pose covers only the first 1 person in this image"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("style, camera, composition, lighting, environment were cut off"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn a_lone_pose_entry_cut_part_way_is_dropped_not_read_as_a_map() {
+    // The review's input: one entry object (not a list), cut inside it.
+    let raw = "{\"description\":\"a woman\",\"pose\":{\"label\":\"woman_1\",\"body_line\":\"upright\",\"stance\":\"stand";
+    let recovered = recover_cut_off_reply(raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[0], "a woman");
+    assert_eq!(recovered.fields[POSE], "", "no half entry is kept");
+    let notice = recovered.notice.unwrap();
+    assert!(
+        notice.starts_with(
+            "The reply reached the length limit: the pose was cut off before any person was \
+             complete, so it is left out;"
+        ),
+        "{notice}"
+    );
+    assert!(!notice.contains("covers only"), "{notice}");
+    // Without a label, a slot with a text value still marks it as one entry.
+    let unlabeled =
+        "{\"description\":\"a dog\",\"pose\":{\"body_line\":\"a dog, lying\",\"stance\":\"on";
+    let recovered = recover_cut_off_reply(unlabeled).unwrap().unwrap();
+    assert_eq!(recovered.fields[POSE], "");
+}
+
+#[test]
+fn a_lone_pose_entry_that_completed_is_kept_when_a_later_field_is_cut() {
+    let raw = format!(
+        "{{\"description\":\"a woman\",\"pose\":{},\"style\":\"a 1970s col",
+        entry_json("woman_1", true)
+    );
+    let recovered = recover_cut_off_reply(&raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("woman_1"));
+    assert_eq!(
+        field_text(&recovered, "style"),
+        "",
+        "the cut style is dropped"
+    );
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: style, camera, composition, lighting, \
+             environment were cut off."
+        )
+    );
+}
+
+#[test]
+fn a_map_key_that_is_a_slot_name_is_still_a_label() {
+    // A map whose keys are labels; one label happens to be a slot name. Its value is an entry
+    // object, so it is a map key, complete or cut off.
+    let complete = format!(
+        "{{\"description\":\"two\",\"pose\":{{\"head\":{},\"woman_1\":{}}}}}",
+        entry_json("head", false),
+        entry_json("woman_1", false)
+    );
+    let parsed = parse_described_fields(&complete).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        format!("{}\n{}", pose_line_for("head"), pose_line_for("woman_1"))
+    );
+    let cut = &complete[..complete.find("\"woman_1\"").unwrap() + 40];
+    let recovered = recover_cut_off_reply(cut).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("head"));
+    assert!(recovered
+        .notice
+        .unwrap()
+        .contains("the pose covers only the first 1 person"));
+}
+
+#[test]
+fn a_six_field_reply_from_before_pose_still_parses() {
+    let legacy: Vec<(&str, Value)> = DESCRIBE_FIELDS
+        .iter()
+        .filter(|field| **field != "pose")
+        .map(|field| (*field, json!(format!("old {field}"))))
+        .collect();
+    assert_eq!(legacy.len(), 6);
+    for parsed in [
+        parse_described_fields(&reply(&legacy)).expect("strict"),
+        parse_lenient_described_fields(&reply(&legacy)).expect("lenient"),
+    ] {
+        assert_eq!(parsed.fields[POSE], "");
+        for (field, text) in DESCRIBE_FIELDS.iter().zip(&parsed.fields) {
+            if *field != "pose" {
+                assert_eq!(text, &format!("old {field}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_structured_pose_is_stored_as_one_text_field_in_the_result_item() {
+    let parsed = parse_described_fields(&reply(&[
+        ("description", json!("two people")),
+        (
+            "pose",
+            json!([pose_entry("woman_1"), pose_entry("woman_2")]),
+        ),
+    ]))
+    .unwrap();
+    let item = DescribedItem {
+        item: DescribeItem {
+            item_id: "item_1".to_owned(),
+            image_path: PathBuf::from("/data/images/item_1.png"),
+            relative_path: "images/item_1.png".to_owned(),
+            asset_id: None,
+            given: None,
+        },
+        size: Some((8, 8)),
+        outcome: Ok(parsed),
+        condensed: None,
+    };
+    let stored = stored_item_json(&item);
+    assert_eq!(
+        stored["pose"],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("woman_2"))
+    );
+    assert_eq!(stored["description"], "two people");
 }
 
 #[test]
@@ -165,6 +812,7 @@ fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others
             Some(" fancyfeast/llama-joycaption-beta-one-hf-llava "),
             DescribeModel::JoyCaption,
         ),
+        (Some(QWEN38_27B_DESCRIBER_REPO), DescribeModel::Qwen38),
     ] {
         assert_eq!(
             DescribeModel::from_payload(model).unwrap(),
@@ -214,9 +862,41 @@ fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
         );
     }
     assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
-    // One prompt: instruction, then the contract, then the user line.
+    assert!(instruction.contains("POSE, its own field, plain text, one line per person or animal"));
+    assert!(instruction.contains(
+        "Write hidden and what hides it for a hidden or out-of-frame limb; never guess where it \
+         probably is."
+    ));
+    assert!(instruction.contains(
+        "reclined and propped up (on what, how far from upright), or horizontal only if the \
+         torso lies flat"
+    ));
+    // The built-in default is itself an instruction the API accepts for JoyCaption.
+    assert!(instruction.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    // JoyCaption's own contract: every field, pose as one plain-text string, no slots.
     let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
-    assert_eq!(prompt.output_contract, vision.output_contract);
+    assert_ne!(prompt.output_contract, vision.output_contract);
+    assert!(prompt.output_contract.starts_with(DRAFT_OUTPUT_HEADING));
+    for field in DESCRIBE_FIELDS {
+        assert!(
+            prompt.output_contract.contains(&format!("\"{field}\": \"")),
+            "JoyCaption's contract names {field} as a string"
+        );
+    }
+    for (key, _) in POSE_SLOTS {
+        assert!(
+            !prompt.output_contract.contains(&format!("\"{key}\"")),
+            "JoyCaption's contract has no {key} slot"
+        );
+    }
+    assert_pose_is_written_last(&prompt.output_contract);
+    assert!(prompt
+        .output_contract
+        .contains("one line per person or animal"));
+    assert!(prompt
+        .output_contract
+        .contains("Outside pose, omit hidden or unreadable details rather than guess."));
+    // One prompt: instruction, then the contract, then the user line.
     assert_eq!(
         prompt.single_turn(),
         format!(
@@ -264,9 +944,9 @@ fn the_lenient_parse_finds_the_object_inside_fences_and_prose() {
     )
     .expect("parses");
     assert_eq!(parsed.fields[0], "a man, man_1, waving");
-    assert_eq!(parsed.fields[4], "soft window light");
-    assert!(parsed.fields[1..4].iter().all(String::is_empty));
-    assert!(parsed.fields[5].is_empty());
+    assert_eq!(field_text(&parsed, "lighting"), "soft window light");
+    assert!(parsed.fields[1..5].iter().all(String::is_empty));
+    assert!(field_text(&parsed, "environment").is_empty());
 }
 
 #[test]
@@ -278,8 +958,11 @@ fn the_lenient_parse_still_flags_unusable_replies() {
             "{\"description\": \"a woman, woman_1, cut off mid",
             "no complete JSON object",
         ),
-        ("Here: {}", "none of the six"),
-        ("{\"caption\": \"a woman\"}", "none of the six"),
+        ("Here: {}", "none of the description fields"),
+        (
+            "{\"caption\": \"a woman\"}",
+            "none of the description fields",
+        ),
         ("{\"camera\": 35}", "\"camera\" field is not a string"),
     ] {
         let error = parse_lenient_described_fields(raw).expect_err(raw);
@@ -370,6 +1053,10 @@ struct StubDescriber {
     cancel_after: Option<(usize, Arc<AtomicBool>)>,
     /// `Some(retries)` behaves like JoyCaption: the lenient parse and that many parse retries.
     joycaption_like: Option<usize>,
+    /// Each condensing call's (system, user) and the replies it answers, in order. A stub that is
+    /// not JoyCaption-like condenses, like the Vision Captioner.
+    condense_calls: Mutex<Vec<(String, String)>>,
+    condense_replies: Mutex<VecDeque<WorkerResult<Result<CondenseReply, String>>>>,
 }
 
 impl StubDescriber {
@@ -379,7 +1066,17 @@ impl StubDescriber {
             replies: Mutex::new(replies.into()),
             cancel_after: None,
             joycaption_like: None,
+            condense_calls: Mutex::default(),
+            condense_replies: Mutex::default(),
         }
+    }
+
+    fn with_condense_replies(
+        mut self,
+        replies: Vec<WorkerResult<Result<CondenseReply, String>>>,
+    ) -> Self {
+        self.condense_replies = Mutex::new(replies.into());
+        self
     }
 
     fn joycaption_like(replies: Vec<WorkerResult<Result<String, String>>>) -> Self {
@@ -426,6 +1123,24 @@ impl BatchDescriber for StubDescriber {
 
     fn parse_retries(&self) -> usize {
         self.joycaption_like.unwrap_or(0)
+    }
+
+    fn condenses(&self) -> bool {
+        self.joycaption_like.is_none()
+    }
+
+    fn condense(&self, system: String, user: String, _cancel: CancelFlag) -> CondenseFuture {
+        self.condense_calls
+            .lock()
+            .expect("condense calls lock")
+            .push((system, user));
+        let reply = self
+            .condense_replies
+            .lock()
+            .expect("condense replies lock")
+            .pop_front()
+            .expect("a queued reply per condensing call");
+        Box::pin(async move { reply })
     }
 }
 
@@ -509,7 +1224,7 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
     // item_2 has no file, so only item_1 and item_3 reach the describer: item_1 describes, item_3
-    // replies with something that is not the six-field object.
+    // replies with something that is not the description object.
     let describer = StubDescriber::new(vec![
         Ok(Ok(full_reply("first"))),
         Ok(Ok("I cannot describe this image.".to_owned())),
@@ -740,6 +1455,19 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     other_model["model"] = json!("someone/other-vlm");
     refuse(other_model, "does not support model");
 
+    // SW-7119: only the Qwen3.8 27B describer has tiers, and an unknown tier is refused.
+    let mut unknown_tier = base.clone();
+    unknown_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    unknown_tier["variant"] = json!("q2");
+    refuse(unknown_tier, "Unsupported describe tier");
+    let mut tier_on_the_8b = base.clone();
+    tier_on_the_8b["variant"] = json!("q4");
+    refuse(tier_on_the_8b, "not available for this model");
+    let mut numeric_tier = base.clone();
+    numeric_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    numeric_tier["variant"] = json!(8);
+    refuse(numeric_tier, "must be a string");
+
     let mut outside = base.clone();
     outside["items"] = json!([{
         "itemId": "item_1",
@@ -764,6 +1492,673 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
 // ── Parse retries (SW-7083) ───────────────────────────────────────────────────────────────────
 
 /// The payload with only item_1 (12x8), for `model`.
+#[test]
+fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = Stage {
+        settings: test_settings(dir.path()),
+        dataset_root: dir.path().join("datasets").join("ds-1"),
+        _dir: dir,
+    };
+    let parse = |tier: Option<&str>| {
+        let mut payload = payload(&stage, None);
+        payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+        if let Some(tier) = tier {
+            payload["variant"] = json!(tier);
+        }
+        parse_batch_describe_request(&stage.settings, payload.as_object().expect("object"))
+            .expect("accepted")
+    };
+    let default_tier = parse(None);
+    assert_eq!(default_tier.model, DescribeModel::Qwen38);
+    assert_eq!(default_tier.tier, Some("q4"));
+    assert_eq!(
+        default_tier.prompt.instruction,
+        default_describe_instruction(DescribeModel::VisionCaptioner),
+        "the 27B describes with the Vision Captioner's full instruction"
+    );
+    let q8 = parse(Some("q8"));
+    let result = batch_describe_result(&q8, &[], false);
+    assert_eq!(result["model"], QWEN38_27B_DESCRIBER_REPO);
+    assert_eq!(result["variant"], "q8");
+}
+
+/// The pinned snapshot the CUDA smoke checks for each tier comes from the shipped catalog's rows:
+/// the engine's re-host `<tier>/` folder for q4 and q8, the upstream repository's root for bf16.
+/// The production resolver lands on exactly that folder when it is the cached snapshot.
+#[test]
+fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        QWEN38_27B_DESCRIBER_MODEL_ID, QWEN38_27B_DESCRIBER_TIERS,
+    };
+    let entry = crate::test_env::shipped_catalog_entry(QWEN38_27B_DESCRIBER_MODEL_ID);
+    let is_revision =
+        |value: &str| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    for rehost in [
+        QWEN38_27B_DESCRIBER_CANDLE_REPO,
+        QWEN38_27B_DESCRIBER_MLX_REPO,
+    ] {
+        for tier in ["q4", "q8"] {
+            let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("quantised row");
+            assert_eq!(pinned.repo, rehost);
+            assert!(is_revision(&pinned.revision), "{rehost} {tier}: {pinned:?}");
+            assert_eq!(
+                pinned.relative_dir,
+                Path::new(&format!("models--{}", rehost.replace('/', "--")))
+                    .join("snapshots")
+                    .join(&pinned.revision)
+                    .join(tier)
+            );
+        }
+        // Full precision is the upstream repository on every lane, at its root.
+        let bf16 = qwen38_pinned_snapshot(&entry, "bf16", rehost).expect("bf16 row");
+        assert_eq!(bf16.repo, QWEN38_27B_DESCRIBER_REPO);
+        assert!(is_revision(&bf16.revision), "{bf16:?}");
+        assert_eq!(
+            bf16.relative_dir,
+            Path::new("models--huihui-ai--Huihui-Qwen3.8-27B-abliterated")
+                .join("snapshots")
+                .join(&bf16.revision)
+        );
+        assert_eq!(qwen38_pinned_snapshot(&entry, "q2", rehost), None);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    for tier in QWEN38_27B_DESCRIBER_TIERS {
+        let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("pinned row");
+        let snapshot = hf_cache
+            .path()
+            .join(format!("models--{}", pinned.repo.replace('/', "--")))
+            .join("snapshots")
+            .join(&pinned.revision);
+        stage_tier_files(&snapshot, &pinned.repo, tier);
+        let resolved = qwen38_describer_weights_dir(&settings, tier).expect("installed");
+        assert!(
+            resolved.ends_with(&pinned.relative_dir),
+            "{tier} resolved to {}",
+            resolved.display()
+        );
+    }
+}
+
+/// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is
+/// the upstream snapshot. A tier counts as installed only when every file its catalog row pins is
+/// present: a partial download (some of them, as a cancelled download leaves) is refused by name.
+#[test]
+fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost_repo = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let snapshot = |repo: &str, revision: &str| {
+        hf_cache
+            .path()
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+    };
+    let rehost = snapshot(rehost_repo, "aaa111");
+    let upstream = snapshot(QWEN38_27B_DESCRIBER_REPO, "bbb222");
+    stage_tier_files(&rehost, rehost_repo, "q4");
+    // q8 holds only its config, as a download cancelled after its small files leaves it.
+    std::fs::create_dir_all(rehost.join("q8")).expect("q8 dir");
+    std::fs::write(rehost.join("q8").join("config.json"), b"{}").expect("q8 config");
+    stage_tier_files(&upstream, QWEN38_27B_DESCRIBER_REPO, "bf16");
+
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    let resolved = |tier: &str| qwen38_describer_weights_dir(&settings, tier);
+    let same = |left: &Path, right: &Path| {
+        left.canonicalize().expect("left exists") == right.canonicalize().expect("right exists")
+    };
+    assert!(same(
+        &resolved("q4").expect("q4 installed"),
+        &rehost.join("q4")
+    ));
+    assert!(same(&resolved("bf16").expect("bf16 installed"), &upstream));
+    let error = resolved("q8").expect_err("q8 has only some of its files");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(error.to_string().contains("q8 tier"), "{error}");
+
+    // Full precision follows the same rule: a shard its index names is missing (a partial
+    // download), so it is not installed, with the same plain message.
+    std::fs::remove_file(upstream.join("model-fixture.safetensors")).expect("drop a shard");
+    let error = resolved("bf16").expect_err("bf16 is missing a shard");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The bf16 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+}
+
+/// The shipped 27B catalog entry, as the API attaches it to a describe job.
+fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let mut job = payload(stage, None);
+    job["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    job["variant"] = json!(tier);
+    job["modelManifestEntries"] = json!([sceneworks_core::builtin_manifests::builtin_model_entry(
+        QWEN38_27B_DESCRIBER_MODEL_ID
+    )
+    .expect("the 27B describer is a builtin")]);
+    job
+}
+
+/// Each tier's memory floor is read from the lane block of the carried catalog entry, and a tier
+/// above what the worker has is refused with both numbers; no floor or no budget refuses nothing.
+#[test]
+fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 34.0, 65.0])] {
+        let floors = ["q4", "q8", "bf16"].map(|tier| {
+            let job = qwen38_job_payload(&stage, tier);
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
+                .unwrap_or_else(|| panic!("{lane} {tier} declares a floor"))
+        });
+        assert_eq!(floors, expect, "{lane}");
+    }
+    // A tier with no row falls back to the lane's conservative bf16 floor.
+    let job = qwen38_job_payload(&stage, "q4");
+    let job = job.as_object().expect("payload");
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(65.0));
+    assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
+
+    let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer needs 38.0 GB of memory, but this worker \
+             has 32.0 GB for it. Choose a smaller tier."
+        ),
+        "{error}"
+    );
+    qwen38_fit_refusal("q4", Some(25.0), Some(32.0)).expect("fits");
+    qwen38_fit_refusal("q4", None, Some(8.0)).expect("no floor refuses nothing");
+    qwen38_fit_refusal("q4", Some(25.0), None).expect("no budget refuses nothing");
+    // Just under a whole-GiB floor reads as two different numbers, not "22 GB ... 22 GB".
+    let error = qwen38_fit_refusal("q4", Some(22.0), Some(21.7)).expect_err("too big");
+    assert!(
+        error.to_string().ends_with(
+            "The q4 tier of the Qwen3.8 27B describer needs 22.0 GB of memory, but this worker \
+             has 21.7 GB for it. Choose a smaller tier."
+        ),
+        "{error}"
+    );
+}
+
+/// The Candle floors never admit a load the engine then refuses, nor one below its measured peak:
+/// each is the smallest whole GiB at or above both candle-llm's CUDA load requirement (from the
+/// shipped snapshots' safetensors headers, inference 4a36a7f) and the measured peak above baseline.
+#[test]
+fn each_candle_floor_covers_the_engine_load_requirement_and_the_measured_peak() {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    // (tier, engine load requirement in bytes, measured peak above baseline in MiB)
+    for (tier, engine_bytes, peak_mib) in [
+        ("q4", 22_279_852_166_u64, 21_995.0),
+        ("q8", 35_291_474_440, 34_409.0),
+        ("bf16", 69_520_866_634, 57_319.0),
+    ] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor_gb =
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier).expect("floor");
+        let need_mib = (engine_bytes as f64 / MIB).max(peak_mib);
+        assert!(
+            floor_gb * 1024.0 >= need_mib,
+            "{tier}: {floor_gb} GiB < {need_mib} MiB"
+        );
+        assert!(
+            (floor_gb - 1.0) * 1024.0 < need_mib,
+            "{tier}: {floor_gb} GiB is not the smallest whole GiB covering {need_mib} MiB"
+        );
+    }
+    // A 24 GB card (24,564 MiB total) admits q4 with up to 2,036 MiB in use, never q8 or bf16.
+    let card = 24_564.0 / 1024.0;
+    for (tier, admitted) in [("q4", true), ("q8", false), ("bf16", false)] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier);
+        assert_eq!(
+            qwen38_fit_refusal(tier, floor, Some(card - 2_036.0 / 1024.0)).is_ok(),
+            admitted,
+            "{tier}"
+        );
+    }
+}
+
+/// A second describe job for the tier the first job left in the refine cache is admitted: the
+/// cached model is reused, so the free VRAM it occupies is not held against it. Asking the cache
+/// evicts nothing: a different cached refiner stays resident (its weights are credited instead).
+/// No GPU or model: the cache holds unit models and the free-VRAM readings are the numbers a
+/// 32 GiB card would report.
+#[test]
+fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    assert_eq!(floor, Some(22.0));
+    // A 32 GiB card holding the first job's q4 model (measured 21.48 GiB) has about 10 GiB free.
+    let free_with_q4_cached = Some(32.0 - 21.48);
+    let free_after_drop = Some(32.0);
+
+    // The refused case the old check produced: the full floor against the free VRAM alone.
+    assert!(qwen38_fit_refusal("q4", floor, free_with_q4_cached).is_err());
+
+    // The same tier still cached: reused, admitted, and still resident afterwards.
+    let mut cache = CacheThread::<&str, ()>::new(true);
+    cache.install("q4", ());
+    let (access, other) = cache.access_for(&"q4");
+    assert_eq!((access, other), (CacheAccess::Warm, None));
+    assert_eq!(cache.resident_key(), Some(&"q4"));
+    qwen38_cached_fit_refusal(access, "q4", floor, None).expect("a cached tier is admitted");
+
+    // A different refiner cached: reported, not dropped; its credited memory counts.
+    cache.install("q8", ());
+    let (access, other) = cache.access_for(&"q4");
+    assert_eq!((access, other), (CacheAccess::Cold, Some(&"q8")));
+    assert_eq!(cache.resident_key(), Some(&"q8"), "asking evicts nothing");
+    qwen38_cached_fit_refusal(access, "q4", floor, free_after_drop)
+        .expect("the credited memory counts");
+
+    // A cold load that truly cannot fit is still refused.
+    let error =
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
+    assert!(error.to_string().contains("needs 22.0 GB"), "{error}");
+
+    // A 24 GB card (24,564 MiB total) is admitted cold with 22,528 MiB free and refused below.
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(24_564.0 / 1024.0))
+        .expect("an idle 24 GB card admits q4");
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_528.0 / 1024.0))
+        .expect("22,528 MiB free admits q4");
+    assert!(
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_527.0 / 1024.0)).is_err()
+    );
+}
+
+/// A cold Candle load evicts the cached image/video generator BEFORE free VRAM is read, so a describe
+/// started within the generator cache's idle window sees the memory that generator held. A warm tier
+/// needs no reading and evicts nothing. No GPU: the generator is a unit model in a cache, and the
+/// probe reports what a 32 GiB card holding a 21.48 GiB generator would report.
+#[tokio::test]
+async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    let generators = Mutex::new(CacheThread::<&str, ()>::new(false));
+    let steps = Mutex::new(Vec::<&str>::new());
+    let (generators, steps) = (&generators, &steps);
+    let evict = || async move {
+        steps.lock().unwrap().push("evict");
+        Ok(generators.lock().unwrap().evict().is_some())
+    };
+    let probe = || async move {
+        steps.lock().unwrap().push("probe");
+        let generator_resident = !generators.lock().unwrap().is_empty();
+        Ok(Some(crate::fit_gate::VramBudget {
+            free_gb: if generator_resident {
+                32.0 - 21.48
+            } else {
+                32.0
+            },
+            total_gb: 32.0,
+        }))
+    };
+
+    // A generator left cached by an image job: dropped first, so the reading sees its memory free.
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Cold, 0.0, evict, probe)
+        .await
+        .expect("evict and probe succeed");
+    assert_eq!(*steps.lock().unwrap(), ["evict", "probe"]);
+    assert_eq!(free, Some(32.0));
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, free)
+        .expect("the generator's memory counts once it is evicted");
+    // The order matters: reading before the eviction would refuse a load that fits.
+    assert!(qwen38_fit_refusal("q4", floor, Some(32.0 - 21.48)).is_err());
+
+    // A warm tier reuses the resident describer: no eviction, no reading, admitted.
+    steps.lock().unwrap().clear();
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Warm, 0.0, evict, probe)
+        .await
+        .expect("warm needs nothing");
+    assert_eq!(free, None);
+    assert!(steps.lock().unwrap().is_empty());
+    assert!(
+        !generators.lock().unwrap().is_empty(),
+        "a warm describe keeps the generator"
+    );
+
+    // A failed eviction fails the admission rather than reading a stale card.
+    let error = qwen38_free_gb_after_eviction(
+        CacheAccess::Cold,
+        0.0,
+        || async {
+            Err::<bool, _>(WorkerError::Engine(
+                "generator cache worker stopped".to_owned(),
+            ))
+        },
+        probe,
+    )
+    .await
+    .expect_err("eviction error propagates");
+    assert!(error.to_string().contains("stopped"), "{error}");
+    assert!(
+        steps.lock().unwrap().is_empty(),
+        "no probe after a failed eviction"
+    );
+}
+
+/// A refused job evicts nothing beyond the generator: with the 8B Vision Captioner resident, a
+/// bf16 27B job on a 24 GB card (8B weights credited, capped at the card's total) is refused and
+/// the 8B stays in the refine cache. The same job on a 96 GB card is admitted on the credit, and
+/// its own load (not the check) drops the 8B. No GPU or model: unit models and card readings.
+#[tokio::test]
+async fn a_refused_qwen38_job_leaves_the_cached_refiner_resident() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "bf16");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "bf16");
+    let mut refiners = CacheThread::<&str, ()>::new(true);
+    refiners.install("vision-captioner-8b", ());
+    let (access, other) = refiners.access_for(&"qwen38-bf16");
+    assert_eq!(
+        (access, other),
+        (CacheAccess::Cold, Some(&"vision-captioner-8b"))
+    );
+    // The 8B's bf16 weights, as `cached_refiner_weights_gb` reads them from its safetensors.
+    let eight_b_gb = 16.3;
+    for (card_gb, admitted) in [(24_564.0 / 1024.0, false), (97_887.0 / 1024.0, true)] {
+        let free = qwen38_free_gb_after_eviction(
+            access,
+            eight_b_gb,
+            || async { Ok(false) },
+            || async move {
+                Ok(Some(crate::fit_gate::VramBudget {
+                    free_gb: card_gb - eight_b_gb - 1.0,
+                    total_gb: card_gb,
+                }))
+            },
+        )
+        .await
+        .expect("probe");
+        assert!(
+            free.expect("reading") <= card_gb,
+            "the credit is capped at the card"
+        );
+        assert_eq!(
+            qwen38_cached_fit_refusal(access, "bf16", floor, free).is_ok(),
+            admitted,
+            "{card_gb} GiB card"
+        );
+        assert_eq!(
+            refiners.resident_key(),
+            Some(&"vision-captioner-8b"),
+            "the check evicts no refiner"
+        );
+    }
+}
+
+/// A describer's load and generation failures name the model in use: the 27B's say "Qwen3.8 27B
+/// describer", the 8B's keep "Vision Captioner". The load failure is driven for real through the
+/// refine cache against a folder that holds no model (nothing loads, nothing downloads).
+#[tokio::test]
+async fn a_describer_failure_names_the_model_in_use() {
+    assert_eq!(
+        DescribeModel::VisionCaptioner.display_name(),
+        "Vision Captioner"
+    );
+    assert_eq!(
+        DescribeModel::Qwen38.display_name(),
+        "Qwen3.8 27B describer"
+    );
+    let empty = tempfile::tempdir().expect("empty weights dir");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_OFFLINE", "1")]);
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    for (model, expected) in [
+        (DescribeModel::Qwen38, "Qwen3.8 27B describer load failed"),
+        (
+            DescribeModel::VisionCaptioner,
+            "Vision Captioner load failed",
+        ),
+    ] {
+        let describer = VisionCaptionerDescriber {
+            model,
+            weights_dir: empty.path().join("no-model"),
+            job_id: "label-test".to_owned(),
+        };
+        let error = describer
+            .describe(
+                image::DynamicImage::new_rgb8(8, 8),
+                &prompt,
+                CancelFlag::new(),
+            )
+            .await
+            .expect_err("nothing to load");
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+/// A condense-only 27B job loads the tier its rows were described with, so it parses that tier
+/// from `variant` and is refused by name, before anything is condensed, when the tier is not
+/// installed. A measure-only job of the same tier loads nothing and is not refused for it.
+#[tokio::test]
+async fn a_qwen38_condense_only_job_uses_its_tier_and_refuses_one_not_installed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let condense_payload = |mode: &str| {
+        let mut payload = qwen38_job_payload(&stage, "q8");
+        let entry = fit_entry(1024);
+        payload["fitTo"] = entry["id"].clone();
+        payload["fitToManifestEntry"] = entry;
+        payload[mode] = json!(true);
+        payload["items"] = json!([{
+            "itemId": "item_1",
+            "imagePath": stage.dataset_root.join("images/item_1.png").display().to_string(),
+            "relativePath": "images/item_1.png",
+            "assetId": null,
+            "width": 640,
+            "height": 480,
+            "fields": { "description": "A woman, woman_1." },
+            "condensedText": "woman_1.",
+        }]);
+        payload
+    };
+    let request = parse_batch_describe_request(
+        &stage.settings,
+        condense_payload("condenseOnly").as_object().unwrap(),
+    )
+    .expect("parses");
+    assert_eq!(request.model, DescribeModel::Qwen38);
+    assert_eq!(request.tier, Some("q8"));
+
+    let run = |payload: Value| {
+        let api_client = ApiClient::new(&stage.settings);
+        let mut job: JobSnapshot =
+            serde_json::from_value(job_value("describe-job", false)).expect("job");
+        job.payload = payload.as_object().expect("payload object").clone();
+        let settings = stage.settings.clone();
+        async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
+    };
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    let error = run(condense_payload("condenseOnly"))
+        .await
+        .expect_err("an uninstalled tier is refused");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+    assert!(stored_items(&api).is_empty(), "nothing was condensed");
+
+    let measured = run(condense_payload("measureOnly")).await;
+    assert!(
+        measured
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.to_string().contains("not installed")),
+        "{measured:?}"
+    );
+}
+
+/// Stage every file the catalog row of `repo`'s `tier` pins in `snapshot`, as a finished tier
+/// download leaves it: a shard glob becomes one shard named by the index. Marked `cfg(test)` so the
+/// model-artifact inventory scan reads it as a test-only item.
+#[cfg(test)]
+fn stage_tier_files(snapshot: &Path, repo: &str, tier: &str) {
+    let files = sceneworks_core::dataset_batch_describe::qwen38_tier_files(repo, tier);
+    assert!(!files.is_empty(), "{repo} {tier} has a catalog row");
+    for file in files {
+        let file = file.replace('*', "fixture");
+        let path = snapshot.join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("snapshot dir");
+        let body = if file == "model.safetensors.index.json" {
+            json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
+        } else {
+            "{}".to_owned()
+        };
+        std::fs::write(path, body).expect("tier file");
+    }
+}
+
+/// Stage `tier` fully in a re-host snapshot of `hf_cache`. Marked `cfg(test)` like the above.
+#[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
+    let snapshot = hf_cache
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join("aaa111");
+    stage_tier_files(&snapshot, repo, tier);
+}
+
+/// AC3: a tier that is not installed, or that cannot fit, ends the job before any image is
+/// described: no progress post, no stored item, and the job's error says what to do.
+#[tokio::test]
+async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let run = |payload: Value| {
+        let api_client = ApiClient::new(&stage.settings);
+        let mut job: JobSnapshot =
+            serde_json::from_value(job_value("describe-job", false)).expect("job");
+        job.payload = payload.as_object().expect("payload object").clone();
+        let settings = stage.settings.clone();
+        async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
+    };
+
+    // Nothing installed: refused by name, before the first image.
+    let error = {
+        let _env = crate::test_env::EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            hf_cache.path().to_str().expect("utf-8"),
+        )]);
+        run(qwen38_job_payload(&stage, "q8")).await
+    }
+    .expect_err("an uninstalled tier is refused");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+
+    // A partial q8 (its config and tokenizer present, its weights missing, as a cancelled
+    // download leaves it): refused with the same plain message, before the first image.
+    {
+        use sceneworks_core::dataset_batch_describe::{
+            QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        };
+        let repo = if cfg!(target_os = "macos") {
+            QWEN38_27B_DESCRIBER_MLX_REPO
+        } else {
+            QWEN38_27B_DESCRIBER_CANDLE_REPO
+        };
+        stage_installed_tier(hf_cache.path(), repo, "q8");
+        let weights = hf_cache
+            .path()
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots/aaa111/q8/model.safetensors");
+        std::fs::remove_file(weights).expect("drop the q8 weights");
+    }
+    let error = {
+        let _env = crate::test_env::EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            hf_cache.path().to_str().expect("utf-8"),
+        )]);
+        run(qwen38_job_payload(&stage, "q8")).await
+    }
+    .expect_err("a partial tier is refused");
+    assert!(
+        error
+            .to_string()
+            .ends_with("The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in the Model Manager, or choose a tier that is installed."),
+        "{error}"
+    );
+
+    // The installed q4 tier on a Mac emulated at 16 GB: refused for memory, before the first image.
+    #[cfg(target_os = "macos")]
+    {
+        stage_installed_tier(
+            hf_cache.path(),
+            sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MLX_REPO,
+            "q4",
+        );
+        let error = {
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8")),
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16"),
+            ]);
+            run(qwen38_job_payload(&stage, "q4")).await
+        }
+        .expect_err("a tier above the machine is refused");
+        assert!(
+            error.to_string().ends_with(
+                "The q4 tier of the Qwen3.8 27B describer needs 28.0 GB of memory, but this \
+                 worker has 16.0 GB for it. Choose a smaller tier."
+            ),
+            "{error}"
+        );
+    }
+
+    assert!(posts(&api).is_empty(), "no progress was posted");
+    assert!(stored_items(&api).is_empty(), "no image was described");
+}
+
 fn one_image_payload(stage: &Stage, model: &str) -> Value {
     let mut one = payload(stage, None);
     one["model"] = json!(model);
@@ -859,6 +2254,107 @@ async fn a_generation_error_is_flagged_without_a_retry() {
     let item = &stored_items(&api)[0];
     assert_eq!(item["failed"], true);
     assert_eq!(item["error"], "JoyCaption MLX generation failed: boom");
+}
+
+#[tokio::test]
+async fn a_cut_off_vision_reply_is_stored_described_with_its_notice() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let full = contract_order_reply(&["woman_1", "man_1", "girl_1"]);
+    let raw = cut_at_entry(&full, "girl_1", 40);
+    let describer = StubDescriber::new(vec![Ok(Ok(raw))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, VISION_CAPTIONER_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(describer.calls.lock().unwrap().len(), 1, "not retried");
+    assert_eq!(terminal(&api, "completed")["result"]["failedCount"], 0);
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], false);
+    assert_eq!(items[0]["error"], Value::Null);
+    assert_eq!(items[0]["description"], "full description");
+    assert_eq!(
+        items[0]["pose"],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1"))
+    );
+    assert!(items[0]["notice"]
+        .as_str()
+        .unwrap()
+        .contains("the pose covers only the first 2 people"));
+}
+
+#[tokio::test]
+async fn a_cut_off_joycaption_reply_is_retried_then_recovered() {
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let cut = "{\"description\": \"a man, man_1, in a coat\", \"style\": \"photo\", \
+               \"camera\": \"\", \"composition\": \"wide\", \"lighting\": \"dusk\", \
+               \"environment\": \"a street\", \"pose\": \"man_1 stands upright, chest";
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok(cut.to_owned())),
+        Ok(Ok(cut.to_owned())),
+        Ok(Ok(cut.to_owned())),
+    ]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(
+        describer.calls.lock().unwrap().len(),
+        1 + JOYCAPTION_PARSE_RETRIES,
+        "the retries are spent before anything is recovered"
+    );
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], false);
+    assert_eq!(items[0]["lighting"], "dusk");
+    assert_eq!(items[0]["pose"], "", "a cut plain-text pose is never kept");
+    assert_eq!(
+        items[0]["notice"],
+        "The reply reached the length limit: the pose was cut off before any person was \
+         complete, so it is left out; the other fields are complete."
+    );
+
+    // A retry that completes wins over recovery.
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let describer =
+        StubDescriber::joycaption_like(vec![Ok(Ok(cut.to_owned())), Ok(Ok(full_reply("whole")))]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    let items = stored_items(&api);
+    assert_eq!(items[0]["pose"], "whole pose");
+    assert_eq!(items[0]["notice"], Value::Null);
+
+    // Cut before the description: still a failure, with the plain length message after retries.
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let early = "{\"description\": \"a man, man_1, in a";
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok(early.to_owned())),
+        Ok(Ok(early.to_owned())),
+        Ok(Ok(early.to_owned())),
+    ]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], true);
+    assert_eq!(items[0]["error"], CUT_OFF_BEFORE_DESCRIPTION);
 }
 
 #[tokio::test]
@@ -1227,11 +2723,25 @@ fn one_image_can_never_exceed_the_per_item_limit() {
         image_path: PathBuf::from("/data/images/item_1.png"),
         relative_path: "images/item_1.png".to_owned(),
         asset_id: Some("asset-1".to_owned()),
+        given: None,
     };
     let described = DescribedItem {
         item: item.clone(),
         size: Some((4096, 4096)),
         outcome: Ok(parsed),
+        condensed: Some(Condensed {
+            target: "krea_2_turbo".to_owned(),
+            limit: 1024,
+            text: "\u{1}".repeat(MAX_DESCRIBE_FIELD_CHARS + 1),
+            tokens: Some(1024),
+            exact: false,
+            estimate_reason: Some("\u{1}".repeat(MAX_ITEM_ERROR_CHARS)),
+            characters: MAX_DESCRIBE_FIELD_CHARS + 1,
+            mentions: 999,
+            over: true,
+            failed: false,
+            notice: Some("\u{1}".repeat(MAX_ITEM_ERROR_CHARS)),
+        }),
     };
     let encoded = stored_item_json(&described).to_string().len();
     assert!(
@@ -1242,6 +2752,7 @@ fn one_image_can_never_exceed_the_per_item_limit() {
         item,
         size: None,
         outcome: Err("\u{1}".repeat(50_000)),
+        condensed: None,
     };
     assert!(
         stored_item_json(&failed).to_string().len()
@@ -1259,11 +2770,14 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
             image_path: PathBuf::from("/data/x.png"),
             relative_path: "\u{1}".repeat(sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES),
             asset_id: None,
+            given: None,
         },
         size: Some((10, 20)),
         outcome: Ok(DescribedFields {
             fields: std::array::from_fn(|_| "text".to_owned()),
+            notice: None,
         }),
+        condensed: None,
     };
     let stored = stored_item_json(&described);
     assert!(stored.to_string().len() <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES);
@@ -1271,4 +2785,814 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
     assert_eq!(stored["failed"], true);
     assert_eq!(stored["width"], 10);
     assert_eq!(stored["description"], "");
+}
+
+// ── Fit to: the condensing step (SW-7163) ─────────────────────────────────────────────────────
+
+#[test]
+fn the_condense_section_is_fixed_and_carries_its_rules() {
+    let system = condense::condense_system(586);
+    assert!(
+        !system.contains("{max_words}"),
+        "the word target is filled in"
+    );
+    for rule in [
+        "ONE flowing prompt of at most 586 words",
+        "covers all seven fields",
+        "Every person label",
+        "exactly as written",
+        "Each person's pose above everything else",
+        "own left and right",
+        "frame-left and frame-right",
+        "relative to the camera",
+        "Cut style, camera, lighting and environment detail first",
+        "Shorten pose last",
+        "no headings, no field names, no lists",
+        "no commentary",
+        "Thinking is not needed",
+    ] {
+        assert!(
+            system.contains(rule),
+            "the condense instruction says {rule:?}"
+        );
+    }
+    // It is never part of either describer's editable default instruction.
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        assert!(!default_describe_instruction(model).contains("ONE flowing prompt"));
+    }
+}
+
+#[test]
+fn person_labels_are_whole_lowercase_noun_underscore_number_words() {
+    assert_eq!(
+        condense::person_labels(
+            "A woman, woman_1, faces man_12; woman_1's hand. Man_2 x_y item_3a"
+        ),
+        vec!["woman_1", "man_12", "woman_1"]
+    );
+    assert!(condense::person_labels("the_woman_1 woman_1b woman__1 _1").is_empty());
+}
+
+#[test]
+fn the_condense_user_turn_is_every_non_empty_field_with_one_pose_line_per_person() {
+    let mut fields: [String; DESCRIBE_FIELDS.len()] = Default::default();
+    fields[0] = "A woman, woman_1.".to_owned();
+    fields[1] = "woman_1 — Body line: upright\nman_1 — Body line: seated".to_owned();
+    fields[6] = "A kitchen.".to_owned();
+    let user = condense::condense_user(&fields);
+    assert!(user.ends_with(
+        "Description: A woman, woman_1.\nPose: woman_1 — Body line: upright\nPose: man_1 — Body \
+         line: seated\nEnvironment: A kitchen."
+    ));
+    assert!(!user.contains("Style:"), "an empty field is left out");
+}
+
+/// The Vision Captioner reply of one image with one person, woman_1, in every field.
+fn labelled_reply() -> String {
+    reply(
+        &DESCRIBE_FIELDS
+            .iter()
+            .map(|field| (*field, json!(format!("woman_1 {field}"))))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn condense_reply(
+    text: &str,
+    generated_tokens: usize,
+) -> WorkerResult<Result<CondenseReply, String>> {
+    Ok(Ok(CondenseReply {
+        text: text.to_owned(),
+        generated_tokens,
+        cut_off: false,
+    }))
+}
+
+/// A target catalog entry declaring `limit` prompt tokens.
+fn fit_entry(limit: u64) -> Value {
+    json!({
+        "id": "krea_2_turbo",
+        "name": "Krea 2 Turbo",
+        "adapter": "mlx_krea",
+        "image": { "maxPromptTokens": limit },
+        "downloads": [],
+    })
+}
+
+/// item_1 only, fit to `entry`.
+fn fit_payload(stage: &Stage, entry: Value) -> Value {
+    let mut payload = one_image_payload(stage, VISION_CAPTIONER_REPO);
+    payload["fitTo"] = entry["id"].clone();
+    payload["fitToManifestEntry"] = entry;
+    payload
+}
+
+/// Counts one token per whitespace-separated word, standing in for the target's own tokenizer.
+struct WordCounter;
+
+impl condense::PromptTokenCounter for WordCounter {
+    fn count(&self, text: &str) -> Result<usize, String> {
+        Ok(text.split_whitespace().count())
+    }
+}
+
+/// Run the job like `run_job`, with `counter` as the target's exact counter when given.
+async fn run_fit_job(
+    stage: &Stage,
+    payload: Value,
+    describer: &dyn BatchDescriber,
+    counter: Option<Box<dyn condense::PromptTokenCounter>>,
+) -> WorkerResult<()> {
+    let api = ApiClient::new(&stage.settings);
+    let mut job: JobSnapshot =
+        serde_json::from_value(job_value("describe-job", false)).expect("job");
+    job.payload = payload.as_object().expect("payload object").clone();
+    let mut request = parse_batch_describe_request(&stage.settings, &job.payload)?;
+    let fit = request.fit.as_mut().expect("the job has a target");
+    match counter {
+        Some(counter) => fit.counter = Some(counter),
+        None => fit.estimate_reason = Some("Krea 2 Turbo is not installed".to_owned()),
+    }
+    run_batch_describe(&api, &stage.settings, &job, request, describer).await
+}
+
+fn running_messages(api: &StubApi) -> Vec<String> {
+    posts(api)
+        .iter()
+        .filter(|body| body["status"] == "running")
+        .map(|body| body["message"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_condensed_prompt_that_fits_first_time_is_stored_beside_the_seven_fields() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let text = "A woman, woman_1, stands upright facing the camera in a kitchen.";
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))])
+        .with_condense_replies(vec![condense_reply(&format!("  {text}\n"), 300)]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one condensing generation, no retry");
+    // An estimate is held to 85% of 1,024 (870); the word target is the tighter bound less 10%.
+    assert!(calls[0].0.contains("at most 570 words"), "{}", calls[0].0);
+    assert!(calls[0].1.contains("Description: woman_1 description"));
+    let item = &stored_items(&api)[0];
+    for field in DESCRIBE_FIELDS {
+        assert_eq!(
+            item[field],
+            format!("woman_1 {field}"),
+            "the fields stay stored"
+        );
+    }
+    let condensed = &item["condensed"];
+    assert_eq!(condensed["target"], "krea_2_turbo");
+    assert_eq!(condensed["limitTokens"], 1024);
+    assert_eq!(condensed["text"], text, "whitespace is stripped");
+    assert_eq!(condensed["tokens"], 300);
+    assert_eq!(condensed["tokenCount"], "estimate");
+    assert_eq!(condensed["estimateReason"], "Krea 2 Turbo is not installed");
+    assert_eq!(condensed["characters"], text.chars().count());
+    assert_eq!(condensed["over"], false);
+    assert_eq!(condensed["failed"], false);
+    assert_eq!(condensed["notice"], Value::Null);
+    assert!(
+        running_messages(&api).contains(&"Condensing image 1 of 1 for Krea 2 Turbo.".to_owned())
+    );
+    // The description is checkpointed as provisional before condensing, then replaced in place.
+    let appends = api.appends.lock().unwrap().clone();
+    assert_eq!(appends.len(), 2);
+    assert_eq!(appends[0]["items"][0]["position"], 0);
+    assert_eq!(appends[0]["items"][0]["item"]["provisional"], true);
+    assert!(appends[0]["items"][0]["item"].get("condensed").is_none());
+    assert_eq!(appends[1]["items"][0]["position"], 0);
+    assert!(
+        item.get("provisional").is_none(),
+        "the final item is not provisional"
+    );
+    assert_eq!(
+        terminal(&api, "completed")["result"]["fitTo"],
+        "krea_2_turbo"
+    );
+}
+
+#[tokio::test]
+async fn an_exact_count_uses_the_targets_tokenizer_and_the_full_limit() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    // The describer's own count (2,000) would be over; the exact count (4 words) is not.
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 stands upright smiling.", 2_000),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        Some(Box::new(WordCounter)),
+    )
+    .await
+    .expect("job completes");
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert!(calls[0].0.contains("at most 580 words"), "{}", calls[0].0);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokens"], 4);
+    assert_eq!(condensed["tokenCount"], "exact");
+    assert_eq!(condensed["estimateReason"], Value::Null);
+    assert_eq!(condensed["over"], false);
+}
+
+#[tokio::test]
+async fn an_over_long_prompt_is_retried_once_with_a_stricter_target_and_then_fits() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 at great length.", 900),
+        condense_reply("woman_1 briefly.", 400),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].0.contains("at most 484 words"), "{}", calls[1].0);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["text"], "woman_1 briefly.");
+    assert_eq!(condensed["tokens"], 400);
+    assert_eq!(condensed["over"], false);
+    assert!(running_messages(&api)
+        .iter()
+        .any(|message| message.contains("again (attempt 2)")));
+}
+
+#[tokio::test]
+async fn a_prompt_still_over_after_the_retry_is_stored_over_with_a_plain_notice() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let long = format!("woman_1 {}", "word ".repeat(900));
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply(&long, 1_200),
+        Ok(Ok(CondenseReply {
+            text: long.clone(),
+            generated_tokens: 1_100,
+            cut_off: true,
+        })),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(
+        describer.condense_calls.lock().unwrap().len(),
+        2,
+        "one retry only"
+    );
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["over"], true);
+    assert_eq!(
+        condensed["failed"], false,
+        "an over prompt is kept, marked over"
+    );
+    assert_eq!(condensed["tokens"], 1_100);
+    let notice = condensed["notice"].as_str().expect("a notice");
+    assert!(
+        notice.starts_with("Still over the limit even after one retry"),
+        "{notice}"
+    );
+    assert!(notice.contains("cut off"), "{notice}");
+    assert!(
+        notice.contains("about 1100 tokens plus room for 1 variable values is over 870"),
+        "{notice}"
+    );
+    assert_eq!(
+        condensed["text"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        901,
+        "never truncated to fit"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_missing_a_label_is_retried_then_reported_failed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("A woman stands.", 100),
+        condense_reply("A woman stands upright.", 100),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(
+        describer.condense_calls.lock().unwrap().len(),
+        2,
+        "retried once"
+    );
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["failed"], false, "the description itself stands");
+    let condensed = &item["condensed"];
+    assert_eq!(condensed["failed"], true);
+    assert!(condensed["notice"]
+        .as_str()
+        .unwrap()
+        .contains("leaves out woman_1 even after one retry"));
+}
+
+#[tokio::test]
+async fn a_condense_only_job_opens_no_image_and_never_describes() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["condenseOnly"] = json!(true);
+    // item_2 has no image on disk: a condense-only job never reads it.
+    payload["items"] = json!([{
+        "itemId": "item_2",
+        "imagePath": stage.dataset_root.join("images/item_2.png").display().to_string(),
+        "relativePath": "images/item_2.png",
+        "assetId": null,
+        "width": 640,
+        "height": 480,
+        "fields": { "description": "An edited woman, woman_1.", "pose": "woman_1 — seated" },
+    }]);
+    // No describe reply is queued: a describe call would panic the test.
+    let describer = StubDescriber::new(Vec::new())
+        .with_condense_replies(vec![condense_reply("woman_1 sits, edited.", 50)]);
+    run_fit_job(&stage, payload, &describer, None)
+        .await
+        .expect("job completes");
+    assert!(
+        describer.calls.lock().unwrap().is_empty(),
+        "nothing is described"
+    );
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert!(calls[0]
+        .1
+        .contains("Description: An edited woman, woman_1."));
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["itemId"], "item_2");
+    assert_eq!(
+        (item["width"].clone(), item["height"].clone()),
+        (json!(640), json!(480))
+    );
+    assert_eq!(item["description"], "An edited woman, woman_1.");
+    assert_eq!(item["style"], "", "a field the row did not send is empty");
+    assert_eq!(item["failed"], false);
+    assert_eq!(item["condensed"]["text"], "woman_1 sits, edited.");
+    assert!(running_messages(&api).contains(&"Condensing image 1 of 1.".to_owned()));
+    let completed = terminal(&api, "completed");
+    assert_eq!(completed["message"], "Condensed 1 image(s).");
+    assert_eq!(completed["result"]["condenseOnly"], true);
+}
+
+#[tokio::test]
+async fn joycaption_rows_are_never_condensed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["model"] = json!(JOYCAPTION_REPO);
+    let describer = StubDescriber::joycaption_like(vec![Ok(Ok(labelled_reply()))]);
+    run_fit_job(&stage, payload, &describer, None)
+        .await
+        .expect("job completes");
+    assert!(describer.condense_calls.lock().unwrap().is_empty());
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["description"], "woman_1 description");
+    assert!(item.get("condensed").is_none(), "{item}");
+}
+
+#[tokio::test]
+async fn a_job_without_a_target_stores_items_without_a_condensed_object() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, VISION_CAPTIONER_REPO),
+        &describer,
+    )
+    .await
+    .expect("job completes");
+    assert!(describer.condense_calls.lock().unwrap().is_empty());
+    assert!(stored_items(&api)[0].get("condensed").is_none());
+    assert_eq!(terminal(&api, "completed")["result"]["fitTo"], Value::Null);
+}
+
+#[test]
+fn the_limit_comes_from_the_carried_catalog_entry_never_the_request() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let parse = |payload: Value| {
+        parse_batch_describe_request(&stage.settings, payload.as_object().unwrap())
+    };
+    let mut spoofed = fit_payload(&stage, fit_entry(200));
+    spoofed["maxPromptTokens"] = json!(50_000);
+    spoofed["limitTokens"] = json!(50_000);
+    let request = parse(spoofed).expect("parses");
+    let fit = request.fit.expect("a target");
+    assert_eq!((fit.model_id.as_str(), fit.limit), ("krea_2_turbo", 200));
+    assert_eq!(fit.name, "Krea 2 Turbo");
+
+    let refuse = |payload: Value, expect: &str| match parse(payload) {
+        Err(WorkerError::InvalidPayload(message)) => {
+            assert!(message.contains(expect), "{message}")
+        }
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("refused: {expect}"),
+    };
+    let mut other_entry = fit_payload(&stage, fit_entry(200));
+    other_entry["fitTo"] = json!("krea_2_raw");
+    refuse(other_entry, "carries no catalog entry");
+    let mut no_limit = fit_payload(&stage, fit_entry(200));
+    no_limit["fitToManifestEntry"]["image"] = json!({});
+    refuse(no_limit, "declares no image.maxPromptTokens");
+    let mut no_target = one_image_payload(&stage, VISION_CAPTIONER_REPO);
+    no_target["condenseOnly"] = json!(true);
+    refuse(no_target, "need a fitTo target");
+    let mut joy = fit_payload(&stage, fit_entry(200));
+    joy["model"] = json!(JOYCAPTION_REPO);
+    joy["condenseOnly"] = json!(true);
+    refuse(joy, "a describer that condenses");
+    let mut unknown_field = fit_payload(&stage, fit_entry(200));
+    unknown_field["condenseOnly"] = json!(true);
+    unknown_field["items"][0]["fields"] = json!({ "mood": "calm" });
+    refuse(unknown_field, "unknown field \"mood\"");
+    let mut no_fields = fit_payload(&stage, fit_entry(200));
+    no_fields["condenseOnly"] = json!(true);
+    refuse(no_fields, "has no fields to condense");
+}
+
+#[test]
+fn the_exact_counter_needs_an_installed_tier_tokenizer_and_a_known_adapter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = test_settings(dir.path());
+    let entry = json!({
+        "downloads": [{
+            "repo": "SceneWorks/krea-2-turbo-mlx",
+            "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "files": ["q8/transformer/*", "q8/tokenizer/*", "../tokenizer/*"],
+        }],
+    });
+    assert!(
+        condense::tokenizer_roots(&settings, &entry).is_empty(),
+        "nothing installed"
+    );
+    let payload = json!({ "fitTo": "krea_2_turbo", "fitToManifestEntry": fit_entry(1024) });
+    let fit = condense::parse_fit_target(payload.as_object().unwrap())
+        .unwrap()
+        .unwrap();
+    match condense::exact_token_counter(&settings, &fit) {
+        Err(reason) => assert_eq!(reason, "Krea 2 Turbo is not installed"),
+        Ok(_) => panic!("no tokenizer is installed"),
+    }
+    let mut unknown = fit;
+    unknown.entry["adapter"] = json!("mlx_supra2");
+    match condense::exact_token_counter(&settings, &unknown) {
+        Err(reason) => assert!(reason.contains("no tokenizer-only counter"), "{reason}"),
+        Ok(_) => panic!("no counter for this adapter"),
+    }
+}
+
+/// The Fit to limit Krea 2 declares is the cap its engine admits prompts against (template prefix
+/// included), on this build's own backend, and the catalog says a longer prompt is refused, not
+/// truncated (the engine fails loud, sc-9047).
+#[test]
+fn krea_2_declares_its_engines_prompt_token_cap_and_that_it_refuses_beyond_it() {
+    #[cfg(target_os = "macos")]
+    let engine_cap = runtime_macos::providers::krea::text_encoder::tokenizer::MAX_TEXT_TOKENS;
+    #[cfg(not(target_os = "macos"))]
+    let engine_cap = runtime_cuda::providers::krea::pipeline::MAX_TEXT_TOKENS;
+    for id in ["krea_2_turbo", "krea_2_raw"] {
+        let entry = Value::Object(crate::test_env::shipped_catalog_entry(id));
+        assert_eq!(
+            sceneworks_core::dataset_batch_describe::prompt_token_limit(&entry),
+            Some(engine_cap),
+            "{id}"
+        );
+        assert_eq!(entry["image"]["promptOverflow"], "refuse", "{id}");
+        assert_eq!(
+            entry["adapter"], "mlx_krea",
+            "{id}: the exact counter keys on it"
+        );
+    }
+}
+
+/// Reports a fixed token count, or fails, standing in for the target's tokenizer.
+struct FixedCounter(Option<usize>);
+
+impl condense::PromptTokenCounter for FixedCounter {
+    fn count(&self, _text: &str) -> Result<usize, String> {
+        self.0.ok_or_else(|| "tokenizer failed".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_that_fits_only_with_bare_labels_is_over_once_values_are_reserved() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    // 1,015 of 1,024 tokens with eight label mentions: 1,015 + 8 × 8 = 1,079 is over.
+    let eight = "woman_1 turns; ".repeat(8);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply(&eight, 100),
+        condense_reply(&eight, 100),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        Some(Box::new(FixedCounter(Some(1015)))),
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(
+        describer.condense_calls.lock().unwrap().len(),
+        2,
+        "retried once"
+    );
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["over"], true, "{condensed}");
+    assert_eq!(condensed["labelMentions"], 8);
+    assert_eq!(condensed["reservedTokens"], 64);
+    assert!(condensed["notice"]
+        .as_str()
+        .unwrap()
+        .contains("1015 tokens plus room for 8 variable values is over 1024"));
+}
+
+#[tokio::test]
+async fn an_invented_label_is_retried_then_reported_failed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 stands beside person_2.", 50),
+        condense_reply("woman_1 stands beside person_2 again.", 50),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(describer.condense_calls.lock().unwrap().len(), 2);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["failed"], true);
+    assert!(condensed["notice"]
+        .as_str()
+        .unwrap()
+        .contains("adds person_2, which the fields do not have"));
+}
+
+#[test]
+fn a_reply_that_is_not_one_plain_prompt_is_recognised() {
+    for (reply, expect) in [
+        ("Here is the prompt: woman_1 stands.", "preamble"),
+        ("The condensed prompt:\nwoman_1 stands.", "preamble"),
+        ("# Prompt\nwoman_1 stands.", "markdown heading"),
+        ("- woman_1 stands\n- a kitchen", "list"),
+        ("1. woman_1 stands", "list"),
+        ("woman_1 stands. Pose: upright.", "field names"),
+    ] {
+        let problem = condense::shape_problem(reply).unwrap_or_else(|| panic!("{reply:?}"));
+        assert!(problem.contains(expect), "{reply:?}: {problem}");
+    }
+    for plain in [
+        "A woman, woman_1, stands upright in a kitchen, her left hand on the counter.",
+        "woman_1 strikes a pose: arms raised, chin up.",
+    ] {
+        assert_eq!(condense::shape_problem(plain), None, "{plain:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_preamble_reply_is_retried_and_a_plain_one_is_kept() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("Here is the prompt: woman_1 stands.", 50),
+        condense_reply("woman_1 stands.", 50),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(describer.condense_calls.lock().unwrap().len(), 2);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["text"], "woman_1 stands.");
+    assert_eq!(condensed["failed"], false);
+}
+
+#[tokio::test]
+async fn a_reply_the_exact_counter_cannot_count_is_held_to_the_estimate_bound() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    // 900 describer tokens fits 1,024 but not the 870 estimate bound.
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 stands.", 900),
+        condense_reply("woman_1 stands.", 900),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        Some(Box::new(FixedCounter(None))),
+    )
+    .await
+    .expect("job completes");
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokenCount"], "estimate");
+    assert_eq!(condensed["over"], true);
+    assert!(condensed["notice"]
+        .as_str()
+        .unwrap()
+        .contains("is over 870"));
+}
+
+#[tokio::test]
+async fn a_measure_only_job_counts_edited_prompts_without_any_generation() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["measureOnly"] = json!(true);
+    payload["items"] = json!([{
+        "itemId": "item_2",
+        "imagePath": stage.dataset_root.join("images/item_2.png").display().to_string(),
+        "relativePath": "images/item_2.png",
+        "width": 640,
+        "height": 480,
+        "notice": "The reply reached the length limit: the pose is missing.",
+        "fields": { "description": "A woman, woman_1." },
+        "condensedText": "woman_1 sits by the window, edited by hand.",
+    }]);
+    // Neither a describe nor a condense reply is queued: either call would panic the test.
+    let describer = StubDescriber::new(Vec::new());
+    run_fit_job(&stage, payload, &describer, Some(Box::new(WordCounter)))
+        .await
+        .expect("job completes");
+    assert!(describer.calls.lock().unwrap().is_empty());
+    assert!(describer.condense_calls.lock().unwrap().is_empty());
+    let item = &stored_items(&api)[0];
+    assert_eq!(
+        item["notice"],
+        "The reply reached the length limit: the pose is missing."
+    );
+    let condensed = &item["condensed"];
+    assert_eq!(
+        condensed["text"],
+        "woman_1 sits by the window, edited by hand."
+    );
+    assert_eq!(condensed["tokens"], 8);
+    assert_eq!(condensed["tokenCount"], "exact");
+    assert_eq!(condensed["over"], false);
+    assert_eq!(condensed["failed"], false);
+    assert_eq!(
+        terminal(&api, "completed")["message"],
+        "Measured 1 image(s)."
+    );
+}
+
+#[tokio::test]
+async fn a_measure_only_job_without_the_targets_tokenizer_leaves_the_prompt_unmeasured() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["measureOnly"] = json!(true);
+    payload["items"][0]["fields"] = json!({ "description": "A woman, woman_1." });
+    payload["items"][0]["condensedText"] = json!("woman_1 sits.");
+    run_fit_job(&stage, payload, &StubDescriber::new(Vec::new()), None)
+        .await
+        .expect("job completes");
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokens"], Value::Null);
+    assert_eq!(condensed["over"], false);
+}
+
+#[test]
+fn condense_only_rows_are_capped_in_total_and_never_empty() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let refuse = |fields: Value, expect: &str| {
+        let mut payload = fit_payload(&stage, fit_entry(1024));
+        payload["condenseOnly"] = json!(true);
+        payload["items"][0]["fields"] = fields;
+        match parse_batch_describe_request(&stage.settings, payload.as_object().unwrap()) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains(expect), "{message}")
+            }
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("refused: {expect}"),
+        }
+    };
+    let big = "x".repeat(MAX_DESCRIBE_FIELD_CHARS);
+    refuse(
+        json!({ "description": big, "pose": big, "style": "y" }),
+        "more than 32000",
+    );
+    refuse(
+        json!({ "description": "  ", "pose": "" }),
+        "no text in any field",
+    );
+}
+
+/// Fails the whole job on its condensing call, as a model that cannot load does.
+struct LoadFailsOnCondense;
+
+impl BatchDescriber for LoadFailsOnCondense {
+    fn describe(
+        &self,
+        _: image::DynamicImage,
+        _: &DescribePrompt,
+        _: CancelFlag,
+    ) -> DescribeFuture {
+        Box::pin(async { Ok(Ok(labelled_reply())) })
+    }
+
+    fn condenses(&self) -> bool {
+        true
+    }
+
+    fn condense(&self, _: String, _: String, _: CancelFlag) -> CondenseFuture {
+        Box::pin(async {
+            Err(WorkerError::Engine(
+                "Vision Captioner load failed".to_owned(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_model_failure_while_condensing_keeps_the_image_just_described() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let result = run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &LoadFailsOnCondense,
+        None,
+    )
+    .await;
+    assert!(result.is_err(), "the job fails with the model");
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["description"], "woman_1 description");
+    assert!(item.get("condensed").is_none());
+}
+
+/// The real job entry point with neither the describer nor the target installed: a measure-only
+/// job resolves no describer (it would fail "not cached" if it tried), fetches nothing, and
+/// leaves the edited prompt "not measured".
+#[tokio::test]
+async fn a_measure_only_job_runs_without_the_describer_or_the_targets_tokenizer() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["measureOnly"] = json!(true);
+    payload["fitToManifestEntry"]["downloads"] = json!([{
+        "repo": "SceneWorks/krea-2-turbo-mlx",
+        "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "files": ["q8/tokenizer/*"],
+    }]);
+    payload["items"][0]["fields"] = json!({ "description": "A woman, woman_1." });
+    payload["items"][0]["condensedText"] = json!("woman_1 sits.");
+    let mut job: JobSnapshot =
+        serde_json::from_value(job_value("describe-job", false)).expect("job");
+    job.payload = payload.as_object().expect("payload object").clone();
+    run_dataset_batch_describe_job(&ApiClient::new(&stage.settings), &stage.settings, &job)
+        .await
+        .expect("a measure-only job needs no describer");
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokens"], Value::Null, "not measured");
+    assert_eq!(condensed["estimateReason"], "Krea 2 Turbo is not installed");
+    assert!(
+        !stage.settings.data_dir.join("huggingface").exists()
+            || std::fs::read_dir(stage.settings.data_dir.join("huggingface"))
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true),
+        "nothing was downloaded"
+    );
 }
