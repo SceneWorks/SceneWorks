@@ -441,6 +441,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // checkpoint) in the Rust worker — not a native-flow gap. It routes by the `image_segment`
         // capability advertisement, so it queues rather than enforce-fails here.
         | JobType::DatasetSubjectMask
+        // SW-7082/SW-7083: dataset_batch_describe runs the Vision Captioner on the native TextLlm
+        // provider that serves prompt_refine, or JoyCaption on the training_caption captioner — not
+        // a native-flow gap; it routes by the capability of its model.
+        | JobType::DatasetBatchDescribe
         // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
         // assets on demand — a native Rust/MLX job, not a native-flow gap. Gated by the worker's
         // capability advertisement, so it queues rather than enforce-fails here.
@@ -718,6 +722,9 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetFaceAnalysis
         // sc-2126: dataset_subject_mask on the candle lane (candle SAM3) routes by `image_segment` too.
         | JobType::DatasetSubjectMask
+        // SW-7082/SW-7083: dataset_batch_describe on the candle lane (candle-llama Qwen3-VL, or
+        // candle-gen-joycaption) routes by the capability of its model too.
+        | JobType::DatasetBatchDescribe
         // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
         | JobType::FaceLikenessCompare
         // sc-13404: pure audio synthesis (Kokoro TTS) runs on the runtime's candle audio lane off-Mac
@@ -1387,6 +1394,36 @@ pub fn convert_artifact_required_here(converter: &str) -> bool {
     } else {
         CANDLE_NATIVE_CONVERTERS.contains(&converter)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn converter_policy_covers_shipped_products_and_preserves_platform_fallbacks() {
+    for spec in crate::registry::builtin_model_specs() {
+        if let Some(converter) = spec
+            .product
+            .fields
+            .get("mlx")
+            .and_then(|mlx| mlx.get("converter"))
+            .and_then(Value::as_str)
+        {
+            assert!(
+                NATIVE_CONVERTERS.contains(&converter),
+                "{} declares unknown converter {converter}",
+                spec.product.id
+            );
+        }
+    }
+    for converter in CANDLE_NATIVE_CONVERTERS {
+        assert!(NATIVE_CONVERTERS.contains(converter));
+    }
+    assert!(!convert_artifact_required_here("not_a_converter"));
+    assert!(convert_artifact_required_here("supra2_img"));
+    assert_eq!(
+        convert_artifact_required_here("anima_quant"),
+        cfg!(target_os = "macos")
+    );
+    assert!(convert_artifact_required_here("flux2_klein_diffusers"));
 }
 
 /// `model_convert` is supported for the in-process Rust converters enumerated in

@@ -135,6 +135,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// The exact owner-local plan compiled before the generator was loaded. Only base FLUX.1
     /// reaches this seam during ENG-1a; other routes retain their existing generator call.
     pub(crate) render_plan: Option<&'a gen_core::RenderPlan>,
+    /// The pre-load plan of the Hires.fix refinement pass, compiled together with `render_plan` as
+    /// one multi-pass plan whose second pass consumes the first pass's stretched output.
+    pub(crate) hires_render_plan: Option<&'a gen_core::RenderPlan>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -230,7 +233,7 @@ pub(super) fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
-    let mut request = build_render_request(
+    let request = build_render_request(
         prompt,
         width,
         height,
@@ -255,6 +258,23 @@ pub(super) fn render_on_surface(
         surface,
         cancel,
     )?;
+    render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        surface,
+        on_progress,
+    )
+}
+
+/// Run one already-built generic-lane request on `surface` and return every image it produced.
+fn render_request_on_surface(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    surface: &LaneRgbaSurface<'_>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
     // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
     // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
     // has its warnings collected for the image's provenance.
@@ -403,8 +423,34 @@ pub(super) fn build_render_request(
     Ok(request)
 }
 
-/// Resolve a base provider's owner-local plan before `start_cached_gen_stream` can load weights.
-/// The registry returns `None` for routes that have not migrated yet; an invalid base request is a
+/// The FLUX.1 provider ids whose every request — base text-to-image, XLabs IP-Adapter, ControlNet
+/// and PuLID — renders from a render plan compiled before load (SW-6933 / SW-6936).
+pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
+    "flux1_schnell",
+    "flux1_dev",
+    "flux1_dev_control",
+    "pulid_flux",
+];
+
+/// Map a provider's pre-load plan refusal onto the worker's error classes: an invalid request is a
+/// payload error the user can act on, cancellation stays cancellation, and a poisoned process keeps its
+/// typed recovery class.
+pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::ProcessPoisoned(_) => {
+            crate::classify_engine_error("render-plan compilation failed", error)
+        }
+        gen_core::Error::Canceled => WorkerError::Canceled(format!(
+            "{route}: generation canceled while compiling its render plan"
+        )),
+        other => WorkerError::InvalidPayload(format!(
+            "{route}: cannot compile render plan before load: {other}"
+        )),
+    }
+}
+
+/// Resolve a provider's owner-local plan before `start_cached_gen_stream` can load weights.
+/// The registry returns `None` for routes that have not migrated yet; an invalid request is a
 /// pre-load error rather than a fallback to the legacy call.
 pub(super) fn compile_render_plan(
     registry: &gen_core::ProviderRegistry,
@@ -414,23 +460,155 @@ pub(super) fn compile_render_plan(
 ) -> WorkerResult<Option<gen_core::RenderPlan>> {
     let plan = registry
         .compile_render_plan(engine_id, spec, request)
-        .map_err(|error| match error {
-            gen_core::Error::ProcessPoisoned(_) => {
-                crate::classify_engine_error("render-plan compilation failed", error)
-            }
-            other => WorkerError::InvalidPayload(format!(
-                "{engine_id}: cannot compile render plan before load: {other}"
-            )),
-        })?;
-    if plan.is_none()
-        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && request.conditioning.is_empty()
-    {
+        .map_err(|error| preload_plan_error(engine_id, error))?;
+    if plan.is_none() && FLUX1_PRELOAD_PLANNED_ENGINES.contains(&engine_id) {
         return Err(WorkerError::Engine(format!(
-            "{engine_id}: base text-to-image route has no registered pre-load render planner"
+            "{engine_id}: route has no registered pre-load render planner"
         )));
     }
     Ok(plan)
+}
+
+/// [`compile_render_plan`] for a route that only renders from a pre-load plan (the MLX FLUX.1
+/// ControlNet and PuLID lanes).
+#[cfg(target_os = "macos")]
+pub(super) fn compile_required_render_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<gen_core::RenderPlan> {
+    compile_render_plan(registry, engine_id, spec, request)?.ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "{engine_id}: route has no registered pre-load render planner"
+        ))
+    })
+}
+
+/// The Hires.fix refinement request: the target size, the refinement steps and CFG, and the first
+/// pass's stretched output as `reference` (`None` while planning, where the multi-pass plan supplies
+/// the produced reference). The refinement always decodes through the native VAE, so PiD is off
+/// whatever the first pass used. Execution and the pre-load planner both build it here, so the
+/// plan is compiled from the request that runs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_hires_refinement_request(
+    prompt: &str,
+    seed: i64,
+    hires: &HiresFixPlan,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+) -> WorkerResult<GenerationRequest> {
+    build_render_request(
+        prompt,
+        hires.width,
+        hires.height,
+        seed,
+        hires.steps,
+        hires.guidance,
+        negative_prompt,
+        reference,
+        &[],
+        None,
+        hires.true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        false,
+        text_style_gain,
+        memory,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+    )
+}
+
+/// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
+/// refinement pass compiled together with it.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(super) struct PreparedRender {
+    pub(super) pass: Option<gen_core::RenderPlan>,
+    pub(super) hires: Option<gen_core::RenderPlan>,
+}
+
+/// Compile a Hires.fix render — the first pass, then a refinement pass whose reference is the first
+/// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
+/// before load. `refine` carries no reference of its own; the plan binds the produced one by size
+/// and strength, because its pixels exist only after the first pass.
+#[cfg(target_os = "macos")]
+pub(super) fn compile_hires_render_plans(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    first: &GenerationRequest,
+    refine: &GenerationRequest,
+    hires: &HiresFixPlan,
+) -> WorkerResult<(gen_core::RenderPlan, gen_core::RenderPlan)> {
+    let passes = [
+        gen_core::PlannedPassRequest {
+            request: first,
+            produced_reference: None,
+        },
+        gen_core::PlannedPassRequest {
+            request: refine,
+            produced_reference: Some(gen_core::ProducedReference {
+                from_pass: 0,
+                width: hires.width,
+                height: hires.height,
+                strength: Some(hires.provider_reference_strength),
+            }),
+        },
+    ];
+    let plan = registry
+        .compile_multi_pass_render_plan(engine_id, spec, &passes)
+        .map_err(|error| preload_plan_error(engine_id, error))?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })?;
+    match plan.passes() {
+        [first, refine] => Ok((first.clone(), refine.clone())),
+        passes => Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
+            passes.len()
+        ))),
+    }
+}
+
+/// The refinement pass's reference must be exactly the image its plan declared it consumes.
+pub(super) fn check_produced_reference(
+    plan: &gen_core::RenderPlan,
+    reference: &Image,
+) -> WorkerResult<()> {
+    match plan.produced_reference() {
+        Some(produced)
+            if (produced.width, produced.height) == (reference.width, reference.height) =>
+        {
+            Ok(())
+        }
+        Some(produced) => Err(WorkerError::InvalidPayload(format!(
+            "Hires.fix refinement plan expects a {}x{} first-pass image, got {}x{}",
+            produced.width, produced.height, reference.width, reference.height
+        ))),
+        None => Err(WorkerError::InvalidPayload(
+            "Hires.fix refinement plan does not consume the first pass's output".to_owned(),
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -773,6 +951,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
         render_plan: surface.render_plan,
+        hires_render_plan: None,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -815,6 +994,9 @@ pub(super) fn generate_one_with_hires_on_surface(
         hires.height,
         "stretch",
     )?;
+    if let Some(plan) = surface.hires_render_plan {
+        check_produced_reference(plan, &high_res_reference)?;
+    }
     let reference = (high_res_reference, hires.provider_reference_strength);
     let mut second_progress = |progress| match progress {
         Progress::Step { current, .. } => on_progress(Progress::Step {
@@ -841,36 +1023,36 @@ pub(super) fn generate_one_with_hires_on_surface(
         prefix_kv_cache: surface.prefix_kv_cache,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
-        render_plan: None,
+        render_plan: surface.hires_render_plan,
+        hires_render_plan: None,
     };
-    generate_one_on_surface(
-        generator,
+    let request = build_hires_refinement_request(
         prompt,
-        hires.width,
-        hires.height,
         seed,
-        hires.steps,
-        hires.guidance,
+        &hires,
         negative_prompt,
         Some(&reference),
-        &[],
-        None,
-        hires.true_cfg,
         sampler,
         scheduler,
         scheduler_shift,
         guidance_method,
-        false,
         text_style_gain,
         memory,
-        memory_strategy_context,
         enhance,
         prompt_enhancement,
         preview,
         &refine_surface,
         cancel,
+    )?;
+    render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        &refine_surface,
         &mut second_progress,
-    )
+    )?
+    .pop()
+    .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))
 }
 
 /// Within-image step fraction mapped into the 0.10..0.95 generation band.
@@ -1016,3 +1198,7 @@ mod process_fault_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/flux1_conditional_route_tests.rs"]
+pub(super) mod flux1_conditional_route_tests;

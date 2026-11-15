@@ -18,6 +18,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
+import { servedGuidance } from "../testUtils/servedCatalogFacts.js";
 
 const LTX = {
   id: "ltx_2_3",
@@ -768,6 +769,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     name: "SCAIL-2",
     type: "video",
     family: "scail2",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     capabilities: ["animate_character", "replace_person"],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
@@ -791,6 +793,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     name: "Wan 2.2",
     type: "video",
     family: "wan-video",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     capabilities: ["image_to_video", "text_to_video", "replace_person"],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
@@ -1473,6 +1476,11 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       variant: tier,
       installState: installed.includes(tier) ? "installed" : "missing",
     })),
+    // The API's served guidance for a fixture with no memory evidence: no bound on any tier.
+    memoryGuidance: servedGuidance({
+      mlx: { bf16: null, q8: null, q4: null },
+      candle: { bf16: null, q8: null, q4: null },
+    }),
     macSupport: {
       supported: true,
       features: { videoModes: { text_to_video: true } },
@@ -1483,6 +1491,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     id: "scail2_14b",
     name: "SCAIL-2",
     family: "scail2",
+    downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
     adapter: "scail2",
     capabilities: ["animate_character"],
   });
@@ -1591,6 +1600,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "wan_2_2",
       name: "Wan2.2",
       family: "wan-video",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "wan_video",
     };
     const context = baseContext({ videoModels: [wan], macCapabilities: null });
@@ -1611,6 +1621,8 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "ltx_2_5",
       name: "LTX-2.5",
       family: "ltx-video",
+      loraCompatibility: { generation: "2.5" },
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "ltx_video",
       defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
       limits: { steps: [8, 30] },
@@ -1649,6 +1661,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: null });
@@ -1670,6 +1683,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: null });
@@ -1782,9 +1796,14 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .querySelector("form")
       .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     expect(createVideoJob).not.toHaveBeenCalled();
-    await act(async () => {});
-    expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
-    expect(tierPicker().value).toBe("q4");
+    // The fallback model snap and the tier reseed are separate effect passes that a loaded machine
+    // can flush after a bare act(); wait for the settled UI state rather than a single tick.
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
+        expect(tierPicker().value).toBe("q4");
+      });
+    });
     expect(container.textContent).toContain("requires Bernini at Q8");
     expect(container.textContent).toContain("not available on the current backend");
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
@@ -2067,6 +2086,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
+      downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
       adapter: "scail2",
     };
     const context = baseContext({ videoModels: [scail], macCapabilities: MAC_CAPS });
@@ -2159,7 +2179,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   let container;
   let root;
 
-  // The two A14B MoE engines that honor advanced.lightning (constants.js WAN_A14B_LIGHTNING_MODEL_IDS).
+  // The two A14B MoE engines carry the typed Lightning fact. The rows are the Windows/Linux
+  // catalog's: the API drops the macOS-only Lightning download there, and the toggle must remain.
   const WAN_T2V_14B = {
     id: "wan_2_2_t2v_14b",
     name: "Wan2.2 14B (T2V)",
@@ -2169,7 +2190,9 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
     quantization: {},
-    loraCompatibility: {},
+    loraCompatibility: { sizeClass: "14b" },
+    video: { supportsLightning: true },
+    downloads: [{ repo: "SceneWorks/wan2.2-t2v-a14b-candle", variant: "q4", platforms: ["windows", "linux"] }],
     ui: {},
   };
   const WAN_I2V_14B = {
@@ -2184,6 +2207,9 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     id: "wan_2_2",
     name: "Wan 2.2 (5B)",
     capabilities: ["text_to_video"],
+    loraCompatibility: { sizeClass: "5b" },
+    video: {},
+    downloads: [],
   };
   // A non-Wan engine (LTX) — no toggle.
   const NON_WAN = {
@@ -3061,6 +3087,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     family: "wan-video",
     adapter: "wan_video",
     capabilities: ["text_to_video"],
+    video: { supportsLightning: true },
+    downloads: [],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },
     quantization: {},
@@ -3390,8 +3418,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
   // for Wan / LTX / SCAIL-2 / Bernini. Without this leg the test above would also pass against an
   // implementation that hid the pair for every model.
   //
-  // Bernini rather than the Wan A14B fixture on purpose: `wan_2_2_t2v_14b` is in
-  // WAN_A14B_LIGHTNING_MODEL_IDS, and Lightning defaults ON and suppresses guidance itself — so it
+  // Bernini rather than the Wan A14B fixture on purpose: Wan ships the Lightning package,
+  // and Lightning defaults ON and suppresses guidance itself — so it
   // would have proved nothing about the new `video` gate.
   it("keeps Guidance and Negative prompt for a model that declares no video axes", async () => {
     const context = baseContext({ videoModels: [BERNINI_V2V] });
@@ -3456,8 +3484,11 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
     // deliberately asserted separately. LTX-2.5 declares both absent for its default distilled
     // surface; Video Studio reopens only negative conditioning when dev is explicitly selected.
+    // A block that declares only another fact (Wan A14B's `supportsLightning`) keeps both axes.
     const videoEntries = models.filter((entry) => entry.type === "video");
-    const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
+    const declaring = videoEntries
+      .filter((entry) => entry.video && ("supportsGuidance" in entry.video || "supportsNegativePrompt" in entry.video))
+      .map((entry) => entry.id).sort();
     expect(declaring).toEqual(["krea_realtime_14b", "ltx_2_5", "minimax_h3", "minimax_h3_ref", "svd"]);
     expect(videoEntries.length - declaring.length).toBe(8);
 

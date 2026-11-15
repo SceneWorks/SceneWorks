@@ -18,7 +18,7 @@ use crate::project_store::{
 };
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
-    relative_string, write_json,
+    relative_string, unsigned_int, write_json,
 };
 use crate::time::utc_now;
 
@@ -840,7 +840,7 @@ fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
     let mut connection = connect_project_db_migrated(project_path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let indexed_count = transaction.query_row("select count(*) from characters", [], |row| {
-        row.get::<_, u64>(0)
+        Ok(unsigned_int(row.get::<_, i64>(0)?))
     })?;
     let stored_fingerprint = transaction
         .query_row(

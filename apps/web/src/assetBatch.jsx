@@ -16,7 +16,7 @@ import { Modal } from "./components/Modal.jsx";
 import { lazyInteraction } from "./components/LazyScreen.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels } from "./imageJobs.js";
-import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./modelEligibility.js";
 import { availableUpscaleEngines as upscaleEnginesForPlatform } from "./upscaleEngines.js";
 import { defaultDepthModel as defaultDepthModelFor, depthAvailability as depthAvailabilityFor } from "./depthJobs.js";
 

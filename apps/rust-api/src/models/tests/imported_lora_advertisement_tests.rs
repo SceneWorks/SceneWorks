@@ -307,8 +307,29 @@ fn provider_surface_matches_exact_source_shape() {
             .all(|value| { !matches!(value.as_str(), Some("text_to_image" | "edit_image")) })));
     assert!(wrong_shape["ui"].get("img2img").is_none());
     assert!(wrong_shape["ui"].get("editReferences").is_none());
+    assert!(wrong_shape["ui"].get("controlModes").is_none());
+    assert!(wrong_shape["ui"].get("controlOverlay").is_none());
     assert!(wrong_shape.get("runtimeQuantTiers").is_none());
     assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+}
+
+#[test]
+fn krea_fine_tunes_keep_pose_controls_and_the_base_overlay_on_both_lanes() {
+    let builtin = sceneworks_core::builtin_manifests::builtin_model_entry("krea_2_turbo").unwrap();
+    for id in ["kreamania", "sick_ollie"] {
+        for (mlx, candle) in [(true, false), (false, true)] {
+            let mut imported = entry(id, "krea_2");
+            apply_imported_provider_surface_for_lanes(&mut imported, mlx, candle);
+            assert_eq!(imported["ui"]["poseLibrary"], true, "{id} mlx={mlx}");
+            assert_eq!(imported["ui"]["controlModes"], json!(["pose"]));
+            assert_eq!(
+                imported["ui"]["controlScale"],
+                builtin["ui"]["controlScale"]
+            );
+            assert_eq!(imported["ui"]["controlOverlay"], true);
+            assert_eq!(imported["ui"]["controlOverlayBaseModel"], "krea_2_turbo");
+        }
+    }
 }
 
 /// sc-11043 (epic 11037): a checkpoint STORED as NVFP4 offers exactly its own tier.
@@ -323,6 +344,13 @@ fn an_nvfp4_import_offers_its_own_tier_and_never_q4() {
     native.insert("importQuantFormat".to_owned(), json!("nvfp4"));
     apply_imported_provider_surface_for_lanes(&mut native, false, true);
     assert_eq!(native["runtimeQuantTiers"], json!(["nvfp4"]));
+    assert_eq!(native["ui"]["poseLibrary"], true);
+    assert_eq!(native["ui"]["controlModes"], json!(["pose"]));
+    assert_eq!(native["ui"]["controlOverlayBaseModel"], "krea_2_turbo");
+    let mut on_mac = native.clone();
+    apply_imported_provider_surface_for_lanes(&mut on_mac, true, false);
+    assert!(on_mac["ui"].get("poseLibrary").is_none());
+    assert_eq!(on_mac["macSupport"]["supported"], false);
 
     // A dense sibling through the same route is untouched: the projection keys on the entry's
     // own source codec, not on the family or the route's advertised quants.

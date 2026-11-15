@@ -243,11 +243,10 @@ export function parseEngineModelTable(rustSource) {
  * Parse preview support for the bespoke Candle Qwen-Edit lane.
  *
  * That provider is dispatched directly by SceneWorks rather than registered in the generic media
- * registry, so stage-1 engine facts cannot describe it. The declaration and the actual
- * `QwenEditRequest.preview` wiring live in one Rust source file; both must remain present or this
- * parser fails loudly instead of preserving a stale `true` claim.
+ * registry, so stage-1 engine facts cannot describe it. The typed registry export owns model
+ * membership; the live `QwenEditRequest.preview` sink must still be present.
  */
-export function parseBespokePreviewRoutes(rustSource) {
+export function parseBespokePreviewRoutes(rustSource, specs) {
   if (typeof rustSource !== "string" || rustSource.length === 0) {
     throw new Error("parseBespokePreviewRoutes: expected qwen_edit_candle.rs source text");
   }
@@ -255,27 +254,17 @@ export function parseBespokePreviewRoutes(rustSource) {
     rustSource,
     "parseBespokePreviewRoutes: qwen_edit_candle.rs",
   );
-  const anchor = "const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =";
-  const declarations = source.split(anchor).length - 1;
-  if (declarations !== 1) {
-    throw new Error(
-      `parseBespokePreviewRoutes: expected exactly one ${anchor}, found ${declarations}`,
-    );
+  if (!specs || typeof specs !== "object" || Array.isArray(specs)) {
+    throw new Error("parseBespokePreviewRoutes: expected typed registry specs");
   }
-  const afterAnchor = source.slice(source.indexOf(anchor) + anchor.length);
-  const open = afterAnchor.indexOf("&[");
-  const close = open === -1 ? -1 : afterAnchor.indexOf("]", open + 2);
-  if (open === -1 || close === -1) {
-    throw new Error("parseBespokePreviewRoutes: preview model list is not a closed `&[...]`");
-  }
-  const body = afterAnchor.slice(open + 2, close);
-  const modelIds = [...body.matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
-  const quotes = (body.match(/"/g) ?? []).length;
-  if (modelIds.length === 0 || quotes !== modelIds.length * 2) {
-    throw new Error("parseBespokePreviewRoutes: preview model list is empty or only partly parsed");
-  }
-  if (new Set(modelIds).size !== modelIds.length) {
-    throw new Error("parseBespokePreviewRoutes: preview model list contains a duplicate id");
+  const modelIds = Object.entries(specs)
+    .filter(([, spec]) => spec.product?.family === "qwen-image"
+      && spec.previewByBackend?.candle === true
+      && spec.routes?.candle === undefined
+      && spec.routes?.mlx?.id === "qwen_image_edit")
+    .map(([id]) => id);
+  if (modelIds.length === 0) {
+    throw new Error("parseBespokePreviewRoutes: no typed Qwen-Edit preview routes");
   }
   if (
     !/move\s*\|\s*index,\s*\(seed,\s*prompt\),\s*preview,\s*on_progress\s*\|/.test(source) ||
@@ -290,6 +279,51 @@ export function parseBespokePreviewRoutes(rustSource) {
     backend: "candle",
     supportsPreview: true,
   }));
+}
+
+/**
+ * The top-level field entries of every `TypeName { … }` struct literal in comment-stripped Rust
+ * `source`, whitespace-collapsed (`preview`, `preview: preview.clone()`, `..Default::default()`).
+ * Braces, brackets and parentheses are balanced, so a nested literal's fields and the commas inside
+ * a call belong to the nested expression, not to the outer literal. String literals are not
+ * special-cased: the PuLID request literals carry none that contain a bracket.
+ *
+ * @param {string} source comment-stripped Rust source
+ * @param {string} typeName the struct name, matched as a whole identifier
+ * @returns {string[][]} one field list per literal, in source order
+ */
+function structLiteralFields(source, typeName) {
+  const literals = [];
+  const opener = new RegExp(`(?<![A-Za-z0-9_])${typeName}\\s*\\{`, "g");
+  for (const match of source.matchAll(opener)) {
+    const fields = [];
+    let depth = 0;
+    let field = "";
+    let closed = false;
+    for (let index = match.index + match[0].length; index < source.length; index += 1) {
+      const char = source[index];
+      if ("{[(".includes(char)) depth += 1;
+      if ("}])".includes(char)) {
+        if (depth === 0) {
+          closed = char === "}";
+          break;
+        }
+        depth -= 1;
+      }
+      if (char === "," && depth === 0) {
+        fields.push(field);
+        field = "";
+      } else {
+        field += char;
+      }
+    }
+    if (!closed) continue;
+    fields.push(field);
+    literals.push(
+      fields.map((entry) => entry.split(/\s+/).join(" ").trim()).filter((entry) => entry.length > 0),
+    );
+  }
+  return literals;
 }
 
 /**
@@ -310,10 +344,16 @@ export function parsePulidPreviewRoutes(mlxSource, candleSource) {
   if (!modelId || modelId !== candleModelId) {
     throw new Error("parsePulidPreviewRoutes: platform model declarations are missing or disagree");
   }
-  if (!/GenerationRequest\s*\{[\s\S]*?\bpreview,\s*[\s\S]*?\};/.test(mlx)) {
+  // Judged per struct literal, at the literal's own top level: a `preview` field that only appears
+  // in a LATER closure's parameter list, or inside a nested literal, must not satisfy the check.
+  if (!structLiteralFields(mlx, "GenerationRequest").some((fields) => fields.includes("preview"))) {
     throw new Error("parsePulidPreviewRoutes: MLX GenerationRequest has no live preview sink");
   }
-  if (!/PulidFluxRequest\s*\{[\s\S]*?\bpreview:\s*preview\.clone\(\),[\s\S]*?\};/.test(candle)) {
+  if (
+    !structLiteralFields(candle, "PulidFluxRequest").some((fields) =>
+      fields.includes("preview: preview.clone()"),
+    )
+  ) {
     throw new Error("parsePulidPreviewRoutes: Candle PulidFluxRequest has no live preview sink");
   }
   return ["mlx", "candle"].map((backend) => ({

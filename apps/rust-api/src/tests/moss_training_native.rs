@@ -58,30 +58,34 @@ fn seed_catalog_namespace(temp: &tempfile::TempDir, model: &Value) -> (PathBuf, 
 }
 
 fn worker_settings(api_url: String, api_settings: &crate::Settings) -> sceneworks_worker::Settings {
-    sceneworks_worker::Settings {
-        api_url,
-        access_token: None,
-        data_dir: api_settings.data_dir.clone(),
-        resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
-        config_dir: api_settings.config_dir.clone(),
-        worker_id: TEST_TRAINING_WORKER_ID.to_owned(),
-        gpu_id: if cfg!(target_os = "macos") { "mlx" } else { "test-gpu" }.to_owned(),
-        is_child_worker: false,
-        poll_seconds: 1,
-        heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 10,
-        huggingface_base_url: "http://127.0.0.1:9".to_owned(),
-        huggingface_token: None,
-        credentials: Vec::new(),
-        max_lora_url_bytes: 1,
-        max_model_url_bytes: 1,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
-        backend_mlx_enabled: cfg!(target_os = "macos"),
-        backend_candle_enabled: cfg!(all(not(target_os = "macos"), feature = "backend-candle")),
-        external_model_roots: Vec::new(),
-        gpu_memory_limit_bytes: 0,
+    let mut worker = crate::tests::support::test_worker_settings(api_url, api_settings);
+    worker.access_token = None;
+    worker.data_dir = api_settings.data_dir.clone();
+    worker.resolved_cache = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default();
+    worker.config_dir = api_settings.config_dir.clone();
+    worker.worker_id = TEST_TRAINING_WORKER_ID.to_owned();
+    worker.gpu_id = if cfg!(target_os = "macos") {
+        "mlx"
+    } else {
+        "test-gpu"
     }
+    .to_owned();
+    worker.is_child_worker = false;
+    worker.poll_seconds = 1;
+    worker.heartbeat_seconds = 5;
+    worker.shutdown_timeout_seconds = 10;
+    worker.huggingface_base_url = "http://127.0.0.1:9".to_owned();
+    worker.huggingface_token = None;
+    worker.credentials = Vec::new();
+    worker.max_lora_url_bytes = 1;
+    worker.max_model_url_bytes = 1;
+    worker.allow_private_lora_urls = false;
+    worker.utility_workers = 1;
+    worker.backend_mlx_enabled = cfg!(target_os = "macos");
+    worker.backend_candle_enabled = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+    worker.external_model_roots = Vec::new();
+    worker.gpu_memory_limit_bytes = 0;
+    worker
 }
 
 async fn claim_as_existing_worker(app: &axum::Router, job_id: &str) {

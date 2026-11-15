@@ -1,8 +1,8 @@
 import { ltxVideoModelId } from "./videoTierHelpers.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { downloadOffersFor, videoModelServesMode, videoModelUsable } from "../../modelEligibility.js";
-import { macAvailableModels, macGatingActive } from "../../macGating.js";
-import { candleAvailableModels, candleGatingActive } from "../../candleGating.js";
+import { macAvailableModels, macGatingActive } from "../../modelEligibility.js";
+import { candleAvailableModels, candleGatingActive } from "../../modelEligibility.js";
 
 // Extracted from VideoStudio along its existing concern boundary.
 export function useVideoModelSelection({
@@ -73,7 +73,10 @@ export function useVideoModelSelection({
     entry?.capabilities?.includes("image_to_video")
   );
 
-  const supportsLastOnly = (entry) => entry?.id === "minimax_h3" || importedLastOnlyModel(entry);
+  // The stock partition's verdict is the API-served `supportsLastOnlyImageToVideo`
+  // (`h3_keyframes::accepts_last_only_resolved_image_to_video`), not a web id check (SW-7032).
+  const supportsLastOnly = (entry) =>
+    entry?.supportsLastOnlyImageToVideo === true || importedLastOnlyModel(entry);
 
   const acceptsLastOnly = supportsLastOnly(selectedModel);
 

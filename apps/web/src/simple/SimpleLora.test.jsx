@@ -26,14 +26,20 @@ const WAN_5B = {
   id: "wan_2_2",
   name: "Wan 2.2 (TI2V-5B)",
   type: "video",
-  family: "wan-2-2",
+  family: "wan-video",
   capabilities: ["text_to_video"],
+  loraCompatibility: { families: ["wan-video"], sizeClass: "5b" },
   installState: "installed",
   limits: { resolutions: ["1280x720"], durations: [5] },
 };
 
-const WAN_A14B = { ...WAN_5B, id: "wan_2_2_t2v_14b", name: "Wan 2.2 14B (T2V)" };
-const LTX = { ...WAN_5B, id: "ltx_2_3", name: "LTX-2.3", family: "ltx-video" };
+const WAN_A14B = {
+  ...WAN_5B,
+  id: "wan_2_2_t2v_14b",
+  name: "Wan 2.2 14B (T2V)",
+  loraCompatibility: { families: ["wan-video"], sizeClass: "14b" },
+};
+const LTX = { ...WAN_5B, id: "ltx_2_3", name: "LTX-2.3", family: "ltx-video", loraCompatibility: undefined };
 
 const GRAIN = {
   id: "lora_grain",
@@ -52,7 +58,7 @@ const INK = {
   defaultWeight: 0.7,
 };
 // Each of these must be invisible to the picker, for a different reason.
-const WRONG_FAMILY = { id: "lora_wan", name: "Slow Dolly", family: "wan-2-2", installState: "installed" };
+const WRONG_FAMILY = { id: "lora_wan", name: "Slow Dolly", family: "wan-video", installState: "installed" };
 const NOT_INSTALLED = { id: "lora_pending", name: "Still Downloading", family: "z-image", installState: "missing" };
 const FAMILYLESS = { id: "lora_unknown", name: "Mystery Adapter", installState: "installed" };
 const PRESET_MANAGED = {
@@ -320,7 +326,7 @@ describe("Simple studios — LoRA field", () => {
     await click(navButton(container, "Video"));
     await addLora(container, "Slow Dolly");
     expect(slotNames(container)).toEqual(["Slow Dolly"]);
-    // Wan 5B → Wan 14B share the "wan-2-2" family, so the pick is still valid.
+    // Wan 5B → Wan 14B share the "wan-video" family, so the pick is still valid.
     await selectModel(container, "Wan 2.2 14B");
     expect(slotNames(container)).toEqual(["Slow Dolly"]);
   });

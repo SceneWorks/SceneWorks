@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidenceSync } from "./lib/builtin-memory-evidence.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_CATALOG = path.join(ROOT, "config/manifests/builtin.models.jsonc");
@@ -54,7 +55,10 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function loadCatalog() {
   const parsed = JSON.parse(stripJsoncComments(readFileSync(CATALOG, "utf8")));
-  return Array.isArray(parsed) ? parsed : (parsed.models ?? []);
+  if (Array.isArray(parsed)) return parsed;
+  return CATALOG === DEFAULT_CATALOG
+    ? projectBuiltinMemoryEvidence(parsed, readBuiltinMemoryEvidenceSync(ROOT)).models
+    : (parsed.models ?? []);
 }
 
 /** Every declared decode-quality row, flattened with the model it belongs to. */

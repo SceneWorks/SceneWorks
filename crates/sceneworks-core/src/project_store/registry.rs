@@ -252,8 +252,23 @@ impl ProjectStore {
     }
 
     pub fn list_projects(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
+        self.list_projects_inner(true)
+    }
+
+    /// List existing projects without initializing the app-managed data directories.
+    /// Background source inventory uses this path while inspecting a fresh workspace.
+    pub fn list_projects_read_only(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
+        self.list_projects_inner(false)
+    }
+
+    fn list_projects_inner(
+        &self,
+        initialize_data_dirs: bool,
+    ) -> ProjectStoreResult<Vec<ProjectSummary>> {
         let mut registry_cache = self.lock.lock();
-        self.ensure_data_dirs()?;
+        if initialize_data_dirs {
+            self.ensure_data_dirs()?;
+        }
         let mut projects = Vec::new();
         for item in self.load_registry(&mut registry_cache)? {
             // The reserved global pose + keypoint libraries are addressable by id but

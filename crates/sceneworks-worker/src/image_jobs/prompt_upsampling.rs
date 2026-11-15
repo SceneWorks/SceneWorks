@@ -101,10 +101,19 @@ pub(super) fn attach_prompt_upsampler(
             "FLUX 3 enhancement requires the pinned optional {UPSAMPLER_COMPONENT} component: {UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}; refresh the model catalog"
         )));
     }
-    let dir = crate::model_jobs::flux3_prompt_upsampler_snapshot(&settings.data_dir)
-        .ok_or_else(|| WorkerError::InvalidPayload(format!(
-            "Install or reinstall FLUX 3 Prompt Upsampler ({UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}) in Models: its exact receipt, complete inventory and contained files must verify before enabling Enhance prompt; or turn enhancement off"
-        )))?;
+    let dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        crate::portable_aux_sources::bound_aux_path(&request.advanced, UPSAMPLER_COMPONENT)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable FLUX 3 prompt upsampler is not bound".to_owned(),
+                )
+            })?
+    } else {
+        crate::model_jobs::flux3_prompt_upsampler_snapshot(&settings.data_dir)
+            .ok_or_else(|| WorkerError::InvalidPayload(format!(
+                "Install or reinstall FLUX 3 Prompt Upsampler ({UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}) in Models: its exact receipt, complete inventory and contained files must verify before enabling Enhance prompt; or turn enhancement off"
+            )))?
+    };
     UpsamplePackage::check(&dir).map_err(|error| WorkerError::InvalidPayload(format!(
         "FLUX 3 prompt_upsampler is incomplete or incompatible: {error}; reinstall FLUX 3 Prompt Upsampler or turn enhancement off"
     )))?;

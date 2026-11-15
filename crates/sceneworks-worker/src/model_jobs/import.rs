@@ -1460,11 +1460,53 @@ async fn publish_claimed_model_import_manifest(
         // Called on the publication blocking thread INSIDE the acquired manifest lock, not
         // before the wait. The async API client remains on its owning runtime; no new listener.
         runtime.block_on(async {
-            let current: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+            let commitment = crate::imports::model_import_commitment(&job.payload);
+            let (mut current, payload_matches) =
+                authenticated_import_claim(&api, &job, &job.id, &commitment).await?;
+            if !payload_matches {
+                return Err(WorkerError::InvalidPayload(
+                    "Import claim changed or was interrupted before publication; no selection was modified".into(),
+                ));
+            }
+            // The API compared the unredacted stored row. Restore the claimed payload only for the
+            // existing local fence; the HTTP snapshot deliberately redacts private source paths.
+            current.payload = job.payload.clone();
             validate_import_publication_claim(&api.worker_id, &job, &current)
         })
     })
     .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportClaimProbeResponse {
+    job: JobSnapshot,
+    payload_matches: bool,
+}
+
+async fn authenticated_import_claim(
+    api: &ApiClient,
+    claimed_job: &JobSnapshot,
+    target_job_id: &str,
+    commitment: &str,
+) -> WorkerResult<(JobSnapshot, bool)> {
+    let capability = claimed_job
+        .payload
+        .get(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload("Import claim lacks private worker proof".into()))?;
+    let response: ImportClaimProbeResponse = api
+        .post_json(
+            &format!("/api/v1/jobs/{}/import-claim", claimed_job.id),
+            &json!({
+                "workerId": api.worker_id,
+                "targetJobId": target_job_id,
+                "commitment": commitment,
+                "capability": capability,
+            }),
+        )
+        .await?;
+    Ok((response.job, response.payload_matches))
 }
 
 /// Resume only an unchanged import's authenticated retry lineage. Neither caller-supplied
@@ -1485,7 +1527,8 @@ async fn authenticate_import_recovery(
     }
     // Even the original ID must still be owned by this worker. A stale snapshot is not recovery
     // authority; read ancestry from the authenticated control plane, never a mutable payload.
-    let mut current: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+    let (mut current, mut payload_matches) =
+        authenticated_import_claim(api, job, &job.id, &commitment).await?;
     if current.id != job.id
         || current.worker_id.as_deref() != Some(api.worker_id.as_str())
         || matches!(
@@ -1500,7 +1543,7 @@ async fn authenticate_import_recovery(
         if !seen.insert(current.id.clone())
             || current.job_type != JobType::ModelImport
             || current.project_id != job.project_id
-            || crate::imports::model_import_commitment(&current.payload) != commitment
+            || !payload_matches
         {
             return Ok(false);
         }
@@ -1514,11 +1557,13 @@ async fn authenticate_import_recovery(
         if !sceneworks_core::ids::is_safe_id(parent) {
             return Ok(false);
         }
-        let previous: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{parent}")).await?;
+        let (previous, previous_matches) =
+            authenticated_import_claim(api, job, parent, &commitment).await?;
         if previous.attempts.checked_add(1) != Some(current.attempts) {
             return Ok(false);
         }
         current = previous;
+        payload_matches = previous_matches;
     }
     Ok(false)
 }

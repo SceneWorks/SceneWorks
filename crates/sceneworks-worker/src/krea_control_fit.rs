@@ -47,8 +47,10 @@
 //! when even the widened floors overflow the budget. [`KreaControlFit::BestEffort`] (admit and let the
 //! recoverable CUDA-OOM backstop decide) remains the outcome only where the floors deliberately do
 //! not apply: superseded evidence (`candle.control.measured` `false` — a stale upper bound can refuse
-//! a job that would run, see [`fit_ladder`]), an unverified runtime artifact, adapter overlays, or a
-//! request above the measured envelope.
+//! a job that would run, see [`fit_ladder`]) or an unverified runtime artifact. Known adapter bytes
+//! extend the stock artifact's estimates; larger image requests use the shared image derivation law.
+//! If those conservative extrapolations cannot admit a request, the recoverable best-effort fallback
+//! remains available rather than treating an estimate as proof that a bounded render cannot run.
 //!
 //! ## The branch tier is NOT a rung (sc-15799)
 //!
@@ -72,8 +74,8 @@
 //! deepest MEASURED rung: every implemented rung inside the measured envelope carries at least an
 //! estimate-floor candidate, so the reject fires once no rung fits at its graded (measured or
 //! widened-floor) peak. `BestEffort` remains the outcome only where floors deliberately do not
-//! apply — superseded entries, an unverified runtime artifact, adapter overlays, or a request
-//! above the measured envelope.
+//! apply — superseded entries or an unverified runtime artifact — or conservative extrapolations
+//! cannot admit an adapter-bearing or larger-resolution request.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
@@ -108,7 +110,7 @@ pub(crate) const KREA_CONTROL_REFERENCE_COUNT: u32 = 1;
 /// Evidence-revision stamp for the synthesized estimate-floor candidates (sc-18097): request-scoped
 /// telemetry must be attributable to the estimate synthesis, never to the sc-16013 measured rows it
 /// floors on.
-const KREA_CONTROL_ESTIMATE_REVISION: &str = "sc-18097-krea-control-estimate-floor-v1";
+const KREA_CONTROL_ESTIMATE_REVISION: &str = "krea-control-geometry-adapters-estimate-v1";
 const KREA_CONTROL_ATTN_CHUNK_SIZE: u32 = 128 * 1024 * 1024;
 const KREA_CONTROL_DECODE_TILE_EDGE: u32 = 512;
 const KREA_CONTROL_DECODE_OVERLAP: u32 = 128;

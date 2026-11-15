@@ -847,6 +847,40 @@ pub(super) async fn ensure_instantid_file(
 /// face detection but neither ArcFace nor the SDXL/IdentityNet stack. Shares the env override
 /// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
 /// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
+fn bound_utility_face_stack(payload: &JsonObject) -> WorkerResult<PathBuf> {
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("face utility lacks portable source map".to_owned())
+        })?;
+    crate::portable_aux_sources::bound_aux_path(advanced, "utility_face_stack").ok_or_else(|| {
+        WorkerError::InvalidPayload("face utility lacks bound face stack".to_owned())
+    })
+}
+
+#[cfg(test)]
+mod utility_face_source_tests {
+    use super::*;
+
+    #[test]
+    fn utility_face_loader_requires_verified_dispatch_map() {
+        let absent = JsonObject::new();
+        assert!(bound_utility_face_stack(&absent).is_err());
+        let mut bound = JsonObject::new();
+        bound.insert(
+            "advanced".to_owned(),
+            serde_json::json!({
+                "__portableAuxPaths": {"utility_face_stack": "/private/snapshot/face"}
+            }),
+        );
+        assert_eq!(
+            bound_utility_face_stack(&bound).unwrap(),
+            PathBuf::from("/private/snapshot/face")
+        );
+    }
+}
+
 // The standalone kps-extraction capability is a macOS path; the candle lane only loads SCRFD via the
 // InstantID face stack (`with_face`), so this helper is unused off-Mac — allow it dead there.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -855,6 +889,12 @@ pub(crate) async fn ensure_scrfd_weights(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
+    if matches!(
+        job.job_type,
+        sceneworks_core::contracts::JobType::KpsExtract
+    ) {
+        return Ok(bound_utility_face_stack(&job.payload)?.join(INSTANTID_SCRFD_FILE));
+    }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
@@ -891,6 +931,20 @@ pub(crate) async fn ensure_face_stack_dir(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
+    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
+        if let Some(dir) = crate::portable_aux_sources::bound_aux_path(advanced, "instantid_mlx") {
+            return Ok(dir);
+        }
+    }
+    if matches!(
+        job.job_type,
+        sceneworks_core::contracts::JobType::KpsExtract
+            | sceneworks_core::contracts::JobType::DatasetFaceAnalysis
+            | sceneworks_core::contracts::JobType::FaceLikenessCompare
+            | sceneworks_core::contracts::JobType::CatalogAnalysis
+    ) {
+        return bound_utility_face_stack(&job.payload);
+    }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
@@ -1081,7 +1135,22 @@ pub(super) async fn generate_instantid_stream(
     )?;
 
     let (controlnet, ip_adapter, scrfd_path, arcface_path) =
-        ensure_instantid_weights(api, settings, job).await?;
+        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+            let bound = |id| {
+                crate::portable_aux_sources::bound_aux_path(&request.advanced, id).ok_or_else(
+                    || WorkerError::InvalidPayload(format!("missing bound {id} source")),
+                )
+            };
+            let bundle = bound("instantid_mlx")?;
+            (
+                WeightsSource::Dir(bound("instantid_controlnet")?),
+                bundle.join(INSTANTID_IP_ADAPTER_FILE),
+                bundle.join(INSTANTID_SCRFD_FILE),
+                bundle.join(INSTANTID_ARCFACE_FILE),
+            )
+        } else {
+            ensure_instantid_weights(api, settings, job).await?
+        };
 
     // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
     // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
@@ -1153,7 +1222,23 @@ pub(super) async fn generate_instantid_stream(
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
-        Some(ensure_instantid_openpose(api, settings, job).await?)
+        Some(
+            if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+                WeightsSource::Dir(
+                    crate::portable_aux_sources::bound_aux_path(
+                        &request.advanced,
+                        "instantid_openpose",
+                    )
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "missing bound InstantID OpenPose source".to_owned(),
+                        )
+                    })?,
+                )
+            } else {
+                ensure_instantid_openpose(api, settings, job).await?
+            },
+        )
     } else {
         None
     };

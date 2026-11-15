@@ -63,6 +63,9 @@ for (const contract of [
 ]) {
   requireText(workflow, contract);
 }
+requireText(dockerfile, "FROM ${RUNPOD_PREBUILT_CANDLE_IMAGE} AS runpod");
+assert.ok(!workflow.includes("target: rust-worker-candle"),
+  "publication must not compile the standalone CUDA worker again");
 
 function validateCandleRuntimeGate(candidate) {
   const steps = candidate.split(/(?=^      - name: )/m);
@@ -72,8 +75,8 @@ function validateCandleRuntimeGate(candidate) {
     return matches[0];
   };
   const combined = byId("build_staging");
+  const prebuilt = byId("prebuilt");
   const stagedCheck = byId("verify_staging");
-  const candle = byId("build_candle_runtime");
   const smoke = byId("smoke_candle_runtime");
   const combinedSmoke = byId("smoke_published_runtime");
   const promote = byId("promote");
@@ -81,23 +84,20 @@ function validateCandleRuntimeGate(candidate) {
   requireText(combined, "platforms: linux/amd64");
   requireText(combined, "push: true");
   requireText(combined, "tags: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}");
-  requireText(combined, "cache-to: type=gha,mode=max,scope=runpod-amd64");
+  requireText(combined, "cache-to: type=gha,mode=min,scope=runpod-amd64");
   assert.ok(!combined.includes("load: true"), "the staged registry digest, not a separately loaded image, must be tested");
   assert.ok(!combined.includes("steps.metadata.outputs.tags"), "release/manual tags must not be exposed before runtime gates pass");
+  requireText(prebuilt, "scripts/check-runpod-prebuilt-inputs.mjs");
+  requireText(prebuilt, '"$GITHUB_OUTPUT"');
   requireText(stagedCheck, "${{ steps.build_staging.outputs.digest }}");
   requireText(stagedCheck, 'docker pull --platform linux/amd64 "$staged_ref"');
   requireText(stagedCheck, "scripts/check-runpod-staged-image.mjs");
   requireText(stagedCheck, '"$GITHUB_SHA"');
-  for (const [step, target] of [[candle, "rust-worker-candle"]]) {
-    requireText(step, `target: ${target}`);
-    requireText(step, "platforms: linux/amd64");
-    requireText(step, "push: false");
-    requireText(step, "load: true");
-    assert.ok(!step.includes("no-cache: true"), "acceptance builds must share cached CUDA stages");
-  }
   requireText(smoke, "bash scripts/check-docker-candle-runtime.sh");
   requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}");
-  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: ${{ steps.prebuilt.outputs.image }}");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT: /usr/local/bin/sceneworks-rust-worker");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_USER: 1000:1000");
   requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat");
   requireText(smoke, "timeout-minutes: 5");
   requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}");
@@ -116,13 +116,12 @@ function validateCandleRuntimeGate(candidate) {
   assert.ok(!promote.includes("docker/build-push-action"), "promotion must reuse the staged manifest instead of building");
   const runpodBuilds = steps.filter((step) => /^          target: runpod$/m.test(step));
   assert.equal(runpodBuilds.length, 1, "combined RunPod target must be built exactly once");
+  assert.ok(steps.indexOf(prebuilt) < steps.indexOf(combined));
   assert.ok(steps.indexOf(combined) < steps.indexOf(stagedCheck));
-  assert.ok(steps.indexOf(stagedCheck) < steps.indexOf(candle));
-  assert.ok(steps.indexOf(candle) < steps.indexOf(smoke));
+  assert.ok(steps.indexOf(stagedCheck) < steps.indexOf(smoke));
   assert.ok(steps.indexOf(smoke) < steps.indexOf(combinedSmoke));
   assert.ok(steps.indexOf(combinedSmoke) < steps.indexOf(promote), "all staged-image runtime checks must pass before final tags are promoted");
-  assert.equal(candidate.match(/uses: docker\/setup-buildx-action@/g)?.length, 1,
-    "the standalone CUDA image and single combined image must share one builder");
+  assert.equal(candidate.match(/uses: docker\/setup-buildx-action@/g)?.length, 1);
 }
 
 function validateRuntimeFixture(script) {
@@ -157,9 +156,9 @@ for (const mutated of [
 
 validateCandleRuntimeGate(workflow);
 for (const mutated of [
-  workflow.replace("target: rust-worker-candle", "target: rust-worker"),
+  workflow.replace("id: prebuilt", "id: skipped_prebuilt"),
   workflow.replace("id: smoke_candle_runtime", "id: skipped_smoke"),
-  workflow.replace("load: true", "load: false"),
+  workflow.replace("SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: ${{ steps.prebuilt.outputs.image }}", "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: unverified:latest"),
   workflow.replace("push: true\n          tags: ${{ env.IMAGE_NAME }}:staging-", "push: false\n          tags: ${{ env.IMAGE_NAME }}:staging-"),
   workflow.replace("SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat", "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /missing-driver"),
   workflow.replace("SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}", "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}"),

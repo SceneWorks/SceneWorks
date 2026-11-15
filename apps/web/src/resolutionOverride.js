@@ -1,3 +1,5 @@
+import { isFlux3ImageModel } from "./modelEligibility.js";
+
 // Advanced resolution override (Image Studio): a custom Width/Height lets the user
 // experiment beyond a model's pre-declared Aspect options (e.g. Krea 2 up to 4K). A
 // non-empty override wins for that axis; an empty ("") field falls back to the Aspect
@@ -95,19 +97,15 @@ function sideOnStride(value, step) {
 // used, and WHY it is invalid split into `outOfRange` / `offStride` so the Studio can surface a precise,
 // user-facing error (never a raw requirement string). `invalid` is the OR of the two — the single flag
 // the Generate gate reads.
-export function isFlux3Model(id) {
-  return id === "flux3_klein" || id === "flux3_klein_base";
-}
-
-export function isFlux3ReferenceRequest(modelId, ids) {
-  return isFlux3Model(modelId) && ids.some((id) => typeof id === "string" && id.trim());
+export function isFlux3ReferenceRequest(model, ids) {
+  return isFlux3ImageModel(model) && ids.some((id) => typeof id === "string" && id.trim());
 }
 
 export function evaluateModelDimensions({ model, resolution, widthOverride, heightOverride,
   referenceRequest = false, dimensionIntent = null }) {
   const constraints = modelDimensionConstraints(model);
   // FLUX3 reference canvases admit a single 16px patch; plain generation retains its catalog floor.
-  const referenceGeometry = referenceRequest && isFlux3Model(model?.id);
+  const referenceGeometry = referenceRequest && isFlux3ImageModel(model);
   if (referenceGeometry) constraints.min = 16;
   const effective = resolveEffectiveDimensions({ resolution, widthOverride, heightOverride });
   // Null is an internal deliberate-omission sentinel; accidental undefined geometry stays invalid.

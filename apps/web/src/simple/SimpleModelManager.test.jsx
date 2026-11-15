@@ -4,7 +4,8 @@ import { AppContext } from "../context/AppContext.js";
 import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleUiContext } from "./SimpleUiContext.js";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
-import { MEMORY_HEADROOM_FRACTION, tierFits } from "../tierSuggestion.js";
+import { tierFits } from "../quantTier.js";
+import { servedCatalogFacts, servedGuidance } from "../testUtils/servedCatalogFacts.js";
 const { serverAcknowledgments, getLicenseAcknowledgment } = vi.hoisted(() => ({
   serverAcknowledgments: new Set(), getLicenseAcknowledgment: vi.fn(),
 }));
@@ -126,10 +127,22 @@ const simpleUi = {
   openInAdvanced: vi.fn(),
 };
 
+// Every number the rows quote is API-served (SW-7032): a fixture standing for a shipped model carries
+// the guidance the catalog route serves for it, from the native catalog fixture.
+function withServedGuidance(model) {
+  if (model.memoryGuidance) return model;
+  try {
+    return { ...model, memoryGuidance: servedCatalogFacts(model.id).memoryGuidance };
+  } catch {
+    return model;
+  }
+}
+
 async function render(root, context) {
+  const served = context?.models ? { ...context, models: context.models.map(withServedGuidance) } : context;
   await act(async () => {
     root.render(
-      <AppContext.Provider value={baseContext(context)}>
+      <AppContext.Provider value={baseContext(served)}>
         <SimpleUiContext.Provider value={simpleUi}>
           <SimpleModelManager />
         </SimpleUiContext.Provider>
@@ -268,12 +281,11 @@ describe("SimpleModelManager memory label", () => {
     expect(shown).not.toBeNull();
 
     const q4 = model.variants.find((entry) => entry.variant === "q4");
+    const served = { model: withServedGuidance(model), backend: "mlx" };
     // The number the user reads must be a host the app would actually run this tier on...
-    expect(tierFits(q4, shown), `displayed ${shown} GB must satisfy tierFits`).toBe(true);
+    expect(tierFits(q4, shown, served), `displayed ${shown} GB must satisfy tierFits`).toBe(true);
     // ...and must not be inflated: one GB less must fail, so the row is the MINIMUM honest host size.
-    expect(tierFits(q4, shown - 1), `${shown - 1} GB must not satisfy tierFits`).toBe(false);
-    // Stated as the arithmetic the two share, so the intent survives a refactor of either side.
-    expect(shown).toBe(Math.ceil(Z_IMAGE_Q4_BYTES / 1024 ** 3 / MEMORY_HEADROOM_FRACTION));
+    expect(tierFits(q4, shown - 1, served), `${shown - 1} GB must not satisfy tierFits`).toBe(false);
   });
 
   it("budgets the CEILING over installed tiers when more than one is on disk", async () => {
@@ -469,7 +481,7 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
       // fixture said `true` and the PR body called 37.3 "a measured VRAM requirement"; per the schema the
       // flag means "false when ESTIMATED (scaled from weight size + a measured sibling)", and it covers
       // `minMemoryGb` and `vramGbByTier` together. So neither number here is a measurement, and the row
-      // reports the higher of the two (see the estimated-lane rule in tierSuggestion.js).
+      // reports the higher of the two (the estimated-lane rule in `sceneworks_core::memory_guidance`).
       candle: { minMemoryGb: 44, vramGbByTier: { q4: 37.3, q8: 42.0, bf16: 52.0 }, measured: false },
       hasVariantMatrix: true,
       variants: [
@@ -564,9 +576,12 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
   });
 
   it("uses each model's native provider capabilities for the displayed tier floor", async () => {
-    const model = { id: "flux3_klein", name: "FLUX.3", type: "image", installState: "installed",
+    const model = { id: "flux3_klein", name: "FLUX.3", family: "flux3", type: "image", installState: "installed",
       hasVariantMatrix: true, variants: [variant("nvfp4", "installed", null, null)],
-      candle: { minMemoryGb: 16, measured: true, vramGbByTier: { nvfp4: 24 } } };
+      candle: { minMemoryGb: 16, measured: true, vramGbByTier: { nvfp4: 24 } },
+      // What the API serves for this fixture: nvfp4's 24 GB row plus the 2 GB slack, floored at 16.
+      memoryGuidance: servedGuidance({}, { candle: { blanketGb: 16, entryFloorGb: 16, tiers: {
+        nvfp4: { installedHostGb: 26, installedEstimated: false, floorGb: 16, measuredHostGb: 26 } } } }) };
     const show = (capabilities, status = "online") => render(root, { models: [model],
       macCapabilities: { macGatingActive: false }, visibleWorkers: [{ status, capabilities }] });
     await show(["nvfp4"]);
@@ -582,8 +597,9 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     // showed "needs 48 GB" on Windows — an MLX unified-memory figure presented as a VRAM requirement.
     // Silence is the only honest answer: `qwen_image` declares mlx 50 against candle 56, so the MLX
     // blanket is not even reliably the conservative one and cannot be reused as a safe default.
+    // The fixture's premise is a model with NO candle evidence, so the API serves an empty lane.
     await render(root, {
-      models: [zImage({ installState: "installed" })],
+      models: [{ ...zImage({ installState: "installed" }), memoryGuidance: servedGuidance() }],
       macCapabilities: { macGatingActive: false },
     });
     expect(displayedGb(container)).toBeNull();
@@ -631,8 +647,9 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     expect(metaText(container)).toEqual(["needs 28 GB"]);
     // Pinned to the app's own criterion rather than to the literal 28, so it cannot drift from the picker.
     const q4 = model.variants[0];
-    expect(tierFits(q4, displayedGb(container))).toBe(true);
-    expect(tierFits(q4, displayedGb(container) - 1)).toBe(false);
+    const served = { model: withServedGuidance(model), backend: "mlx" };
+    expect(tierFits(q4, displayedGb(container), served)).toBe(true);
+    expect(tierFits(q4, displayedGb(container) - 1, served)).toBe(false);
   });
 
   it("uses the candle BLANKET when the lane really has no per-tier row (kokoro_82m)", async () => {

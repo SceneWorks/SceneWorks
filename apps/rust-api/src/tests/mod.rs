@@ -3,7 +3,7 @@
 
 mod auth;
 mod browser_fixture;
-mod catalog;
+pub(crate) mod catalog;
 mod checkpoint_library;
 mod compression;
 mod dataset_catalogs;
@@ -12,6 +12,8 @@ mod embedded_web;
 mod import_repair;
 // `pub(crate)` so the sc-22714 review suite can drive the same in-process API + fake worker
 // instead of standing up a second one.
+mod batch_describe;
+mod describe_prompts;
 pub(crate) mod film_harness;
 mod film_harness_anchoring;
 mod film_harness_fixes;

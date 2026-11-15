@@ -1,0 +1,54 @@
+name: Qwen3.8 27B describer weight provisioning
+
+# Dispatch-only (SW-7120). Downloads the pinned Candle q4/ and q8/ tiers of
+# SceneWorks/qwen3.8-27b-abliterated-candle into the CUDA real-weights runner's hub cache, in the
+# standard hub layout, for qwen38-describer-validation.yml. Runs no model. Does nothing when every
+# file is already present at its published size; refuses before downloading with under 70 GB free.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    # One writer at a time into the shared cache.
+    concurrency:
+      group: qwen38-describer-provision
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 240
+    env:
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate runner Python for snapshot provisioning
+        shell: powershell
+        run: |
+          $version = python --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.') {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+          if ([int]$Matches.minor -lt 12) {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+      - name: Test the provisioning checks without network
+        run: python -I -B scripts/ci/qwen38_describer_provision_test.py
+      - name: Provision the pinned q4 and q8 tiers
+        shell: powershell
+        env:
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "qwen38-describer-provision-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local provisioning venv' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
+          & $python -I -B scripts/ci/qwen38_describer_provision.py
+          if ($LASTEXITCODE -ne 0) { throw "describer provisioning failed with exit code $LASTEXITCODE" }

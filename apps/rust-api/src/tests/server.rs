@@ -356,6 +356,21 @@ async fn inprocess_utility_worker_startup_runs_conversion_recovery_before_spawni
     std::fs::create_dir_all(&outside).expect("outside root");
     std::os::unix::fs::symlink(&outside, models_dir.join("mlx"))
         .expect("nested conversion-root symlink");
+    // The production boundary builds its worker settings from the environment. Pin the config
+    // root and credential store inside this test (under the one shared env lock), so it never
+    // reads the developer's OS app-config directory.
+    let config_dir = temp.path().join("config");
+    let credentials_dir = temp.path().join("credentials");
+    let _env = sceneworks_core::test_env::EnvVars::set(&[
+        (
+            "SCENEWORKS_CONFIG_DIR",
+            config_dir.to_str().expect("utf-8 config dir"),
+        ),
+        (
+            "SCENEWORKS_CREDENTIALS_DIR",
+            credentials_dir.to_str().expect("utf-8 credentials dir"),
+        ),
+    ]);
 
     let result = crate::spawn_inprocess_utility_worker(0, data_dir).await;
 

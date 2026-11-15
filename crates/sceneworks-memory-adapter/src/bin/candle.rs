@@ -440,8 +440,9 @@ const SD3_5_FIXTURE_SLUGS: [(&str, &str); 3] = [
 /// PuLID-FLUX (sc-22726). On this lane it is NOT a registered generator: `candle-gen-pulid`
 /// registers nothing (its `lib.rs` says so in as many words, and the checked-in capability dump
 /// lists it under `bespokeMemoryRouteWaivers`). The worker loads it as
-/// `runtime_cuda::providers::pulid::PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)`
-/// (`image_jobs/pulid_candle.rs`), so this arm does exactly that — going through the registry
+/// `runtime_cuda::providers::pulid::PulidFlux::load_with_memory_context_spec(&PulidFluxPaths, ctx,
+/// &spec)` after compiling its render plan against `spec` (`image_jobs/pulid_candle.rs`), so this
+/// arm does exactly that — going through the registry
 /// would be a different code path, not the production one (E4).
 const PULID_FLUX_ID: &str = "pulid_flux";
 const PULID_FLUX_EXECUTION_PATH: &str = "the Candle PuLID-FLUX identity-conditioned character path";

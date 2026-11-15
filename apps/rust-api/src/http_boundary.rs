@@ -319,11 +319,22 @@ mod tests {
         let mut slow = tokio::net::TcpStream::connect(address).await.unwrap();
         slow.write_all(b"GET / HTTP/1.1\r\nHost:").await.unwrap();
         let mut buf = [0; 256];
-        let count = tokio::time::timeout(Duration::from_secs(2), slow.read(&mut buf))
+        let closed = tokio::time::timeout(Duration::from_secs(2), slow.read(&mut buf))
             .await
-            .unwrap()
             .unwrap();
-        assert!(count == 0 || String::from_utf8_lossy(&buf[..count]).contains("408"));
+        match closed {
+            Ok(count) => {
+                assert!(count == 0 || String::from_utf8_lossy(&buf[..count]).contains("408"));
+            }
+            // Winsock can report a reset instead of EOF when the timed-out
+            // connection closes with a partial request still in flight.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            Err(error) => panic!("unexpected slow-header close: {error}"),
+        }
         let response = reqwest::get(format!("http://{address}/")).await.unwrap();
         assert_eq!(response.text().await.unwrap(), "authorized peer");
         let response = reqwest::get(format!("http://{address}/events"))

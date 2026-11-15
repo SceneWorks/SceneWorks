@@ -215,7 +215,7 @@ fn fits_nothing_engaged() -> KreaControlFit {
 }
 
 #[test]
-fn additive_adapter_bytes_shift_every_control_rung_and_incurred_peak() {
+fn additive_adapter_bytes_shift_every_control_rung_without_claiming_a_measured_peak() {
     let manifest = krea_manifest_measured();
     let tier = "q4";
     let one_gib = crate::fit_gate::BYTES_PER_GIB as u64;
@@ -237,9 +237,19 @@ fn additive_adapter_bytes_shift_every_control_rung_and_incurred_peak() {
     );
 
     let fit = fit_ladder_for_entry_with_adapter_bytes(&manifest, tier, Some(budget(96.0)), one_gib);
-    let plain = incurred_peak_gb(&fits_nothing_engaged(), &manifest, tier).unwrap();
-    let adapted = incurred_peak_gb_with_adapter_bytes(&fit, &manifest, tier, one_gib).unwrap();
-    assert!((adapted - plain - 1.0).abs() < 1e-6);
+    assert!(matches!(
+        fit,
+        KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
+            estimate_scoped: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        incurred_peak_gb_with_adapter_bytes(&fit, &manifest, tier, one_gib),
+        None,
+        "an adapter estimate must not claim a measured reclaimable peak"
+    );
 }
 
 /// Assert a [`KreaControlFit::TooBig`] whose `needed_gb` is ~`expected` (float-tolerant).
@@ -1324,10 +1334,88 @@ fn control_estimate_floors_require_current_evidence_and_the_loaded_identity() {
     );
 }
 
-/// sc-13960: on a warm worker, crediting the cudarc pool the previous control render left behind
-/// FLIPS the ladder off its needless rungs — the repeated-control-render scenario the story names.
-/// Pins the arithmetic the two-pass evict-reclaim gate performs (`fit_ladder(raw)` vs
-/// `fit_ladder(with_reclaimable(raw, pool))`).
+#[test]
+fn high_resolution_pose_with_adapters_selects_resident_only_when_its_estimate_fits() {
+    let manifest = krea_manifest_measured();
+    let contract = registered_contract_for_tier("bf16").unwrap();
+    let geometry = MemoryGeometry {
+        width: 1408,
+        height: 2048,
+        batch: 1,
+        frames: 1,
+        reference_count: KREA_CONTROL_REFERENCE_COUNT,
+    };
+    let adapter_bytes = crate::fit_gate::BYTES_PER_GIB as u64;
+    let fit = |free_gb, runtime_verified| {
+        fit_ladder_for_entry_with_runtime(
+            &manifest,
+            "bf16",
+            Some(budget(free_gb)),
+            adapter_bytes,
+            geometry,
+            Some(&contract),
+            runtime_verified,
+        )
+    };
+    let roomy = fit(1024.0, true);
+    assert_eq!(
+        roomy,
+        KreaControlFit::Fits {
+            offload_policy: OffloadPolicy::Resident,
+            tile_vae_decode: false,
+            chunk_attention: false,
+            estimate_scoped: true,
+        }
+    );
+    assert!(
+        !matches!(
+            fit(60.0, true),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Resident,
+                ..
+            }
+        ),
+        "the 1024² row must not be reused unscaled for a 1408×2048 render"
+    );
+    assert_eq!(
+        incurred_peak_gb_with_adapter_bytes(&roomy, &manifest, "bf16", adapter_bytes),
+        None
+    );
+    assert!(
+        matches!(fit(20.0, true), KreaControlFit::BestEffort { .. }),
+        "a conservative high-resolution estimate must not hard-reject a bounded render"
+    );
+    assert!(
+        matches!(fit(1024.0, false), KreaControlFit::BestEffort { .. }),
+        "a custom or unverified artifact must not inherit the stock-model estimate"
+    );
+    let small = fit_ladder_for_entry_with_runtime(
+        &manifest,
+        "bf16",
+        Some(budget(96.0)),
+        adapter_bytes,
+        MemoryGeometry {
+            width: 768,
+            height: 768,
+            ..geometry
+        },
+        Some(&contract),
+        true,
+    );
+    assert!(
+        matches!(
+            small,
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Resident,
+                estimate_scoped: true,
+                ..
+            }
+        ),
+        "in-envelope adapter requests must reuse the resident pipeline: {small:?}"
+    );
+}
+
+/// Credit the previous control render's released pool before considering a slower residency rung.
 #[test]
 fn reclaim_flips_a_warm_control_gate_back_to_resident() {
     let m = krea_manifest();

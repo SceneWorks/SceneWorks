@@ -75,23 +75,12 @@ pub(crate) fn iris_install_refused(refusal: sceneworks_worker::IrisInstallRefusa
     refused(refusal.kind, refusal.message)
 }
 
-/// The installed backbone directory of an Iris target when its `config.yaml` is present (the engine
-/// resolution reads it); `None` when the base is not installed. Generation reads the pinned
-/// generation backbone itself (root `config.yaml` + `model.safetensors`), never the repo-level
-/// marker a task export satisfies (S7).
+/// The generation backbone for Iris plan resolution. Depth and restoration task exports have
+/// their own option parsers; passing their `config.yaml` to the generation parser is invalid.
 fn installed_backbone(state: &AppState, target: &TrainingTarget) -> Option<PathBuf> {
-    let data_dir = &state.settings.data_dir;
-    if target_objective(target) == Some(IrisObjective::Generation) {
-        return sceneworks_worker::iris_generation_backbone_dir(data_dir);
-    }
-    if !matches!(
-        crate::training::training_base_model_status(data_dir, target),
-        crate::training::TrainingBaseStatus::Ready
-    ) {
-        return None;
-    }
-    let dir = PathBuf::from(crate::training::resolve_base_model_path(target, data_dir));
-    dir.join("config.yaml").is_file().then_some(dir)
+    (target_objective(target) == Some(IrisObjective::Generation))
+        .then(|| sceneworks_worker::iris_generation_backbone_dir(&state.settings.data_dir))
+        .flatten()
 }
 
 fn teacher_status(state: &AppState) -> Value {

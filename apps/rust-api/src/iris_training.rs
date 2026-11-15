@@ -846,6 +846,7 @@ pub(crate) fn iris_full_checkpoint_entry(
     entry.remove("downloads");
     entry.remove("triggerWords");
     entry.insert("scope".to_owned(), Value::String("global".to_owned()));
+    entry.insert("provenance".to_owned(), json!({ "trainingJobId": job.id }));
     entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
     Ok(entry)
 }
@@ -945,6 +946,9 @@ pub(crate) async fn alias_trained_checkpoint(
         block.insert("modelId".to_owned(), Value::String(requested.to_owned()));
     }
     engine_object.insert(TRAINED_CHECKPOINT_KEY.to_owned(), block);
+    if let Some(provenance) = object.get("provenance") {
+        engine_object.insert("provenance".to_owned(), provenance.clone());
+    }
     payload.insert("model".to_owned(), Value::String(engine_model.to_owned()));
     payload.insert(
         CHECKPOINT_MODEL_ID_KEY.to_owned(),

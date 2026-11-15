@@ -1,8 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { recipeToStudioPatch } from "./recipeToStudioPatch.js";
+import { isFlux3ImageModel } from "../../modelEligibility.js";
 
 export function useImageRecipeReplay({
   model,
+  models,
+  mode,
+  referenceAssetIds,
   launchRequest,
   setRecipeTierRequest,
   setFlux3Layout,
@@ -92,10 +96,27 @@ export function useImageRecipeReplay({
   setHiresFixUpscaleBy,
   setHiresFixCfgScale
 }) {
+  // A recipe whose model the catalog has not delivered yet keeps its FLUX.3-only restore here
+  // until the model resolves (applied only if it resolves to a FLUX.3 image model).
+  const pendingFlux3Recipe = useRef(null);
+  // Live values the user can change after a replay starts; the deferred restore yields to them.
+  const live = useRef({});
+  live.current = { model, mode, referenceAssetIds };
   useEffect(() => {
-    const patch = recipeToStudioPatch(launchRequest, { model, recipeMode,
+    const pending = pendingFlux3Recipe.current;
+    if (!pending || pending.stage === 2) return;
+    // Stage 0 is the commit that applied the replay (state not yet updated); stage 1 is the first
+    // commit that shows the replayed state, which is the baseline a later user edit is measured from.
+    if (pending.stage === 0) { pending.stage = 1; return; }
+    pending.baseline = { ...live.current };
+    pending.stage = 2;
+  });
+  useEffect(() => {
+    const patch = recipeToStudioPatch(launchRequest, { model, models, recipeMode,
       mossEditActive: mossEditTransition.current.active, advancedDefaultsModel: advancedDefaultsModel.current,
       ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale });
+    pendingFlux3Recipe.current = patch?.flags.flux3Pending
+      ? { launchRequest, initialValues: patch.values, stage: 0, baseline: null } : null;
     if (!patch) return;
     const { values, flags } = patch;
     mossEditTransition.current.replay = flags.mossEditReplay;
@@ -182,4 +203,41 @@ export function useImageRecipeReplay({
   // The launch id owns one-shot hydration; local values must not replay the launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest?.id]);
+
+  useEffect(() => {
+    const pending = pendingFlux3Recipe.current;
+    if (!pending) return;
+    const resolved = models.find((entry) => entry.id === pending.launchRequest.recipe?.model);
+    if (!resolved) return;
+    pendingFlux3Recipe.current = null;
+    if (!isFlux3ImageModel(resolved)) return;
+    // A user action after the replay started wins over the deferred restore.
+    const { baseline } = pending;
+    const userActed = baseline && (
+      baseline.model !== live.current.model || baseline.mode !== live.current.mode ||
+      JSON.stringify(baseline.referenceAssetIds) !== JSON.stringify(live.current.referenceAssetIds));
+    if (userActed) return;
+    // Re-derive through the same function the loaded-catalog path uses and apply exactly what the
+    // resolved model changes, so late and loaded replays end in the same Studio state.
+    const patch = recipeToStudioPatch(pending.launchRequest, { model, models, recipeMode,
+      mossEditActive: mossEditTransition.current.active, advancedDefaultsModel: advancedDefaultsModel.current,
+      ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale });
+    if (!patch) return;
+    const flux3Setters = {
+      flux3ReferenceSlots: setFlux3ReferenceSlots,
+      orderedCharacterReferences: setOrderedCharacterReferences,
+      referenceAssetIds: setReferenceAssetIds,
+      mode: setMode,
+      referenceDimensionIntent: setReferenceDimensionIntent,
+      widthOverride: setWidthOverride,
+      heightOverride: setHeightOverride,
+    };
+    for (const [key, setter] of Object.entries(flux3Setters)) {
+      if (!Object.hasOwn(patch.values, key)) continue;
+      if (JSON.stringify(patch.values[key]) === JSON.stringify(pending.initialValues[key])) continue;
+      setter(patch.values[key]);
+    }
+  // Runs when the catalog changes; the pending ref scopes it to the one launch awaiting a model.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [models]);
 }

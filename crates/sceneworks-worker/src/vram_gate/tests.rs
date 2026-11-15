@@ -213,9 +213,10 @@ fn builtin_krea_turbo_manifest_at_live_closure() -> JsonObject {
 }
 
 fn builtin_krea_turbo_manifest() -> JsonObject {
-    let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let parsed: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-        .expect("builtin model manifest parses");
+    let parsed: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     parsed["models"]
         .as_array()
         .expect("models array")
@@ -841,9 +842,10 @@ fn the_binding_phase_resolves_ties_to_the_later_phase() {
 /// static-contract version that the schema independently pins.
 #[test]
 fn no_builtin_route_ships_a_stale_calibration_abi_stamp() {
-    let jsonc = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let parsed: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-        .expect("builtin model manifest parses");
+    let parsed: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
 
     // Two shapes carry a live calibration ABI: `turboFit.calibrationAbi` (Krea's bespoke opt-in)
     // and `<backend>.calibrations[].abi` (the packaged-evidence bindings, read into
@@ -3020,14 +3022,11 @@ fn predicted_peak_prefers_measured_tier_then_min_memory() {
 /// refused a 5090 as soon as a desktop compositor held 0.84 GiB.
 #[test]
 fn qwen_image_2_1_resolves_a_derived_candle_floor_per_tier() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1,
-    ))
-    .expect("builtin.models.jsonc parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin.models.jsonc parses")
+            .clone();
     // sc-25907: Turbo holds its bf16 VAE at the Candle compute width exactly as base holds its
     // f32 one, so its DERIVED Candle floors are the same arithmetic over the same inputs.
     for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS

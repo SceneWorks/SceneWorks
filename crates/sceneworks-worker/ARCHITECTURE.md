@@ -117,6 +117,7 @@ conditional/partial.
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_subject_mask` | ✅ MLX SAM3 on Mac / Candle SAM3 off-Mac (person masks for training) | `run_utility_job` → `run_dataset_subject_mask_job`; routes by the `image_segment` capability (no capability of its own) |
+| `dataset_batch_describe` | ✅ Vision Captioner (Qwen3-VL) on the native TextLlm provider, or JoyCaption on the `training_caption` captioner (SW-7083), MLX on Mac / Candle off-Mac (prompt-batch descriptions of a training dataset, SW-7082) | `run_utility_job` → `run_dataset_batch_describe_job`; routes by the capability of its `model` (`prompt_refine` for the Vision Captioner, `training_caption` for JoyCaption; no capability of its own) |
 | `face_likeness_compare` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_face_likeness_compare_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `prompt_refine` | ⚠️ native TextLlm provider when its registry lane is linked | `run_utility_job` → `run_prompt_refine_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 <!-- job-matrix:end -->

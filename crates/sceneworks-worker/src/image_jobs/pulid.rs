@@ -19,8 +19,9 @@ use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_cached_gen_stream_with_request_state;
+use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
 use super::uses_standard_tier_layout;
+use super::CancelFlag;
 use super::Conditioning;
 use super::GenerationOutput;
 use super::GenerationRequest;
@@ -405,7 +406,19 @@ pub(super) async fn generate_pulid_flux_stream(
         project_path,
     )?;
 
-    let weights = ensure_pulid_weights(api, settings, job).await?;
+    let mut _portable_face_lease = None;
+    let weights = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let (adapter, eva, face_dir, lease) =
+            crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
+        _portable_face_lease = Some(lease);
+        PulidWeights {
+            adapter,
+            eva,
+            face_dir,
+        }
+    } else {
+        ensure_pulid_weights(api, settings, job).await?
+    };
     // Feed the engine's weight seam from the resolved cache paths on the `LoadSpec` (the `pulid_flux`
     // loader resolves the PuLID adapter + EVA + face stack from `LoadSpec::identity`, sc-8827). The
     // paths ride the spec into the spawned load task — no process-global env mutation (the old
@@ -554,17 +567,74 @@ pub(super) async fn generate_pulid_flux_stream(
         },
     )
     .await?;
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    // One reference face per image (the engine consumes it into the id-embedding + CA injector).
+    // idWeight → strength; timestepToStartCfg → timestep_to_start_cfg. The pre-load planner and the
+    // render build each output's request here, so a plan is compiled from the request it runs.
+    let pulid_request = move |seed: i64,
+                              memory: Option<gen_core::GenerationMemory>,
+                              preview: gen_core::PreviewSink,
+                              cancel: &CancelFlag| GenerationRequest {
+        prompt: prompt.clone(),
+        negative_prompt: None,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        true_cfg: None,
+        timestep_to_start_cfg: Some(start_cfg),
+        sampler: sampler.clone(),
+        scheduler: scheduler.clone(),
+        scheduler_shift,
+        conditioning: vec![Conditioning::Reference {
+            image: reference.clone(),
+            strength: Some(id_weight),
+        }],
+        memory,
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let planning_request = pulid_request.clone();
+    let planning_seeds = seeds.clone();
+    let planning_spec = spec.clone();
+    // Every output's plan binds the reference face, identity stack and request before the cache loads
+    // any weights (SW-6936), compiled on the generator's own owner command; a refusal fails pre-load.
+    let prepare_plans = move |planning_cancel: &CancelFlag| {
+        planning_seeds
+            .iter()
+            .map(|seed| {
+                // Preview never shapes the trajectory; the live sink is bound at generation time.
+                let candidate = planning_request(
+                    *seed,
+                    None,
+                    gen_core::PreviewSink::default(),
+                    planning_cancel,
+                );
+                super::render::compile_required_render_plan(
+                    crate::inference_runtime::media(),
+                    PULID_ENGINE_ID,
+                    &planning_spec,
+                    &candidate,
+                )
+            })
+            .collect::<WorkerResult<Vec<_>>>()
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_prepared(
         job.id.clone(),
         PULID_ENGINE_ID,
         0,
         spec,
         format!("{PULID_ENGINE_ID} load failed"),
+        prepare_plans,
+        crate::inference_runtime::load,
         move |generator,
               cache_state,
               loaded_policy,
               warm_policy,
               external_committed_bytes,
+              render_plans,
               tx,
               cancel| {
             // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
@@ -580,95 +650,80 @@ pub(super) async fn generate_pulid_flux_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
-            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    generator,
-                    &memory_plan,
-                    &memory_inputs,
-                    request_cache_state,
-                    loaded_policy.offload_policy,
-                    warm_policy.take(),
-                    external_committed_bytes,
-                )?;
-                request_cache_state = gen_core::MemoryCacheState::Warm;
-                let _request_memory_limit = memory_evaluation
-                    .process_limit_bytes
-                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                // One reference face per image (the engine consumes it into the id-embedding +
-                // CA injector). idWeight → strength; timestepToStartCfg → timestep_to_start_cfg.
-                let mut req = GenerationRequest {
-                    prompt: prompt.clone(),
-                    negative_prompt: None,
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
-                    true_cfg: None,
-                    timestep_to_start_cfg: Some(start_cfg),
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    scheduler_shift,
-                    conditioning: vec![Conditioning::Reference {
-                        image: reference.clone(),
-                        strength: Some(id_weight),
-                    }],
-                    memory: Some(memory_evaluation.memory),
-                    preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = match crate::memory_strategy::generate_with_scope(
-                    generator,
-                    &mut req,
-                    Some(&memory_evaluation.context),
-                    on_progress,
-                ) {
-                    Ok(output) => output,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "PuLID-FLUX generation failed: {error}"
-                        )))
+            let planned = seeds.into_iter().zip(render_plans);
+            drive_gen_items_scored(
+                tx,
+                planned,
+                move |_index, (seed, render_plan), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine("PuLID-FLUX produced no image".to_owned())
-                        })?;
-                        // Score this finished image against the cached source embedding (sc-4411). The
-                        // Image build + pixel clone is paid ONLY when a scorer exists; a non-frontal /
-                        // no-face result records an honest detected:false N/A, `None` scorer ⇒ field
-                        // omitted.
-                        let face_likeness = scorer.as_ref().and_then(|scorer| {
-                            crate::face_likeness::score_generated_image(
-                                Some(scorer),
-                                &Image {
-                                    width: image.width,
-                                    height: image.height,
-                                    pixels: image.pixels.clone(),
-                                },
-                                Some(likeness_source_ref.as_str()),
-                            )
-                        });
-                        Ok(Some((
-                            seed,
-                            image.width,
-                            image.height,
-                            image.pixels,
-                            face_likeness,
-                        )))
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        request_cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        external_committed_bytes,
+                    )?;
+                    request_cache_state = gen_core::MemoryCacheState::Warm;
+                    let _request_memory_limit = memory_evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let mut req =
+                        pulid_request(seed, Some(memory_evaluation.memory), preview, &cancel);
+                    let output = match crate::memory_strategy::generate_with_scope_report_planned(
+                        generator,
+                        &mut req,
+                        &render_plan,
+                        Some(&memory_evaluation.context),
+                        on_progress,
+                    ) {
+                        Ok(report) => report.output.ok_or_else(|| {
+                            WorkerError::Engine("PuLID-FLUX produced no output".to_owned())
+                        })?,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "PuLID-FLUX generation failed: {error}"
+                            )))
+                        }
+                    };
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            let image = images.pop().ok_or_else(|| {
+                                WorkerError::Engine("PuLID-FLUX produced no image".to_owned())
+                            })?;
+                            // Score this finished image against the cached source embedding (sc-4411). The
+                            // Image build + pixel clone is paid ONLY when a scorer exists; a non-frontal /
+                            // no-face result records an honest detected:false N/A, `None` scorer ⇒ field
+                            // omitted.
+                            let face_likeness = scorer.as_ref().and_then(|scorer| {
+                                crate::face_likeness::score_generated_image(
+                                    Some(scorer),
+                                    &Image {
+                                        width: image.width,
+                                        height: image.height,
+                                        pixels: image.pixels.clone(),
+                                    },
+                                    Some(likeness_source_ref.as_str()),
+                                )
+                            });
+                            Ok(Some((
+                                seed,
+                                image.width,
+                                image.height,
+                                image.pixels,
+                                face_likeness,
+                            )))
+                        }
+                        _ => Err(WorkerError::Engine(
+                            "PuLID-FLUX returned non-image output".to_owned(),
+                        )),
                     }
-                    _ => Err(WorkerError::Engine(
-                        "PuLID-FLUX returned non-image output".to_owned(),
-                    )),
-                }
-            })
+                },
+            )
         },
     );
 
@@ -695,6 +750,19 @@ mod pulid_tests {
     use super::*;
 
     #[test]
+    fn conditional_base_prefers_external_model_path_then_the_selected_tier() {
+        super::super::render::flux1_conditional_route_tests::assert_conditional_base_resolution(
+            "PuLID-FLUX (MLX)",
+            serde_json::json!({
+                "projectId": "p", "model": "pulid_flux_dev", "prompt": "a portrait", "count": 1,
+                "mode": "character_image", "referenceAssetId": "asset_1"
+            }),
+            PULID_FLUX_REPO,
+            resolve_pulid_flux_base,
+        );
+    }
+
+    #[test]
     fn pulid_memory_identity_is_exact_character_to_provider_image_to_image() {
         let context = pulid_memory_route_context();
         assert_eq!(
@@ -718,14 +786,9 @@ mod pulid_tests {
         assert!(!inputs.use_pid);
         assert!(!inputs.has_phases);
 
-        let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin manifest parses");
-        let manifest = manifest["models"]
-            .as_array()
-            .and_then(|models| models.iter().find(|model| model["id"] == PULID_MODEL))
-            .and_then(Value::as_object)
+        // The production accessor: the shipped row with its typed memory evidence projected in,
+        // which is the `modelManifestEntry` the API attaches to a PuLID job (SW-7031).
+        let manifest = sceneworks_core::builtin_manifests::builtin_model_entry(PULID_MODEL)
             .expect("shipped PuLID manifest");
         let identity_spec = || {
             let mut spec = LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))

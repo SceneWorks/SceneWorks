@@ -111,30 +111,48 @@ async function assertDesktopLinuxReleaseWorkflow() {
     path.join(root, ".github/workflows/desktop-linux.yml"),
     "utf8",
   );
-  const linuxJob = body.match(/\n  linux:\n([\s\S]*)$/)?.[1];
+  const linuxJob = body.match(/\n  linux:\n([\s\S]*?)(?=\n  [a-z][\w-]*:|$)/)?.[1];
   if (!linuxJob) {
     throw new Error(`${workflowPath} must define a Linux release job`);
   }
 
   for (const field of [
-    "needs: windows",
     "runs-on: ubuntu-22.04",
     "gstreamer1.0-libav",
     "scripts/check-gen-core-skew.sh --self-test",
     "sceneworks-worker --features backend-candle",
     "sceneworks-rust-api --features embed-web,backend-candle",
     "--bundles appimage,deb --config updater.release.conf.json",
-    "target/release/bundle/appimage/*.AppImage",
-    "target/release/bundle/deb/*.deb",
-    "--target linux-x86_64",
-    "gh release upload",
-    "gh release download",
+    "tar -cf release-linux.tar -C target/release/bundle appimage deb",
+    "name: release-linux",
+    "if-no-files-found: error",
   ]) {
     if (!linuxJob.includes(field)) {
       throw new Error(
         `${workflowPath} Linux release job is missing required contract: ${field}`,
       );
     }
+  }
+
+  const publisher = body.match(/\n  publish-desktop:\n([\s\S]*?)(?=\n  [a-z][\w-]*:|$)/)?.[1];
+  if (!publisher) throw new Error(`${workflowPath} must define a desktop publication job`);
+  for (const field of [
+    "needs: [macos, windows, linux]",
+    "name: release-windows",
+    "name: release-linux",
+    "tar -xf release-artifacts/windows/release-windows.tar -C target/release/bundle",
+    "tar -xf release-artifacts/linux/release-linux.tar -C target/release/bundle",
+    "target/release/bundle/appimage/*.AppImage",
+    "target/release/bundle/deb/*.deb",
+    "--target windows-x86_64",
+    "--target linux-x86_64",
+    "gh release upload",
+    "gh release download",
+  ]) {
+    if (!publisher.includes(field)) throw new Error(`${workflowPath} desktop publisher is missing required contract: ${field}`);
+  }
+  if (/^    needs:/m.test(linuxJob) || linuxJob.includes("gh release upload")) {
+    throw new Error(`${workflowPath} Linux build must run independently and defer release mutation to the publisher`);
   }
 
   const cudaPin = linuxJob.match(/^\s+cuda:\s*"([^"]+)"/m)?.[1];

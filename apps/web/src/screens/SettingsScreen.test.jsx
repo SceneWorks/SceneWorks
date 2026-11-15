@@ -595,17 +595,21 @@ describe("SettingsScreen GPU memory (desktop)", () => {
   let gpuInfo;
   let appSettings;
   let limitFailure;
+  let settingsGate;
 
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     telemetry = { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
     gpuInfo = { platform: "macos", devices: ["Apple M3 Max"], unifiedMemoryMb: 131072 };
-    appSettings = {};
+    // The shell always serves the key; `null` is its no-target state (slider at "Use all").
+    appSettings = { gpuMemoryLimitFraction: null };
+    settingsGate = null;
     limitFailure = null;
     invoke = vi.fn(async (command, args) => {
       switch (command) {
         case "get_app_settings":
-          return appSettings; // no cap → slider starts at 100% (Off)
+          if (settingsGate) await settingsGate;
+          return appSettings;
         case "get_gpu_info":
           return gpuInfo;
         case "list_credentials":
@@ -675,6 +679,39 @@ describe("SettingsScreen GPU memory (desktop)", () => {
     expect(container.textContent).toContain("Engine");
     expect(container.textContent).toContain("Unified memory");
     expect(container.textContent).toContain("128 GiB");
+  });
+
+  // SW-7032: the web holds no default for the GPU memory cap. Before the shell's settings load the
+  // slider has no value and is disabled (nothing can be saved); afterwards it shows the served value.
+  it("shows no GPU memory target and cannot save one until the served settings load", async () => {
+    let release;
+    settingsGate = new Promise((resolve) => { release = resolve; });
+    await render();
+    // The screen loads settings and the GPU probe together, so before load the control is absent.
+    expect(slider()).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("set_gpu_memory_limit", expect.anything());
+    await act(async () => { release(); });
+    await act(async () => {});
+    expect(slider().disabled).toBe(false);
+    expect(slider().value).toBe("100");
+  });
+
+  it.each([[0.5, "50"], [0.25, "25"]])("reflects a served GPU memory target of %s", async (fraction, shown) => {
+    appSettings = { gpuMemoryLimitFraction: fraction };
+    await render();
+    expect(slider().disabled).toBe(false);
+    expect(slider().value).toBe(shown);
+  });
+
+  it("stays empty and disabled, and saves nothing, when the shell serves no GPU memory target key", async () => {
+    appSettings = {};
+    await render();
+    const input = slider();
+    expect(input.disabled).toBe(true);
+    expect(input.getAttribute("value")).toBe("");
+    expect(container.textContent).toContain("Loading…");
+    await act(async () => { input.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true })); });
+    expect(invoke).not.toHaveBeenCalledWith("set_gpu_memory_limit", expect.anything());
   });
 
   it("applies the GPU memory target live, without restarting the worker", async () => {

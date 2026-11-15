@@ -744,6 +744,43 @@ pub struct TrainingPresetRegistry {
     pub extra: ExtraFields,
 }
 
+/// Project a target's (or preset's) config onto what its Candle trainer executes. The registry keeps
+/// the established MLX defaults; a Candle host's API serves this projection, so the form the Studio
+/// seeds, the submitted config and the worker preflight agree.
+pub fn apply_candle_training_defaults(kernel: &str, config: &mut TrainingConfig) {
+    match kernel {
+        // These Candle trainers are intentionally dense and do not render previews. MLX retains
+        // its established checkpointing/preview defaults in the core catalog and macOS response.
+        "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "anima_lora" => {
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(false));
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+            if kernel == "mage_flow_lora" {
+                config.advanced.insert(
+                    "fullFinetuneConfig".to_owned(),
+                    json!({
+                        "mixedPrecision": "f32",
+                        "gradientCheckpointing": false
+                    }),
+                );
+            }
+        }
+        // The Wan single-DiT and I2V trainers do not preview. Both A14B variants require
+        // checkpointing on Candle; TI2V-5B remains a negative and honors its existing value.
+        "wan_lora" => {
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+        }
+        "wan_moe_lora" => {
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(true));
+            config.advanced.insert("sampleEvery".to_owned(), json!(0));
+        }
+        _ => {}
+    }
+}
+
 /// Generic LoRA training hyperparameters.
 ///
 /// The visible fields back the simple config panel; engine-specific knobs live
@@ -1048,7 +1085,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         }
         // A malformed static declaration must not panic a production catalog request. Contract
         // tests require every builtin trainer identity; an unresolved identity has no decoder.
-        if let Ok(trainer) = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx") {
+        if let Ok(trainer) = crate::registry::expected_backend_local_trainer_id(target, "mlx") {
             if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
                 target.limits.insert(
                     depth_anchoring::X0_DECODER_LIMIT.to_owned(),
@@ -5482,7 +5519,7 @@ mod model_contract_metadata_tests {
         }
         for target in &registry.targets {
             for backend in ["mlx", "candle"] {
-                crate::jobs_store::expected_backend_local_trainer_id(target, backend)
+                crate::registry::expected_backend_local_trainer_id(target, backend)
                     .unwrap_or_else(|error| panic!("{}/{}: {error}", target.id, backend));
             }
         }

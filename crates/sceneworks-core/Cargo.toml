@@ -15,11 +15,11 @@ model-inference-proof = []
 [dependencies]
 reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "7e51f6aee90c4a3554555c21fffba43d205e3a91" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "7e51f6aee90c4a3554555c21fffba43d205e3a91" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "7e51f6aee90c4a3554555c21fffba43d205e3a91" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
 # The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "7e51f6aee90c4a3554555c21fffba43d205e3a91" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
 directories = "5"
 fs2 = { workspace = true }
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's
@@ -54,6 +54,7 @@ png = { workspace = true }
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
 # so no new locked version appears.
 sha2 = { workspace = true }
+uuid = { workspace = true }
 subtle = { workspace = true }
 # Fallible no-clobber TempPath adapter requires tempfile3.27 at runtime.
 tempfile = { workspace = true }
@@ -101,9 +102,12 @@ libc = "0.2"
 # confined even when a managed path is concurrently replaced.
 rustix = { version = "1", features = ["fs"] }
 
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonschema = "0.28"
+
 [dev-dependencies]
-# Metadata-only route reconciliation parses every native dispatcher arm, including inactive cfgs.
-syn = { workspace = true }
 # Adversarial PNG fixtures choose compression explicitly, independent of the workspace's
 # unified miniz/zlib-rs backend. Already locked transitively; never a production dependency.
 flate2 = "1.1"
@@ -112,6 +116,8 @@ jsonschema = "0.28"
 # pinned-checksum verification path runs for real. Same 0.10 line the crate already depends on, so
 # no new locked version appears.
 sha2 = { workspace = true }
+# SW-6931 route reconciliation: parses the worker's native dispatch arms in a test.
+syn = { workspace = true }
 
 [lints]
 workspace = true

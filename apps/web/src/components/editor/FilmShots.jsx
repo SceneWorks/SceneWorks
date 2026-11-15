@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { LoraPickerList } from "../LoraPickerList.jsx";
 import { saveJsonExport } from "../../saveExportFile.js";
 import { FILM_SHOT_STATE_LABELS, filmShotState } from "./filmShotState.js";
 
@@ -81,6 +82,7 @@ async function exportJson(name, value, onError) {
 export function FilmShots({ capabilities, compiled, disabled, draft, findings = [], models = [], onChange, onImportError, run = null, selectedShotIds, setSelectedShotIds }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [adapterPickerOpen, setAdapterPickerOpen] = useState(false);
   const planInput = useRef(null);
   const compiledInput = useRef(null);
   const shots = draft.productionPlan.shots;
@@ -167,8 +169,25 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
           <NumberInput label="Frames per second" min="1" onChange={(value) => onChange((next) => setOptionalNumber(next.productionPlan.model, "fps", value))} value={draft.productionPlan.model.fps} />
           <label>Default resolution<input aria-label="Default resolution" list="film-resolution-options" value={draft.productionPlan.model.resolution ?? ""} onChange={(event) => onChange((next) => setOptional(next.productionPlan.model, "resolution", event.target.value))} /></label>
           <datalist id="film-resolution-options">{resolutions.map((value) => <option key={value} value={value} />)}</datalist>
-          <label>Adapters (comma separated)<input aria-label="Plan adapters" list="film-adapter-options" value={(draft.productionPlan.model.loras ?? []).join(", ")} onChange={(event) => onChange((next) => { next.renderRegime = "custom"; next.productionPlan.model.loras = asList(event.target.value); })} /></label>
-          <datalist id="film-adapter-options">{turboLoras.map((lora) => <option key={lora.id} value={lora.id}>{lora.name}</option>)}</datalist>
+          <div>
+            <label>Adapters (comma separated)<input aria-label="Plan adapters" value={(draft.productionPlan.model.loras ?? []).join(", ")} onChange={(event) => onChange((next) => { next.renderRegime = "custom"; next.productionPlan.model.loras = asList(event.target.value); })} /></label>
+            <button aria-expanded={adapterPickerOpen} onClick={() => setAdapterPickerOpen((open) => !open)} type="button">Add LoRA</button>
+            {adapterPickerOpen ? (
+              <div className="lora-picker-panel">
+                <LoraPickerList
+                  loras={turboLoras.filter((lora) => !(draft.productionPlan.model.loras ?? []).includes(lora.id))}
+                  onAdd={(lora) => {
+                    onChange((next) => {
+                      next.renderRegime = "custom";
+                      next.productionPlan.model.loras = [...(next.productionPlan.model.loras ?? []), lora.id];
+                    });
+                    setAdapterPickerOpen(false);
+                  }}
+                  emptyMessage="No more compatible adapters available."
+                />
+              </div>
+            ) : null}
+          </div>
           <NumberInput label="Steps" min="1" onChange={(value) => onChange((next) => { next.renderRegime = "custom"; next.productionPlan.model.advanced ??= {}; setOptionalNumber(next.productionPlan.model.advanced, "steps", value); })} value={advanced.steps} />
           <NumberInput label="Reference image short edge" max="2048" min="1024" onChange={(value) => onChange((next) => { next.productionPlan.model.advanced ??= {}; setOptionalNumber(next.productionPlan.model.advanced, "referenceImageShortEdge", value); })} value={advanced.referenceImageShortEdge} />
           <label>Reference image resize<select aria-label="Reference image resize mode" value={advanced.referenceImageResizeMode ?? ""} onChange={(event) => onChange((next) => { next.productionPlan.model.advanced ??= {}; setOptional(next.productionPlan.model.advanced, "referenceImageResizeMode", event.target.value); })}><option value="">Model default (match)</option>{REFERENCE_IMAGE_RESIZE_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>

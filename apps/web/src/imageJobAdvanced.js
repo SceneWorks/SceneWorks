@@ -2,7 +2,7 @@ import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEdi
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
-import { isFlux3LayoutModel } from "./flux3Layout.js";
+import { isFlux3ImageModel } from "./modelEligibility.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -19,7 +19,6 @@ import { isFlux3LayoutModel } from "./flux3Layout.js";
 export function buildImageJobAdvanced(state) {
   const {
     resolution,
-    model,
     flux3Layout,
     flux3ReferenceIds,
     // Structured-prompt recipe round-trip (sc-6147).
@@ -80,6 +79,7 @@ export function buildImageJobAdvanced(state) {
     // img2img reference-guided generation (epic 8588 slice A, sc-8593).
     supportsImg2img,
     img2imgReferenceAssetId,
+    imageReferenceDetails,
     img2imgStrength,
     // Krea "text style" tap-reweight gain (sc-11878).
     supportsTextStyle,
@@ -132,7 +132,7 @@ export function buildImageJobAdvanced(state) {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
     ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
-    ...(isFlux3LayoutModel(model) && flux3Layout?.boxes?.length ? {
+    ...(isFlux3ImageModel(selectedModel) && flux3Layout?.boxes?.length ? {
       // Preserve the original document and current attachment order, never a rounded table.
       flux3_layout: flux3Layout,
       flux3_reference_ids: flux3ReferenceIds ?? [],
@@ -301,6 +301,9 @@ export function buildImageJobAdvanced(state) {
     ...(supportsImg2img && img2imgReferenceAssetId
       ? { strength: img2imgStrength }
       : {}),
+    // Display context survives deletion while the job waits in the queue.
+    ...(mode === "text_to_image" && supportsImg2img && img2imgReferenceAssetId && imageReferenceDetails?.assetId === img2imgReferenceAssetId
+      ? { imageReference: imageReferenceDetails } : {}),
     // Krea "text style" tap-reweight gain (sc-11878): emit advanced.textStyleGain only when the model
     // declares the control AND it's off the 1.0 no-op default — keeps existing recipes byte-identical.
     // The worker clamps to [0.25, 1.75]; candle-gen-krea reweights the Qwen3-VL taps (Krea-only).

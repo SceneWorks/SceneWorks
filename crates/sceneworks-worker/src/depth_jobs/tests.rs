@@ -382,10 +382,28 @@ fn admission_scales_with_the_model_input_and_refuses_over_budget() {
             + (declaration.reference_peak_gb - declaration.resident_gb) * 4.0;
         assert!(quadruple > linear, "{lane}: extrapolation is padded");
     }
+    // SW-7032: the measured lane facts arrive from the evidence store through the catalog
+    // projection with their recorded values; the declared parameters stay product data.
     let mlx = DepthAdmission::from_payload(&payload, "mlx").unwrap();
-    assert_eq!(mlx.reference_peak_gb, 9.4);
+    assert_eq!(
+        mlx,
+        DepthAdmission {
+            reference_model_pixels: 524_288.0,
+            extrapolation_factor: 1.5,
+            resident_gb: 6.5,
+            reference_peak_gb: 9.4,
+        }
+    );
     let candle = DepthAdmission::from_payload(&payload, "candle").unwrap();
-    assert_eq!(candle.reference_peak_gb, 8.4);
+    assert_eq!(
+        candle,
+        DepthAdmission {
+            reference_model_pixels: 524_288.0,
+            extrapolation_factor: 1.5,
+            resident_gb: 7.2,
+            reference_peak_gb: 8.4,
+        }
+    );
 
     let plan = |w: u32, h: u32| plan_depth_input(w, h, DepthResolution::Native, 16).unwrap();
     // A 4000x3000 photo at NATIVE resolution is ~12 MP of model input: refused on a 64 GB budget,

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripJsoncComments } from './lib/jsonc.mjs';
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from './lib/builtin-memory-evidence.mjs';
 import { validateFlux3AnchorPrerequisites, flux3AnchorRequestDigest, resourceCaseDigest } from './lib/flux3-resource-contract.mjs';
 import { validateNativeBoundaryReceipt } from './lib/flux3-native-boundary.mjs';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -11,7 +12,10 @@ export const digestPattern = /^[a-f0-9]{64}$/;
 export const shaPattern = /^[a-f0-9]{40}$/;
 export const PHASES = ['prerequisites', 'ordinary', 'references-layout', 'upsampler', 'adaptation', 'native-tiers', 'limits', 'failures'];
 export async function loadProductTargets(root = ROOT) {
-  const manifest = JSON.parse(stripJsoncComments(await readFile(path.join(root, 'config/manifests/builtin.models.jsonc'), 'utf8')));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile(path.join(root, 'config/manifests/builtin.models.jsonc'), 'utf8'))),
+    await readBuiltinMemoryEvidence(root),
+  );
   const capabilities = Object.fromEntries(await Promise.all(['mlx', 'candle'].map(async backend => [backend, JSON.parse(await readFile(path.join(root, `config/engine-capabilities/runtime/capabilities.${backend}.json`), 'utf8'))])));
   const allModels = Array.isArray(manifest) ? manifest : manifest.models;
   const models = allModels.filter(m => ['flux3_klein', 'flux3_klein_base'].includes(m.id));

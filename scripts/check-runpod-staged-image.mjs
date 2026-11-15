@@ -24,7 +24,7 @@ export function validateStagedImage({ image, revision, inspectJson, installedHas
     ["/usr/local/bin/sceneworks-runpod-entrypoint"],
     "staged image must retain the production RunPod entrypoint",
   );
-  assert.equal(imageConfig.Config?.User ?? "", "", "staged image must retain root-only initialization entrypoint access");
+  assert.ok(["", "root"].includes(imageConfig.Config?.User ?? ""), "staged image must retain root-only initialization entrypoint access");
   assert.equal(
     imageConfig.Config?.Labels?.["org.opencontainers.image.revision"],
     revision,

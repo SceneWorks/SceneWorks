@@ -9,8 +9,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !report.missing.is_empty() {
         return Err(format!(
-            "{} legacy route cells lost their binding",
-            report.missing.len()
+            "{} product route cells have no engine binding: {:?}",
+            report.missing.len(),
+            report.missing
         )
         .into());
     }

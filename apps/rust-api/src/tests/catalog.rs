@@ -1,6 +1,42 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn catalog_convert_revision(repo: &str, reference: &str) -> Option<&'static str> {
+    assert_eq!(reference, "main");
+    assert!(
+        matches!(
+            repo,
+            "owner/plain" | "MiniMaxAI/MiniMax-H3" | "Lightricks/LTX-Video"
+        ),
+        "unexpected conversion source: {repo}"
+    );
+    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+}
+
+fn catalog_convert_pinned_files(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        })
+        .collect()
+}
+
+fn pin_catalog_convert_metadata(state: &crate::AppState) {
+    // These license and replay tests name synthetic repositories; admission still validates the
+    // immutable revision and file closure returned by these per-app fixtures.
+    *state.test_hooks.dynamic_hf_revision_override.lock() = Some(catalog_convert_revision);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            catalog_convert_pinned_files(selectors)
+        }));
+}
+
 /// Retain this guard across the complete fixture, including awaited catalog mutations.
 fn catalog_fixture_cache_root(
     settings: &Settings,
@@ -60,6 +96,170 @@ fn merge_model_manifest_entry_handles_single_or_missing_sources() {
     let user = json!({"id": "ltx_2_3", "name": "user"});
     assert_eq!(merge_model_manifest_entry(None, Some(user.clone())), user);
     assert_eq!(merge_model_manifest_entry(None, None), json!({}));
+}
+
+#[test]
+fn registered_builtin_merge_keeps_model_authority_for_catalog_and_license_reads() {
+    let user = json!({
+        "id": "flux_schnell",
+        "name": "My Schnell",
+        "adapter": "attacker_adapter",
+        "gated": true,
+        "requiresLicenseAcknowledgment": true,
+        "downloads": [{"provider": "huggingface", "repo": "attacker/weights"}]
+    });
+    let projected = crate::models::merge_model_entries_with_registry(
+        vec![json!({"id": "flux_schnell", "adapter": "stale_adapter"})],
+        vec![user.clone()],
+    );
+    let model = &projected[0];
+    assert_eq!(model["name"], "My Schnell");
+    assert_eq!(model["adapter"], "flux_diffusers");
+    assert_eq!(model["gated"], false);
+    assert_eq!(
+        model["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    assert_ne!(model["requiresLicenseAcknowledgment"], true);
+
+    // The reserved builtin id keeps its routing identity even when only a user row is on disk.
+    let user_only = crate::models::merge_model_entries_with_registry(Vec::new(), vec![user]);
+    assert_eq!(user_only[0]["adapter"], "flux_diffusers");
+    let unrelated = crate::models::merge_model_entries_with_registry(
+        vec![json!({"id":"other","adapter":"old"})],
+        vec![json!({"id":"other","adapter":"user"})],
+    );
+    assert_eq!(unrelated[0]["adapter"], "user");
+    let embedded = crate::models::embedded_builtin_catalog_entry(|row| row["id"] == "flux_schnell")
+        .expect("embedded catalog")
+        .expect("registered builtin fallback");
+    assert_eq!(embedded["adapter"], model["adapter"]);
+    assert_eq!(embedded["downloads"], model["downloads"]);
+}
+
+#[test]
+fn legacy_builtin_merge_restores_memory_evidence_after_user_product_overlay() {
+    let builtin = sceneworks_core::builtin_manifests::builtin_model_entry("flux_dev")
+        .expect("legacy builtin")
+        .clone();
+    let original_floor = builtin["mlx"]["minMemoryGb"].clone();
+    let original_contract = builtin["mlx"]["memoryStrategyContract"].clone();
+    let user = json!({
+        "id": "flux_dev",
+        "name": "My FLUX",
+        "mlx": {"minMemoryGb": 1, "memoryStrategyContract": {"provider": "attacker"}}
+    });
+    let merged = crate::models::merge_model_entries_with_registry(
+        vec![serde_json::Value::Object(builtin)],
+        vec![user],
+    );
+    assert_eq!(merged[0]["name"], "My FLUX");
+    assert_eq!(merged[0]["mlx"]["minMemoryGb"], original_floor);
+    assert_eq!(
+        merged[0]["mlx"]["memoryStrategyContract"],
+        original_contract
+    );
+}
+
+#[tokio::test]
+async fn registered_builtin_projects_consistently_through_api_and_job_resolver() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).expect("manifest dir");
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","adapter":"stale_adapter"}]}"#,
+    )
+    .expect("builtin manifest");
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","name":"My Schnell","adapter":"attacker_adapter","downloads":[{"repo":"attacker/weights"}]}]}"#,
+    )
+    .expect("user manifest");
+    let (app, state) = create_app_with_state(test_settings(&temp)).expect("app");
+
+    let (status, catalog) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .find(|row| row["id"] == "flux_schnell")
+        .expect("registered row");
+    assert_eq!(row["name"], "My Schnell");
+    assert_eq!(row["adapter"], "flux_diffusers");
+    assert!(row["downloads"]
+        .as_array()
+        .expect("platform downloads")
+        .iter()
+        .all(|download| download["repo"] != "attacker/weights"));
+    assert_eq!(row["catalogScope"], "builtin");
+
+    let resolved = crate::models::resolve_model_manifest_entry(&state, "flux_schnell")
+        .await
+        .expect("job entry");
+    assert_eq!(resolved["name"], row["name"]);
+    assert_eq!(resolved["adapter"], row["adapter"]);
+    assert_eq!(
+        resolved["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    assert_eq!(resolved["catalogScope"], "builtin");
+    let (license_rows, _) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("license rows");
+    assert_eq!(license_rows[0]["adapter"], row["adapter"]);
+    assert_eq!(license_rows[0]["downloads"], resolved["downloads"]);
+}
+
+#[tokio::test]
+async fn hiding_registered_builtin_only_removes_public_catalog_row() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).expect("manifest dir");
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell"}]}"#,
+    )
+    .expect("builtin manifest");
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"flux_schnell","hidden":true}]}"#,
+    )
+    .expect("user manifest");
+    let (app, state) = create_app_with_state(test_settings(&temp)).expect("app");
+
+    let (status, catalog) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .all(|row| row["id"] != "flux_schnell"));
+    let explicit = crate::models::find_model_by_id(&state, "flux_schnell")
+        .await
+        .expect("explicit lookup")
+        .expect("hidden model remains addressable");
+    assert_eq!(explicit["adapter"], "flux_diffusers");
+    let resolved = crate::models::resolve_model_manifest_entry(&state, "flux_schnell")
+        .await
+        .expect("job resolver");
+    assert_eq!(resolved["catalogScope"], "builtin");
+    assert_eq!(
+        resolved["downloads"][0]["repo"],
+        "SceneWorks/flux1-schnell-mlx"
+    );
+    let (license_rows, _) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("license source rows");
+    assert_eq!(license_rows.len(), 1);
+    assert_eq!(license_rows[0]["downloads"], resolved["downloads"]);
 }
 
 #[test]
@@ -1410,6 +1610,11 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
 
 #[tokio::test]
 async fn model_and_lora_routes_match_manifest_behavior() {
+    // The catalog half asserts how the catalog merges a builtin row with a lenient user override
+    // (unknown keys kept, sc-12338). A REGISTERED builtin's override is limited to author choices by
+    // design (APPREG-6: an override cannot inject locators or policy), so that merge is exercised on
+    // an unregistered builtin row. The job half needs a native route, which only a registered id
+    // has, so it runs the registered z_image (a guidance model: the client negative prompt applies).
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
@@ -1429,15 +1634,22 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image",
+                  "name": "Z-Image (registered; row content is not authority)",
+                  "family": "z-image",
+                  "type": "image",
+                  "downloads": []
+                },
+                {
+                  "id": "catalog_route_fixture",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
                   "adapter": "z_image_diffusers",
                   "capabilities": ["text_to_image", "edit_image"],
                   "downloads": [
-                    { "provider": "huggingface", "repo": "owner/alternate-model", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
-                    { "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
+                    { "provider": "huggingface", "repo": "owner/alternate-model", "revision": "fedcba9876543210fedcba9876543210fedcba98", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
+                    { "provider": "huggingface", "repo": "owner/model", "revision": "0123456789abcdef0123456789abcdef01234567", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
                   ],
                   "paths": {},
                   "defaults": {},
@@ -1457,7 +1669,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "catalog_route_fixture",
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
@@ -1508,7 +1720,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "id": "cinematic",
                   "name": "Cinematic",
                   "workflow": "text_to_image",
-                  "model": "base-model",
+                  "model": "z_image",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
                   "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -1539,7 +1751,89 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|repository, revision, selectors| {
+            if repository == "owner/model"
+                && revision == "0123456789abcdef0123456789abcdef01234567"
+                && selectors == ["*.safetensors".to_owned()]
+            {
+                vec![
+                    sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                        relative_path: "model.safetensors".into(),
+                        size_bytes: 7,
+                        sha256: format!(
+                            "sha256:{}",
+                            sceneworks_core::hashing::sha256_bytes(b"fixture")
+                        ),
+                    },
+                ]
+            } else if repository.starts_with("SceneWorks/") || repository.starts_with("Tongyi-MAI/")
+            {
+                // The job half of this test runs the REGISTERED z_image_turbo (only a registered id
+                // has a native route); answer its pinned publisher metadata offline.
+                selectors
+                    .iter()
+                    .map(|selector| {
+                        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                            relative_path: selector.replace('*', "weights.safetensors").into(),
+                            size_bytes: 7,
+                            sha256: format!(
+                                "sha256:{}",
+                                sceneworks_core::hashing::sha256_bytes(b"fixture")
+                            ),
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }));
+    let lora_bytes = std::fs::read(lora_dir.join("style.safetensors")).unwrap();
+    let lora_files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: "style.safetensors".into(),
+            size_bytes: lora_bytes.len() as u64,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(&lora_bytes)
+            ),
+        },
+    ];
+    let lora_source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "style-lora",
+        None,
+        &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+            &lora_files,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lora_claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        lora_source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        lora_files,
+    )
+    .unwrap();
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "catalog-mlx-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    sceneworks_core::contracts::WorkerCapability::Gpu,
+                    sceneworks_core::contracts::WorkerCapability::ImageGenerate,
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&[lora_claim]),
+        )
+        .unwrap();
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
@@ -1596,7 +1890,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .find(|preset| preset["id"] == "legacy_edit")
         .expect("legacy edit preset");
     assert_eq!(legacy_edit["workflow"], "edit_image");
-    assert_eq!(legacy_edit["model"], "base-model");
+    assert_eq!(legacy_edit["model"], "catalog_route_fixture");
     assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][0],
@@ -1604,7 +1898,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][1],
-        "model defaulted to base-model for legacy preset"
+        "model defaulted to catalog_route_fixture for legacy preset"
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][2],
@@ -1640,7 +1934,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city at night",
-            "model": "base-model",
+            "model": "z_image",
             // Client render settings that DIFFER from the preset's declared
             // defaults (count 2 / 1280x720 / "flat lighting") — the studio seeds
             // the form from the preset but the user can override, so these
@@ -1654,13 +1948,18 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{image_job}");
     assert_eq!(
         image_job["payload"]["prompt"],
         "city at night, cinematic lighting"
     );
     assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
-    assert!(image_job["payload"]["loras"][0]["installedPath"]
+    assert!(image_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_image_job = state
+        .jobs_store
+        .get_job(image_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_image_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1670,7 +1969,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         image_job["payload"]["loras"][0]["source"]["path"],
         "loras/style.safetensors"
     );
-    assert_eq!(image_job["payload"]["model"], "base-model");
+    assert_eq!(image_job["payload"]["model"], "z_image");
     assert_eq!(
         image_job["payload"]["modelManifestEntry"]["catalogScope"],
         "builtin"
@@ -1703,7 +2002,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city with selected lora",
-            "model": "base-model",
+            "model": "z_image",
             "count": 1,
             "width": 512,
             "height": 512,
@@ -1729,7 +2028,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         null_path_job["payload"]["loras"][0]["compatibility"]["families"][0],
         "z-image"
     );
-    assert!(null_path_job["payload"]["loras"][0]["installedPath"]
+    assert!(null_path_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_null_path_job = state
+        .jobs_store
+        .get_job(null_path_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_null_path_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1751,12 +2055,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(preset_model_job["payload"]["model"], "base-model");
+    assert_eq!(preset_model_job["payload"]["model"], "z_image");
 
     let (status, job) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/base-model/download",
+        "/api/v1/models/catalog_route_fixture/download",
         json!({ "requestedGpu": "" }),
     )
     .await;
@@ -1766,14 +2070,14 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["modelName"], "User Model");
     assert_eq!(job["payload"]["repo"], "owner/model");
     assert_eq!(job["payload"]["files"][0], "*.safetensors");
-    assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+    assert!(job["payload"].get("targetDir").is_none());
 
     // Removing a user overlay does not remove or reclassify the protected builtin. The direct
     // manifest lookup in the delete route owns this behavior independently of routing scope.
     let (status, deleted_overlay) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/base-model?permanent=true",
+        "/api/v1/models/catalog_route_fixture?permanent=true",
         Value::Null,
     )
     .await;
@@ -1787,7 +2091,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|model| model["id"] == "base-model")
+        .find(|model| model["id"] == "catalog_route_fixture")
         .expect("protected builtin remains after overlay deletion");
     assert_eq!(restored_builtin["name"], "Base Model");
     assert_eq!(restored_builtin["catalogScope"], "builtin");
@@ -1805,10 +2109,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["repo"], "owner/lora");
     assert_eq!(job["payload"]["loraId"], "imported_lora");
     assert_eq!(job["payload"]["scope"], "global");
-    assert!(job["payload"]["targetDir"]
-        .as_str()
-        .is_some_and(|value| value.ends_with("data/loras/imported_lora")
-            || value.ends_with("data\\loras\\imported_lora")));
+    assert!(job["payload"].get("targetDir").is_none());
+    assert!(job["payload"].get("manifestPath").is_none());
     assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
     assert!(job["payload"].get("sourcePath").is_none());
 
@@ -1867,10 +2169,15 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         upload_job["payload"]["manifestEntry"]["files"][0],
         "detail.safetensors"
     );
+    assert!(upload_job["payload"]["sourcePath"].is_null());
+    let stored_upload = state
+        .jobs_store
+        .get_job(upload_job["id"].as_str().unwrap())
+        .unwrap();
     let source_path = std::path::PathBuf::from(
-        upload_job["payload"]["sourcePath"]
+        stored_upload.payload["sourcePath"]
             .as_str()
-            .expect("source path"),
+            .expect("private source path"),
     );
     assert_eq!(
         std::fs::read(&source_path).expect("staged upload reads"),
@@ -1987,7 +2294,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "catalog_route_fixture",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
@@ -2165,10 +2472,10 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
     // import normalizes both halves to the dot-delimited high/low_noise convention
     // (off-convention upload names included) and persists the chosen A14B baseModel.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
     let wan_bytes = test_safetensors_bytes_with_keys(&wan_video_tensor_keys());
     let (status, job) = request_multipart_lora_pair_upload(
-        app,
+        app.clone(),
         &[
             ("name", "Wan MoE"),
             ("scope", "global"),
@@ -2198,14 +2505,32 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
         format!("{lora_id}.low_noise.safetensors")
     );
 
+    // The API must not publish either host staging path, while the worker-owned row retains both
+    // exact files to import. GET uses the same public projection as the enqueue response.
+    assert!(job["payload"].get("sourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("secondarySourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("targetDir").is_none(), "{job}");
+    assert!(job["payload"].get("manifestPath").is_none(), "{job}");
+    let job_id = job["id"].as_str().expect("job id");
+    let (get_status, public_job) =
+        request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert!(public_job["payload"].get("sourcePath").is_none());
+    assert!(public_job["payload"].get("secondarySourcePath").is_none());
+    assert!(public_job["payload"].get("targetDir").is_none());
+    assert!(public_job["payload"].get("manifestPath").is_none());
+    let worker_job = state.jobs_store.get_job(job_id).expect("worker-owned job");
+    assert!(worker_job.payload["targetDir"].is_string());
+    assert!(worker_job.payload["manifestPath"].is_string());
+
     // Both halves staged on disk; the worker renames them on import.
     let primary = std::path::PathBuf::from(
-        job["payload"]["sourcePath"]
+        worker_job.payload["sourcePath"]
             .as_str()
             .expect("primary source path"),
     );
     let secondary = std::path::PathBuf::from(
-        job["payload"]["secondarySourcePath"]
+        worker_job.payload["secondarySourcePath"]
             .as_str()
             .expect("secondary source path"),
     );
@@ -2716,6 +3041,9 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -2727,7 +3055,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "sdxl",
+                "id": "sdxl_snapshot_fixture",
                 "name": "SDXL",
                 "type": "image",
                 "family": "sdxl",
@@ -2789,7 +3117,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "sdxl");
+    assert_eq!(models[0]["id"], "sdxl_snapshot_fixture");
     assert_eq!(models[0]["installState"], "missing");
     assert_eq!(models[0]["cacheState"], "incomplete");
     assert_eq!(models[0]["repairAvailable"], true);
@@ -2804,6 +3132,9 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Chroma's model_index.json declares `feature_extractor` and `image_encoder`
     // as `[null, null]` — diffusers' sentinel for optional components the pipeline
     // doesn't use, which have no files on disk by design. The health check must
@@ -2820,7 +3151,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "chroma1_base",
+                "id": "chroma_snapshot_fixture",
                 "name": "Chroma1-Base",
                 "type": "image",
                 "family": "chroma",
@@ -2893,7 +3224,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "chroma1_base");
+    assert_eq!(models[0]["id"], "chroma_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);
@@ -2902,6 +3233,9 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
 
 #[tokio::test]
 async fn downloadable_model_catalog_treats_processor_components_as_weightless() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Qwen-Image-Edit-2511's model_index.json declares a `processor`
     // (Qwen2VLProcessor) — a transformers preprocessing wrapper that carries no
     // model weights and ships `preprocessor_config.json` instead of `config.json`.
@@ -2919,7 +3253,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "qwen_image_edit_2511",
+                "id": "qwen_edit_snapshot_fixture",
                 "name": "Qwen-Image-Edit-2511",
                 "type": "image",
                 "family": "qwen-image",
@@ -2994,7 +3328,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "qwen_image_edit_2511");
+    assert_eq!(models[0]["id"], "qwen_edit_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);
@@ -3461,14 +3795,20 @@ fn minimax_h3_manifest() -> String {
 /// shards in `present`. Files are real (not blob symlinks) so the fixture is portable; the blob-level
 /// semantics are covered by the unix-gated `variant_delete_tests`.
 #[cfg(test)]
-fn seed_minimax_partition(
+pub(crate) fn seed_minimax_partition(
     snapshot: &std::path::Path,
     tier: &str,
     partition: &str,
     present: &[&str],
 ) {
-    let dir = snapshot.join(tier).join(partition);
-    std::fs::create_dir_all(&dir).expect("partition dir creates");
+    seed_minimax_partition_dir(&snapshot.join(tier).join(partition), present);
+}
+
+/// [`seed_minimax_partition`] at an explicit component directory: the CUDA `minimax_h3` dense row's
+/// upstream `transformer/` sits at the snapshot root rather than under a tier directory.
+#[cfg(test)]
+fn seed_minimax_partition_dir(dir: &std::path::Path, present: &[&str]) {
+    std::fs::create_dir_all(dir).expect("partition dir creates");
     std::fs::write(dir.join("config.json"), "{}").expect("config writes");
     std::fs::write(
         dir.join("diffusion_pytorch_model.safetensors.index.json"),
@@ -3487,7 +3827,7 @@ fn seed_minimax_partition(
 }
 
 #[cfg(test)]
-const MINIMAX_SHARDS: [&str; 2] = [
+pub(crate) const MINIMAX_SHARDS: [&str; 2] = [
     "diffusion_pytorch_model-00001-of-00002.safetensors",
     "diffusion_pytorch_model-00002-of-00002.safetensors",
 ];
@@ -3499,10 +3839,6 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
     let snapshot =
         data_dir.join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc");
     for (dir, files) in [
-        (
-            "text_encoder",
-            vec!["config.json", "model.safetensors.index.json"],
-        ),
         ("vae", vec!["config.json"]),
         ("audio_vae", vec!["config.json"]),
         // sc-19573 — the two paths the loader opens that the catalog used to omit.
@@ -3518,6 +3854,82 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
             std::fs::write(component.join(file), "{}").expect("component file writes");
         }
     }
+    // The dense bf16 encoder is the REGISTERED row this host serves (the compiled registry, not a
+    // config-dir fixture, owns minimax_h3's downloads): an explicit file list on macOS, the whole
+    // `text_encoder/` directory off macOS.
+    for file in registered_minimax_bf16_encoder()["files"]
+        .as_array()
+        .unwrap()
+    {
+        let file = file.as_str().unwrap();
+        let paths = match file.strip_suffix("/*") {
+            Some(dir) => [
+                "config.json",
+                "model.safetensors.index.json",
+                "model.safetensors",
+            ]
+            .map(|name| snapshot.join(dir).join(name))
+            .to_vec(),
+            None => vec![snapshot.join(file)],
+        };
+        for path in paths {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("encoder dir creates");
+            std::fs::write(path, "{}").expect("encoder file writes");
+        }
+    }
+}
+
+/// `minimax_h3`'s registered dense bf16 text-encoder row as this host's catalog serves it.
+#[cfg(test)]
+fn registered_minimax_bf16_encoder() -> Value {
+    registered_entry_for_api_host("minimax_h3")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["componentId"] == "text_encoder"
+                && row["variant"] == "bf16"
+                && row["repo"] == "MiniMaxAI/MiniMax-H3"
+        })
+        .expect("the registered bf16 encoder row for this host")
+        .clone()
+}
+
+/// `model`'s REGISTERED `tier` primary as this host's catalog serves it (macOS: the rehost's
+/// `<tier>/<partition>/`; the CUDA `minimax_h3` bf16 row: upstream `transformer/`).
+#[cfg(test)]
+fn registered_minimax_primary(model: &str, tier: &str) -> Value {
+    sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+        &registered_entry_for_api_host(model),
+        tier,
+    )
+    .unwrap_or_else(|| panic!("{model} registers a {tier} primary on this host"))
+}
+
+/// Seed `model`'s registered `tier` primary partition into this module's fixture snapshot of the
+/// repository that row names, and return the seeded component directory.
+#[cfg(test)]
+fn seed_registered_minimax_primary(
+    data_dir: &std::path::Path,
+    model: &str,
+    tier: &str,
+) -> std::path::PathBuf {
+    let row = registered_minimax_primary(model, tier);
+    let snapshot = match row["repo"].as_str() {
+        Some("SceneWorks/minimax-h3-mlx") => {
+            "models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294"
+        }
+        Some("MiniMaxAI/MiniMax-H3") => "models--MiniMaxAI--MiniMax-H3/snapshots/939557dc",
+        other => panic!("{model} {tier}: unexpected primary repository {other:?}"),
+    };
+    let dir = data_dir.join("cache/huggingface/hub").join(snapshot).join(
+        row["files"][0]
+            .as_str()
+            .and_then(|file| file.strip_suffix("/*"))
+            .expect("primary is one component directory"),
+    );
+    seed_minimax_partition_dir(&dir, &MINIMAX_SHARDS);
+    dir
 }
 
 /// Seed the PACKED per-tier text encoder (sc-19120) into the rehost snapshot. Tier-scoped, so a q4
@@ -3534,6 +3946,7 @@ fn seed_minimax_packed_text_encoder(data_dir: &std::path::Path, tier: &str) {
 
 #[tokio::test]
 async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_floor() {
+    let _env = isolate_hf_cache();
     // sc-19078 — the on-demand tier fetch, per entry and per tier. `SceneWorks/minimax-h3-mlx` is
     // 240.7 GB in total, so a tier install must pull exactly ONE TIER: q8 here is 70.6 GB of DiT
     // against 240.7 GB for the repo. The co-requisites are the weights FLOOR and must be queued
@@ -3561,7 +3974,7 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         app.clone(),
         "POST",
         "/api/v1/models/minimax_h3/download",
-        json!({ "requestedGpu": "auto", "variant": "q8" }),
+        json!({ "requestedGpu": "auto", "variant": "q8", "licenseAcknowledged": true }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -3570,8 +3983,19 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
     assert_eq!(primary["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
     assert_eq!(primary["payload"]["variant"], "q8");
     assert_eq!(primary["payload"]["files"], json!(["q8/transformer/*"]));
+    // minimax_h3 is registered, so its downloads (and their pins) come from the compiled registry,
+    // not the config-dir fixture: the tier fetch carries the registered row's own pin.
+    let registered_pin = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("minimax_h3 is registered")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["files"] == json!(["q8/transformer/*"]))
+        .expect("the registered q8 transformer row")["revision"]
+        .clone();
+    assert!(registered_pin.as_str().is_some_and(|pin| pin.len() == 40));
     assert_eq!(
-        primary["payload"]["revision"], "f22bc294f46894584645aec59a513ee411450c96",
+        primary["payload"]["revision"], registered_pin,
         "the tier fetch is pinned, never main"
     );
 
@@ -3589,10 +4013,19 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         .iter()
         .map(|job| job["payload"]["files"].to_string())
         .collect::<Vec<_>>();
+    // The registered row also declares the soft, tier-agnostic Veda predictor co-requisite, which
+    // an install queues beside the floor (the config-dir fixture never declared it).
     assert_eq!(
         download_jobs.len(),
-        7,
-        "primary + sibling partition + packed TE + four tier-agnostic floor rows: {queued:?}"
+        8,
+        "primary + sibling partition + packed TE + four tier-agnostic floor rows + the Veda \
+         predictor: {queued:?}"
+    );
+    assert!(
+        queued
+            .iter()
+            .any(|files| files.contains("veda_8nfe_600step_preview")),
+        "{queued:?}"
     );
     assert!(
         queued
@@ -3773,6 +4206,11 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
             seed_minimax_partition(&snapshot, tier, partition, &MINIMAX_SHARDS);
         }
     }
+    // Each card's bf16 primary as this host registers it (off macOS `minimax_h3`'s is upstream
+    // `transformer/`, not the rehost partition above).
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        seed_registered_minimax_primary(&data_dir, id, "bf16");
+    }
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
     let encoder = data_dir.join(
@@ -3806,10 +4244,24 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
                 if repaired { "complete" } else { "incomplete" }
             );
             if !repaired {
-                for path in [
-                    "text_encoder/config.json",
-                    "text_encoder/model.safetensors.index.json",
-                ] {
+                // The registered encoder row names its documents (macOS) or its directory (CUDA).
+                let encoder = registered_minimax_bf16_encoder();
+                let required = encoder["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|path| {
+                        path.ends_with("/*")
+                            || [
+                                "text_encoder/config.json",
+                                "text_encoder/model.safetensors.index.json",
+                            ]
+                            .contains(path)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!required.is_empty(), "{encoder}");
+                for path in required {
                     let missing = json!(format!("MiniMaxAI/MiniMax-H3/{path}"));
                     assert!(tier("bf16")["missingRequiredFiles"]
                         .as_array()
@@ -3827,27 +4279,38 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
                 app.clone(),
                 "POST",
                 "/api/v1/models/minimax_h3/download",
-                json!({"variant": "bf16"}),
+                json!({"variant": "bf16", "licenseAcknowledged": true}),
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{primary}");
-            assert_eq!(primary["payload"]["files"], json!(["bf16/transformer/*"]));
+            let registered_primary = registered_minimax_primary("minimax_h3", "bf16");
+            assert_eq!(primary["payload"]["repo"], registered_primary["repo"]);
+            assert_eq!(primary["payload"]["files"], registered_primary["files"]);
             let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
             let downloads = jobs.as_array().unwrap();
-            assert_eq!(
-                downloads.len(),
-                7,
-                "primary, sibling, encoder, and four shared components"
+            // The primary plus every co-requisite this host's registered row declares for bf16:
+            // the encoder, the four shared components, the soft Veda predictor (see the tier test
+            // above) and, where that host's row co-requires it, the sibling partition.
+            let co_requisites =
+                sceneworks_core::model_artifacts::artifact_selection::model_co_requisite_downloads_for_variant(
+                    &registered_entry_for_api_host("minimax_h3"),
+                    Some("bf16"),
+                );
+            assert_eq!(downloads.len(), 1 + co_requisites.len(), "{downloads:#?}");
+            assert!(downloads.iter().any(|job| job["payload"]["files"]
+                .to_string()
+                .contains("veda_8nfe_600step_preview")));
+            // The bf16 encoder row is the REGISTERED row's (the compiled registry, not the
+            // config-dir fixture, owns minimax_h3's downloads).
+            let registered_te = registered_minimax_bf16_encoder();
+            assert!(
+                downloads
+                    .iter()
+                    .any(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3"
+                        && job["payload"]["revision"] == registered_te["revision"]
+                        && job["payload"]["files"] == registered_te["files"]),
+                "{downloads:#?}"
             );
-            assert!(downloads
-                .iter()
-                .any(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3"
-                    && job["payload"]["revision"] == "939557dc319dd91227e30195a763f272ba7f8765"
-                    && job["payload"]["files"]
-                        == json!([
-                            "text_encoder/config.json",
-                            "text_encoder/model.safetensors.index.json"
-                        ])));
             assert!(downloads.iter().all(|job| {
                 let files = job["payload"]["files"].to_string();
                 !files.contains("q4/") && !files.contains("q8/")
@@ -3953,10 +4416,10 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     let data_dir = temp_dir.path().join("data");
     let snapshot = data_dir
         .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
-    // Both entries installed: `minimax_h3` at q4 + bf16, `minimax_h3_ref` at q4.
-    for tier in ["q4", "bf16"] {
-        seed_minimax_partition(&snapshot, tier, "transformer", &MINIMAX_SHARDS);
-    }
+    // Both entries installed: `minimax_h3` at q4 + bf16 (each at the primary this host registers),
+    // `minimax_h3_ref` at q4.
+    let deleted_partitions =
+        ["q4", "bf16"].map(|tier| seed_registered_minimax_primary(&data_dir, "minimax_h3", tier));
     seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
@@ -3976,11 +4439,8 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     assert_eq!(deleted["removedManifestEntry"], false);
 
     // The deleted entry's partitions are gone from EVERY tier…
-    for tier in ["q4", "bf16"] {
-        assert!(
-            !snapshot.join(tier).join("transformer").exists(),
-            "{tier}/transformer removed"
-        );
+    for partition in &deleted_partitions {
+        assert!(!partition.exists(), "{} removed", partition.display());
     }
     // …the sibling's partition survives, file for file…
     let sibling = snapshot.join("q4/transformer_ref");
@@ -4871,6 +5331,10 @@ async fn mmaudio_repo_rename_requires_the_exact_confined_current_snapshot() {
 
 #[tokio::test]
 async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
+    let _env = isolate_hf_cache();
+    // chatterbox_tts is registered and its compiled row pins its primary download, so the 'primary
+    // declares no revision' half cannot be authored for it. The planner rule is model-agnostic, so
+    // the same row shape is authored under an unregistered id.
     // sc-13541: a co-requisite whose weight the runtime resolves via a pinned-SHA `hf_get_pinned`
     // (chatterbox_tts's ve/perth) must have its `revision` forwarded to the download job, so the worker
     // fetches that exact commit into `snapshots/<sha>/` — where the resolver reads offline. The planner
@@ -4887,7 +5351,7 @@ async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "chatterbox_tts",
+                "id": "pinned_corequisite_fixture",
                 "name": "Chatterbox",
                 "type": "audio",
                 "family": "chatterbox",
@@ -4907,7 +5371,7 @@ async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
     let (status, primary) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/chatterbox_tts/download",
+        "/api/v1/models/pinned_corequisite_fixture/download",
         json!({ "requestedGpu": "auto" }),
     )
     .await;
@@ -6142,17 +6606,15 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     // the wan-video adapter, ONLY the validated replace_person capability (no generic T2V/I2V on
     // this control checkpoint), the diffusers-conversion download repo (NOT the raw VideoX-Fun
     // alibaba-pai repo, which does not load), an MLX block, and NO Torch GGUF quantization.
-    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/manifests/builtin.models.jsonc");
-    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
-    let model = manifest["models"]
-        .as_array()
-        .expect("models array")
-        .iter()
-        .find(|entry| entry["id"] == "wan_2_2_vace_fun_14b")
-        .expect("wan_2_2_vace_fun_14b is registered in the catalog");
+    // APPREG-4: memory facts live in the registry evidence store, not the hand-authored
+    // manifest, so read the shipped entry the way every consumer does (registry projection plus
+    // evidence), not the raw product file.
+    let model = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("wan_2_2_vace_fun_14b")
+            .expect("wan_2_2_vace_fun_14b is registered in the catalog")
+            .clone(),
+    );
+    let model = &model;
     assert_eq!(model["type"], "video");
     assert_eq!(model["family"], "wan-video");
     assert_eq!(model["adapter"], "wan_video");
@@ -6188,8 +6650,13 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     let macos = download_for("macos");
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(
+        macos["revision"],
+        "1abfb95801b7bd8f952083ebf80b93448ddb0ce4"
+    );
     let windows = download_for("windows");
     assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(windows["revision"], macos["revision"]);
     assert_eq!(
         download_for("linux")["repo"],
         "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
@@ -6213,6 +6680,83 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         model.get("quantization").is_none(),
         "native-first: no Torch GGUF quantization block"
     );
+}
+
+#[test]
+fn shipped_hugging_face_downloads_have_immutable_selected_revisions() {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_supported_model_download, selected_model_artifact_closure,
+    };
+
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("shipped model manifest");
+    let models = manifest["models"].as_array().expect("models array");
+    for model in models {
+        for download in model["downloads"].as_array().into_iter().flatten() {
+            if !is_supported_model_download(download) || download["provider"] != "huggingface" {
+                continue;
+            }
+            let revision = download["revision"].as_str().unwrap_or_default();
+            assert!(
+                revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{}/{} has no immutable publisher revision",
+                model["id"],
+                download["repo"]
+            );
+        }
+    }
+
+    for (id, platform, tier, repo, revision) in [
+        (
+            "svd",
+            "macos",
+            None,
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            "9e43909513c6714f1bc78bcb44d96e733cd242aa",
+        ),
+        (
+            "wan_2_2",
+            "windows",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            "b8fff7315c768468a5333511427288870b2e9635",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "linux",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+            "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "macos",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "windows",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("shipped model");
+        let selected = selected_model_artifact_closure(model, platform, tier);
+        let primary = selected["downloads"]
+            .as_array()
+            .expect("selected downloads")
+            .iter()
+            .find(|row| row["coRequisite"] != true)
+            .expect("selected primary");
+        assert_eq!(primary["repo"], repo, "{id}/{platform}/{tier:?}");
+        assert_eq!(primary["revision"], revision, "{id}/{platform}/{tier:?}");
+    }
 }
 
 #[test]
@@ -7810,7 +8354,8 @@ async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_r
 
     let settings = test_settings(&temp_dir);
     let output_dir = settings.data_dir.join("models/mlx/converted-1");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    pin_catalog_convert_metadata(&state);
 
     let convert_payload = |base_repo: &str, acknowledged: bool| {
         let mut payload = json!({
@@ -8450,10 +8995,9 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
         job["payload"]["linkedRelativePath"],
         json!("checkpoints/dit.safetensors")
     );
-    assert_eq!(
-        job["payload"]["targetDir"],
-        Value::Null,
-        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    assert!(
+        job["payload"].get("targetDir").is_none(),
+        "a linked import publishes no install directory: {job:?}"
     );
     let entry = &job["payload"]["manifestEntry"];
     assert_eq!(entry["source"]["provider"], json!("linked-library"));
@@ -8655,7 +9199,8 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     let config_dir = temp.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).unwrap();
     write_license_acknowledgment_catalog(&config_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
+    pin_catalog_convert_metadata(&state);
     let ack = "/api/v1/models/minimax_h3/license-acknowledgment";
     let (status, accepted) = request(app.clone(), "PUT", ack, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
@@ -8770,16 +9315,18 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     }
     let (status, _) = request(app.clone(), "PUT", ack, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
-    let path = config_dir.join("builtin.models.jsonc");
-    let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(
-        &path,
-        source.replace(
-            "https://huggingface.co/MiniMaxAI/MiniMax-H3",
-            "https://example.org/new-license",
+    // minimax_h3's terms come from the compiled registry, so they change only with a release; a
+    // config-dir edit cannot change them. Recreate the state a release leaves behind: the stored
+    // acceptance names the previous terms.
+    super::yue2_catalog::age_stored_license_acceptance(
+        &temp,
+        "minimax_h3",
+        &Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+                .expect("minimax_h3 is registered")
+                .clone(),
         ),
-    )
-    .unwrap();
+    );
     let changed = create_app(settings).unwrap();
     for (kind, id) in &jobs {
         for operation in ["retry", "duplicate"] {

@@ -1,18 +1,40 @@
-# PIPE-18 route reconciliation (SW-6931)
+# PIPE-18 route reconciliation (SW-6931, SW-F331 E1)
 
-The executable artifact is `sceneworks-core::jobs_store::generation_route_coverage` and
-its `check-generation-route-coverage` command. It joins the existing published product
-matrix to the current production routing predicates, canonical requests, native platform
-snapshots, actual bespoke selectors, and the source-identified CPU/iOS profiles. Its output
-is a temporary review/CI artifact, **not another checked-in capability matrix** or a source
-of product eligibility.
+The executable artifact is `sceneworks-core::jobs_store::generation_route_coverage` and its
+`check-generation-route-coverage` command. It joins the public product routes to the platform
+engine registries by provider, mode, conditioning and output on each backend. Its output is a
+temporary review artifact, **not a checked-in capability matrix**, a source of product
+eligibility, or a gate with a pinned digest.
 
-The old product input is `config/backend-capabilities/matrix.json` at SceneWorks
-`5a28d413dd9f579cc9607d44f252a045d025bd8e`. A test freezes its semantic model digest
-(`105abeb6caea45068044f0d4b6e6fcf8a6bcf58f003e81de7c016514fa454c82`), independently of
-source-capture digest refreshes. Regenerating a candidate export cannot silently remove an
-old positive or negative witness. A new model or axis requires an explicit baseline
-disposition. Preserve the old inventory when the legacy matrix is eventually retired.
+The two sides of the join are written independently:
+
+- **Product side (authored).** Public operations (`capabilities`, `ui.img2img`) and authored
+  conditioning carriers (`ui.controlModes`, `ui.multiReference`, `audio.conditioning`) of
+  `config/manifests/builtin.models.jsonc`; the vector providers each product names; the
+  production routing predicates (`routing/mlx.rs`, `routing/candle.rs`, which apply the authored
+  `config/manifests/registry/route-policy.json` and every bespoke worker lane) that decide whether
+  a backend routes the canonical request; and the native job arms of
+  `crates/sceneworks-worker/src/utility_dispatch.rs`. No field the core build copies out of a
+  capability dump is read on this side.
+- **Engine side.** The platform registries in
+  `config/engine-capabilities/runtime/capabilities.{mlx,candle}.json`, produced by the worker's
+  `engine_capability_facts.rs` dumper: model and video-mode mappings, registered generators with
+  their descriptor conditioning, text-LLM, audio and utility registries, and worker job arms.
+
+A routed product cell binds when the platform's worker advertises the job arm (the production
+claim gate) and either a registered engine serves it (mapped generator with the mode's
+conditioning, video mapping meeting the mode's conditioning requirements, named vector provider,
+audio registration) or a bespoke worker lane claims it. A routed cell with neither is **missing**.
+An authored public cell that no backend routes is also missing. The approved backend exception
+register (`config/manifests/registry/approved-exceptions.json`) records deliberate MLX-only cells:
+the Candle side it explains is reported under `exceptions`, never dropped, and it can never
+explain an MLX loss.
+
+On the current tree the report has 451 route cells (393 operation, 58 conditioning; 413
+registry-bound, 38 on bespoke lanes), zero missing cells and nine exception-covered Candle cells
+(the LTX-2.3 Eros withdrawal and the Krea Realtime sequencing decisions). It also carries all
+39 `JobType` lifecycles with the platforms that advertise each arm, every registry surface with
+its owner and callable entry point, model aliases, and the source-identified iOS/CPU profiles.
 
 Run from the SceneWorks root:
 
@@ -23,45 +45,33 @@ node --test scripts/check-generation-route-profiles.test.mjs
 node scripts/check-generation-route-profiles.mjs /path/to/inference-checkout
 ```
 
-The last command uses `git show` at the receipt's immutable inference revision; it checks
-source bytes and extracts the real profile assertions independently. It neither checks out
-another revision nor compiles an engine. The receipt in
-`crates/sceneworks-core/tests/fixtures/generation-route-profiles.json` names the exact source
-files/hashes, including the direct FLUX.1/FLUX.2 conditioning contracts. The iOS media-enabled
-profile has seven generators and Iris restoration; LLM-only excludes both media surfaces.
-CPU composes the same Candle media/audio catalogs as CUDA with its own LLM list and admission.
-Neither iOS registration nor a CPU/CUDA shared catalog proves device fit.
+The binary exits non-zero when any cell is missing. The profile command uses `git show` at the
+receipt's immutable inference revision; it checks source bytes and extracts the real profile
+assertions independently. It neither checks out another revision nor compiles an engine. The
+receipt in `crates/sceneworks-core/tests/fixtures/generation-route-profiles.json` names the exact
+source files/hashes. The iOS media-enabled profile has seven generators and Iris restoration;
+LLM-only excludes both media surfaces. CPU composes the same Candle media/audio catalogs as CUDA
+with its own LLM list and admission. Neither iOS registration nor a CPU/CUDA shared catalog
+proves device fit.
 
-The report retains all 38 `JobType` lifecycles and parses the actual native dispatch arms
-with `syn`, rather than accepting comments as dispatch evidence. Its product rows preserve
-both backend answers for every operation, conditioning, adapter, precision, guidance and
-preview cell; imports and training retain their separate typed rows. Registry entries retain
-provider descriptors, public consumers or direct engine disposition, and the callable bundle
-entry point. Model aliases retain their origin even when the target is absent from the media
-registry: all four Candle Qwen edit aliases remain visible, with their public eligibility
-checked separately.
+The job join parses the actual native dispatch arms with `syn`, rather than accepting comments as
+dispatch evidence. Conditioning keeps the canonical production request and distinguishes FLUX.1
+XLabs IP, PuLID/InstantID identity and structural control from VAE initialization; SenseNova
+VQA/interleave keep their concrete worker entry points and text/ordered-document outputs.
 
-Conditioning retains the canonical production request and distinguishes FLUX.1 XLabs IP,
-PuLID/InstantID identity and structural control from VAE initialization. Direct FLUX.2-dev
-MLX img2img has its own source witness; base FLUX.1 img2img remains explicitly unsupported.
-SenseNova VQA/interleave keep their concrete worker entry points and text/ordered-document
-outputs. Output variants retain Qwen 2.1 straight-alpha RGBA, prompt/count batch output, joint
-H3 AV and optional LTX AV. Vector output retains canonical sanitized SVG, derived preview and
-terminal metadata.
-
-The mutation test removes StarVector from each candidate text-LLM list while preserving the
-old product witness. It must name exactly:
+The negative control removes StarVector from both platforms' text-LLM registries in memory,
+leaving the product side untouched. It must name exactly:
 
 ```text
-mlx/starvector_1b/operation/image_to_svg
-candle/starvector_1b/operation/image_to_svg
-mlx/starvector_8b/operation/image_to_svg
-candle/starvector_8b/operation/image_to_svg
+macos/mlx/starvector_1b/operation/image_to_svg
+cuda/candle/starvector_1b/operation/image_to_svg
+macos/mlx/starvector_8b/operation/image_to_svg
+cuda/candle/starvector_8b/operation/image_to_svg
 ```
 
-Success means zero missing old supported cells, complete job lifecycle/dispatch coverage,
-reviewed dispositions for newly introduced cells, and valid source/profile provenance. This
-is metadata-only route evidence. It makes no learned-output, latency, memory-fit or AP13
-migration-acceptance claim. Future migration owners still attach the appropriate native
-receipts to these routes. Ordinary CI executes no CPU/GPU model forward for this check;
-there is no workflow dispatch, device hold or terminal measurement campaign.
+A second control removes Krea Realtime's MLX registrations: its three MLX cells become missing
+while its approved Candle exception cells stay reported, unchanged.
+
+This is metadata-only route evidence. It makes no learned-output, latency, memory-fit or AP13
+migration-acceptance claim. Ordinary CI executes no CPU/GPU model forward for this check; there
+is no workflow dispatch, device hold or terminal measurement campaign.

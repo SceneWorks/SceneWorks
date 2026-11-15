@@ -208,6 +208,7 @@ pub(crate) fn cors_layer(settings: &Settings) -> CorsLayer {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([
             Method::GET,
+            Method::HEAD,
             Method::POST,
             Method::PUT,
             Method::PATCH,
@@ -287,13 +288,13 @@ fn is_loopback_peer(peer: Option<SocketAddr>) -> bool {
 /// media ticket (sc-8810). Browsers cannot attach headers to element-driven requests
 /// (`<img src>`, `<video src>`, `<a download>`), so — mirroring the SSE ticket — an
 /// authenticated client mints a short-lived ticket (POST /api/v1/files/ticket) and
-/// appends it as a `?ticket=` query param. The bypass is scoped hard: GET only, and
+/// appends it as a `?ticket=` query param. The bypass is scoped hard: GET/HEAD only, and
 /// only the read-only media routes (project files, pose previews, and confined
 /// catalog thumbnails); every other
 /// route still requires the real token, and an SSE event ticket is never accepted
 /// here (separate store).
 fn media_ticket_authorized(state: &AppState, request: &Request<axum::body::Body>) -> bool {
-    if request.method() != Method::GET {
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return false;
     }
     if !is_ticketed_media_path(request.uri().path()) {
@@ -306,6 +307,7 @@ fn media_ticket_authorized(state: &AppState, request: &Request<axum::body::Body>
 }
 
 /// The exact route families a media ticket unlocks:
+/// HEAD supports the same read-only routes for media availability checks.
 ///   GET /api/v1/projects/:project_id/files/*relative_path
 ///   GET /api/v1/poses/preview/:job_id/:file_name
 ///   GET /api/v1/catalogs/:catalog_id/records/:record_id/thumbnail

@@ -70,45 +70,7 @@ const PID_GEMMA_REPO: &str = "SceneWorks/gemma-2-2b-it";
 /// their own request and do not yet thread PiD — they stay on the native VAE, mirroring the engine-side
 /// scope decisions in sc-7846/47/48 (tracked as a follow-up).
 fn pid_backbone_for(model: &str) -> Option<&'static str> {
-    match model {
-        // qwenimage (sc-7845): Qwen-Image T2I + its strict-pose control variant (both the `qwen_image`
-        // model id), every Qwen-Image-Edit variant (all → the one `qwen_image_edit` engine), Krea 2.
-        "qwen_image"
-        | "qwen_image_edit"
-        | "qwen_image_edit_2509"
-        | "qwen_image_edit_2511"
-        | "qwen_image_edit_2511_lightning"
-        | "krea_2_turbo"
-        | "krea_2_raw" => Some("qwenimage"),
-        // flux (sc-7846): FLUX.1, Boogu-Image, Chroma, and Z-Image — Z-Image is in the FLUX.1 VAE latent
-        // space (PiD's zimage tags alias the flux checkpoint), not the qwenimage space.
-        "flux_dev" | "flux_schnell" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
-        | "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "z_image_turbo" | "z_image_edit" => {
-            Some("flux")
-        }
-        // flux2 (sc-7847): FLUX.2-dev, every klein-9b variant, Lens, Ideogram 4 (packed 128-ch latent).
-        "flux2_dev"
-        | "flux2_klein_9b"
-        | "flux2_klein_9b_kv"
-        | "flux2_klein_9b_true_v2"
-        | "lens"
-        | "lens_turbo"
-        | "ideogram_4"
-        | "ideogram_4_turbo" => Some("flux2"),
-        // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE). InstantID
-        // (sc-8370/8371) composes the SDXL VAE too, so its Angles/Poses latents decode through the same
-        // `sdxl` PiD student — the engine's `InstantId::with_pid` loads that one checkpoint.
-        // Illustrious-XL (epic 10609) ships the stock SDXL VAE (scaling_factor 0.13025 — verified on
-        // the converted turnkey), so its latents decode through the same `sdxl` PiD student.
-        "sdxl"
-        | "realvisxl"
-        | "realvisxl_lightning"
-        | "kolors"
-        | "instantid_realvisxl"
-        | "illustrious_xl_v1"
-        | "illustrious_xl_v2" => Some("sdxl"),
-        _ => None,
-    }
+    sceneworks_core::portable_sources::pid_backbone_for(model)
 }
 
 /// PiD super-resolves the sampler latent by a FIXED 4× (`mlx_gen_pid` `sr_scale`, baked into every
@@ -179,17 +141,7 @@ pub(crate) fn pid_effective_dims(
 /// like `mlxQuantize` / `schedulerShift` — no top-level `ImageRequest` field, so zero contract-snapshot
 /// drift). Accepts a JSON bool or the string `"true"`.
 pub(super) fn pid_requested(request: &ImageRequest) -> bool {
-    request
-        .advanced
-        .get("usePid")
-        .map(|value| {
-            value.as_bool().unwrap_or_else(|| {
-                value
-                    .as_str()
-                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("true"))
-            })
-        })
-        .unwrap_or(false)
+    sceneworks_core::portable_sources::pid_requested(request.advanced.get("usePid"))
 }
 
 /// The `res2k` (2K-tuned) student filename for a backbone that ships one — flux + flux2 (sc-10056).
@@ -301,6 +253,37 @@ pub(super) fn resolve_pid_weights(
     let gemma_repo =
         crate::payload::trimmed_string(request.advanced.get("pidGemma")).unwrap_or(PID_GEMMA_REPO);
 
+    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let snapshot =
+            crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_checkpoint")
+                .ok_or_else(|| {
+                    crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
+                })?;
+        let gemma = crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_gemma")
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound PiD Gemma".to_owned())
+            })?;
+        let filename = filename_override.unwrap_or_else(|| {
+            pid_default_file(
+                backbone,
+                pid_output_tier(request),
+                &snapshot,
+                default_2kto4k_file,
+            )
+            .to_owned()
+        });
+        let checkpoint = snapshot.join(filename);
+        if !checkpoint.is_file() {
+            return Err(crate::WorkerError::InvalidPayload(
+                "bound PiD checkpoint is missing".to_owned(),
+            ));
+        }
+        return Ok(Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(checkpoint),
+            gemma: WeightsSource::Dir(gemma),
+        }));
+    }
+
     // Both snapshots must be cached, or fall through to the native VAE (no partial/half-loaded PiD).
     let Some(snapshot) = huggingface_snapshot_dir(data_dir, repo) else {
         return Ok(None);
@@ -343,6 +326,38 @@ mod pid_tests {
                 .as_object()
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn candle_pulid_pid_uses_frozen_decoder_and_gemma_or_refuses_missing_source() {
+        let root = tempfile::tempdir().unwrap();
+        let decoder = root.path().join("decoder");
+        let gemma = root.path().join("gemma");
+        std::fs::create_dir_all(&decoder).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+        let checkpoint = decoder.join("pid_flux_2kto4k_v1pt5.safetensors");
+        std::fs::write(&checkpoint, b"fixture").unwrap();
+        let input = request(
+            "pulid_flux_dev",
+            json!({
+                "usePid": true,
+                "__portableAuxPaths": {"pid_checkpoint": decoder, "pid_gemma": gemma}
+            }),
+        );
+        let resolved = resolve_pid_weights(&input, root.path(), "pulid_flux_dev")
+            .unwrap()
+            .expect("candle PuLID PiD must resolve");
+        assert!(matches!(resolved.checkpoint, WeightsSource::File(path) if path == checkpoint));
+        assert!(matches!(resolved.gemma, WeightsSource::Dir(path) if path == gemma));
+
+        let missing = request(
+            "pulid_flux_dev",
+            json!({
+                "usePid": true,
+                "__portableAuxPaths": {"pid_checkpoint": decoder}
+            }),
+        );
+        assert!(resolve_pid_weights(&missing, root.path(), "pulid_flux_dev").is_err());
     }
 
     #[test]

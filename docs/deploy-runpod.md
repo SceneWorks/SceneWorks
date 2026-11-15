@@ -83,6 +83,12 @@ The template will refer to the secret without containing its value:
 {{ RUNPOD_SECRET_sceneworks_access_token }}
 ```
 
+The API normally creates a private worker-source proof master on the persistent
+volume. To pre-provision one, generate 32 random bytes as 64 hex characters,
+store the value in a separate RunPod Secret named `sceneworks_worker_proof_master`,
+and add `SCENEWORKS_WORKER_PROOF_MASTER={{ RUNPOD_SECRET_sceneworks_worker_proof_master }}`
+to your private template. Keep the value out of the checked-in template.
+
 If you plan to use a gated Hugging Face model:
 
 1. Accept the model's license on Hugging Face.
@@ -109,6 +115,7 @@ SceneWorks uses `/workspace` for durable data:
 | --- | --- |
 | `/workspace/data` | Projects, generated assets, imported models, and application data |
 | `/workspace/config` | SceneWorks configuration and user manifests |
+| `/workspace/credentials` | Service credentials and the private `0600` worker-source proof master |
 | `/workspace/cache/huggingface` | Downloaded Hugging Face model files |
 
 The live job queue is intentionally stored on the Pod's local disk. Projects,
@@ -305,10 +312,20 @@ that bypasses RunPod's HTTPS proxy.
 | `SCENEWORKS_VOLUME` | No | `/workspace` | Base for durable SceneWorks data, config, and model-cache directories. |
 | `SCENEWORKS_API_PORT` | No | `8010` | Internal UI/API port. If changed, expose the same HTTP port in RunPod. |
 | `SCENEWORKS_CORS_ORIGINS` | Only for a different-origin frontend | built-in development origins | Exact allowed origins. Not needed for the default same-origin embedded UI. |
+| `SCENEWORKS_WORKER_PROOF_MASTER` | No | generated in `/workspace/credentials` | Optional 64-hex worker-source proof master. Supply it through a RunPod Secret if you need a pre-provisioned value; never put the value in the template. |
 
 The combined image intentionally binds to `0.0.0.0` so RunPod's proxy can reach
 it. It refuses to start without a nonblank access token.
 `SCENEWORKS_CORS_ORIGINS` is not needed for the default embedded UI.
+The API creates or verifies a `0600` proof master at
+`/workspace/credentials/worker-source-proof-master`. The GPU and utility workers
+share this durable credentials directory, while the supervisor gives each child
+only its derived key. If you supply `SCENEWORKS_WORKER_PROOF_MASTER`, add it as a
+RunPod Secret reference to the private template's environment. A standalone
+worker without this shared directory must receive its own 64-hex
+`SCENEWORKS_WORKER_PROOF_KEY`, derived as HMAC-SHA256 of its exact worker ID using
+the 64-hex master **text** as the key. Dynamic local model paths fail closed when
+an eligible worker cannot authenticate and prove their source bytes.
 
 ## Supported GPU architectures
 
@@ -509,15 +526,51 @@ gh workflow run publish-runpod.yml --ref "$candidate_ref" -f "image_tag=$candida
 docker buildx imagetools inspect "ghcr.io/sceneworks/sceneworks-runpod:$candidate_tag"
 ```
 
-The workflow builds and loads both the `linux/amd64` RunPod candidate and exact
-`rust-worker-candle` stage into the hosted runner. One Buildx builder shares the
-compiled CUDA dependency stages. Before any publication, the real API and
-standalone worker pass CPU-only registration, bind-write, and clean-shutdown
-checks for both the image default identity and an explicit UID/GID override.
-The final RunPod publication reuses those cached stages; manual runs leave
-release/latest tags unchanged. The workflow has no nonpublishing mode. These
-hosted checks make no GPU claim; actual CUDA/provider acceptance still requires
-the run below.
+The workflow reads the digest-pinned prebuilt Candle worker's OCI configuration
+from the registry with Buildx, without a local Docker daemon or layer downloads,
+and checks its exact source revision against the current worker inputs before
+building. The combined `linux/amd64`
+RunPod candidate reuses that worker and rebuilds the API/web layer. Before any
+publication, the prebuilt worker and the staged combined image pass CPU-only
+registration, bind-write, and clean-shutdown checks for both the image default
+identity and an explicit UID/GID override. A changed worker input requires a
+fresh validated prebuilt image and Dockerfile digest; the workflow fails closed
+until then. Manual runs leave release/latest tags unchanged. The workflow has
+no nonpublishing mode. These hosted checks make no GPU claim; actual CUDA/provider
+acceptance still requires the run below.
+
+The historical first pinned base was
+`ghcr.io/sceneworks/sceneworks-runpod:candle-prebuilt-6435067` at digest
+`sha256:2ff487bd5aefdf294443ece9ea25e6b55c1cb8c349964af5db4d11990e492fe8`
+(the linux/amd64 image manifest within index
+`sha256:c9218ef4252ecdeffeef2608c1ed94a849fc91746902ad3d6cb62b9a0f53cf81`).
+It retains the exact worker from source `6435067bd5c57aab4e7f0e8722bd53ea6c39ba92`;
+the original Docker build checked its sm_80/sm_90/sm_120 cubins and sm_120 PTX
+before producing the staged image.
+
+The current `0.11.1` base was built by
+[Actions run 42498547124](https://github.com/SceneWorks/SceneWorks/actions/runs/42498547124)
+from source `703d8d884056de9752a2d415d408cc5209483ce9`, after the version bump.
+Its full source tag is
+`ghcr.io/sceneworks/sceneworks-runpod:candle-prebuilt-703d8d884056de9752a2d415d408cc5209483ce9`.
+The Dockerfile pins its `linux/amd64` image manifest
+`sha256:36e0a3fc5bf6a25eb4eaead33e3d07cfb3c10c1db969ecf5955be9737d664d44`
+within OCI index
+`sha256:70a68a018893e8d91ef1c45a61921ef97f49af19e9e68ef863b8fc456aea69ff`.
+The build passed the same sm_80/sm_90/sm_120 cubin and sm_120 PTX checks. The
+source guard includes version metadata, so a version bump also requires a fresh
+worker when it changes those inputs. Moving a human-readable registry tag cannot
+change the digest-pinned release build. Registry metadata inspection does not
+replace the publication workflow's image pulls and CPU startup checks.
+
+When worker inputs change, first merge the reviewed source to `release/next`,
+then dispatch `build-runpod-candle-base.yml` on that ref. Its source build runs
+the same embedded CUDA architecture check and publishes a worker image tagged
+with the full source SHA. Read the resulting immutable `linux/amd64` image
+manifest digest (rather than an attestation-bearing index), update
+`RUNPOD_PREBUILT_CANDLE_IMAGE` in `docker/rust.Dockerfile` through a reviewed PR,
+and run `node scripts/check-runpod-prebuilt-inputs.mjs`. The release publication
+workflow runs that check again against the exact tag and refuses a stale base.
 
 Record the source revision and registry digest and deploy that exact candidate
 with the normal token secret, `/workspace` network mount, and port `8010/http`.

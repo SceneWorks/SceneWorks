@@ -1075,8 +1075,9 @@ pub(super) fn pulid_flux_context(
 
 /// The `candle:pulid_flux` arm. Unlike every other Candle arm this one never touches the provider
 /// registry: `candle-gen-pulid` registers no `Generator` at all, and the worker loads it as
-/// `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` — so that is the load path measured
-/// here (E4). The memory contract is likewise path-shaped rather than spec-shaped
+/// `PulidFlux::load_with_memory_context_spec(&PulidFluxPaths, ctx, &spec)` after compiling its
+/// render plan against that spec (SW-6936) — so that is the load path measured here (E4). The
+/// memory contract is likewise path-shaped rather than spec-shaped
 /// (`memory_strategy::provider_contract(&paths)`).
 pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
     use runtime_cuda::providers::pulid::{memory_strategy as pulid_memory, PulidFlux};
@@ -1183,16 +1184,40 @@ pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
         hardware_bytes,
         1,
     );
+    // The production route (`pulid_candle.rs`, SW-6936): compile the render plan against the exact
+    // load contract BEFORE any weights open, then load under that contract with the admitted
+    // context and render from the plan. The planned generate refuses a context that differs.
+    let reference = pulid_reference_image()?;
+    let generation = pulid_flux_generation_request(width, height);
+    let mut spec = runtime_cuda::gen_core::LoadSpec::new(
+        runtime_cuda::gen_core::WeightsSource::Dir(binding.paths.flux_base.clone()),
+    )
+    .with_adapters(binding.paths.adapters.clone());
+    spec.identity = Some(runtime_cuda::gen_core::IdentityWeights {
+        encoder: Some(runtime_cuda::gen_core::WeightsSource::File(
+            binding.paths.pulid_weights.clone(),
+        )),
+        eva: Some(runtime_cuda::gen_core::WeightsSource::File(
+            binding.paths.eva_weights.clone(),
+        )),
+        face_dir: Some(runtime_cuda::gen_core::WeightsSource::Dir(
+            binding.paths.face_dir.clone(),
+        )),
+    });
+    let plan = runtime_cuda::providers::pulid::pulid_flux::compile_pulid_plan(
+        &binding.paths,
+        &spec,
+        &generation,
+        &reference,
+    )
+    .map_err(|error| format!("pulid_flux pre-load render plan refused: {error}"))?;
+
     let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
-    // The production load path: the bespoke provider, admitted at load with the exact context it
-    // will then be asked to honour. `generate_with_memory_context` refuses a context that differs.
-    let model = PulidFlux::load_with_memory_context(&binding.paths, context.clone())
+    let model = PulidFlux::load_with_memory_context_spec(&binding.paths, context.clone(), &spec)
         .map_err(|error| format!("load real pulid_flux {} provider: {error}", binding.tier))?;
     vram.end_load(load_sample);
 
-    let reference = pulid_reference_image()?;
-    let generation = pulid_flux_generation_request(width, height);
     let generation_sample = vram.phase();
     let mut phase_sample = Some(vram.phase());
     let mut phase = MemoryPhase::Conditioning;
@@ -1202,8 +1227,12 @@ pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
     // No `MemoryRequestScope` exists on this route — the provider admits at load rather than
     // opening a per-request scope — so the phase boundaries are driven by the progress stream
     // alone, exactly as the MLX image arms drive theirs.
-    let result =
-        model.generate_with_memory_context(&context, &generation, &reference, &mut |progress| {
+    let result = model.generate_with_memory_context_planned(
+        &context,
+        &generation,
+        &reference,
+        &plan,
+        &mut |progress| {
             let boundary = match progress {
                 Progress::Loading(runtime_cuda::gen_core::LoadPhase::Renderer) => {
                     protocol::ReferenceBoundary::RendererLoad
@@ -1224,7 +1253,8 @@ pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
             }
             phase = memory_phase(next);
             phase_sample = Some(vram.phase());
-        });
+        },
+    );
     if let Some(sample) = phase_sample.take() {
         let terminal_peak_gb = vram.end_observed(sample);
         match phase {

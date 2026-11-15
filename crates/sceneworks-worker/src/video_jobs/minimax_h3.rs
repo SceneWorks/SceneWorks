@@ -2143,16 +2143,42 @@ fn resolve_imported_minimax_h3_dit_with_check(
         ));
     }
     let entry = &request.model_manifest_entry;
-    let store =
-        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
-    let source_lease = store
-        .lease_source(&checkpoint_id)
-        .map_err(|e| refuse("source-in-use", e.to_string()))?;
-    let resolved = store
-        .resolve_with_check(&checkpoint_id, check)
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    let assembly = sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
-        .map_err(|reason| refuse("ambiguous-component", reason))?;
+    // A portable binding carries the API's trusted semantic plan and exact layer bytes in a
+    // private attempt lease. Its original checkpoint id may embed a root id from another host,
+    // so resolving it against this worker's plan store would reject identical registered bytes.
+    // Unbound jobs retain the local store lease and its existing source-drift checks.
+    let (resolved, source_lease) = if let Some(verified) = &settings.verified_plan_layers {
+        (
+            verified
+                .resolve_checkpoint(&checkpoint_id, check)
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
+            None,
+        )
+    } else {
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        let source_lease = store
+            .lease_source(&checkpoint_id)
+            .map_err(|e| refuse("source-in-use", e.to_string()))?;
+        let resolved = store
+            .resolve_with_check(&checkpoint_id, check)
+            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        (resolved, Some(source_lease))
+    };
+    // The stamped plan id belongs to the API host's physical import. The portable guard already
+    // bound this server-owned entry to the semantic plan and exact layer bytes, and the worker's
+    // reconstructed plan deliberately has a local synthetic id. Omit only that physical id from
+    // the existing H3 verifier; it still checks the semantic digest, immutable declaration,
+    // assembly/partition, and pruning against the verified plan and source inventory.
+    let mut portable_entry = entry.clone();
+    if settings.verified_plan_layers.is_some() {
+        if let Some(Value::Object(import_plan)) = portable_entry.get_mut("importPlan") {
+            import_plan.remove("planId");
+        }
+    }
+    let assembly =
+        sceneworks_core::minimax_h3_import::verify_entry_assembly(&portable_entry, &resolved.plan)
+            .map_err(|reason| refuse("ambiguous-component", reason))?;
     let pins = resolved
         .layers
         .iter()
@@ -2381,14 +2407,33 @@ fn resolve_imported_minimax_h3_dit_with_check(
         directory.clone(),
         planned,
     )
-    .map_err(|e| refuse("source-drift", e))?
-    .with_leases(source_lease, derivative);
+    .map_err(|e| refuse("source-drift", e))?;
+    let load_authority = if let Some(verified) = &settings.verified_plan_layers {
+        load_authority.with_portable_lease(verified.lease(), derivative)
+    } else {
+        load_authority.with_leases(
+            source_lease.expect("unbound H3 import holds its local source lease"),
+            derivative,
+        )
+    };
     check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
     Ok(ImportedMiniMaxH3Dit {
         load_authority,
         normalization_cache_outcome,
         semantic_digest: resolved.plan.semantic_digest().ok(),
-        plan_id: resolved.plan.plan_id.clone(),
+        // Report the server-owned import id, not the synthetic worker reconstruction id. The
+        // semantic digest remains the cross-host byte/plan identity used for admission.
+        plan_id: if settings.verified_plan_layers.is_some() {
+            entry
+                .get("importPlan")
+                .and_then(Value::as_object)
+                .and_then(|plan| plan.get("planId"))
+                .and_then(Value::as_str)
+                .unwrap_or(&resolved.plan.plan_id)
+                .to_owned()
+        } else {
+            resolved.plan.plan_id.clone()
+        },
         checkpoint_id,
         transformer_dir: directory,
         partition: assembly.partition,

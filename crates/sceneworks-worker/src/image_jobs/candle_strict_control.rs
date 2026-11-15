@@ -5,7 +5,7 @@ use super::conditioning::stage_likeness;
 use super::events::consume_gen_events;
 use super::resolve_seed;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_gen_stream;
+use super::stream::start_gen_stream_with_cancel;
 use super::strict_control::ensure_depth_estimator_dir;
 use super::strict_control::preprocess_control_entry;
 use super::strict_control::requested_control_kind;
@@ -24,6 +24,7 @@ use crate::JsonObject;
 use crate::Path;
 use crate::Settings;
 use crate::Value;
+use crate::WorkerError;
 use crate::WorkerResult;
 
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the
@@ -121,15 +122,43 @@ pub(super) trait CandleStrictControl: Send + 'static {
     /// and fails on exactly that, on every platform, because both candle CI lanes are dispatch-only. An
     /// impl whose upstream request has no `preview` field yet binds `_preview`; its file is still swept,
     /// so adding the field upstream without wiring it here is caught the same way.
+    ///
+    /// `plan` is the render plan [`compile_one_before_load`](Self::compile_one_before_load) compiled for
+    /// this exact `control` before the model loaded: `Some` for every pose of a lane whose
+    /// [`requires_preload_plan`](Self::requires_preload_plan) is true, `None` for every other lane.
+    #[allow(clippy::too_many_arguments)]
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
+        plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image>;
+
+    /// Whether this lane compiles a source-bound render plan for every preprocessed control map before
+    /// [`load`](Self::load) opens any weights (SW-6936). The driver then preprocesses the whole pose set
+    /// up front, so a request the provider would refuse fails before the load instead of after it.
+    fn requires_preload_plan(&self) -> bool {
+        false
+    }
+
+    /// Compile one pose's render plan without weights. Called only when
+    /// [`requires_preload_plan`](Self::requires_preload_plan) is true; a lane that opts in must
+    /// override it.
+    fn compile_one_before_load(
+        &self,
+        _control: &Image,
+        _seed: u64,
+        _cancel: &CancelFlag,
+    ) -> WorkerResult<gen_core::RenderPlan> {
+        Err(WorkerError::Engine(format!(
+            "{} declares a pre-load render plan but has no planner",
+            self.engine_label()
+        )))
+    }
 }
 
 /// The shared async preamble + per-pose streaming driver for a candle strict-control lane (sc-8304).
@@ -240,11 +269,49 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     let engine_label = provider.engine_label();
     let stream_tag = provider.stream_tag();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_gen_stream_with_cancel(
         job.id.clone(),
         stream_tag,
         0,
-        move || {
+        move |planning_cancel| {
+            // A planned lane preprocesses every control map and compiles its source-bound plan before
+            // `load` opens any weights, so a request the provider refuses fails here, pre-load.
+            let planned = if provider.requires_preload_plan() {
+                let planned = poses
+                    .iter()
+                    .map(|pose| {
+                        if planning_cancel.is_cancelled() {
+                            return Err(WorkerError::Canceled(
+                                "strict-control generation canceled while planning".into(),
+                            ));
+                        }
+                        let control = preprocess_control_entry(
+                            &control_kind,
+                            user_control.as_ref(),
+                            Some(pose),
+                            control_source.as_ref(),
+                            width,
+                            height,
+                            stickwidth,
+                            depth_weights_dir.as_deref(),
+                        )?;
+                        let plan = provider.compile_one_before_load(
+                            &control,
+                            seed as u64,
+                            planning_cancel,
+                        )?;
+                        Ok((control, plan))
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?;
+                if planning_cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(
+                        "strict-control generation canceled before load".into(),
+                    ));
+                }
+                Some(planned)
+            } else {
+                None
+            };
             let model = provider.load()?;
             // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
             let scorer = match (&face_stack_dir, &likeness_source) {
@@ -253,28 +320,65 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 }
                 _ => None,
             };
-            Ok((provider, model, poses, scorer))
+            Ok((
+                provider,
+                model,
+                poses,
+                planned,
+                scorer,
+                user_control,
+                control_source,
+                depth_weights_dir,
+                control_kind,
+            ))
         },
-        move |(provider, model, poses, scorer), tx, cancel| {
+        move |(
+            provider,
+            model,
+            poses,
+            planned,
+            scorer,
+            user_control,
+            control_source,
+            depth_weights_dir,
+            control_kind,
+        ),
+              tx,
+              cancel| {
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
+            drive_gen_items_scored(tx, poses, move |index, pose, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
                 // Pose = the same `draw_wholebody` skeleton (byte-preserved); canny/depth derive from the
-                // threaded source. A user-supplied control map short-circuits for any kind.
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
+                // threaded source. A user-supplied control map short-circuits for any kind. A planned
+                // lane reuses the exact map its plan was compiled from.
+                let unplanned_control;
+                let (control, render_plan) = match planned.as_ref() {
+                    Some(planned) => {
+                        let (control, plan) = planned.get(index).ok_or_else(|| {
+                            WorkerError::Engine(format!(
+                                "{engine_label}: no pre-load render plan for pose {index}"
+                            ))
+                        })?;
+                        (control, Some(plan))
+                    }
+                    None => {
+                        unplanned_control = preprocess_control_entry(
+                            &control_kind,
+                            user_control,
+                            Some(&pose),
+                            control_source,
+                            width,
+                            height,
+                            stickwidth,
+                            depth_weights_dir,
+                        )?;
+                        (&unplanned_control, None)
+                    }
+                };
                 // The job's live per-image preview sink, handed straight to the provider's bespoke request
                 // (epic 16948, sc-16962). `drive_gen_items_scored` built it with `preview_sink_for`, so a
                 // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
@@ -282,7 +386,8 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 // Krea control lane shipped an inert `Default::default()` sink.
                 let out = match provider.generate_one(
                     &model,
-                    &control,
+                    control,
+                    render_plan,
                     seed as u64,
                     &cancel,
                     &preview,
