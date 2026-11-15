@@ -33,7 +33,7 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
-import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
+import { iterateBatch, leadingResolutionTemplate, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
   evaluateModelDimensions,
   dimensionConstraintMessage,
@@ -2673,8 +2673,8 @@ export function ImageStudio() {
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   let batchDimensionAdvice = null;
   if (uiOnlyDimensionAdvice && batchMode && batchTotal > 0) {
-    for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-      const { resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+    for (const { prompt: directive } of iterateBatch(batchPrompts.map(leadingResolutionTemplate), batchVariables)) {
+      const { resolution: itemResolution } = parsePromptResolution(directive, resolutionOptions);
       const evaluation = evaluateModelDimensions({
         model: selectedModel,
         resolution: `${itemResolution?.width ?? width}x${itemResolution?.height ?? height}`,

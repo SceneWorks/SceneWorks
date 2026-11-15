@@ -1490,13 +1490,13 @@ fn an_unrelated_object_assign_is_not_an_invisible_advanced_write() {
 #[test]
 #[should_panic(expected = "builds a SECOND `advanced` map")]
 fn a_second_map_inside_a_declared_builder_is_refused() {
-    // Shaped like `DocumentStudio.submit`: the registered `AssignedObject` initializer, plus a
+    // Shaped like `buildInterleaveAdvanced`: the registered `AssignedObject` initializer, plus a
     // nested helper with its own literal that the arm never reads. Verified against the real lint:
-    // inserting this into the real `submit` left 27/27 green before this refusal existed.
+    // inserting this into the real builder left 27/27 green before this refusal existed.
     emitted_keys(
         builder_for(AdvancedKeySource::InterleaveBuilder),
         r#"
-async function submit(event) {
+function buildInterleaveAdvanced(trimmedSystem, sourceAssetIds, referenceGuidance) {
   const advanced = {};
   advanced.systemMessage = trimmedSystem;
   advanced.imageGuidanceScale = referenceGuidance;

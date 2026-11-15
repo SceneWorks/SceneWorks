@@ -128,6 +128,15 @@ function modelSupportsInterleave(model) {
   return Array.isArray(model?.capabilities) && model.capabilities.includes("interleave");
 }
 
+function buildInterleaveAdvanced(trimmedSystem, sourceAssetIds, referenceGuidance) {
+  const advanced = {};
+  if (trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE) {
+    advanced.systemMessage = trimmedSystem;
+  }
+  if (sourceAssetIds.length > 0) advanced.imageGuidanceScale = referenceGuidance;
+  return advanced;
+}
+
 
 function documentSegments(job) {
   const segments = job.result?.segments;
@@ -216,11 +225,6 @@ export function DocumentStudio() {
   const [requestWidth, requestHeight] = resolution.split("x").map(Number);
   const sourceAssetIds = storyboardFrames.map((frame) => frame.assetId).filter(Boolean);
   const trimmedSystem = systemMessage.trim();
-  const advanced = {};
-  if (trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE) {
-    advanced.systemMessage = trimmedSystem;
-  }
-  if (sourceAssetIds.length > 0) advanced.imageGuidanceScale = referenceGuidance;
   const portableDraft = {
     prompt: prompt.trim(),
     model: model || undefined,
@@ -228,7 +232,7 @@ export function DocumentStudio() {
     width: requestWidth,
     height: requestHeight,
     sourceAssetIds,
-    advanced,
+    advanced: buildInterleaveAdvanced(trimmedSystem, sourceAssetIds, referenceGuidance),
   };
   const portableFeedback = usePortableFeedback("interleave", portableDraft, selectedModel, Boolean(selectedModel && prompt.trim()));
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
