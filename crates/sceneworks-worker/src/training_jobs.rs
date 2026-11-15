@@ -4717,12 +4717,12 @@ mod tests {
                     .unwrap_err();
                     assert_eq!(shape.to_string(), submission.to_string(), "{field}");
                     let worker = validate_training_target_config(&plan).unwrap_err();
-                    // Generic type refusals precede registration; MOSS-specific checks follow it.
-                    // Neither-backend builds still exercise every pure field-shape assertion.
+                    // Generic type and MOSS field-shape refusals both precede registration.
+                    // Neither-backend builds must preserve the same field refusal.
                     let expected = early_worker_refusal.unwrap_or(field);
                     assert!(
                         matches!(&worker, WorkerError::InvalidPayload(message) if
-                            if native_runtime { message.contains(expected) } else { message == &unavailable }),
+                            message.contains(expected)),
                         "{field}: worker={worker:?}, expected={expected}"
                     );
                 }
