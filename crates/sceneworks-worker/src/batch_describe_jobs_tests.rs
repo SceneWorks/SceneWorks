@@ -196,6 +196,20 @@ fn assert_pose_is_written_last(contract: &str) {
     assert!(at("environment") < at("pose"), "pose is written last");
 }
 
+/// The Qwen3.8 27B describer is a Vision Captioner-class describer: the same editable instruction
+/// and the same slot-style `[OUTPUT]` contract (pose as named slots, written last), never
+/// JoyCaption's plain-text one.
+#[test]
+fn the_qwen38_describer_uses_the_vision_captioner_prompt_and_slot_contract() {
+    assert_eq!(DescribeModel::Qwen38.output_section(), "OUTPUT");
+    let (qwen38, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    let (joy, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
+    assert_eq!(qwen38, vision);
+    assert_ne!(qwen38.output_contract, joy.output_contract);
+    assert_pose_is_written_last(&qwen38.output_contract);
+}
+
 #[test]
 fn both_contracts_take_precedence_over_an_old_preset_about_pose() {
     for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
@@ -798,6 +812,7 @@ fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others
             Some(" fancyfeast/llama-joycaption-beta-one-hf-llava "),
             DescribeModel::JoyCaption,
         ),
+        (Some(QWEN38_27B_DESCRIBER_REPO), DescribeModel::Qwen38),
     ] {
         assert_eq!(
             DescribeModel::from_payload(model).unwrap(),
@@ -1440,6 +1455,19 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     other_model["model"] = json!("someone/other-vlm");
     refuse(other_model, "does not support model");
 
+    // SW-7119: only the Qwen3.8 27B describer has tiers, and an unknown tier is refused.
+    let mut unknown_tier = base.clone();
+    unknown_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    unknown_tier["variant"] = json!("q2");
+    refuse(unknown_tier, "Unsupported describe tier");
+    let mut tier_on_the_8b = base.clone();
+    tier_on_the_8b["variant"] = json!("q4");
+    refuse(tier_on_the_8b, "not available for this model");
+    let mut numeric_tier = base.clone();
+    numeric_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    numeric_tier["variant"] = json!(8);
+    refuse(numeric_tier, "must be a string");
+
     let mut outside = base.clone();
     outside["items"] = json!([{
         "itemId": "item_1",
@@ -1464,6 +1492,673 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
 // ── Parse retries (SW-7083) ───────────────────────────────────────────────────────────────────
 
 /// The payload with only item_1 (12x8), for `model`.
+#[test]
+fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = Stage {
+        settings: test_settings(dir.path()),
+        dataset_root: dir.path().join("datasets").join("ds-1"),
+        _dir: dir,
+    };
+    let parse = |tier: Option<&str>| {
+        let mut payload = payload(&stage, None);
+        payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+        if let Some(tier) = tier {
+            payload["variant"] = json!(tier);
+        }
+        parse_batch_describe_request(&stage.settings, payload.as_object().expect("object"))
+            .expect("accepted")
+    };
+    let default_tier = parse(None);
+    assert_eq!(default_tier.model, DescribeModel::Qwen38);
+    assert_eq!(default_tier.tier, Some("q4"));
+    assert_eq!(
+        default_tier.prompt.instruction,
+        default_describe_instruction(DescribeModel::VisionCaptioner),
+        "the 27B describes with the Vision Captioner's full instruction"
+    );
+    let q8 = parse(Some("q8"));
+    let result = batch_describe_result(&q8, &[], false);
+    assert_eq!(result["model"], QWEN38_27B_DESCRIBER_REPO);
+    assert_eq!(result["variant"], "q8");
+}
+
+/// The pinned snapshot the CUDA smoke checks for each tier comes from the shipped catalog's rows:
+/// the engine's re-host `<tier>/` folder for q4 and q8, the upstream repository's root for bf16.
+/// The production resolver lands on exactly that folder when it is the cached snapshot.
+#[test]
+fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        QWEN38_27B_DESCRIBER_MODEL_ID, QWEN38_27B_DESCRIBER_TIERS,
+    };
+    let entry = crate::test_env::shipped_catalog_entry(QWEN38_27B_DESCRIBER_MODEL_ID);
+    let is_revision =
+        |value: &str| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    for rehost in [
+        QWEN38_27B_DESCRIBER_CANDLE_REPO,
+        QWEN38_27B_DESCRIBER_MLX_REPO,
+    ] {
+        for tier in ["q4", "q8"] {
+            let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("quantised row");
+            assert_eq!(pinned.repo, rehost);
+            assert!(is_revision(&pinned.revision), "{rehost} {tier}: {pinned:?}");
+            assert_eq!(
+                pinned.relative_dir,
+                Path::new(&format!("models--{}", rehost.replace('/', "--")))
+                    .join("snapshots")
+                    .join(&pinned.revision)
+                    .join(tier)
+            );
+        }
+        // Full precision is the upstream repository on every lane, at its root.
+        let bf16 = qwen38_pinned_snapshot(&entry, "bf16", rehost).expect("bf16 row");
+        assert_eq!(bf16.repo, QWEN38_27B_DESCRIBER_REPO);
+        assert!(is_revision(&bf16.revision), "{bf16:?}");
+        assert_eq!(
+            bf16.relative_dir,
+            Path::new("models--huihui-ai--Huihui-Qwen3.8-27B-abliterated")
+                .join("snapshots")
+                .join(&bf16.revision)
+        );
+        assert_eq!(qwen38_pinned_snapshot(&entry, "q2", rehost), None);
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    for tier in QWEN38_27B_DESCRIBER_TIERS {
+        let pinned = qwen38_pinned_snapshot(&entry, tier, rehost).expect("pinned row");
+        let snapshot = hf_cache
+            .path()
+            .join(format!("models--{}", pinned.repo.replace('/', "--")))
+            .join("snapshots")
+            .join(&pinned.revision);
+        stage_tier_files(&snapshot, &pinned.repo, tier);
+        let resolved = qwen38_describer_weights_dir(&settings, tier).expect("installed");
+        assert!(
+            resolved.ends_with(&pinned.relative_dir),
+            "{tier} resolved to {}",
+            resolved.display()
+        );
+    }
+}
+
+/// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is
+/// the upstream snapshot. A tier counts as installed only when every file its catalog row pins is
+/// present: a partial download (some of them, as a cancelled download leaves) is refused by name.
+#[test]
+fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost_repo = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let snapshot = |repo: &str, revision: &str| {
+        hf_cache
+            .path()
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+    };
+    let rehost = snapshot(rehost_repo, "aaa111");
+    let upstream = snapshot(QWEN38_27B_DESCRIBER_REPO, "bbb222");
+    stage_tier_files(&rehost, rehost_repo, "q4");
+    // q8 holds only its config, as a download cancelled after its small files leaves it.
+    std::fs::create_dir_all(rehost.join("q8")).expect("q8 dir");
+    std::fs::write(rehost.join("q8").join("config.json"), b"{}").expect("q8 config");
+    stage_tier_files(&upstream, QWEN38_27B_DESCRIBER_REPO, "bf16");
+
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    let resolved = |tier: &str| qwen38_describer_weights_dir(&settings, tier);
+    let same = |left: &Path, right: &Path| {
+        left.canonicalize().expect("left exists") == right.canonicalize().expect("right exists")
+    };
+    assert!(same(
+        &resolved("q4").expect("q4 installed"),
+        &rehost.join("q4")
+    ));
+    assert!(same(&resolved("bf16").expect("bf16 installed"), &upstream));
+    let error = resolved("q8").expect_err("q8 has only some of its files");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(error.to_string().contains("q8 tier"), "{error}");
+
+    // Full precision follows the same rule: a shard its index names is missing (a partial
+    // download), so it is not installed, with the same plain message.
+    std::fs::remove_file(upstream.join("model-fixture.safetensors")).expect("drop a shard");
+    let error = resolved("bf16").expect_err("bf16 is missing a shard");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The bf16 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+}
+
+/// The shipped 27B catalog entry, as the API attaches it to a describe job.
+fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let mut job = payload(stage, None);
+    job["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    job["variant"] = json!(tier);
+    job["modelManifestEntries"] = json!([sceneworks_core::builtin_manifests::builtin_model_entry(
+        QWEN38_27B_DESCRIBER_MODEL_ID
+    )
+    .expect("the 27B describer is a builtin")]);
+    job
+}
+
+/// Each tier's memory floor is read from the lane block of the carried catalog entry, and a tier
+/// above what the worker has is refused with both numbers; no floor or no budget refuses nothing.
+#[test]
+fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 34.0, 65.0])] {
+        let floors = ["q4", "q8", "bf16"].map(|tier| {
+            let job = qwen38_job_payload(&stage, tier);
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
+                .unwrap_or_else(|| panic!("{lane} {tier} declares a floor"))
+        });
+        assert_eq!(floors, expect, "{lane}");
+    }
+    // A tier with no row falls back to the lane's conservative bf16 floor.
+    let job = qwen38_job_payload(&stage, "q4");
+    let job = job.as_object().expect("payload");
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(65.0));
+    assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
+
+    let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer needs 38.0 GB of memory, but this worker \
+             has 32.0 GB for it. Choose a smaller tier."
+        ),
+        "{error}"
+    );
+    qwen38_fit_refusal("q4", Some(25.0), Some(32.0)).expect("fits");
+    qwen38_fit_refusal("q4", None, Some(8.0)).expect("no floor refuses nothing");
+    qwen38_fit_refusal("q4", Some(25.0), None).expect("no budget refuses nothing");
+    // Just under a whole-GiB floor reads as two different numbers, not "22 GB ... 22 GB".
+    let error = qwen38_fit_refusal("q4", Some(22.0), Some(21.7)).expect_err("too big");
+    assert!(
+        error.to_string().ends_with(
+            "The q4 tier of the Qwen3.8 27B describer needs 22.0 GB of memory, but this worker \
+             has 21.7 GB for it. Choose a smaller tier."
+        ),
+        "{error}"
+    );
+}
+
+/// The Candle floors never admit a load the engine then refuses, nor one below its measured peak:
+/// each is the smallest whole GiB at or above both candle-llm's CUDA load requirement (from the
+/// shipped snapshots' safetensors headers, inference 4a36a7f) and the measured peak above baseline.
+#[test]
+fn each_candle_floor_covers_the_engine_load_requirement_and_the_measured_peak() {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    // (tier, engine load requirement in bytes, measured peak above baseline in MiB)
+    for (tier, engine_bytes, peak_mib) in [
+        ("q4", 22_279_852_166_u64, 21_995.0),
+        ("q8", 35_291_474_440, 34_409.0),
+        ("bf16", 69_520_866_634, 57_319.0),
+    ] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor_gb =
+            qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier).expect("floor");
+        let need_mib = (engine_bytes as f64 / MIB).max(peak_mib);
+        assert!(
+            floor_gb * 1024.0 >= need_mib,
+            "{tier}: {floor_gb} GiB < {need_mib} MiB"
+        );
+        assert!(
+            (floor_gb - 1.0) * 1024.0 < need_mib,
+            "{tier}: {floor_gb} GiB is not the smallest whole GiB covering {need_mib} MiB"
+        );
+    }
+    // A 24 GB card (24,564 MiB total) admits q4 with up to 2,036 MiB in use, never q8 or bf16.
+    let card = 24_564.0 / 1024.0;
+    for (tier, admitted) in [("q4", true), ("q8", false), ("bf16", false)] {
+        let job = qwen38_job_payload(&stage, tier);
+        let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier);
+        assert_eq!(
+            qwen38_fit_refusal(tier, floor, Some(card - 2_036.0 / 1024.0)).is_ok(),
+            admitted,
+            "{tier}"
+        );
+    }
+}
+
+/// A second describe job for the tier the first job left in the refine cache is admitted: the
+/// cached model is reused, so the free VRAM it occupies is not held against it. Asking the cache
+/// evicts nothing: a different cached refiner stays resident (its weights are credited instead).
+/// No GPU or model: the cache holds unit models and the free-VRAM readings are the numbers a
+/// 32 GiB card would report.
+#[test]
+fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    assert_eq!(floor, Some(22.0));
+    // A 32 GiB card holding the first job's q4 model (measured 21.48 GiB) has about 10 GiB free.
+    let free_with_q4_cached = Some(32.0 - 21.48);
+    let free_after_drop = Some(32.0);
+
+    // The refused case the old check produced: the full floor against the free VRAM alone.
+    assert!(qwen38_fit_refusal("q4", floor, free_with_q4_cached).is_err());
+
+    // The same tier still cached: reused, admitted, and still resident afterwards.
+    let mut cache = CacheThread::<&str, ()>::new(true);
+    cache.install("q4", ());
+    let (access, other) = cache.access_for(&"q4");
+    assert_eq!((access, other), (CacheAccess::Warm, None));
+    assert_eq!(cache.resident_key(), Some(&"q4"));
+    qwen38_cached_fit_refusal(access, "q4", floor, None).expect("a cached tier is admitted");
+
+    // A different refiner cached: reported, not dropped; its credited memory counts.
+    cache.install("q8", ());
+    let (access, other) = cache.access_for(&"q4");
+    assert_eq!((access, other), (CacheAccess::Cold, Some(&"q8")));
+    assert_eq!(cache.resident_key(), Some(&"q8"), "asking evicts nothing");
+    qwen38_cached_fit_refusal(access, "q4", floor, free_after_drop)
+        .expect("the credited memory counts");
+
+    // A cold load that truly cannot fit is still refused.
+    let error =
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
+    assert!(error.to_string().contains("needs 22.0 GB"), "{error}");
+
+    // A 24 GB card (24,564 MiB total) is admitted cold with 22,528 MiB free and refused below.
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(24_564.0 / 1024.0))
+        .expect("an idle 24 GB card admits q4");
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_528.0 / 1024.0))
+        .expect("22,528 MiB free admits q4");
+    assert!(
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_527.0 / 1024.0)).is_err()
+    );
+}
+
+/// A cold Candle load evicts the cached image/video generator BEFORE free VRAM is read, so a describe
+/// started within the generator cache's idle window sees the memory that generator held. A warm tier
+/// needs no reading and evicts nothing. No GPU: the generator is a unit model in a cache, and the
+/// probe reports what a 32 GiB card holding a 21.48 GiB generator would report.
+#[tokio::test]
+async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    let generators = Mutex::new(CacheThread::<&str, ()>::new(false));
+    let steps = Mutex::new(Vec::<&str>::new());
+    let (generators, steps) = (&generators, &steps);
+    let evict = || async move {
+        steps.lock().unwrap().push("evict");
+        Ok(generators.lock().unwrap().evict().is_some())
+    };
+    let probe = || async move {
+        steps.lock().unwrap().push("probe");
+        let generator_resident = !generators.lock().unwrap().is_empty();
+        Ok(Some(crate::fit_gate::VramBudget {
+            free_gb: if generator_resident {
+                32.0 - 21.48
+            } else {
+                32.0
+            },
+            total_gb: 32.0,
+        }))
+    };
+
+    // A generator left cached by an image job: dropped first, so the reading sees its memory free.
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Cold, 0.0, evict, probe)
+        .await
+        .expect("evict and probe succeed");
+    assert_eq!(*steps.lock().unwrap(), ["evict", "probe"]);
+    assert_eq!(free, Some(32.0));
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, free)
+        .expect("the generator's memory counts once it is evicted");
+    // The order matters: reading before the eviction would refuse a load that fits.
+    assert!(qwen38_fit_refusal("q4", floor, Some(32.0 - 21.48)).is_err());
+
+    // A warm tier reuses the resident describer: no eviction, no reading, admitted.
+    steps.lock().unwrap().clear();
+    generators.lock().unwrap().install("txt2img", ());
+    let free = qwen38_free_gb_after_eviction(CacheAccess::Warm, 0.0, evict, probe)
+        .await
+        .expect("warm needs nothing");
+    assert_eq!(free, None);
+    assert!(steps.lock().unwrap().is_empty());
+    assert!(
+        !generators.lock().unwrap().is_empty(),
+        "a warm describe keeps the generator"
+    );
+
+    // A failed eviction fails the admission rather than reading a stale card.
+    let error = qwen38_free_gb_after_eviction(
+        CacheAccess::Cold,
+        0.0,
+        || async {
+            Err::<bool, _>(WorkerError::Engine(
+                "generator cache worker stopped".to_owned(),
+            ))
+        },
+        probe,
+    )
+    .await
+    .expect_err("eviction error propagates");
+    assert!(error.to_string().contains("stopped"), "{error}");
+    assert!(
+        steps.lock().unwrap().is_empty(),
+        "no probe after a failed eviction"
+    );
+}
+
+/// A refused job evicts nothing beyond the generator: with the 8B Vision Captioner resident, a
+/// bf16 27B job on a 24 GB card (8B weights credited, capped at the card's total) is refused and
+/// the 8B stays in the refine cache. The same job on a 96 GB card is admitted on the credit, and
+/// its own load (not the check) drops the 8B. No GPU or model: unit models and card readings.
+#[tokio::test]
+async fn a_refused_qwen38_job_leaves_the_cached_refiner_resident() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "bf16");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "bf16");
+    let mut refiners = CacheThread::<&str, ()>::new(true);
+    refiners.install("vision-captioner-8b", ());
+    let (access, other) = refiners.access_for(&"qwen38-bf16");
+    assert_eq!(
+        (access, other),
+        (CacheAccess::Cold, Some(&"vision-captioner-8b"))
+    );
+    // The 8B's bf16 weights, as `cached_refiner_weights_gb` reads them from its safetensors.
+    let eight_b_gb = 16.3;
+    for (card_gb, admitted) in [(24_564.0 / 1024.0, false), (97_887.0 / 1024.0, true)] {
+        let free = qwen38_free_gb_after_eviction(
+            access,
+            eight_b_gb,
+            || async { Ok(false) },
+            || async move {
+                Ok(Some(crate::fit_gate::VramBudget {
+                    free_gb: card_gb - eight_b_gb - 1.0,
+                    total_gb: card_gb,
+                }))
+            },
+        )
+        .await
+        .expect("probe");
+        assert!(
+            free.expect("reading") <= card_gb,
+            "the credit is capped at the card"
+        );
+        assert_eq!(
+            qwen38_cached_fit_refusal(access, "bf16", floor, free).is_ok(),
+            admitted,
+            "{card_gb} GiB card"
+        );
+        assert_eq!(
+            refiners.resident_key(),
+            Some(&"vision-captioner-8b"),
+            "the check evicts no refiner"
+        );
+    }
+}
+
+/// A describer's load and generation failures name the model in use: the 27B's say "Qwen3.8 27B
+/// describer", the 8B's keep "Vision Captioner". The load failure is driven for real through the
+/// refine cache against a folder that holds no model (nothing loads, nothing downloads).
+#[tokio::test]
+async fn a_describer_failure_names_the_model_in_use() {
+    assert_eq!(
+        DescribeModel::VisionCaptioner.display_name(),
+        "Vision Captioner"
+    );
+    assert_eq!(
+        DescribeModel::Qwen38.display_name(),
+        "Qwen3.8 27B describer"
+    );
+    let empty = tempfile::tempdir().expect("empty weights dir");
+    let _env = crate::test_env::EnvVars::set(&[("HF_HUB_OFFLINE", "1")]);
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    for (model, expected) in [
+        (DescribeModel::Qwen38, "Qwen3.8 27B describer load failed"),
+        (
+            DescribeModel::VisionCaptioner,
+            "Vision Captioner load failed",
+        ),
+    ] {
+        let describer = VisionCaptionerDescriber {
+            model,
+            weights_dir: empty.path().join("no-model"),
+            job_id: "label-test".to_owned(),
+        };
+        let error = describer
+            .describe(
+                image::DynamicImage::new_rgb8(8, 8),
+                &prompt,
+                CancelFlag::new(),
+            )
+            .await
+            .expect_err("nothing to load");
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+/// A condense-only 27B job loads the tier its rows were described with, so it parses that tier
+/// from `variant` and is refused by name, before anything is condensed, when the tier is not
+/// installed. A measure-only job of the same tier loads nothing and is not refused for it.
+#[tokio::test]
+async fn a_qwen38_condense_only_job_uses_its_tier_and_refuses_one_not_installed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let condense_payload = |mode: &str| {
+        let mut payload = qwen38_job_payload(&stage, "q8");
+        let entry = fit_entry(1024);
+        payload["fitTo"] = entry["id"].clone();
+        payload["fitToManifestEntry"] = entry;
+        payload[mode] = json!(true);
+        payload["items"] = json!([{
+            "itemId": "item_1",
+            "imagePath": stage.dataset_root.join("images/item_1.png").display().to_string(),
+            "relativePath": "images/item_1.png",
+            "assetId": null,
+            "width": 640,
+            "height": 480,
+            "fields": { "description": "A woman, woman_1." },
+            "condensedText": "woman_1.",
+        }]);
+        payload
+    };
+    let request = parse_batch_describe_request(
+        &stage.settings,
+        condense_payload("condenseOnly").as_object().unwrap(),
+    )
+    .expect("parses");
+    assert_eq!(request.model, DescribeModel::Qwen38);
+    assert_eq!(request.tier, Some("q8"));
+
+    let run = |payload: Value| {
+        let api_client = ApiClient::new(&stage.settings);
+        let mut job: JobSnapshot =
+            serde_json::from_value(job_value("describe-job", false)).expect("job");
+        job.payload = payload.as_object().expect("payload object").clone();
+        let settings = stage.settings.clone();
+        async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
+    };
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    let error = run(condense_payload("condenseOnly"))
+        .await
+        .expect_err("an uninstalled tier is refused");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+    assert!(stored_items(&api).is_empty(), "nothing was condensed");
+
+    let measured = run(condense_payload("measureOnly")).await;
+    assert!(
+        measured
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.to_string().contains("not installed")),
+        "{measured:?}"
+    );
+}
+
+/// Stage every file the catalog row of `repo`'s `tier` pins in `snapshot`, as a finished tier
+/// download leaves it: a shard glob becomes one shard named by the index. Marked `cfg(test)` so the
+/// model-artifact inventory scan reads it as a test-only item.
+#[cfg(test)]
+fn stage_tier_files(snapshot: &Path, repo: &str, tier: &str) {
+    let files = sceneworks_core::dataset_batch_describe::qwen38_tier_files(repo, tier);
+    assert!(!files.is_empty(), "{repo} {tier} has a catalog row");
+    for file in files {
+        let file = file.replace('*', "fixture");
+        let path = snapshot.join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("snapshot dir");
+        let body = if file == "model.safetensors.index.json" {
+            json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
+        } else {
+            "{}".to_owned()
+        };
+        std::fs::write(path, body).expect("tier file");
+    }
+}
+
+/// Stage `tier` fully in a re-host snapshot of `hf_cache`. Marked `cfg(test)` like the above.
+#[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
+    let snapshot = hf_cache
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join("aaa111");
+    stage_tier_files(&snapshot, repo, tier);
+}
+
+/// AC3: a tier that is not installed, or that cannot fit, ends the job before any image is
+/// described: no progress post, no stored item, and the job's error says what to do.
+#[tokio::test]
+async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let run = |payload: Value| {
+        let api_client = ApiClient::new(&stage.settings);
+        let mut job: JobSnapshot =
+            serde_json::from_value(job_value("describe-job", false)).expect("job");
+        job.payload = payload.as_object().expect("payload object").clone();
+        let settings = stage.settings.clone();
+        async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
+    };
+
+    // Nothing installed: refused by name, before the first image.
+    let error = {
+        let _env = crate::test_env::EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            hf_cache.path().to_str().expect("utf-8"),
+        )]);
+        run(qwen38_job_payload(&stage, "q8")).await
+    }
+    .expect_err("an uninstalled tier is refused");
+    assert!(
+        error.to_string().ends_with(
+            "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
+             the Model Manager, or choose a tier that is installed."
+        ),
+        "{error}"
+    );
+
+    // A partial q8 (its config and tokenizer present, its weights missing, as a cancelled
+    // download leaves it): refused with the same plain message, before the first image.
+    {
+        use sceneworks_core::dataset_batch_describe::{
+            QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        };
+        let repo = if cfg!(target_os = "macos") {
+            QWEN38_27B_DESCRIBER_MLX_REPO
+        } else {
+            QWEN38_27B_DESCRIBER_CANDLE_REPO
+        };
+        stage_installed_tier(hf_cache.path(), repo, "q8");
+        let weights = hf_cache
+            .path()
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots/aaa111/q8/model.safetensors");
+        std::fs::remove_file(weights).expect("drop the q8 weights");
+    }
+    let error = {
+        let _env = crate::test_env::EnvVars::set(&[(
+            "HF_HUB_CACHE",
+            hf_cache.path().to_str().expect("utf-8"),
+        )]);
+        run(qwen38_job_payload(&stage, "q8")).await
+    }
+    .expect_err("a partial tier is refused");
+    assert!(
+        error
+            .to_string()
+            .ends_with("The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in the Model Manager, or choose a tier that is installed."),
+        "{error}"
+    );
+
+    // The installed q4 tier on a Mac emulated at 16 GB: refused for memory, before the first image.
+    #[cfg(target_os = "macos")]
+    {
+        stage_installed_tier(
+            hf_cache.path(),
+            sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MLX_REPO,
+            "q4",
+        );
+        let error = {
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8")),
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16"),
+            ]);
+            run(qwen38_job_payload(&stage, "q4")).await
+        }
+        .expect_err("a tier above the machine is refused");
+        assert!(
+            error.to_string().ends_with(
+                "The q4 tier of the Qwen3.8 27B describer needs 28.0 GB of memory, but this \
+                 worker has 16.0 GB for it. Choose a smaller tier."
+            ),
+            "{error}"
+        );
+    }
+
+    assert!(posts(&api).is_empty(), "no progress was posted");
+    assert!(stored_items(&api).is_empty(), "no image was described");
+}
+
 fn one_image_payload(stage: &Stage, model: &str) -> Value {
     let mut one = payload(stage, None);
     one["model"] = json!(model);

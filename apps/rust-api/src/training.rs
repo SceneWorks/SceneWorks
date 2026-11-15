@@ -1505,10 +1505,11 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
-/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
-/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
-/// Captioner, `training_caption` for JoyCaption). The worker
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner, JoyCaption (SW-7083) or
+/// the Qwen3.8 27B describer at a tier describes each image of the dataset (or of `itemIds`, in
+/// dataset order) as seven JSON fields plus its pixel size; `fitTo` and `condenseRows` add or run
+/// only the condensing step. The job routes by the capability of its model (`prompt_refine` for
+/// the Vision Captioner-class describers, `training_caption` for JoyCaption). The worker
 /// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
 /// the user's instruction.
 pub(crate) async fn create_training_dataset_batch_describe_job(
@@ -1516,7 +1517,7 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let (model, tier, prompt) = validate_batch_describe_request(&payload)?;
     let fit_to = match payload
         .fit_to
         .as_deref()
@@ -1579,6 +1580,11 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
+    // A tiered describer carries its tier on every request mode: a condense-only job reloads the
+    // tier the row was described with, never the default.
+    if let Some(tier) = tier {
+        job_payload.insert("variant".to_owned(), json!(tier));
+    }
     if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
     }
@@ -1603,19 +1609,43 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
+    // Describe and condense-only jobs load the tier, so it must be installed. A model-free job
+    // (measure-only) loads no describer and carries no source, the same rule the source
+    // preparation above and the claim gate apply.
+    let model_free = sceneworks_core::model_artifacts::portable_binding::model_free_job(
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+    );
+    if let Some(tier) = tier.filter(|_| !model_free) {
+        ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+    }
     let requested_gpu = payload.requested_gpu;
+    // Freeze the exact source each worker route loads (for a tiered describer, that tier's row on
+    // that platform) now, like the other dataset jobs, so a claim runs only what was admitted.
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetBatchDescribe,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetBatchDescribe,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1654,9 +1684,13 @@ pub(crate) async fn list_training_dataset_batch_describe_jobs(
 /// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
-) -> Result<(&'static str, Option<String>), ApiError> {
-    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+) -> Result<(&'static str, Option<&'static str>, Option<String>), ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        max_describe_prompt_chars, resolve_describe_tier,
+    };
     let model = resolve_describe_model(payload.model.as_deref())?;
+    let tier = resolve_describe_tier(Some(model), payload.variant.as_deref())
+        .map_err(|message| training_field_error("variant", message))?;
     let prompt = payload
         .prompt
         .as_deref()
@@ -1669,7 +1703,50 @@ pub(crate) fn validate_batch_describe_request(
             format!("The describing prompt must be at most {limit} characters for this model."),
         ));
     }
-    Ok((model, prompt.map(str::to_owned)))
+    Ok((model, tier, prompt.map(str::to_owned)))
+}
+
+/// Refuse a describe tier this host has not installed, before the job is queued. Each tier is its
+/// own download (the q4 and q8 tiers are separate folders of a re-host), so the model being
+/// installed in some tier says nothing about the tier the request names.
+fn ensure_describe_tier_installed(
+    data_dir: &std::path::Path,
+    job_payload: &JsonObject,
+    tier: &str,
+) -> Result<(), ApiError> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let Some(entry) = job_payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+    else {
+        return Err(ApiError::internal(
+            "Qwen3.8 27B describe job carries no catalog entry",
+        ));
+    };
+    let mut entry = entry.clone();
+    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
+    if crate::models::installed_variant_keys(&entry, data_dir)
+        .iter()
+        .any(|installed| installed == tier)
+    {
+        return Ok(());
+    }
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(QWEN38_27B_DESCRIBER_MODEL_ID);
+    Err(ApiError::model_artifact_conflict(
+        format!(
+            "The {tier} tier of {name} is not installed. Download that tier in the Model \
+             Manager, or choose a tier that is installed."
+        ),
+        "model_artifact_incomplete",
+    ))
 }
 
 /// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it
@@ -1825,15 +1902,19 @@ pub(crate) fn validate_condense_rows(
 /// other accepted describer, anything else is refused. Shared by the describe job and the default
 /// describing prompt route so both accept exactly the same `model` values.
 pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
-    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use sceneworks_core::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     match model.map(str::trim) {
         None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
         Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(QWEN38_27B_DESCRIBER_REPO) => Ok(QWEN38_27B_DESCRIBER_REPO),
         Some(other) => Err(training_field_error(
             "model",
             format!(
                 "Unsupported describe model {other:?}. Use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ),
         )),
     }

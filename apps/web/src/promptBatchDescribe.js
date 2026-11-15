@@ -90,9 +90,11 @@ export function condensedSizeText(condensed) {
   return `${about}${condensed.tokens.toLocaleString("en-US")} of ${condensed.limitTokens.toLocaleString("en-US")} tokens${room}`;
 }
 
-// A condense-only request per part of `rows`: each part holds rows of one describer (`model`) and
-// stays under `maxBytes` of serialized rows and `maxRows` rows, so a large dataset never reaches
-// the API's 10 MiB JSON body limit. `toRequestRow` maps a row to what the request carries.
+// A condense-only request per part of `rows`: each part holds rows of one describer (`model`) at
+// one tier (`variant`, null for a describer without tiers), so each row condenses on the model it
+// was described with, and stays under `maxBytes` of serialized rows and `maxRows` rows, so a large
+// dataset never reaches the API's 10 MiB JSON body limit. `toRequestRow` maps a row to what the
+// request carries.
 export function condenseChunks(rows, toRequestRow, { maxBytes = 2 * 1024 * 1024, maxRows = 200 } = {}) {
   const chunks = [];
   const open = new Map();
@@ -100,16 +102,18 @@ export function condenseChunks(rows, toRequestRow, { maxBytes = 2 * 1024 * 1024,
     const request = toRequestRow(row);
     const bytes = new TextEncoder().encode(JSON.stringify(request)).length + 1;
     const model = row.model ?? null;
-    let chunk = open.get(model);
+    const variant = row.variant ?? null;
+    const key = JSON.stringify([model, variant]);
+    let chunk = open.get(key);
     if (!chunk || chunk.rows.length >= maxRows || chunk.bytes + bytes > maxBytes) {
-      chunk = { model, rows: [], bytes: 0 };
+      chunk = { model, variant, rows: [], bytes: 0 };
       chunks.push(chunk);
-      open.set(model, chunk);
+      open.set(key, chunk);
     }
     chunk.rows.push(request);
     chunk.bytes += bytes;
   }
-  return chunks.map(({ model, rows: chunkRows }) => ({ model, rows: chunkRows }));
+  return chunks.map(({ model, variant, rows: chunkRows }) => ({ model, variant, rows: chunkRows }));
 }
 
 // Returns { text, skipped }. Failed results, ones without usable dimensions, and ones whose

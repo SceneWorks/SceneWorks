@@ -161,6 +161,30 @@ where
     cache_thread::run_cached(refine_worker(), key, load, run, REFINE_SEAM_MESSAGES).await
 }
 
+/// Ask the cache thread what a load of `spec`/`reqs` would find, evicting nothing:
+/// [`CacheAccess::Warm`] when that exact model is already resident (the job reuses it and needs no
+/// new memory), else [`CacheAccess::Cold`] with the weights source of a different resident
+/// refiner, which the load's own evict-before-load drops first. A memory check credits what that
+/// drop frees; a job it refuses leaves the resident refiner in place.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn refiner_admission_access(
+    spec: &LoadSpec,
+    reqs: &ModelRequirements,
+) -> WorkerResult<(cache_thread::CacheAccess, Option<PathBuf>)> {
+    let key = RefineModelCacheKey::new(spec, reqs);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let job: RefineJob = Box::new(move |cache| {
+        let (access, resident) = cache.access_for(&key);
+        let _ = reply_tx.send((access, resident.map(|resident| resident.source.clone())));
+    });
+    refine_worker()
+        .send(job)
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_stopped.to_owned()))?;
+    reply_rx
+        .await
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_dropped.to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

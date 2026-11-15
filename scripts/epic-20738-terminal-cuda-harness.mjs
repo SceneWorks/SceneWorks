@@ -199,9 +199,13 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // sc-26325 adds the two exact official MOSS Base/SFT listings: 147 keys; every prior row is unchanged.
 // sc-26234's whole-repository FLUX 3 download (files: []) adds no selective census row;
 // preserve main's honest evidence re-record and its pinned digest.
+// SW-7119 adds the Qwen3.8 27B describer's upstream listing
+// (huihui-ai/Huihui-Qwen3.8-27B-abliterated@739e3c5b…) and its MLX q4/q8 re-host
+// (SceneWorks/qwen3.8-27b-abliterated-mlx@76f3c445…) and Candle q4/q8 re-host
+// (SceneWorks/qwen3.8-27b-abliterated-candle@accaccc1…): 153 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "95cde218e352097d3e314d0f9bb5891a219f9c01b84965c6af4abc56ac591d82";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "85d40276eb35421b40c7542007bf732f6f18e787350214726305554803a3c13a";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

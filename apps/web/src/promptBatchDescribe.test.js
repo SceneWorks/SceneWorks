@@ -204,6 +204,17 @@ describe("Fit to (SW-7163)", () => {
       ["vision", ["i2", "i3"]],
       ["other/describer", ["i4"]],
     ]);
+    expect(byRows.every((part) => part.variant === null)).toBe(true);
+    // A tiered describer's rows condense at the tier each was described with: one part per tier.
+    const tiered = [
+      { itemId: "a", model: "big", variant: "q4", text: "x" },
+      { itemId: "b", model: "big", variant: "q8", text: "x" },
+      { itemId: "c", model: "big", variant: "q4", text: "x" },
+    ];
+    expect(condenseChunks(tiered, toRequest).map((part) => [part.model, part.variant, part.rows.map((r) => r.itemId)])).toEqual([
+      ["big", "q4", ["a", "c"]],
+      ["big", "q8", ["b"]],
+    ]);
     const oneRowBytes = new TextEncoder().encode(JSON.stringify(toRequest(rows[0]))).length + 1;
     const bySize = condenseChunks(rows.slice(0, 4), toRequest, { maxBytes: oneRowBytes * 3 - 1 });
     expect(bySize.map((part) => part.rows.length)).toEqual([2, 2]);

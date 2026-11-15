@@ -1118,6 +1118,15 @@ fn entries_support_route(
             && !(*job_type == JobType::PromptRefine
                 && slot == "modelManifestEntries/0"
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
+            // A dataset batch describe likewise carries the describer its `model` repository
+            // selects (the Vision Captioner, JoyCaption or the Qwen3.8 27B) in that first slot.
+            && !(*job_type == JobType::DatasetBatchDescribe
+                && slot == "modelManifestEntries/0"
+                && payload.get("model").is_some_and(|model| {
+                    downloads
+                        .iter()
+                        .any(|download| download.get("repo") == Some(model))
+                }))
             // Dataset captioning selects JoyCaption by its authored repository. That selected
             // executable utility is also carried in the first auxiliary slot. A LOCAL
             // selection keeps the same local-versus-repository classification source

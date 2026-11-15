@@ -8,9 +8,18 @@ import { jobsApi } from "../api/jobsResources.js";
 import { abortableDelay } from "../pollJob.js";
 import { isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
-import { JOY_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO, terminalStatuses } from "../constants.js";
+import {
+  JOY_CAPTION_MODEL_ID,
+  VISION_CAPTION_MODEL_ID,
+  VISION_CAPTION_MODEL_REPO,
+  VISION_DESCRIBE_MODEL_ID,
+  VISION_DESCRIBE_MODEL_REPO,
+  terminalStatuses,
+} from "../constants.js";
 import { joyCaptionModel } from "../training/joyCaptionPrompts.js";
 import { missingRequiredModels, modelInstallComplete } from "../modelEligibility.js";
+import { installedTiers } from "../quantTier.js";
+import { formatTierBytes } from "../formatting.js";
 import { condenseChunks, condensedFor, condensedSizeText, fitToTargets, formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
@@ -37,11 +46,46 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 // its newest successful result, and a job that is still running is monitored again.
 
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
+// A describer with `tiers` runs one quant tier, sent as the job's `variant` (the first is the
+// default); the others take no `variant`.
 export const DESCRIBE_MODELS = [
 // `condenses`: the describer has a text-only step that "Fit to" condenses with (SW-7163).
   { id: VISION_CAPTION_MODEL_ID, repo: VISION_CAPTION_MODEL_REPO, label: "Vision Captioner (Qwen3-VL-8B)", condenses: true },
+  {
+    id: VISION_DESCRIBE_MODEL_ID,
+    repo: VISION_DESCRIBE_MODEL_REPO,
+    label: "Vision Describer (Qwen3.8-27B)",
+    condenses: true,
+    tiers: [
+      ["q4", "q4"],
+      ["q8", "q8"],
+      ["bf16", "Full precision"],
+    ],
+  },
   { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one", condenses: false },
 ];
+
+// The tier a describer runs: `tier` when the describer offers it, else its default; null for a
+// describer without tiers.
+function describerTier(entry, tier) {
+  if (!entry?.tiers) return null;
+  return entry.tiers.some(([key]) => key === tier) ? tier : entry.tiers[0][0];
+}
+
+// A tier's size as the catalog serves it (its footprint, else its download size), printed the way
+// the download panel prints it, so a tier shows one figure in one unit; null when none is served.
+function tierSize(entry, tier) {
+  const variant = entry?.variants?.find((candidate) => candidate?.variant === tier);
+  const bytes = variant?.footprint?.diskSizeBytes ?? variant?.downloadSizeBytes;
+  return typeof bytes === "number" && bytes > 0 ? formatTierBytes(bytes) : null;
+}
+
+// Whether the catalog `entry` can run `tier` (null: the model as a whole) on this install.
+function describerInstalled(entry, tier) {
+  if (!entry) return false;
+  if (!tier || !entry.hasVariantMatrix) return modelInstallComplete(entry);
+  return installedTiers(entry).includes(tier);
+}
 
 // `pose` is one line per person; a result stored before it existed reads as an empty pose.
 export const DESCRIBE_FIELDS = [
@@ -55,6 +99,8 @@ export const DESCRIBE_FIELDS = [
 ];
 
 const POLL_MS = 1000;
+// How long a start request may go unanswered before the dialog says it is checking model files.
+export const SLOW_START_MS = 4000;
 // Describe jobs read per page of the dataset's history while restoring the table.
 export const RESTORE_JOBS_PAGE = 50;
 // The wait before each retry of a failed job or items read. A read still failing after the last
@@ -92,12 +138,13 @@ export function describePromptIssues(prompt, limit, modelLabel) {
   ];
 }
 
-// `model` is the repo of the job that produced the item (the job result's `model`), so each row
-// remembers which describer wrote it even when rows come from different runs.
-function rowFromResultItem(item, model = null) {
+// `model` is the repo of the job that produced the item (the job result's `model`) and `variant`
+// its tier, so each row remembers which describer wrote it even when rows come from different runs.
+function rowFromResultItem(item, model = null, variant = null) {
   return {
     itemId: item.itemId,
     model: typeof model === "string" && model ? model : null,
+    variant: typeof variant === "string" && variant ? variant : null,
     imagePath: item.imagePath ?? "",
     assetId: item.assetId ?? null,
     width: item.width ?? null,
@@ -182,10 +229,10 @@ export function condenseRequestRow(row, { measure = false } = {}) {
 }
 
 // Merge result items into the rows, replacing a row with the same item id and keeping dataset order.
-export function mergeDescribeRows(rows, items, datasetOrder = [], model = null) {
+export function mergeDescribeRows(rows, items, datasetOrder = [], model = null, variant = null) {
   const byId = new Map(rows.map((row) => [row.itemId, row]));
   for (const item of items ?? []) {
-    if (item?.itemId) byId.set(item.itemId, rowFromResultItem(item, model));
+    if (item?.itemId) byId.set(item.itemId, rowFromResultItem(item, model, variant));
   }
   const rank = new Map(datasetOrder.map((id, index) => [id, index]));
   return [...byId.values()].sort(
@@ -208,8 +255,8 @@ export function resultMatchesImage(item, source, image) {
   return true;
 }
 
-// Rebuild the table from a dataset's earlier describe jobs, newest first, each `{ model, items,
-// sources }` (`sources`: the job's payload entries by item id). Each current dataset image gets
+// Rebuild the table from a dataset's earlier describe jobs, newest first, each `{ model, variant,
+// items, sources }` (`sources`: the job's payload entries by item id). Each current dataset image gets
 // its newest successful result for its current pixels, or its newest flagged one when no run
 // described it. Results for removed or changed images are left out.
 export function restoreDescribeRows(runs, datasetItems) {
@@ -219,7 +266,7 @@ export function restoreDescribeRows(runs, datasetItems) {
     for (const item of run?.items ?? []) {
       if (!item?.itemId || !resultMatchesImage(item, run.sources?.get(item.itemId), images.get(item.itemId))) continue;
       const current = restored.get(item.itemId);
-      if (!current || (current.failed && !item.failed)) restored.set(item.itemId, rowFromResultItem(item, run.model));
+      if (!current || (current.failed && !item.failed)) restored.set(item.itemId, rowFromResultItem(item, run.model, run.variant));
     }
   }
   return mergeDescribeRows([...restored.values()], [], (datasetItems ?? []).map((image) => image.id));
@@ -252,15 +299,16 @@ export function keepVariableValues(variables, existing) {
 // "mixed" when rows came from runs with different models (each `sourceImages` entry then names its
 // own), or null when no row recorded one. A single string keeps `source.model` the same shape it
 // has always had for the common one-model case; the per-row detail lives beside each image.
-export function describedByModel(rows) {
-  const models = new Set(rows.map((row) => row.model ?? null));
+// `key` picks the recorded value: "model", or "variant" for the describer's tier (same rule).
+export function describedByModel(rows, key = "model") {
+  const models = new Set(rows.map((row) => row[key] ?? null));
   if (models.size === 1) return [...models][0];
   return models.size ? "mixed" : null;
 }
 
 // The prompt-batch create payload for the reviewed rows: one formatter block per usable row, and
-// each block's exact source pixel size and describing model in `sourceImages` (same order as
-// `prompts`).
+// each block's exact source pixel size, describing model and (when recorded) tier in
+// `sourceImages` (same order as `prompts`).
 export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
   const inputs = rows.map((row) => ({ ...row }));
   const { text, skipped } = formatPromptBatch(inputs, { fitTo });
@@ -277,6 +325,7 @@ export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
       height: row.height,
       ratio: snapRatio(row.width, row.height),
       model: row.model ?? null,
+      ...(row.variant ? { variant: row.variant } : {}),
     })),
     source: {
       kind: "training_dataset",
@@ -284,6 +333,7 @@ export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
       datasetName: dataset?.name ?? "",
       datasetVersion: dataset?.version ?? null,
       model: describedByModel(included),
+      variant: describedByModel(included, "variant"),
     },
   };
 }
@@ -399,6 +449,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   datasetItemsRef.current = dataset?.items ?? [];
 
   const [modelId, setModelId] = useState(VISION_CAPTION_MODEL_ID);
+  // The tier chosen for a describer with tiers (null: its default).
+  const [tierChoice, setTierChoice] = useState(null);
   // SW-7163: the "Fit to" target's catalog id, "" for off. Restored from the newest run.
   const [fitTo, setFitTo] = useState("");
   // Which part of a multi-part condense is running ({ index, total }), or null.
@@ -411,7 +463,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Whether the editor shows the selected model's untouched default, so a model switch swaps it
   // for the other model's default; an edited text stays as typed.
   const [followDefault, setFollowDefault] = useState(true);
-  const [promptError, setPromptError] = useState("");
+  // A failed default load's message, by repo.
+  const [promptErrors, setPromptErrors] = useState({});
   const [rows, setRows] = useState([]);
   const [job, setJob] = useState(null);
   const [rerunItemId, setRerunItemId] = useState(null);
@@ -425,6 +478,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // second click synchronously, before React re-renders the disabled buttons; the state disables them.
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
+  // The start request has been waiting for a while: the API is checking the model files.
+  const [slowStart, setSlowStart] = useState(false);
   // Why monitoring stopped while the job was still active (its reads kept failing), or "".
   const [monitorError, setMonitorError] = useState("");
   // True until the earlier runs' results are loaded into the table; runs stay blocked meanwhile.
@@ -440,29 +495,64 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   useEffect(() => () => pollAbort.current?.abort(), []);
 
   const model = DESCRIBE_MODELS.find((entry) => entry.id === modelId) ?? DESCRIBE_MODELS[0];
+  const tier = describerTier(model, tierChoice);
   const modelDefault = defaults[model.repo] ?? null;
   const defaultPrompt = modelDefault ? modelDefault.prompt : null;
-  const loadedDefault = Boolean(modelDefault);
 
-  // Load the selected model's default instruction and limit (served by the API from the worker's
-  // own prompt asset and core's limits, so the web app holds no second copy).
+  // The describer and tier that wrote a row (its re-run uses them), or the selected ones when the
+  // row records no known describer. A row with no recorded tier uses the model's default tier; a
+  // recorded tier the model does not offer is kept as `unknownTier` (its re-run is blocked), never
+  // replaced by another tier.
+  const rowDescriber = (row) => {
+    // A row stored before describers were recorded was described by the default Vision Captioner,
+    // the same fallback its condensing (`describerCondenses`, the condense request) uses.
+    const repo = row.model ?? VISION_CAPTION_MODEL_REPO;
+    const entry = DESCRIBE_MODELS.find((candidate) => candidate.repo === repo);
+    if (!entry) return { entry: model, tier };
+    const unknownTier = Boolean(entry.tiers && row.variant && !entry.tiers.some(([key]) => key === row.variant));
+    return { entry, tier: unknownTier ? row.variant : describerTier(entry, row.variant), unknownTier };
+  };
+
+  // The models whose default instruction and limit are needed: the selected one, and each row's
+  // describer (a re-run checks the prompt against that model's limit). Joined into a string so the
+  // effect below depends on the set by value.
+  const neededRepos = [...new Set([model.repo, ...rows.map((row) => rowDescriber(row).entry.repo)])].join("\u0000");
+  // The repos whose default is loading or loaded, and the signal that aborts their requests: both
+  // live until unmount or a token change, so one repo's load never cancels another's.
+  const defaultsRequested = useRef(new Set());
+  const defaultsAbort = useRef(null);
   useEffect(() => {
-    if (loadedDefault) return undefined;
     const controller = new AbortController();
-    const repo = model.repo;
-    trainingApi
-      .defaultDescribePrompt(token, { signal: controller.signal }, repo)
-      .then((body) => {
-        const text = typeof body?.prompt === "string" ? body.prompt : "";
-        const maxChars = Number(body?.maxChars) || 0;
-        setPromptError("");
-        setDefaults((current) => ({ ...current, [repo]: { prompt: text, maxChars } }));
-      })
-      .catch((error) => {
-        if (!isAbortError(error)) setPromptError(errorMessage(error, "Could not load the default describing prompt."));
-      });
+    defaultsAbort.current = controller;
+    defaultsRequested.current = new Set();
     return () => controller.abort();
-  }, [loadedDefault, model.repo, token]);
+  }, [token]);
+
+  // Load each needed default once (served by the API from the worker's own prompt asset and core's
+  // limits, so the web app holds no second copy). A failed load is retried the next time the needed
+  // set or the selected model changes.
+  useEffect(() => {
+    const { signal } = defaultsAbort.current;
+    for (const repo of neededRepos.split("\u0000")) {
+      if (defaultsRequested.current.has(repo)) continue;
+      defaultsRequested.current.add(repo);
+      trainingApi
+        .defaultDescribePrompt(token, { signal }, repo)
+        .then((body) => {
+          const text = typeof body?.prompt === "string" ? body.prompt : "";
+          const maxChars = Number(body?.maxChars) || 0;
+          setPromptErrors(({ [repo]: _cleared, ...rest }) => rest);
+          setDefaults((current) => ({ ...current, [repo]: { prompt: text, maxChars } }));
+        })
+        .catch((error) => {
+          if (isAbortError(error) || signal.aborted) return;
+          defaultsRequested.current.delete(repo);
+          const message = errorMessage(error, "Could not load the default describing prompt.");
+          setPromptErrors((current) => ({ ...current, [repo]: message }));
+        });
+    }
+  }, [neededRepos, token]);
+  const promptError = promptErrors[model.repo] ?? "";
 
   // Show the selected model's default while the text is untouched.
   useEffect(() => {
@@ -497,12 +587,41 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     [prompt, modelDefault, model.label],
   );
   const catalogEntry = (id) => models.find((entry) => entry.id === id);
-  const modelAvailable = (id) => {
-    const entry = catalogEntry(id);
-    return Boolean(entry) && modelInstallComplete(entry);
-  };
-  const missingModels = missingRequiredModels(models, [model.id]);
-  const selectedAvailable = modelAvailable(model.id);
+  const modelAvailable = (id, modelTier = null) => describerInstalled(catalogEntry(id), modelTier);
+  const tierLabel = tier ? model.tiers.find(([key]) => key === tier)[1] : "";
+  const selectedEntry = catalogEntry(model.id);
+  const selectedAvailable = modelAvailable(model.id, tier);
+  // What the not-installed notice offers: the model, or for a tiered describer the selected tier
+  // (named with its tier), whose download installs only that tier.
+  // The tier's own size, as the Model Manager's tier panel reads it; none rather than the model-level
+  // size, which describes the default tier.
+  const missingModels = tier
+    ? selectedEntry && !selectedAvailable
+      ? [
+          {
+            ...selectedEntry,
+            name: `${selectedEntry.name ?? model.label} ${tierLabel}`,
+            downloadSizeLabel: tierSize(selectedEntry, tier),
+            downloadSizeEstimated: false,
+          },
+        ]
+      : []
+    : // The same unit the tier radios and a tier's panel print, so the dialog shows one unit.
+      missingRequiredModels(models, [model.id]).map((entry) =>
+        typeof entry.downloadSizeBytes === "number" && entry.downloadSizeBytes > 0
+          ? { ...entry, downloadSizeLabel: formatTierBytes(entry.downloadSizeBytes) }
+          : entry,
+      );
+  const downloadJobs = useMemo(
+    () => jobs.filter((entry) => entry.type === "model_download" && (!tier || entry.payload?.variant === tier)),
+    [jobs, tier],
+  );
+  const downloadMissing =
+    typeof createModelDownloadJob !== "function"
+      ? undefined
+      : tier
+        ? () => createModelDownloadJob(selectedEntry, { variant: tier })
+        : createModelDownloadJob;
   const fitTargets = useMemo(() => fitToTargets(models), [models]);
   const fitTarget = fitTargets.find((target) => target.id === fitTo) ?? null;
   // A remembered target the catalog no longer offers (a removed model, or one below the minimum)
@@ -512,7 +631,6 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     setFitTo("");
     if (dataset?.id) storeFitTo(dataset.id, "");
   }, [dataset?.id, fitTarget, fitTo, models.length, restoring]);
-  const downloadJobs = useMemo(() => jobs.filter((entry) => entry.type === "model_download"), [jobs]);
 
   const running = Boolean(job) && !terminalStatuses.has(job.status);
   const result = job?.result ?? null;
@@ -536,24 +654,24 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Merge items read from the job into the table and track which positions are still
   // provisional (an image stored before its condensing step, replaced in place once condensed).
   const mergeJobItems = useCallback(
-    (jobId, items, start, model) => {
+    (jobId, items, start, model, variant = null) => {
       if (itemsRead.current.jobId === jobId) trackProvisional(itemsRead.current.provisional, items, start);
       const superseded = supersededItems.current.jobId === jobId ? supersededItems.current.ids : null;
       const fresh = superseded ? items.filter((item) => !superseded.has(item?.itemId)) : items;
-      if (fresh.length) setRows((current) => mergeDescribeRows(current, fresh, datasetOrder, model));
+      if (fresh.length) setRows((current) => mergeDescribeRows(current, fresh, datasetOrder, model, variant));
     },
     [datasetOrder],
   );
 
   const readItems = useCallback(
-    (jobId, from, model, signal) =>
-      readItemPages(jobId, from, (items, start) => mergeJobItems(jobId, items, start, model), signal),
+    (jobId, from, model, variant, signal) =>
+      readItemPages(jobId, from, (items, start) => mergeJobItems(jobId, items, start, model, variant), signal),
     [mergeJobItems, readItemPages],
   );
 
   // Re-read only the positions that were provisional, one item each, until they are final.
   const rereadProvisional = useCallback(
-    async (jobId, model, signal) => {
+    async (jobId, model, variant, signal) => {
       if (itemsRead.current.jobId !== jobId) return;
       for (const position of [...itemsRead.current.provisional]) {
         const page = await withRetries(
@@ -561,7 +679,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           signal,
         );
         const items = Array.isArray(page?.items) ? page.items.slice(0, 1) : [];
-        if (items.length) mergeJobItems(jobId, items, position, model);
+        if (items.length) mergeJobItems(jobId, items, position, model, variant);
       }
     },
     [mergeJobItems, token],
@@ -574,14 +692,20 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       // The worker stores an item before the post that counts it, so `processedCount` items exist.
       const processed = Number(snapshot?.result?.processedCount) || 0;
       if (itemsRead.current.jobId === jobId && itemsRead.current.provisional.size) {
-        await rereadProvisional(jobId, snapshot?.result?.model, signal);
+        await rereadProvisional(jobId, snapshot?.result?.model, snapshot?.result?.variant, signal);
       }
       const terminal = terminalStatuses.has(snapshot?.status);
       // A finished job (completed, failed or canceled) is drained of every unread item: an image
       // checkpointed before its condensing step is stored but never counted when the job stops
       // while condensing it, so it is reachable only by reading past the published count.
       if (itemsRead.current.jobId === jobId && (terminal || processed > itemsRead.current.count)) {
-        itemsRead.current.count = await readItems(jobId, itemsRead.current.count, snapshot?.result?.model, signal);
+        itemsRead.current.count = await readItems(
+          jobId,
+          itemsRead.current.count,
+          snapshot?.result?.model,
+          snapshot?.result?.variant,
+          signal,
+        );
       }
       setJob(snapshot);
       if (terminal) {
@@ -699,7 +823,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               if (!activeRead) newerDescribed.add(item.itemId);
             }
           }
-          runs.push({ model: entry.result?.model ?? entry.payload?.model ?? null, items, sources });
+          runs.push({
+            model: entry.result?.model ?? entry.payload?.model ?? null,
+            variant: entry.result?.variant ?? entry.payload?.variant ?? null,
+            items,
+            sources,
+          });
           if (activeRead && !missing.size) break;
         }
         if (signal.aborted) return;
@@ -735,11 +864,13 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   }, [dataset?.id, projectId, token]);
 
   // Start a describe job: every image (`itemIds` null), or exactly `itemIds`. `confirmFirst`, when
-  // given, runs first and can decline. Ignored while a start is already in flight or a job runs.
-  // `condense` ({ fitTo, model, rows, measure }) starts a condense-only job instead: the rows'
-  // own describer condenses those already-described rows (their fields as edited here) for the
-  // target, describing nothing; with `measure` it only re-counts their edited condensed prompts.
-  async function submit(itemIds = null, confirmFirst = null, condense = null) {
+  // given, runs first and can decline. `describer` is the model and tier to run (a re-run passes the
+  // row's own). Ignored while a start is already in flight or a job runs.
+  // `condense` ({ fitTo, model, variant, rows, measure }) starts a condense-only job instead: the
+  // rows' own describer, at the tier they were described with, condenses those already-described
+  // rows (their fields as edited here) for the target, describing nothing; with `measure` it only
+  // re-counts their edited condensed prompts.
+  async function submit(itemIds = null, confirmFirst = null, describer = { entry: model, tier }, condense = null) {
     if (submittingRef.current || running || !dataset?.id || !projectId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -753,24 +884,36 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       if (condense) {
         body = {
           model: condense.model ?? VISION_CAPTION_MODEL_REPO,
+          ...(condense.variant ? { variant: condense.variant } : {}),
           requestedGpu: "auto",
           fitTo: condense.fitTo,
           condenseRows: condense.rows,
           ...(condense.measure ? { measureOnly: true } : {}),
         };
       } else {
-        body = { model: model.repo, requestedGpu: "auto" };
+        body = { model: describer.entry.repo, requestedGpu: "auto" };
+        if (describer.tier) body.variant = describer.tier;
         // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
         if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
         if (itemIds) body.itemIds = itemIds;
         // A describer without a text step (JoyCaption) never condenses.
         // Only a target the catalog still offers: a remembered id of a removed model is never sent.
-        if (fitTarget && model.condenses) body.fitTo = fitTarget.id;
+        if (fitTarget && describer.entry.condenses) body.fitTo = fitTarget.id;
       }
       pollAbort.current?.abort();
       const controller = new AbortController();
       pollAbort.current = controller;
       let created;
+      // A start that has not answered after a few seconds is the API checking the model's files
+      // (hashing them once, after an install that recorded no check): say so instead of a bare
+      // spinner. Cleared as soon as the request answers.
+      const slowTimer = new AbortController();
+      abortableDelay(SLOW_START_MS, slowTimer.signal).then(
+        () => {
+          if (!slowTimer.signal.aborted) setSlowStart(true);
+        },
+        () => {},
+      );
       try {
         created = await trainingApi.batchDescribeJobs(projectId, dataset.id, token, {
           method: "POST",
@@ -780,6 +923,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       } catch (error) {
         if (!isAbortError(error)) setRunError(errorMessage(error, "Could not run the describe job."));
         return;
+      } finally {
+        slowTimer.abort();
+        setSlowStart(false);
       }
       if (!itemIds && !condense) setRows([]);
       itemsRead.current = { jobId: created.id, count: 0, provisional: new Set() };
@@ -835,7 +981,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     for (let index = 0; index < parts.length; index += 1) {
       setCondenseProgress(parts.length > 1 ? { index, total: parts.length } : null);
       lastFinished.current = null;
-      await submit(null, null, { fitTo: target, model: parts[index].model, rows: parts[index].rows, measure });
+      await submit(null, null, undefined, {
+        fitTo: target, model: parts[index].model, variant: parts[index].variant, rows: parts[index].rows, measure,
+      });
       if (lastFinished.current !== "completed") break;
     }
     setCondenseProgress(null);
@@ -859,7 +1007,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     setSavedBatch(null);
     setFitTo(id);
     if (dataset?.id) storeFitTo(dataset.id, id);
-    if (id && !condenseBlocked) condenseRows(id);
+    if (id && !condenseBlocked && !condenseRowsIssue(rowsToCondense(rows, id))) condenseRows(id);
   }
 
   // Images with no successful result yet: never described (e.g. after a cancel) or flagged.
@@ -975,8 +1123,48 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Condensing runs on each row's own describer, which must be installed.
   const condenseBlocked =
     busy || restoring || dirty || !DESCRIBE_MODELS.some((entry) => entry.condenses && modelAvailable(entry.id));
+  // Why the pending rows cannot condense yet: each condenses on its own describer and tier, so a
+  // row whose model or tier is not installed (a 27B tier since uninstalled) holds the step. "" when
+  // every pending row can.
+  const condenseRowsIssue = (pending) => {
+    for (const row of pending) {
+      const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+      if (unknownTier) return `${entry.label} has no tier “${rowTier}”, the tier that described a row.`;
+      if (!modelAvailable(entry.id, rowTier)) {
+        const name = rowTier ? `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}` : entry.label;
+        return `${name} is not installed, so its rows cannot be condensed.`;
+      }
+    }
+    return "";
+  };
+  const pendingCondenseIssue = condenseRowsIssue(pendingCondense);
+  // Measuring re-counts an edited condensed prompt with the target's tokenizer and loads no
+  // describer (the job is model-free), so it never waits on a describer or tier being installed.
+  // A target whose tokenizer is missing answers "not measured" on the row.
+  const measureBlocked = busy || restoring || dirty;
   // The block each row will be saved as (its condensed prompt when Fit to applies to it).
   const fitToId = activeFitTo;
+
+  // Why a row's re-run, which runs the row's own describer and tier, cannot start: that model or
+  // tier is not installed, or an edited prompt is over that model's limit. "" when it can.
+  // The model (and tier) a row's re-run runs: the ones that described it, shown on the row so a
+  // different selection above never reads as the one it uses.
+  function rerunDescriberName(row) {
+    const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+    if (unknownTier || !rowTier) return entry.label;
+    return `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}`;
+  }
+
+  function rerunIssue(row) {
+    const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+    if (unknownTier) return `${entry.label} has no tier “${rowTier}”, the tier that described this image.`;
+    const name = rerunDescriberName(row);
+    if (!modelAvailable(entry.id, rowTier)) return `${name} is not installed.`;
+    const rowDefault = defaults[entry.repo];
+    if (!rowDefault) return promptErrors[entry.repo] || "Loading the describing prompt…";
+    const sendsPrompt = prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim();
+    return sendsPrompt ? (describePromptIssues(prompt, rowDefault.maxChars, entry.label)[0]?.message ?? "") : "";
+  }
 
   return (
     <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={requestClose}>
@@ -994,7 +1182,11 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         <fieldset className="dataset-prompt-batch-models">
           <legend>Describing model</legend>
           {DESCRIBE_MODELS.map((entry) => {
-            const available = modelAvailable(entry.id);
+            // A tiered describer is unavailable only when no tier is installed; a missing selected
+            // tier is marked on its own radio below.
+            const available = entry.tiers
+              ? entry.tiers.some(([key]) => modelAvailable(entry.id, key))
+              : modelAvailable(entry.id);
             return (
               <label className="training-toggle-line" key={entry.id}>
                 <input
@@ -1013,19 +1205,46 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             );
           })}
         </fieldset>
+        {model.tiers ? (
+          <fieldset className="dataset-prompt-batch-models">
+            <legend>Tier</legend>
+            {model.tiers.map(([key, label]) => (
+              <label className="training-toggle-line" key={key}>
+                <input
+                  checked={tier === key}
+                  disabled={busy}
+                  name="dataset-prompt-batch-tier"
+                  onChange={() => setTierChoice(key)}
+                  type="radio"
+                  value={key}
+                />
+                <span>
+                  {label}
+                  {tierSize(selectedEntry, key) ? ` (${tierSize(selectedEntry, key)})` : ""}
+                  {modelAvailable(model.id, key) ? null : (
+                    <small className="dataset-prompt-batch-unavailable"> — not installed</small>
+                  )}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
         {!selectedAvailable ? (
           missingModels.length ? (
             <RequiredModelsNotice
+              // Every tier's entry shares the model id, so each tier gets its own notice state.
+              key={tier ?? model.id}
               downloadJobs={downloadJobs}
               feature="Describing the dataset"
               models={missingModels}
               onCancelJob={typeof jobAction === "function" ? (download) => jobAction(download, "cancel") : undefined}
-              onDownload={typeof createModelDownloadJob === "function" ? createModelDownloadJob : undefined}
+              onDownload={downloadMissing}
               onOpenModels={typeof setActiveView === "function" ? () => setActiveView("Models") : undefined}
             />
           ) : (
             <p className="inline-warning" role="status">
-              {model.label} is unavailable on this install.
+              {model.label}
+              {tier ? ` ${tierLabel}` : ""} is unavailable on this install.
             </p>
           )
         ) : null}
@@ -1120,11 +1339,18 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         {restoring ? <p className="dataset-caption-mode-note" role="status">Loading results of earlier runs…</p> : null}
         {runError ? <p className="inline-warning" role="alert">{runError}</p> : null}
         {runMessage ? <p className="dataset-caption-mode-note" role="status">{runMessage}</p> : null}
+        {submitting && slowStart ? (
+          <p className="dataset-caption-mode-note" data-run-note="checking-files" role="status">
+            Checking the model files before the job starts. This happens once after a model is installed and
+            can take about two minutes for a large model.
+          </p>
+        ) : null}
 
         {rows.length ? (
           <div className="dataset-prompt-batch-table" role="table" aria-label="Described images">
             {rows.map((row) => {
               const ratio = snapRatio(row.width, row.height);
+              const rerunBlockedBy = rerunIssue(row);
               return (
                 <div
                   className={row.failed ? "dataset-prompt-batch-row failed" : "dataset-prompt-batch-row"}
@@ -1140,12 +1366,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     </span>
                     <button
                       className="secondary-action"
-                      disabled={runBlocked}
-                      onClick={() => submit([row.itemId])}
+                      disabled={busy || restoring || dirty || defaultPrompt === null || Boolean(rerunBlockedBy)}
+                      onClick={() => submit([row.itemId], null, rowDescriber(row))}
+                      title={rerunBlockedBy || undefined}
                       type="button"
                     >
                       {rerunItemId === row.itemId ? "Re-running…" : "Re-run"}
                     </button>
+                    <span className="dataset-prompt-batch-size" data-row-note="rerun-with">
+                      Re-runs with {rerunDescriberName(row)}
+                    </span>
                   </div>
                   <div className="dataset-prompt-batch-fields" role="cell">
                     {row.failed ? (
@@ -1158,7 +1388,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                       <CondensedPrompt
                         busy={busy}
                         running={running}
-                        measureBlocked={condenseBlocked}
+                        measureBlocked={measureBlocked}
                         onChange={updateCondensed}
                         onMeasure={measureRow}
                         row={row}
@@ -1263,7 +1493,13 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               </button>
             )}
             {pendingCondense.length ? (
-              <button className="secondary-action" disabled={condenseBlocked} onClick={() => condenseRows()} type="button">
+              <button
+                className="secondary-action"
+                disabled={condenseBlocked || Boolean(pendingCondenseIssue)}
+                onClick={() => condenseRows()}
+                title={pendingCondenseIssue || undefined}
+                type="button"
+              >
                 Condense for {fitTarget.name} ({pendingCondense.length})
               </button>
             ) : null}

@@ -63,7 +63,7 @@ use futures_util::future::BoxFuture;
 use gen_core::core_llm::CancelFlag;
 #[cfg(native_lane)]
 pub(crate) use sceneworks_core::dataset_batch_describe::{
-    DESCRIBE_FIELDS, JOYCAPTION_REPO, VISION_CAPTIONER_REPO,
+    DESCRIBE_FIELDS, JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
 };
 
 /// The batch describer prompt asset: `[SYSTEM]` is the default editable instruction, `[OUTPUT]` the
@@ -108,6 +108,9 @@ pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize =
 pub(crate) enum DescribeModel {
     VisionCaptioner,
     JoyCaption,
+    /// The Qwen3.8 27B describer (SW-F365): the Vision Captioner's describing path (same prompt,
+    /// JSON-constrained decode, no thinking) over a larger model that comes in tiers.
+    Qwen38,
 }
 
 #[cfg(native_lane)]
@@ -118,9 +121,11 @@ impl DescribeModel {
         match model.map(str::trim).filter(|value| !value.is_empty()) {
             None | Some(VISION_CAPTIONER_REPO) => Ok(Self::VisionCaptioner),
             Some(JOYCAPTION_REPO) => Ok(Self::JoyCaption),
+            Some(QWEN38_27B_DESCRIBER_REPO) => Ok(Self::Qwen38),
             Some(other) => Err(WorkerError::InvalidPayload(format!(
                 "Dataset batch describe does not support model {other:?}; use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ))),
         }
     }
@@ -129,16 +134,314 @@ impl DescribeModel {
         match self {
             Self::VisionCaptioner => VISION_CAPTIONER_REPO,
             Self::JoyCaption => JOYCAPTION_REPO,
+            Self::Qwen38 => QWEN38_27B_DESCRIBER_REPO,
+        }
+    }
+
+    /// The name a failure message gives this model.
+    pub(crate) fn display_name(self) -> &'static str {
+        match self {
+            Self::VisionCaptioner => "Vision Captioner",
+            Self::JoyCaption => "JoyCaption",
+            Self::Qwen38 => "Qwen3.8 27B describer",
         }
     }
 
     /// The asset section holding this model's fixed output contract: the Vision Captioner's asks
-    /// for pose as named slots, JoyCaption's (shorter, to fit its prompt limit) as plain text.
+    /// for pose as named slots, JoyCaption's (shorter, to fit its prompt limit) as plain text. The
+    /// Qwen3.8 27B describer is a Vision Captioner-class describer and uses the slot contract.
     pub(crate) fn output_section(self) -> &'static str {
         match self {
-            Self::VisionCaptioner => "OUTPUT",
+            Self::VisionCaptioner | Self::Qwen38 => "OUTPUT",
             Self::JoyCaption => "JOYCAPTION_OUTPUT",
         }
+    }
+}
+
+/// Where a Qwen3.8 27B tier's snapshot lives. Full precision (`bf16`) is the upstream repository's
+/// snapshot. A quantised tier is the `<tier>/` folder of this engine's re-host repository: it was
+/// quantised ahead of time, so loading it never reads or load-quantises the full-precision files.
+#[cfg(native_lane)]
+pub(crate) fn qwen38_describer_weights_dir(
+    settings: &Settings,
+    tier: &str,
+) -> WorkerResult<PathBuf> {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let label = "Qwen3.8 27B describer model path";
+    let not_installed = || {
+        WorkerError::InvalidPayload(format!(
+            "The {tier} tier of the Qwen3.8 27B describer is not installed. Download that tier \
+             in the Model Manager, or choose a tier that is installed."
+        ))
+    };
+    let repo = if tier == "bf16" {
+        QWEN38_27B_DESCRIBER_REPO
+    } else if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let snapshot =
+        resolve_app_managed_model_dir(settings, repo, label).map_err(|_| not_installed())?;
+    // Installed means every file the catalog row pins is in this snapshot, the same rule the API's
+    // install state and the job's tier check apply: a cancelled download leaves a folder with
+    // some of them, never an install.
+    let files = sceneworks_core::dataset_batch_describe::qwen38_tier_files(repo, tier);
+    if files.is_empty() || !qwen38_snapshot_holds(&snapshot, &files) {
+        return Err(not_installed());
+    }
+    Ok(if tier == "bf16" {
+        snapshot
+    } else {
+        snapshot.join(tier)
+    })
+}
+
+/// Whether `snapshot` holds every file in `files`. A `model-*.safetensors` shard glob is satisfied
+/// by the shards the snapshot's `model.safetensors.index.json` names, every one of them present.
+#[cfg(native_lane)]
+fn qwen38_snapshot_holds(snapshot: &Path, files: &[String]) -> bool {
+    files.iter().all(|file| {
+        if !file.contains('*') {
+            return snapshot.join(file).is_file();
+        }
+        let Some(shards) = std::fs::read_to_string(snapshot.join("model.safetensors.index.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|index| {
+                index.get("weight_map")?.as_object().map(|map| {
+                    map.values()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+            })
+        else {
+            return false;
+        };
+        !shards.is_empty() && shards.iter().all(|shard| snapshot.join(shard).is_file())
+    })
+}
+
+/// The catalog's pinned snapshot of a Qwen3.8 27B tier, as [`qwen38_describer_weights_dir`]
+/// resolves it on a platform whose quantised tiers come from `rehost_repo`.
+#[cfg(all(test, native_lane))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Qwen38PinnedSnapshot {
+    pub(crate) repo: String,
+    pub(crate) revision: String,
+    /// The weights folder relative to the hub cache:
+    /// `models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier.
+    pub(crate) relative_dir: PathBuf,
+}
+
+/// Read a tier's pinned snapshot from the catalog `entry`'s download rows: full precision (`bf16`)
+/// is the upstream repository's row at its root, a quantised tier is `rehost_repo`'s row for that
+/// variant, in its `<tier>/` folder. `None` when the catalog has no such row.
+#[cfg(all(test, native_lane))]
+pub(crate) fn qwen38_pinned_snapshot(
+    entry: &JsonObject,
+    tier: &str,
+    rehost_repo: &str,
+) -> Option<Qwen38PinnedSnapshot> {
+    let repo = if tier == "bf16" {
+        QWEN38_27B_DESCRIBER_REPO
+    } else {
+        rehost_repo
+    };
+    let revision = entry
+        .get("downloads")?
+        .as_array()?
+        .iter()
+        .find(|row| {
+            row.get("repo").and_then(Value::as_str) == Some(repo)
+                && row.get("variant").and_then(Value::as_str) == Some(tier)
+        })?
+        .get("revision")?
+        .as_str()?
+        .to_owned();
+    let mut relative_dir = PathBuf::from(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join(&revision);
+    if tier != "bf16" {
+        relative_dir.push(tier);
+    }
+    Some(Qwen38PinnedSnapshot {
+        repo: repo.to_owned(),
+        revision,
+        relative_dir,
+    })
+}
+
+/// The memory (GB) a Qwen3.8 27B tier needs on `lane` (`mlx` or `candle`): that lane's
+/// `minMemoryGbByTier[tier]` floor in the catalog entry the job carries, else the lane's
+/// `minMemoryGb`. `None` when the job carries no such entry or floor (then nothing is refused).
+/// The MLX lane reads it; the Candle lane reads its floor through the CUDA fit gate instead.
+#[cfg(native_lane)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn qwen38_tier_floor_gb(payload: &JsonObject, lane: &str, tier: &str) -> Option<f64> {
+    let block = qwen38_catalog_entry(payload)?.get(lane)?;
+    block
+        .get("minMemoryGbByTier")
+        .and_then(|floors| floors.get(tier))
+        .and_then(Value::as_f64)
+        .or_else(|| block.get("minMemoryGb").and_then(Value::as_f64))
+}
+
+/// The Qwen3.8 27B catalog entry the API attached to the job.
+#[cfg(native_lane)]
+fn qwen38_catalog_entry(payload: &JsonObject) -> Option<&JsonObject> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    payload
+        .get("modelManifestEntries")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+}
+
+/// Refuse a tier whose memory floor exceeds what this worker has, with the two numbers. A missing
+/// floor or budget refuses nothing, like every other fit gate.
+#[cfg(native_lane)]
+pub(crate) fn qwen38_fit_refusal(
+    tier: &str,
+    needed_gb: Option<f64>,
+    available_gb: Option<f64>,
+) -> WorkerResult<()> {
+    match crate::fit_gate::fit_decision(needed_gb, available_gb) {
+        crate::fit_gate::FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } => Err(WorkerError::InvalidPayload(format!(
+            "The {tier} tier of the Qwen3.8 27B describer needs {needed_gb:.1} GB of memory, but \
+             this worker has {available_gb:.1} GB for it. Choose a smaller tier."
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The Candle decision once the refine cache has answered: a tier already resident there is reused
+/// and needs no new VRAM, so only a cold load is checked against the free VRAM it will see (with
+/// any other cached refiner's weights credited, since the load drops it first). Pure, so it runs
+/// without a GPU.
+#[cfg(native_lane)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn qwen38_cached_fit_refusal(
+    access: crate::cache_thread::CacheAccess,
+    tier: &str,
+    needed_gb: Option<f64>,
+    available_gb: Option<f64>,
+) -> WorkerResult<()> {
+    match access {
+        crate::cache_thread::CacheAccess::Warm => Ok(()),
+        crate::cache_thread::CacheAccess::Cold => qwen38_fit_refusal(tier, needed_gb, available_gb),
+    }
+}
+
+/// The free VRAM (GB) a cold Candle load is checked against. The cached image/video generator is
+/// evicted first (as the depth, training and image admissions do), then `probe_budget` reads the
+/// card, and `refiner_credit_gb` (the weights of a different cached refiner, which the load's own
+/// evict-before-load drops) is added, capped at the card's total. The refiner itself is not
+/// evicted here, so a job this check refuses leaves it resident. A warm tier is reused and needs
+/// no reading, so nothing is evicted for it. The evict and the probe are injected so the order is
+/// testable without a GPU.
+#[cfg(native_lane)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) async fn qwen38_free_gb_after_eviction<Evict, Probe>(
+    access: crate::cache_thread::CacheAccess,
+    refiner_credit_gb: f64,
+    evict_generator: impl FnOnce() -> Evict,
+    probe_budget: impl FnOnce() -> Probe,
+) -> WorkerResult<Option<f64>>
+where
+    Evict: std::future::Future<Output = WorkerResult<bool>>,
+    Probe: std::future::Future<Output = WorkerResult<Option<crate::fit_gate::VramBudget>>>,
+{
+    if access == crate::cache_thread::CacheAccess::Warm {
+        return Ok(None);
+    }
+    if evict_generator().await? {
+        tracing::info!(
+            event = "qwen38_describer_evicted_cached_generator",
+            "Qwen3.8 27B describer admission: evicted the cached generator before reading free VRAM"
+        );
+    }
+    Ok(probe_budget()
+        .await?
+        .map(|budget| crate::fit_gate::with_reclaimable(budget, refiner_credit_gb).free_gb))
+}
+
+/// The weights (GB) a cached refiner at `source` holds: the bytes of its safetensors payload, what
+/// dropping it releases. 0 when it cannot be read, so an unreadable entry is never over-credited.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn cached_refiner_weights_gb(source: &Path) -> f64 {
+    gen_core::core_llm::checkpoint_payload_bytes(source)
+        .map(|bytes| bytes as f64 / (1u64 << 30) as f64)
+        .unwrap_or(0.0)
+}
+
+/// Whether this worker can hold the job's tier, checked before any image.
+///
+/// MLX: the tier's floor against TOTAL unified memory (the catalog's MLX floors are whole-machine
+/// sizes). A model held in the refine cache or the generator cache does not lower that total, so
+/// nothing is evicted here: eviction could not change the decision.
+///
+/// Candle: the CUDA fit gate's own floor reader against FREE VRAM, which a cached model does lower.
+/// So the refine cache is asked first, without evicting: the same tier resident there is reused
+/// (admitted with no check); a different cached refiner stays resident and its weights are
+/// credited, because the load's own evict-before-load drops it. A cold load evicts the cached
+/// image/video generator before free VRAM is read fresh ([`qwen38_free_gb_after_eviction`]).
+#[cfg(native_lane)]
+async fn qwen38_memory_admission(
+    settings: &Settings,
+    payload: &JsonObject,
+    tier: &str,
+    weights_dir: &Path,
+) -> WorkerResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (settings, weights_dir);
+        qwen38_fit_refusal(
+            tier,
+            qwen38_tier_floor_gb(payload, "mlx", tier),
+            crate::fit_gate::unified_total_gb(),
+        )
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let (spec, requirements) = vision_describer_load(weights_dir);
+        let (access, cached_refiner) =
+            crate::refine_model_cache::refiner_admission_access(&spec, &requirements).await?;
+        let needed_gb = qwen38_catalog_entry(payload)
+            .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
+        let credit_gb = cached_refiner
+            .as_deref()
+            .map_or(0.0, cached_refiner_weights_gb);
+        let gpu_id = settings.gpu_id.clone();
+        let available_gb = qwen38_free_gb_after_eviction(
+            access,
+            credit_gb,
+            crate::generator_cache::evict_cached_generator,
+            || async move {
+                crate::load_progress::spawn_blocking(move || {
+                    crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
+                })
+                .await
+                .map_err(|error| task_join_error("describer VRAM probe", error))
+            },
+        )
+        .await?;
+        qwen38_cached_fit_refusal(access, tier, needed_gb, available_gb)
     }
 }
 
@@ -744,32 +1047,51 @@ pub(crate) trait BatchDescriber: Send + Sync {
 /// The Vision Captioner (Qwen3-VL) describer: a JSON-constrained decode on the resident refine-model
 /// cache, the model loaded once and reused across the dataset's images.
 #[cfg(native_lane)]
-struct VisionCaptionerDescriber {
-    weights_dir: PathBuf,
-    job_id: String,
+pub(crate) struct VisionCaptionerDescriber {
+    /// Which model is loaded: the Vision Captioner or the Qwen3.8 27B describer. Its name leads the
+    /// load and generation failure messages.
+    pub(crate) model: DescribeModel,
+    pub(crate) weights_dir: PathBuf,
+    pub(crate) job_id: String,
+}
+
+/// The refine-cache load a Vision Captioner-class describer makes for `weights_dir`: its spec and
+/// requirements, which together are the cache key. Shared with the 27B's memory check so that
+/// check asks the cache about exactly the model the describe call loads.
+#[cfg(native_lane)]
+fn vision_describer_load(
+    weights_dir: &Path,
+) -> (
+    gen_core::core_llm::LoadSpec,
+    gen_core::core_llm::ModelRequirements,
+) {
+    use gen_core::core_llm::{Constraint, ModelRequirements};
+    let spec = gen_core::core_llm::LoadSpec {
+        source: weights_dir.to_string_lossy().into_owned(),
+        // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
+        ..Default::default()
+    };
+    // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
+    // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
+    // flip to vision at load (see `prompt_refine_jobs`).
+    (
+        spec,
+        ModelRequirements::default().with_constraint(Constraint::Json),
+    )
 }
 
 #[cfg(native_lane)]
 impl VisionCaptionerDescriber {
     /// The cache key both generations use: the condensing step must hit the model the describe
-    /// call loaded, so its spec and requirements are the describe call's exactly.
+    /// call loaded, so its spec and requirements are the describe call's exactly. The Qwen3.8 27B
+    /// memory admission asks the refine cache about the same key ([`vision_describer_load`]).
     fn load_key(
         &self,
     ) -> (
         gen_core::core_llm::LoadSpec,
         gen_core::core_llm::ModelRequirements,
     ) {
-        let spec = gen_core::core_llm::LoadSpec {
-            source: self.weights_dir.to_string_lossy().into_owned(),
-            // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
-            ..Default::default()
-        };
-        // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
-        // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
-        // flip to vision at load (see `prompt_refine_jobs`).
-        let requirements = gen_core::core_llm::ModelRequirements::default()
-            .with_constraint(gen_core::core_llm::Constraint::Json);
-        (spec, requirements)
+        vision_describer_load(&self.weights_dir)
     }
 }
 
@@ -789,10 +1111,11 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let user = prompt.user.clone();
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
+        let name = self.model.display_name();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
-            "Vision Captioner load failed",
+            format!("{name} load failed"),
             move |model| -> WorkerResult<Result<String, String>> {
                 let image = match crate::prompt_refine_jobs::vision_image_ref(image) {
                     Ok(image) => image,
@@ -800,8 +1123,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
                         return Ok(Err(format!("The image could not be prepared: {error}")))
                     }
                 };
-                // The Vision Captioner has no thinking mode; a no-think request keeps the JSON
-                // mask safe to apply from the first token.
+                // Thinking is always off: the 8B Vision Captioner has no thinking mode, and the
+                // Qwen3.8 27B has one that this request disables. A no-think request keeps the
+                // JSON mask safe to apply from the first token.
                 let thinking = ThinkingMode::Disabled;
                 let constraint = crate::prompt_refine_jobs::json_decode_constraint(
                     true,
@@ -848,7 +1172,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 Ok(generation
                     .map(|output| output.text)
-                    .map_err(|error| format!("Vision Captioner generation failed: {error}")))
+                    .map_err(|error| format!("{name} generation failed: {error}")))
             },
         ))
     }
@@ -866,10 +1190,11 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let (spec, requirements) = self.load_key();
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
+        let name = self.model.display_name();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
-            "Vision Captioner load failed",
+            format!("{name} load failed"),
             move |model| -> WorkerResult<Result<CondenseReply, String>> {
                 let request = TextLlmRequest {
                     progress: Some(crate::load_progress::text_observer()),
@@ -906,7 +1231,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                         cut_off: output.finish_reason == Some(FinishReason::Length),
                         text: output.text,
                     })
-                    .map_err(|error| format!("Vision Captioner generation failed: {error}")))
+                    .map_err(|error| format!("{name} generation failed: {error}")))
             },
         ))
     }
@@ -1229,6 +1554,8 @@ async fn append_result_item(
 #[cfg(native_lane)]
 struct BatchDescribeRequest {
     model: DescribeModel,
+    /// The model tier described with: `Some` for the Qwen3.8 27B describer only.
+    tier: Option<&'static str>,
     prompt: DescribePrompt,
     default_prompt: bool,
     dataset_id: String,
@@ -1323,6 +1650,23 @@ fn parse_batch_describe_request(
     payload: &JsonObject,
 ) -> WorkerResult<BatchDescribeRequest> {
     let model = DescribeModel::from_payload(payload.get("model").and_then(Value::as_str))?;
+    // The tier travels as `variant`, the request vocabulary the model-source seam already reads
+    // (`requested_runtime_variant`), so the source a job is admitted against is the tier it loads.
+    // A non-string value is refused, never read as "no tier": that would run the default size.
+    let requested_tier = match payload.get("variant") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(tier)) => Some(tier.as_str()),
+        Some(other) => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Dataset batch describe variant (the model tier) must be a string, got {other}."
+            )))
+        }
+    };
+    let tier = sceneworks_core::dataset_batch_describe::resolve_describe_tier(
+        Some(model.repo()),
+        requested_tier,
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let limit =
         sceneworks_core::dataset_batch_describe::max_describe_prompt_chars(Some(model.repo()));
     let instruction = match payload.get("prompt") {
@@ -1393,6 +1737,7 @@ fn parse_batch_describe_request(
     }
     Ok(BatchDescribeRequest {
         model,
+        tier,
         prompt,
         default_prompt,
         dataset_id: required_payload_string(payload, "datasetId")?.to_owned(),
@@ -1420,6 +1765,9 @@ fn batch_describe_result(
         .count();
     let mut result = JsonObject::new();
     result.insert("model".to_owned(), json!(request.model.repo()));
+    if let Some(tier) = request.tier {
+        result.insert("variant".to_owned(), json!(tier));
+    }
     result.insert("datasetId".to_owned(), json!(request.dataset_id));
     result.insert("datasetVersion".to_owned(), request.dataset_version.clone());
     result.insert("prompt".to_owned(), json!(request.prompt.instruction));
@@ -1479,6 +1827,7 @@ pub(crate) async fn run_dataset_batch_describe_job(
     }
     let describer: Box<dyn BatchDescriber> = match request.model {
         DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber {
+            model: DescribeModel::VisionCaptioner,
             weights_dir: resolve_app_managed_model_dir(
                 settings,
                 VISION_CAPTIONER_REPO,
@@ -1486,6 +1835,19 @@ pub(crate) async fn run_dataset_batch_describe_job(
             )?,
             job_id: job.id.clone(),
         }),
+        DescribeModel::Qwen38 => {
+            // Both refusals come before any image: the tier must be installed and fit here.
+            let tier = request.tier.unwrap_or(
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
+            );
+            let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
+            qwen38_memory_admission(settings, &job.payload, tier, &weights_dir).await?;
+            Box::new(VisionCaptionerDescriber {
+                model: DescribeModel::Qwen38,
+                weights_dir,
+                job_id: job.id.clone(),
+            })
+        }
         DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
             resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
             job.id.clone(),
