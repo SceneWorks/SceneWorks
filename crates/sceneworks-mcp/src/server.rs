@@ -285,6 +285,41 @@ impl schemars::JsonSchema for GenerateImageInput {
 impl GenerateImageInput {
     fn decode(self) -> Result<GenerateImageArgs, ErrorData> {
         let mut canonical = self.0.clone();
+        // Optional tool arguments decode JSON null as None, and image_job_body omits them.
+        // Apply that transport rule before validating the projected HTTP request.
+        for key in [
+            "optionsSchemaVersion",
+            "appearance",
+            "mossImageAdvanced",
+            "mode",
+            "negativePrompt",
+            "model",
+            "count",
+            "seed",
+            "width",
+            "height",
+            "stylePreset",
+            "loras",
+            "characterId",
+            "sourceAssetId",
+            "referenceAssetId",
+            "referenceAssetIds",
+            "maskAssetId",
+            "includeWorkflow",
+            "steps",
+            "guidanceScale",
+            "sampler",
+            "schedulerShift",
+            "cfgInterval",
+            "captionOverflow",
+            "prompts",
+            "mossImage",
+            "mossImageEdit",
+        ] {
+            if canonical.get(key).is_some_and(Value::is_null) {
+                canonical.remove(key);
+            }
+        }
         if canonical
             .get("mode")
             .and_then(Value::as_str)
@@ -2410,6 +2445,60 @@ mod tests {
         raw.as_object_mut().unwrap().remove("title");
         typed.as_object_mut().unwrap().remove("title");
         assert_eq!(raw, typed);
+    }
+
+    #[test]
+    fn nullable_image_tool_options_match_omitted_options_before_shared_validation() {
+        let bare = json!({"projectId":"p", "prompt":"tree"});
+        let mut with_nulls = bare.clone();
+        for key in [
+            "optionsSchemaVersion",
+            "appearance",
+            "mossImageAdvanced",
+            "mode",
+            "negativePrompt",
+            "model",
+            "count",
+            "seed",
+            "width",
+            "height",
+            "stylePreset",
+            "loras",
+            "characterId",
+            "sourceAssetId",
+            "referenceAssetId",
+            "referenceAssetIds",
+            "maskAssetId",
+            "includeWorkflow",
+            "steps",
+            "guidanceScale",
+            "sampler",
+            "schedulerShift",
+            "cfgInterval",
+            "captionOverflow",
+            "prompts",
+            "mossImage",
+            "mossImageEdit",
+        ] {
+            with_nulls[key] = Value::Null;
+        }
+        let decode = |value: Value| GenerateImageInput(value.as_object().unwrap().clone()).decode();
+        assert_eq!(
+            image_job_body(&decode(with_nulls).expect("null options decode")).unwrap(),
+            image_job_body(&decode(bare).expect("omitted options decode")).unwrap(),
+        );
+        for (key, value) in [
+            ("model", json!(3)),
+            ("loras", json!("bad")),
+            ("referenceAssetIds", json!(7)),
+        ] {
+            let mut malformed = json!({"projectId":"p", "prompt":"tree"});
+            malformed[key] = value;
+            assert!(
+                decode(malformed).is_err(),
+                "malformed {key} must be refused"
+            );
+        }
     }
 
     #[test]
