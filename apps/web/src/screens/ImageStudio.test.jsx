@@ -92,6 +92,10 @@ const field = (container, labelText) => {
   );
   return label?.querySelector("input, select");
 };
+const clickReadyGenerate = async (button) => {
+  await vi.waitFor(() => expect(button().disabled).toBe(false));
+  await click(button());
+};
 
 describe("ImageStudio Save as Preset", () => {
   let container;
@@ -1793,6 +1797,7 @@ describe("ImageStudio model picker capability gating", () => {
     [...root.querySelectorAll("label.quant-tier-picker select")][0] ?? null;
   const generateButton = () =>
     [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+  const clickGenerate = () => clickReadyGenerate(generateButton);
 
   it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
@@ -1929,7 +1934,7 @@ describe("ImageStudio model picker capability gating", () => {
     const picker = tierPicker(container);
     expect(picker).toBeTruthy();
     expect(picker.value).toBe("q4");
-    await click(generateButton());
+    await clickGenerate();
     // …and the resolved tier (q4) rides the payload, so the worker budgets/loads THAT tier instead of
     // defaulting to q8 against a tier the user never downloaded (#1516). It is NOT a deliberate pick (no
     // sticky), so the explicit marker is absent — the worker may capability-downtier.
@@ -1945,7 +1950,7 @@ describe("ImageStudio model picker capability gating", () => {
     await openAdvanced(container);
     await act(async () => {});
     expect(tierPicker(container)).toBeFalsy();
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
   });
 
@@ -1961,7 +1966,7 @@ describe("ImageStudio model picker capability gating", () => {
     await openAdvanced(container);
     await act(async () => {});
     expect(tierPicker(container).value).toBe("q4");
-    await click(generateButton());
+    await clickGenerate();
     // Default q4 → mlxQuantize 4.
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
@@ -1981,7 +1986,7 @@ describe("ImageStudio model picker capability gating", () => {
     await act(async () => {});
     // Reload-always: switching surfaces a transient "loading" note.
     expect(container.querySelector("label.quant-tier-picker [role='status']")).toBeTruthy();
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(0);
   });
 
@@ -1998,7 +2003,7 @@ describe("ImageStudio model picker capability gating", () => {
     await act(async () => {});
     setSelect(tierPicker(container), "q8");
     await act(async () => {});
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
   });
 
@@ -2042,7 +2047,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(floorNote()).toBeTruthy();
     expect(floorNote().textContent).toContain("Your pick is honored.");
     // The explicit q4 is honored on Generate (not switched back to the floor).
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 
@@ -2095,7 +2100,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(precisionLabel(container)).toBeFalsy();
     // Default tier q4 → mlxQuantize 4, NOT the precision-toggle's bf16 sentinel 0.
     await vi.waitFor(() => expect(generateButton().disabled).toBe(false));
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 
@@ -2142,7 +2147,7 @@ describe("ImageStudio model picker capability gating", () => {
     // No sticky: q4 is a derived default — the picker says so, and the payload leaves it clampable.
     expect(tierPicker(container).value).toBe("q4");
     expect(note()).toBeTruthy();
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
     expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantizeExplicit");
 
@@ -2153,7 +2158,7 @@ describe("ImageStudio model picker capability gating", () => {
     await click(keep);
     expect(tierPicker(container).value).toBe("q4");
     expect(note()).toBeFalsy();
-    await click(generateButton());
+    await clickGenerate();
     expect(createImageJob.mock.calls[1][0].advanced.mlxQuantize).toBe(4);
     expect(createImageJob.mock.calls[1][0].advanced.mlxQuantizeExplicit).toBe(true);
   });
@@ -3412,8 +3417,8 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
   }
 
   const openAdvanced = async () => click(document.body.querySelector(".advanced-section-toggle"));
-  const generate = async () =>
-    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+  const generate = () => clickReadyGenerate(() =>
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
   const labelStartingWith = (text) =>
     [...container.querySelectorAll("label")].find((node) => node.textContent.trim().startsWith(text));
   const setTextarea = async (element, value) => {

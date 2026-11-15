@@ -716,6 +716,22 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(calls("/yue2/jobs").length).toBe(0);
   });
 
+  it("keeps transcription disabled until a recording is selected", async () => {
+    const entry = yue2Entry({
+      conditionalComponents: [
+        { componentId: "yue2_sheetsage2", requiredFor: ["cover"], installState: "installed" },
+        { componentId: "yue2_mert_v2_fullsong", requiredFor: ["cover"], installState: "installed" },
+      ],
+      conditionalPurposes: { cover: { installState: "installed" } },
+    });
+    await openEnabledLab(context({ models: [...STANDARD, YUE1, entry] }));
+    await click(buttonWithText(lab(), "Cover"));
+    const button = buttonStarting(lab(), "Transcribe the recording");
+    expect(button.disabled).toBe(true);
+    await click(button);
+    expect(calls("/yue2/jobs")).toHaveLength(0);
+  });
+
   it("transcribes a selected recording, reviews both modes, edits the full score and covers both modes", async () => {
     const transcription = {
       id: "yue2t_take", createdAt: "2026-09-27T12:00:00Z", sourceAudioAssetId: "asset_take",
