@@ -14643,14 +14643,43 @@ fn ltx25_dev_attaches_stage_two_refinement_and_distilled_does_not() {
         ..crate::test_env::offline_settings()
     };
     let manifest = json!({
+        "id": "ltx_2_5", "family": "ltx-video", "type": "video",
+        "capabilities": ["text_to_video"],
+        "optionRouteFacts": { "videoMlxRouted": true, "candleVideoRouted": true },
         "mlx": { "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 } },
         "resources": { "distilledLora": { "repo": repo, "file": file } }
     });
-    let dev = request(json!({
-        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+    let resolved = |value: Value| {
+        let authored = value.as_object().unwrap();
+        let effective = sceneworks_core::options::request_validation::resolve(
+            "video",
+            authored,
+            manifest.as_object().unwrap(),
+        )
+        .unwrap();
+        VideoRequest::from_resolved(authored, &effective).unwrap()
+    };
+    let dev = resolved(json!({
+        "projectId": "p", "model": "ltx_2_5", "mode": "text_to_video", "prompt": "a fox",
         "advanced": { "transformerVariant": "dev" },
         "modelManifestEntry": manifest,
     }));
+    assert_eq!(
+        dev.options()
+            .distill_stage1_strength
+            .as_ref()
+            .map(|bound| bound.value),
+        Some(0.0),
+        "shared resolution must materialize the manifest's first-pass default"
+    );
+    assert_eq!(
+        dev.options()
+            .distill_stage2_strength
+            .as_ref()
+            .map(|bound| bound.value),
+        Some(1.0),
+        "shared resolution must materialize the manifest's second-pass default"
+    );
     let specs = resolve_ltx_adapters(&settings, &dev).expect("dev refinement adapter");
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].path, adapter);
@@ -14682,18 +14711,26 @@ fn ltx25_dev_attaches_stage_two_refinement_and_distilled_does_not() {
         "the refusal must name the knob it rejects: {message}"
     );
 
-    // The dev contract must not allow a request to reactivate the refinement
-    // adapter during raw stage one or weaken it during stage two.
-    let override_scales = request(json!({
-        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
-        "advanced": {
-            "transformerVariant": "dev",
-            "distillStage1Strength": 1.0,
-            "distillStage2Strength": 0.0
-        },
-        "modelManifestEntry": manifest,
-    }));
-    assert!(resolve_ltx_adapters(&settings, &override_scales).is_err());
+    // The dev contract refuses authored scales, including values equal to the
+    // manifest defaults; provenance, not numeric equality, decides the policy.
+    for (key, value) in [
+        ("distillStage1Strength", 0.0),
+        ("distillStage1Strength", 1.0),
+        ("distillStage2Strength", 1.0),
+        ("distillStage2Strength", 0.0),
+    ] {
+        let mut advanced = json!({ "transformerVariant": "dev" });
+        advanced[key] = json!(value);
+        let override_scales = resolved(json!({
+            "projectId": "p", "model": "ltx_2_5", "mode": "text_to_video", "prompt": "a fox",
+            "advanced": advanced,
+            "modelManifestEntry": manifest,
+        }));
+        assert!(
+            resolve_ltx_adapters(&settings, &override_scales).is_err(),
+            "authored {key} must be refused even when the other scale is defaulted"
+        );
+    }
 
     let invalid_contract = request(json!({
         "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
