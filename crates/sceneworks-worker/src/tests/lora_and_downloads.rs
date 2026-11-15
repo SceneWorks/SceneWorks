@@ -3777,3 +3777,184 @@ async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision(
         assert_eq!(std::fs::read(&source).unwrap(), original);
     }
 }
+
+/// A Hugging Face hub install: the downloader verifies the blob, and the snapshot file admission
+/// resolves is a link to that blob.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_downloaded_blob_verdict_serves_the_first_admission_check() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    use sha2::{Digest, Sha256};
+
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let repo = temp.path().join("hub/models--owner--model");
+    let blob = repo.join("blobs/etag");
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"weights").unwrap();
+    // A multi-GB download's last write is long past by the time its hash ends; a fixture this
+    // small needs its mtime aged to stand outside the stamp's racy window.
+    let settle = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+    };
+    settle(&blob);
+    let snapshot = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../blobs/etag", &snapshot).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"weights"));
+    let api = ApiClient::new(&settings);
+
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+
+    // Admission checks the snapshot file's real path against the pinned digest: it reads nothing.
+    let cache = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let real = std::fs::canonicalize(&snapshot).unwrap();
+    let pinned = format!("sha256:{digest}");
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap(),
+        SourceVerification::Reused
+    );
+
+    // Modified after the download: hashed again and refused.
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    settle(&blob);
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+/// A settled blob and the path its hub snapshot entry will take. A hard link moves `ctime` on
+/// Unix just as it moves the NTFS change time on Windows, so these tests run on every platform,
+/// including the Windows lane.
+fn snapshot_entry_fixture(temp: &Path) -> (Settings, PathBuf, PathBuf, String) {
+    use sha2::{Digest, Sha256};
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.join("data");
+    let repo = temp.join("hub/models--owner--model");
+    let blob = repo.join("blobs/etag");
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"weights").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+        .unwrap();
+    let entry = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"weights"));
+    (settings, blob, entry, digest)
+}
+
+/// Verify the hard-linked `entry` the way the downloader does after linking it.
+async fn verify_linked_entry(
+    settings: &Settings,
+    blob: &Path,
+    entry: &Path,
+    digest: &str,
+) -> crate::error::WorkerResult<()> {
+    let api = ApiClient::new(settings);
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api: &api,
+        client: &client,
+        settings,
+        job_id: "job-1",
+        cancel_message: "canceled",
+        fresh_download: false,
+    };
+    let progress = crate::downloads::DownloadProgress::new(
+        "model.safetensors",
+        0,
+        Some(7),
+        Duration::from_secs(5),
+    );
+    crate::downloads::verify_snapshot_entry(
+        &context,
+        blob,
+        entry,
+        Some(digest),
+        "model.safetensors",
+        &progress,
+    )
+    .await
+}
+
+/// A snapshot entry that is its own directory entry for the blob (a Windows hard link, or the
+/// copy fallback) is verified again at download time and recorded under the entry's own path, the
+/// path admission resolves, so the first admission after the download reads no bytes.
+#[tokio::test]
+async fn a_hard_linked_snapshot_entry_is_verified_at_download_time() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
+    let api = ApiClient::new(&settings);
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+    std::fs::hard_link(&blob, &entry).unwrap();
+    verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect("the linked entry holds the downloaded bytes");
+    assert_eq!(
+        VerifiedSourceCache::for_data_dir(&settings.data_dir)
+            .verify(
+                &std::fs::canonicalize(&entry).unwrap(),
+                &format!("sha256:{digest}"),
+                &|| Ok(())
+            )
+            .unwrap(),
+        SourceVerification::Reused,
+        "the first admission after the download reads no bytes"
+    );
+}
+
+/// A blob rewritten between its verification and its link — same length, modified time restored
+/// — fails the download, and the old digest is never recorded against the rewritten bytes.
+#[tokio::test]
+async fn a_blob_rewritten_before_its_link_fails_the_download() {
+    use sceneworks_core::verified_source_cache::VerifiedSourceCache;
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
+    let api = ApiClient::new(&settings);
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+    let modified = std::fs::metadata(&blob).unwrap().modified().unwrap();
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    std::fs::hard_link(&blob, &entry).unwrap();
+    let error = verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect_err("substituted bytes fail the download");
+    assert!(
+        error.to_string().contains("failed its integrity check"),
+        "{error}"
+    );
+    let store = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let pinned = format!("sha256:{digest}");
+    for path in [&blob, &entry] {
+        if let Ok(real) = std::fs::canonicalize(path) {
+            assert_ne!(
+                store.recorded(&real).as_deref(),
+                Some(pinned.as_str()),
+                "{} is never recorded as the old digest",
+                path.display()
+            );
+        }
+    }
+}

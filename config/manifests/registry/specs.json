@@ -32918,7 +32918,9 @@
       "id": "krea_2_raw",
       "image": {
         "guidanceOffValue": 0,
+        "maxPromptTokens": 1024,
         "negativePromptRequiresGuidance": true,
+        "promptOverflow": "refuse",
         "supportsSchedulerShift": true
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
@@ -35683,7 +35685,9 @@
       "id": "krea_2_turbo",
       "image": {
         "guidanceOffValue": 0,
+        "maxPromptTokens": 1024,
         "negativePromptRequiresGuidance": true,
+        "promptOverflow": "refuse",
         "supportsGuidance": true,
         "supportsNegativePrompt": true,
         "supportsSchedulerShift": true
@@ -66964,11 +66968,11 @@
     "evidence": {
       "candle": {
         "measured": false,
-        "minMemoryGb": 58,
+        "minMemoryGb": 65,
         "minMemoryGbByTier": {
-          "bf16": 58,
+          "bf16": 65,
           "q4": 22,
-          "q8": 36
+          "q8": 34
         }
       },
       "mlx": {

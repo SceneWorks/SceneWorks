@@ -718,6 +718,92 @@ async fn a_qwen38_tier_that_is_not_installed_is_refused_before_queueing() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
 }
 
+/// A 27B row condenses with the tier it was described with: a condense-only job carries that tier
+/// as `variant`, the 27B's own catalog entry as its only source, and that tier's row bound on
+/// every route, and it is refused plainly when the tier is not installed (it loads the model). A
+/// measure-only job is model-free: it carries and binds no source, so an uninstalled tier does
+/// not matter; it still records the tier the row was described with.
+#[tokio::test]
+async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
+    use sceneworks_core::contracts::JobType;
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO;
+    use sceneworks_core::model_artifacts::portable_binding::model_free_job;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    let rows = json!([{ "itemId": item_ids[0], "width": 640, "height": 480,
+        "fields": { "description": "A woman, woman_1." }, "condensedText": "woman_1." }]);
+    let condense = |tier: &str, measure: bool| {
+        json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": tier, "fitTo": "krea_2_turbo",
+                "condenseRows": rows, "measureOnly": measure })
+    };
+
+    let (status, job) = request(app.clone(), "POST", &route, condense("q4", false)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["variant"], "q4");
+    assert_eq!(job["payload"]["condenseOnly"], true);
+    assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
+    let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("condense-only carries its describer's source")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(entries, vec!["vision_describe_qwen3_8_27b"]);
+    let job_id = job["id"].as_str().expect("job id");
+    for platform in ["linux", "windows"] {
+        let (repo, revision, variant, files) =
+            bound_describer_source(&state, job_id, "candle", platform);
+        assert_eq!(
+            (repo.as_str(), variant.as_str()),
+            (QWEN38_27B_DESCRIBER_CANDLE_REPO, "q4")
+        );
+        assert_eq!(revision, qwen38_tier_row(platform, "q4")["revision"]);
+        assert!(
+            files.iter().all(|file| file.starts_with("q4/")),
+            "{files:?}"
+        );
+    }
+
+    let (status, body) = request(app.clone(), "POST", &route, condense("q8", false)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let detail = body["detail"].as_str().expect("detail");
+    assert!(
+        detail.starts_with("The q8 tier of Vision Describer (Qwen3.8-27B) is not installed."),
+        "{detail}"
+    );
+
+    // Measure-only on the uninstalled q8 tier: admitted because it is model-free, with no source
+    // carried and none bound, not because the tier check passed.
+    let (status, job) = request(app.clone(), "POST", &route, condense("q8", true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = job["payload"].as_object().expect("payload");
+    assert_eq!(payload["measureOnly"], true);
+    assert_eq!(payload["variant"], "q8");
+    assert!(model_free_job(&JobType::DatasetBatchDescribe, payload));
+    for carrier in [
+        "modelManifestEntry",
+        "modelManifestEntries",
+        "baseModelManifestEntry",
+    ] {
+        assert!(payload.get(carrier).is_none(), "{carrier}: {job}");
+    }
+    assert_eq!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::DatasetBatchDescribe,
+            payload,
+            "auto",
+        )
+        .await
+        .expect("a model-free job captures no binding"),
+        None
+    );
+}
+
 /// AC1: installing the q4 tier downloads the q4 folder of this platform's re-host and nothing
 /// else (never the full-precision files), and it is the same pinned source a q4 describe job binds
 /// for this platform's worker, so the installed tier is the one the worker loads.
@@ -784,4 +870,256 @@ async fn installing_the_q4_tier_downloads_only_the_q4_files_the_q4_job_loads() {
         files.iter().all(|file| file.starts_with("q4/")),
         "{files:?}"
     );
+}
+
+/// SW-7163: "Fit to" carries the target's own catalog entry (the worker reads the limit from it),
+/// and a condense-only request carries each row's fields and size on its job items.
+#[tokio::test]
+async fn batch_describe_fit_to_carries_the_targets_catalog_entry() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": " krea_2_turbo ", "maxPromptTokens": 50_000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = &job["payload"];
+    assert_eq!(payload["fitTo"], "krea_2_turbo");
+    assert_eq!(payload["fitToManifestEntry"]["id"], "krea_2_turbo");
+    assert_eq!(
+        payload["fitToManifestEntry"]["image"]["maxPromptTokens"],
+        1024
+    );
+    assert!(payload.get("condenseOnly").is_none());
+    assert_eq!(payload["items"].as_array().unwrap().len(), 3);
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "fitTo": "krea_2_raw",
+            "prompt": "not sent for a condense-only job",
+            "condenseRows": [
+                { "itemId": item_ids[2], "width": 640, "height": 480,
+                  "fields": { "description": "An edited woman, woman_1.", "pose": "woman_1 — seated" } },
+                { "itemId": item_ids[0], "fields": { "style": "A photograph." }, "notice": "Cut off." },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = &job["payload"];
+    assert_eq!(payload["condenseOnly"], true);
+    assert_eq!(payload["fitTo"], "krea_2_raw");
+    assert!(payload.get("prompt").is_none());
+    let items = payload["items"].as_array().unwrap();
+    let ids: Vec<_> = items.iter().map(|item| item["itemId"].clone()).collect();
+    assert_eq!(
+        ids,
+        vec![json!(item_ids[0]), json!(item_ids[2])],
+        "dataset order"
+    );
+    assert_eq!(
+        items[1]["fields"]["description"],
+        "An edited woman, woman_1."
+    );
+    assert_eq!(
+        (items[1]["width"].clone(), items[1]["height"].clone()),
+        (json!(640), json!(480))
+    );
+    assert_eq!(items[0]["width"], Value::Null);
+    assert_eq!(items[0]["notice"], "Cut off.");
+    // Job listings carry the target's prompt facts and tokenizer sources, not its whole entry.
+    let entry = &payload["fitToManifestEntry"];
+    assert_eq!(entry["image"]["maxPromptTokens"], 1024);
+    assert_eq!(entry["image"]["promptOverflow"], "refuse");
+    assert_eq!(entry["adapter"], "mlx_krea");
+    assert!(entry["downloads"][0]["repo"].is_string());
+    assert!(entry.get("licenseNotice").is_none() && entry.get("ui").is_none());
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "fitTo": "krea_2_turbo",
+            "measureOnly": true,
+            "condenseRows": [{ "itemId": item_ids[1], "fields": { "description": "woman_1" },
+                               "condensedText": "woman_1 sits." }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["measureOnly"], true);
+    assert!(job["payload"].get("condenseOnly").is_none());
+    assert_eq!(job["payload"]["items"][0]["condensedText"], "woman_1 sits.");
+}
+
+#[tokio::test]
+async fn batch_describe_refuses_an_unusable_fit_to_target_or_condense_rows() {
+    use sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_FIELD_CHARS;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = |fields: Value| json!({ "itemId": item_ids[0], "fields": fields });
+    for (body, field, expect) in [
+        (
+            json!({ "fitTo": "no_such_model" }),
+            "fitTo",
+            "Unknown Fit to model",
+        ),
+        (
+            json!({ "fitTo": "supra2_img" }),
+            "fitTo",
+            "reads only 128 prompt tokens",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "style": " ", "pose": "" }))] }),
+            "condenseRows",
+            "no text in any field",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({
+                "style": "x".repeat(MAX_DESCRIBE_FIELD_CHARS),
+                "pose": "x".repeat(MAX_DESCRIBE_FIELD_CHARS),
+                "camera": "x",
+            }))] }),
+            "condenseRows",
+            "at most 32000 can be condensed",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "measureOnly": true, "condenseRows": [row(json!({ "style": "a" }))] }),
+            "condenseRows",
+            "no condensed prompt to measure",
+        ),
+        (
+            json!({ "fitTo": "z_image_turbo" }),
+            "fitTo",
+            "declares no prompt token limit",
+        ),
+        (
+            json!({ "model": JOYCAPTION_REPO, "fitTo": "krea_2_turbo" }),
+            "fitTo",
+            "JoyCaption rows are not condensed",
+        ),
+        (
+            json!({ "condenseRows": [row(json!({ "style": "A photograph." }))] }),
+            "condenseRows",
+            "needs a fitTo target",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [] }),
+            "condenseRows",
+            "at least one row",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "itemIds": [item_ids[0]], "condenseRows": [row(json!({ "style": "A photograph." }))] }),
+            "condenseRows",
+            "not both",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "mood": "calm" }))] }),
+            "condenseRows",
+            "unknown field \"mood\"",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [
+                row(json!({ "style": "x".repeat(MAX_DESCRIBE_FIELD_CHARS + 1) }))
+            ] }),
+            "condenseRows",
+            "longer than 16000 characters",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "style": "a" })), row(json!({ "style": "b" }))] }),
+            "condenseRows",
+            "appears twice",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [{ "itemId": "not_an_item", "fields": { "style": "a" } }] }),
+            "itemIds",
+            "Unknown dataset item id(s): not_an_item.",
+        ),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &route, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        assert_eq!(error["context"]["field"], field, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expect),
+            "{expect}: {error}"
+        );
+    }
+}
+
+/// SW-7163: a measure-only job for a row whose describer is not installed is admitted with no
+/// describer source attached and none bound (it is model-free); a condense-only job runs its
+/// describer, so it carries the describer's source and nothing for the target image model.
+#[tokio::test]
+async fn a_measure_only_job_prepares_no_describer_source_and_condense_only_prepares_only_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = json!({ "itemId": item_ids[0], "fields": { "description": "woman_1" },
+                      "condensedText": "woman_1 sits." });
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "measureOnly": true, "condenseRows": [row.clone()] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = job["payload"].as_object().expect("payload");
+    for carrier in [
+        "modelManifestEntry",
+        "modelManifestEntries",
+        "baseModelManifestEntry",
+    ] {
+        assert!(payload.get(carrier).is_none(), "{carrier}: {job}");
+    }
+    assert!(
+        sceneworks_core::model_artifacts::portable_binding::model_free_job(
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload
+        )
+    );
+    assert_eq!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload,
+            "auto",
+        )
+        .await
+        .expect("a model-free job captures no binding"),
+        None
+    );
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "condenseRows": [row] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("condense-only carries its describer's source")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(entries, vec!["vision_caption_qwen3vl_8b"]);
 }

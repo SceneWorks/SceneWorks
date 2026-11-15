@@ -429,8 +429,14 @@ mod conversion_lock_tests {
             .unwrap()
             .file_type()
             .is_symlink());
-        verify_produced_artifact_receipt(&installed, "job", "repo/source", "converted")
-            .expect("receipt remains valid after prune");
+        verify_produced_artifact_receipt(
+            &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(data_dir),
+            &installed,
+            "job",
+            "repo/source",
+            "converted",
+        )
+        .expect("receipt remains valid after prune");
     }
 
     /// sc-22738: released conversion locks must be free IMMEDIATELY, even while a descriptor this
