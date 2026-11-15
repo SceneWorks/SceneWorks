@@ -1546,9 +1546,19 @@ pub(super) fn resolve_ltx_distill_adapter(
         .and_then(Value::as_f64)
         .unwrap_or(0.4) as f32;
     let (stage1, stage2) = if ltx25_dev {
-        if request.options().distill_stage1_strength.is_some()
-            || request.options().distill_stage2_strength.is_some()
-        {
+        let authored_strength = [
+            request.options().distill_stage1_strength.as_ref(),
+            request.options().distill_stage2_strength.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|bound| {
+            matches!(
+                bound.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        });
+        if authored_strength {
             return Err(WorkerError::InvalidPayload(
                 "LTX-2.5 dev fixes the bundled refinement adapter to pass scales [0, 1]; \
                  distillStage1Strength and distillStage2Strength cannot be overridden."
