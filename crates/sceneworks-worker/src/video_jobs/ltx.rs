@@ -786,7 +786,16 @@ pub(super) enum LtxTextEncoderSelection {
 pub(super) fn selected_ltx_text_encoder(
     options: &sceneworks_core::video_request::VideoOptions,
 ) -> WorkerResult<LtxTextEncoderSelection> {
-    let legacy = options.use_uncensored_enhancer.as_ref().map(|v| v.value);
+    let legacy = options
+        .use_uncensored_enhancer
+        .as_ref()
+        .filter(|value| {
+            matches!(
+                value.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        })
+        .map(|value| value.value);
     let selected = match options
         .text_encoder_model
         .as_ref()

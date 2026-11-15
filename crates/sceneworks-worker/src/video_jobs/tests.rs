@@ -13000,6 +13000,22 @@ fn ltx_text_encoder_selector_is_strict_and_legacy_compatible() {
         .unwrap(),
         LtxTextEncoderSelection::Amoral
     );
+    let authored = json!({"advanced":{"textEncoderModel":AMORAL_TEXT_ENCODER_ID}});
+    let effective = json!({"advanced":{
+        "textEncoderModel":AMORAL_TEXT_ENCODER_ID,
+        "useUncensoredEnhancer":false
+    }});
+    let options = sceneworks_core::video_request::VideoOptions::bind(
+        &sceneworks_core::resolved_options::BindingInput::new(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        selected_ltx_text_encoder(&options).unwrap(),
+        LtxTextEncoderSelection::Amoral
+    );
     assert_eq!(
         selected_ltx_text_encoder(&bound_video_options(json!({
             "useUncensoredEnhancer": true

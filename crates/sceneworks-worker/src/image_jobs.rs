@@ -1233,9 +1233,13 @@ fn image_execution_receipt(
     for (output, child) in outputs.iter_mut().zip(child_reports) {
         if let Some(child) = child {
             if !output.stages.is_empty() {
-                return Err(WorkerError::InvalidPayload(
-                    "completed image output has conflicting child and inline stages".into(),
-                ));
+                output
+                    .stages
+                    .push(sceneworks_core::execution_receipt::ExecutionStageBinding {
+                        stage: "child_transform".into(),
+                        execution: child,
+                    });
+                continue;
             }
             let base = output.execution.take().unwrap_or_else(|| {
                 serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default())
@@ -1440,6 +1444,56 @@ fn image_receipt_binds_restored_and_hires_stages_to_final_outputs() {
         .reason,
         "output_stages_changed"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn image_receipt_appends_child_after_inline_base_stages() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("base.png"), b"base").unwrap();
+    std::fs::write(project.path().join("child.png"), b"child").unwrap();
+    let base =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let child =
+        serde_json::to_value(crate::upscale_jobs::real_esrgan_execution_unavailable()).unwrap();
+    for stages in [
+        serde_json::json!([
+            {"stage":"identity","execution":base},
+            {"stage":"restore_face","execution":base}
+        ]),
+        serde_json::json!([
+            {"stage":"base","execution":base},
+            {"stage":"refine","execution":base}
+        ]),
+    ] {
+        let facts = vec![
+            serde_json::json!({"assetId":"base","index":0,"mediaPath":"base.png",
+                "workerExecutionReport":base,"workerExecutionStages":stages}),
+            serde_json::json!({"assetId":"child","index":0,"mediaPath":"child.png",
+                "sourceAssetId":"base","workerExecutionReport":base,
+                "workerChildExecutionReport":child}),
+        ];
+        let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+        assert_eq!(receipt.outputs[0].stages.len(), 3);
+        assert_eq!(receipt.outputs[0].stages[2].stage, "child_transform");
+        let result = serde_json::json!({"expectedCount":2,"assetWrites":facts});
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            result.as_object().unwrap(),
+        )
+        .unwrap();
+        let mut copied = result.clone();
+        copied["assetWrites"][1]["workerExecutionStages"] = stages.clone();
+        assert_eq!(
+            sceneworks_core::execution_receipt::validate_worker_receipt(
+                &receipt,
+                copied.as_object().unwrap(),
+            )
+            .unwrap_err()
+            .reason,
+            "output_stages_changed"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3066,6 +3120,8 @@ fn write_upscaled_asset(
     raw_settings.insert("upscale".to_owned(), upscale_record);
 
     let mut fact = base_fact.clone();
+    // The base asset owns its provider stages; this fact records the child pass separately.
+    fact.remove("workerExecutionStages");
     fact.insert("assetId".to_owned(), json!(fresh_asset_id()));
     fact.insert("mediaPath".to_owned(), json!(media_rel));
     fact.insert("width".to_owned(), json!(width));
@@ -3649,6 +3705,7 @@ pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
         "image_detail requires either the MLX or Candle inference backend".to_owned(),

@@ -179,11 +179,13 @@ pub fn validate_worker_receipt(
         let instantid_stages = matches!(
             output.stages.first().map(|stage| stage.stage.as_str()),
             Some("identity" | "angle" | "pose")
-        ) && output.stages.len() == 2
-            && output.stages[1].stage == "restore_face";
-        let hires_stages = output.stages.len() == 2
+        ) && matches!(output.stages.len(), 2 | 3)
+            && output.stages[1].stage == "restore_face"
+            && (output.stages.len() == 2 || output.stages[2].stage == "child_transform");
+        let hires_stages = matches!(output.stages.len(), 2 | 3)
             && output.stages[0].stage == "base"
-            && output.stages[1].stage == "refine";
+            && output.stages[1].stage == "refine"
+            && (output.stages.len() == 2 || output.stages[2].stage == "child_transform");
         if !output.stages.is_empty()
             && !(child_transform_stages || instantid_stages || hires_stages)
         {
@@ -355,12 +357,17 @@ pub fn validate_worker_receipt(
                 Some("identity" | "angle" | "pose" | "base")
             );
             if inline_output_stages {
-                let expected_stages = serde_json::to_value(&output.stages).map_err(|_| {
+                let has_child = output.stages.len() == 3;
+                let expected_stages = serde_json::to_value(&output.stages[..2]).map_err(|_| {
                     ReplayUnavailable::new("invalid_output_stages", "outputs.stages")
                 })?;
-                if matching.len() != 1
+                if matching.len() != if has_child { 2 } else { 1 }
                     || inline_stages != [&expected_stages]
-                    || !child_reports.is_empty()
+                    || (has_child
+                        && (child_reports != [&output.stages[2].execution]
+                            || matching[1].get("sourceAssetId") != matching[0].get("assetId")
+                            || matching[1].get("workerExecutionReport") != fact_execution))
+                    || (!has_child && !child_reports.is_empty())
                     || fact_execution.is_none()
                     || fact_execution != effective_execution
                 {

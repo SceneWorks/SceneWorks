@@ -429,7 +429,7 @@ async fn dispatch_utility_job(
         // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
         // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
         // never advertised, so this arm is unreachable there and the job remains queued.
-        JobType::ImageDetail => run_image_detail_job(api, settings, job)
+        JobType::ImageDetail => run_image_detail_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Image detail enhancement failed.", error)),
         // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
