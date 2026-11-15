@@ -1,0 +1,166 @@
+# SW-7103 AC1 (feature SW-F363): the real SceneWorks app path for MiniMax-H3-Image LoRA training,
+# on real weights, per backend. The owned API installs the selected tier through the Model Manager
+# download route, trains a text-to-image LoRA and an edit-pair LoRA through the Training Studio
+# training-job route, checks each final adapter is registered in the project LoRA library, and
+# renders through the Image Studio image-job route with the LoRA applied (and once without it).
+# Reached only from the manual memory-catalog dispatcher; never push, pull_request or schedule.
+name: MiniMax-H3-Image training app lifecycle
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks commit (40 hex), identical to the dispatched commit
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference revision that source_sha pins (40 hex); never overrides it
+        required: true
+        type: string
+      backend:
+        description: mlx (nax-macos-2) or cuda (the Windows CUDA real-weights host)
+        required: true
+        type: string
+      tier:
+        description: Base tier the run installs, trains over and renders with (bf16, q8 or q4)
+        required: false
+        type: string
+        default: q4
+permissions:
+  contents: read
+jobs:
+  mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    timeout-minutes: 720
+    concurrency:
+      group: minimax-h3-image-train-app-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-mlx
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      H3I_APP_BACKEND: mlx
+      H3I_APP_TIER: ${{ inputs.tier }}
+      H3I_APP_SOURCE_SHA: ${{ inputs.source_sha }}
+      H3I_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      # Preserve unstripped Mach-O proc-macro dylibs on the pinned toolchain.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Refuse a wrong source, backend, tier or Mac before build
+        run: node scripts/minimax-h3-image-train-app-lifecycle.mjs --preflight-only
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build the API and worker at this commit
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: H3I_APP_WEIGHTS="$HOME/sceneworks-rw-weights" node scripts/minimax-h3-image-train-app-lifecycle.mjs --build-only
+      - name: Install, train t2i and edit LoRAs, and render with them through the owned API and MLX worker
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: H3I_APP_WEIGHTS="$HOME/sceneworks-rw-weights" node scripts/minimax-h3-image-train-app-lifecycle.mjs
+      - name: Retain the receipt, service logs, inputs and renders
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minimax-h3-image-train-app-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
+  cuda:
+    if: ${{ inputs.backend == 'cuda' }}
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 720
+    concurrency:
+      group: minimax-h3-image-train-app-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-cuda
+      cancel-in-progress: false
+    env:
+      H3I_APP_BACKEND: cuda
+      H3I_APP_TIER: ${{ inputs.tier }}
+      H3I_APP_SOURCE_SHA: ${{ inputs.source_sha }}
+      H3I_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      # A task-owned persistent weights root, separate from the runner's shared Hugging Face cache.
+      H3I_APP_WEIGHTS: E:\sceneworks-rw-weights
+      # The shipped desktop CUDA build's compute capability.
+      CUDA_COMPUTE_CAP: "80"
+      RUSTC_WRAPPER: ""
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Refuse a wrong source, backend, tier or host before build
+        shell: powershell
+        run: |
+          node scripts/minimax-h3-image-train-app-lifecycle.mjs --preflight-only
+          if ($LASTEXITCODE -ne 0) { throw 'preflight refused' }
+      - uses: ./.github/actions/prepare-rust-runner
+        with:
+          workspace-directory: .
+      - name: Preserve listener-owned CUDA dependency and kernel build caches
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      # The card is chosen from fixed inventory before the build, and the lifecycle then runs as the
+      # child of the host-global exact-UUID CUDA lease on that card (strict idle), so it never
+      # trains on a card another real-weight job holds. The build itself takes no GPU lease.
+      - name: Choose the CUDA card to lease
+        shell: powershell
+        run: |
+          node scripts/minimax-h3-image-train-app-lifecycle.mjs --select-cuda-card
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA card selection failed' }
+      - name: Build the API and Candle worker at this commit
+        shell: cmd
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
+          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          set "PATH=%CUDA_PATH%\bin;%PATH%"
+          node scripts/minimax-h3-image-train-app-lifecycle.mjs --build-only
+      - name: Install, train t2i and edit LoRAs, and render with them through the owned API and Candle worker under the CUDA lease
+        shell: cmd
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          set "PATH=%CUDA_PATH%\bin;%PATH%"
+          python -I scripts/ci/windows_cuda_execution.py --actor minimax-h3-image-train-app --budget-minutes 660 --physical-indices %H3I_APP_CUDA_INDEX% -- node scripts\minimax-h3-image-train-app-lifecycle.mjs
+      - name: Retain the receipt, service logs, inputs and renders
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minimax-h3-image-train-app-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-minimax-h3-image-train-app/
+          if-no-files-found: error
+          retention-days: 30
