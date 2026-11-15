@@ -448,9 +448,24 @@ mod tests {
         )
     }
 
+    /// The hub revision the shipped q8/q4 rows pin: published, so no placeholder to rewrite.
+    fn published_rehost_revision(entry: &JsonObject) -> String {
+        let revisions: std::collections::BTreeSet<String> = ["q8", "q4"]
+            .into_iter()
+            .map(|tier| {
+                let row = primary_row(entry, tier).expect("packed tier is published");
+                assert_eq!(row["repo"], "SceneWorks/minimax-h3-image-mlx");
+                row["revision"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(revisions.len(), 1, "both packed tiers pin one revision");
+        revisions.into_iter().next().unwrap()
+    }
+
     /// The bf16 tier stages H3's dense text encoder and no DiT component (the root's own
-    /// `transformer_diffusers/` is the tier); the packed tiers are pending, so an explicit q4 pick
-    /// is refused by name rather than substituted.
+    /// `transformer_diffusers/` is the tier); the packed tiers are published but not installed, so
+    /// an explicit q4 pick is refused by name rather than substituted, and a tier the catalog still
+    /// marks `pendingArtifact` is refused as not published.
     #[test]
     fn bf16_resolves_the_upstream_root_and_stages_h3s_text_encoder() {
         let temporary = tempfile::tempdir().unwrap();
@@ -498,6 +513,17 @@ mod tests {
         assert!(!spec.components.contains_key(DIT_COMPONENT));
         let refused = resolve_weights_dir(&request(&entry, json!({"mlxQuantize": 4})), &settings);
         assert!(
+            matches!(&refused, Err(WorkerError::InvalidPayload(message)) if message.contains("not installed")),
+            "{refused:?}"
+        );
+        let mut pending = entry.clone();
+        for row in pending["downloads"].as_array_mut().unwrap() {
+            if row["variant"] == "q4" && row.get("coRequisite").is_none() {
+                row["pendingArtifact"] = json!(true);
+            }
+        }
+        let refused = resolve_weights_dir(&request(&pending, json!({"mlxQuantize": 4})), &settings);
+        assert!(
             matches!(&refused, Err(WorkerError::InvalidPayload(message)) if message.contains("not published")),
             "{refused:?}"
         );
@@ -510,14 +536,9 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let (data, _guard) = isolated_cache(temporary.path());
         let settings = settings(&data);
-        let mut entry = shipped_entry();
-        let rehost_rev = "1111111111111111111111111111111111111111";
-        for row in entry["downloads"].as_array_mut().unwrap() {
-            if row.get("pendingArtifact").is_some() {
-                row.as_object_mut().unwrap().remove("pendingArtifact");
-                row["revision"] = json!(rehost_rev);
-            }
-        }
+        let entry = shipped_entry();
+        let rehost_rev = published_rehost_revision(&entry);
+        let rehost_rev = rehost_rev.as_str();
         let root = snapshot(&settings.data_dir, IMAGE_REPO, IMAGE_REV);
         assert!(root.starts_with(temporary.path()));
         touch(root.join("vae_diffusers/config.json"));
@@ -578,13 +599,8 @@ mod tests {
             refused.to_string().contains("needs an installed tier"),
             "{refused}"
         );
-        let rehost_rev = "2222222222222222222222222222222222222222";
-        for row in entry["downloads"].as_array_mut().unwrap() {
-            if row.get("pendingArtifact").is_some() {
-                row.as_object_mut().unwrap().remove("pendingArtifact");
-                row["revision"] = json!(rehost_rev);
-            }
-        }
+        let rehost_rev = published_rehost_revision(&entry);
+        let rehost_rev = rehost_rev.as_str();
         let root = snapshot(&data, IMAGE_REPO, IMAGE_REV);
         assert!(root.starts_with(temporary.path()));
         for file in [

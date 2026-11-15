@@ -454,7 +454,8 @@ mod tests {
         assert!(!is_pending_artifact_download(&nvfp4));
         for tier in ["bf16", "q8", "q4"] {
             let row = model_download_for_variant(&value, tier).expect("converted row");
-            assert!(is_pending_artifact_download(&row), "{tier}");
+            // bf16 is still unpublished; the macOS q8/q4 packs are pinned to the hub revision.
+            assert_eq!(is_pending_artifact_download(&row), tier == "bf16", "{tier}");
             assert_eq!(row_tier_subdir(&row).as_deref(), Some(tier));
         }
         // The engine's pinned revision is the catalog's, for the weights and the prompts alike.
