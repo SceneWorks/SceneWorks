@@ -16,7 +16,7 @@ use serde_json::Value;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::store_util::lock_store_path;
+use crate::store_util::{lock_store_path, sql_int, unsigned_int};
 use crate::time::utc_now;
 
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
@@ -1037,7 +1037,7 @@ impl Catalog {
             )
             .map_err(|error| map_sqlite_error(&database_path, error))?;
         let rows = statement
-            .query_map(params![limit, offset], |row| {
+            .query_map(params![sql_int(u64::from(limit)), sql_int(offset)], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1243,7 +1243,7 @@ impl Catalog {
                 .query_map(params_from_iter(bindings), |row| {
                     Ok(CatalogFacetCount {
                         value: row.get(0)?,
-                        count: row.get(1)?,
+                        count: unsigned_int(row.get(1)?),
                     })
                 })
                 .map_err(|error| map_sqlite_error(&database_path, error))?;
@@ -1424,7 +1424,9 @@ impl Catalog {
         let mut bindings = Vec::new();
         append_search_predicates(&mut sql, &mut bindings, request, search_text)?;
         self.connection
-            .query_row(&sql, params_from_iter(bindings), |row| row.get(0))
+            .query_row(&sql, params_from_iter(bindings), |row| {
+                Ok(unsigned_int(row.get(0)?))
+            })
             .map_err(|error| map_sqlite_error(&self.database_path(), error))
     }
 
@@ -1473,7 +1475,7 @@ impl Catalog {
                 .query_map(params_from_iter(bindings), |row| {
                     Ok(CatalogFacetCount {
                         value: row.get(0)?,
-                        count: row.get(1)?,
+                        count: unsigned_int(row.get(1)?),
                     })
                 })
                 .map_err(|error| map_sqlite_error(&database_path, error))?
@@ -1631,7 +1633,7 @@ impl Catalog {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, u64>(3)?,
+                    unsigned_int(row.get::<_, i64>(3)?),
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                 ))
@@ -1680,7 +1682,7 @@ impl Catalog {
                         "update catalog_saved_views
                          set name = ?1, query_json = ?2, revision = revision + 1, updated_at = ?3
                         where id = ?4 and revision = ?5",
-                        params![name, query_json, now, id, expected],
+                        params![name, query_json, now, id, sql_int(expected)],
                     )
                     .map_err(|error| map_saved_view_write_error(&self.database_path(), error))?;
                 if changed == 0 {
@@ -1694,7 +1696,7 @@ impl Catalog {
                 let count: u64 = self
                     .connection
                     .query_row("select count(*) from catalog_saved_views", [], |row| {
-                        row.get(0)
+                        Ok(unsigned_int(row.get(0)?))
                     })
                     .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
                 if count >= MAX_SAVED_VIEWS {
@@ -1719,7 +1721,7 @@ impl Catalog {
             .query_row(
                 "select revision, created_at from catalog_saved_views where id = ?1",
                 [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((unsigned_int(row.get(0)?), row.get(1)?)),
             )
             .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
         Ok(CatalogSavedView {
@@ -1738,7 +1740,7 @@ impl Catalog {
             .connection
             .execute(
                 "delete from catalog_saved_views where id = ?1 and revision = ?2",
-                params![id, expected_revision],
+                params![id, sql_int(expected_revision)],
             )
             .map_err(|error| map_sqlite_error(&self.database_path(), error))?;
         if changed == 0 {
@@ -5826,12 +5828,12 @@ mod tests {
         let raw = Connection::open(&database_path).unwrap();
         let projected: u64 = raw
             .query_row("select count(*) from catalog_record_search", [], |row| {
-                row.get(0)
+                Ok(unsigned_int(row.get(0)?))
             })
             .unwrap();
         let searchable: u64 = raw
             .query_row("select count(*) from catalog_record_fts", [], |row| {
-                row.get(0)
+                Ok(unsigned_int(row.get(0)?))
             })
             .unwrap();
         assert_eq!(projected, records.len() as u64);

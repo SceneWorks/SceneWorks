@@ -548,17 +548,17 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "z_image_turbo",
-                  "name": "Z-Image",
-                  "family": "z-image",
+                  "id": "realvisxl",
+                  "name": "RealVisXL",
+                  "family": "sdxl",
                   "type": "image",
-                  "adapter": "z_image_diffusers",
+                  "adapter": "sdxl_diffusers",
                   "capabilities": ["text_to_image", "character_image"],
-                  "downloads": [],
+                  "downloads": [{ "provider": "huggingface", "repo": "SceneWorks/realvisxl-mlx", "revision": "e40202d63baef826c7df95a639a811698c1178d2", "variant": "q4", "default": true, "files": ["q4/*"] }],
                   "paths": {},
                   "defaults": {},
                   "limits": {},
-                  "loraCompatibility": { "families": ["z-image"] },
+                  "loraCompatibility": { "families": ["sdxl"] },
                   "ui": {}
                 }
               ]
@@ -571,7 +571,7 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
         r#"{ "schemaVersion": 1, "models": [] }"#,
     )
     .expect("user models writes");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Characters").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
@@ -664,7 +664,7 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
         json!({
             "name": "Mira LoRA",
             "sourcePath": lora_source.display().to_string(),
-            "compatibility": { "families": ["z-image"] },
+            "compatibility": { "families": ["sdxl"] },
             "triggerWords": ["mira"]
         }),
     )
@@ -678,18 +678,76 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
             .replace('/', std::path::MAIN_SEPARATOR_STR),
     );
     assert_eq!(
-        std::fs::read(project_lora_path).expect("lora copied"),
+        std::fs::read(&project_lora_path).expect("lora copied"),
         test_safetensors_bytes()
     );
+
+    let lora_bytes = std::fs::read(&project_lora_path).unwrap();
+    let lora_files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: project_lora_path.file_name().unwrap().into(),
+            size_bytes: lora_bytes.len() as u64,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(&lora_bytes)
+            ),
+        },
+    ];
+    let lora_id = with_lora["loras"][0]["id"].as_str().unwrap();
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        lora_id,
+        None,
+        &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+            &lora_files,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        lora_files,
+    )
+    .unwrap();
+    for (worker_id, gpu_id, platform, candle) in [
+        ("character-mlx-worker", "mlx", "macos", false),
+        ("character-candle-worker", "cuda:0", "windows", true),
+    ] {
+        let mut capabilities = vec![
+            sceneworks_core::contracts::WorkerCapability::Gpu,
+            sceneworks_core::contracts::WorkerCapability::ImageGenerate,
+        ];
+        if candle {
+            capabilities.push(sceneworks_core::contracts::WorkerCapability::Unknown(
+                "candle".into(),
+            ));
+        }
+        state
+            .jobs_store
+            .register_worker_with_portable_sources(
+                sceneworks_core::jobs_store::RegisterWorker {
+                    worker_id: worker_id.into(),
+                    gpu_id: gpu_id.into(),
+                    gpu_name: None,
+                    capabilities,
+                    loaded_models: vec![],
+                    utilization: None,
+                },
+                Some(platform),
+                Some(std::slice::from_ref(&claim)),
+            )
+            .unwrap();
+    }
 
     let (status, test_job) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
-        json!({ "prompt": "portrait", "lookId": look_id, "count": 2 }),
+        json!({ "prompt": "portrait", "model": "realvisxl", "lookId": look_id, "count": 2 }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{test_job}");
     assert_eq!(test_job["type"], "image_generate");
     assert_eq!(test_job["payload"]["mode"], "character_image");
     assert_eq!(test_job["payload"]["characterId"], character_id);

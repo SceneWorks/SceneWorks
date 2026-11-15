@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
-import { videoModelServesMode } from "../modelEligibility.js";
-import { WAN_MOE_PAIRED_LORA_MODEL_IDS } from "../constants.js";
+import { videoModelServesMode, wanPairedLoraAvailable } from "../modelEligibility.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "../studioDefaults.js";
@@ -365,7 +364,7 @@ export function SimpleVideoStudio() {
           atLimit={lora.atLimit}
           availableLoras={lora.availableLoras}
           effectiveLoraWeight={lora.effectiveLoraWeight}
-          hint={WAN_MOE_PAIRED_LORA_MODEL_IDS.has(selectedModel?.id) ? MOE_LORA_HINT : null}
+          hint={wanPairedLoraAvailable(selectedModel) ? MOE_LORA_HINT : null}
           onAddKeyword={(keyword) => setPrompt((current) => promptWithKeyword(current, keyword))}
           onOpenPicker={openLoraPicker}
           onRemove={lora.removeLora}

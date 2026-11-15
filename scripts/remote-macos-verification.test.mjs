@@ -475,8 +475,9 @@ test("incremental compilation is scoped to the declared consumer profile and aut
   await assert.rejects(stale.verify, /cache build flags/);
 });
 test("facts transport binds the exact authoritative target writer as generation only", async () => {
-  assert.equal(OUTPUTS.length, 9); assert.equal(OUTPUTS.at(-1), TARGET_REGISTRY);
-  assert.deepEqual(OUTPUTS.slice(0, 8), ["config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/audio/capabilities.candle.json", "config/engine-capabilities/runtime/capabilities.mlx.json", "config/backend-capabilities/matrix.json", "config/manifests/builtin.preview-support.jsonc", "apps/web/src/data/previewSupport.json", "docs/generated/memory-matrix.json", "docs/generated/memory-matrix.md"]);
+  assert.equal(OUTPUTS.length, 8); assert.equal(OUTPUTS.at(-1), TARGET_REGISTRY);
+  assert.deepEqual(OUTPUTS.slice(0, 7), ["config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/audio/capabilities.candle.json", "config/engine-capabilities/runtime/capabilities.mlx.json", "config/manifests/builtin.preview-support.jsonc", "apps/web/src/data/previewSupport.json", "docs/generated/memory-matrix.json", "docs/generated/memory-matrix.md"]);
+  assert.doesNotMatch(readFileSync(modulePath, "utf8"), /dump-backend-capability-matrix|config\/backend-capabilities\/matrix\.json/);
   assert.equal(TARGET_REGISTRY, "tests/fixtures/rust_migration_contracts/training/target-registry.json");
   const writer = `running 1 test\ntest ${TARGET_REGISTRY_WRITER} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n`;
   assert.deepEqual(policy.registryGenerationRecord(writer), generationRecord());

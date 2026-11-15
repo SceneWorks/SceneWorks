@@ -569,30 +569,29 @@ pub(super) fn worker_settings(
     settings: &crate::Settings,
     gpu_id: String,
 ) -> sceneworks_worker::Settings {
-    sceneworks_worker::Settings {
-        api_url: url,
-        access_token: None,
-        data_dir: settings.data_dir.clone(),
-        resolved_cache: settings.resolved_cache.clone(),
-        config_dir: settings.config_dir.clone(),
-        worker_id: format!("moss-acceptance-{}", uuid::Uuid::new_v4()),
-        gpu_id,
-        is_child_worker: false,
-        poll_seconds: 1,
-        heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 30,
-        huggingface_base_url: "http://127.0.0.1:9".into(),
-        huggingface_token: None,
-        credentials: Vec::new(),
-        max_lora_url_bytes: 1,
-        max_model_url_bytes: 1,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
-        backend_mlx_enabled: cfg!(target_os = "macos"),
-        backend_candle_enabled: cfg!(all(not(target_os = "macos"), feature = "backend-candle")),
-        external_model_roots: Vec::new(),
-        gpu_memory_limit_bytes: 0,
-    }
+    let mut worker = crate::tests::support::test_worker_settings(url, settings);
+    worker.access_token = None;
+    worker.data_dir = settings.data_dir.clone();
+    worker.resolved_cache = settings.resolved_cache.clone();
+    worker.config_dir = settings.config_dir.clone();
+    worker.worker_id = format!("moss-acceptance-{}", uuid::Uuid::new_v4());
+    worker.gpu_id = gpu_id;
+    worker.is_child_worker = false;
+    worker.poll_seconds = 1;
+    worker.heartbeat_seconds = 5;
+    worker.shutdown_timeout_seconds = 30;
+    worker.huggingface_base_url = "http://127.0.0.1:9".into();
+    worker.huggingface_token = None;
+    worker.credentials = Vec::new();
+    worker.max_lora_url_bytes = 1;
+    worker.max_model_url_bytes = 1;
+    worker.allow_private_lora_urls = false;
+    worker.utility_workers = 1;
+    worker.backend_mlx_enabled = cfg!(target_os = "macos");
+    worker.backend_candle_enabled = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+    worker.external_model_roots = Vec::new();
+    worker.gpu_memory_limit_bytes = 0;
+    worker
 }
 pub(super) fn set_cap(settings: &sceneworks_worker::Settings, value: Value) -> Result<()> {
     std::fs::create_dir_all(&settings.config_dir).map_err(|e| e.to_string())?;

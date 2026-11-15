@@ -73,8 +73,9 @@ pub mod test_support {
     use super::*;
     use std::collections::HashMap;
 
-    fn roots() -> &'static parking_lot::Mutex<HashMap<PathBuf, PathBuf>> {
-        static ROOTS: OnceLock<parking_lot::Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    fn roots() -> &'static parking_lot::Mutex<HashMap<PathBuf, (PathBuf, usize)>> {
+        static ROOTS: OnceLock<parking_lot::Mutex<HashMap<PathBuf, (PathBuf, usize)>>> =
+            OnceLock::new();
         ROOTS.get_or_init(Default::default)
     }
 
@@ -90,7 +91,7 @@ pub mod test_support {
             if roots.contains_key(&data_dir) {
                 return None;
             }
-            roots.insert(data_dir.clone(), hub);
+            roots.insert(data_dir.clone(), (hub, 1));
             Some(Self(data_dir))
         }
 
@@ -101,19 +102,34 @@ pub mod test_support {
                 !roots.contains_key(&data_dir),
                 "fixture data directory already registered"
             );
-            roots.insert(data_dir.clone(), hub);
+            roots.insert(data_dir.clone(), (hub, 1));
             Self(data_dir)
+        }
+
+        /// Keep a fixture cache mapping alive while background work uses its data directory.
+        /// The owning fixture may finish before that work resolves the cache root.
+        pub fn retain(data_dir: &Path) -> Option<Self> {
+            let mut roots = roots().lock();
+            let (_, leases) = roots.get_mut(data_dir)?;
+            *leases += 1;
+            Some(Self(data_dir.to_path_buf()))
         }
     }
 
     impl Drop for CacheRootGuard {
         fn drop(&mut self) {
-            roots().lock().remove(&self.0);
+            let mut roots = roots().lock();
+            if let Some((_, leases)) = roots.get_mut(&self.0) {
+                *leases -= 1;
+                if *leases == 0 {
+                    roots.remove(&self.0);
+                }
+            }
         }
     }
 
     pub(super) fn root(data_dir: &Path) -> Option<PathBuf> {
-        roots().lock().get(data_dir).cloned()
+        roots().lock().get(data_dir).map(|(root, _)| root.clone())
     }
 }
 
@@ -195,6 +211,19 @@ pub fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBu
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn retained_fixture_cache_root_outlives_its_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let hub = dir.path().join("private-hub");
+        let owner = test_support::CacheRootGuard::new(data_dir.clone(), hub.clone());
+        let background = test_support::CacheRootGuard::retain(&data_dir).unwrap();
+        drop(owner);
+        assert_eq!(test_support::root(&data_dir), Some(hub));
+        drop(background);
+        assert_eq!(test_support::root(&data_dir), None);
+    }
 
     #[test]
     fn cache_env_uses_trimmed_nonempty_values_in_priority_order() {

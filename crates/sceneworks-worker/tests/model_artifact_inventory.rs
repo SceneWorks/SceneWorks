@@ -54,6 +54,17 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/portable_aux_sources.rs"],
+        categories: &[
+            Category::Image,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
             "crates/sceneworks-worker/src/image_jobs/artifact_resolution.rs",
@@ -155,6 +166,8 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         source_files: &[
             "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
             "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+            // SW-7082/SW-7083: the dataset batch describer (Vision Captioner or JoyCaption).
+            "crates/sceneworks-worker/src/batch_describe_jobs.rs",
         ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
@@ -164,6 +177,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
+        },
+    },
+    ModelConsumerInventoryEntry {
+        // SW-7163: the describe job's "Fit to" step reads only the target image model's installed
+        // tokenizer (its pinned primary snapshot) to count a condensed prompt exactly.
+        source_files: &["crates/sceneworks-worker/src/batch_describe_condense.rs"],
+        categories: &[Category::Image, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
         },
@@ -322,7 +344,11 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // job's carriers (all categories) against the typed source-library availability contract and
     // is deliberately the ONLY worker surface holding external-library availability policy.
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/external_library_runtime.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "crates/sceneworks-worker/src/portable_source_claims.rs",
+            "crates/sceneworks-worker/src/utility_dispatch.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,
@@ -367,7 +393,10 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // sc-19708: the API's single model-source seam (carrier attachment + submission preflight);
     // same shared source-library contract, mirrored on the API side of the boundary.
     ModelConsumerInventoryEntry {
-        source_files: &["apps/rust-api/src/model_sources.rs"],
+        source_files: &[
+            "apps/rust-api/src/model_sources.rs",
+            "apps/rust-api/src/portable_admission.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,
@@ -581,6 +610,9 @@ mod tests {
         "crates/sceneworks-worker/src/ladder_e2e_sc18101.rs",
         "crates/sceneworks-worker/src/mage_flow_q8_mlx_smoke.rs",
         "crates/sceneworks-worker/src/pid_tier_mlx_smoke.rs",
+        // SW-7120: the Qwen3.8 27B describer CUDA validation, an #[ignore]d test module compiled only
+        // under cfg(all(test, not(macos), backend-candle)) and run only by its dispatched workflow.
+        "crates/sceneworks-worker/src/qwen38_describer_gpu_smoke.rs",
         "crates/sceneworks-worker/src/resolution_sweep.rs",
         "crates/sceneworks-worker/src/sana_mlx_smoke.rs",
         "crates/sceneworks-worker/src/sd3_5_mlx_smoke.rs",

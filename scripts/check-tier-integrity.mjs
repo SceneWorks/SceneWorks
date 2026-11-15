@@ -69,6 +69,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import {
   HEADER_MEASUREMENT_TERMS,
   VAE_RESIDENCY_SCOPES,
@@ -83,6 +84,8 @@ const MLX_FIT_GATE = "crates/sceneworks-worker/src/mlx_fit_gate.rs";
 const ROUTING_CATALOG = "crates/sceneworks-core/src/jobs_store/routing/catalog.rs";
 const ROUTING_CANDLE = "crates/sceneworks-core/src/jobs_store/routing/candle.rs";
 const ROUTING_MLX = "crates/sceneworks-core/src/jobs_store/routing/mlx.rs";
+const ROUTE_POLICY = "config/manifests/registry/route-policy.json";
+const REGISTRY_SPECS = "config/manifests/registry/specs.json";
 const OUTPUT_JSON = "docs/generated/tier-integrity.json";
 const OUTPUT_MD = "docs/generated/tier-integrity.md";
 
@@ -188,25 +191,44 @@ function parseJsonc(body) {
  * rather than as "no constraint": a lane oracle that silently resolves nothing is exactly the failure
  * this function replaces, so it fails CLOSED.
  */
-export function routedLanes({ routingCatalog, routingCandle, routingMlx }) {
+export function routedLanes({
+  routingCatalog,
+  routingCandle,
+  routingMlx,
+  routePolicy,
+  registrySpecs,
+}) {
   const lanes = new Map();
   const add = (id, lane) => {
     if (!lanes.has(id)) lanes.set(id, new Set());
     lanes.get(id).add(lane);
   };
-  for (const constructor of ["ModelCaps", "VideoModelCaps"]) {
-    const pattern = new RegExp(
-      `${constructor}::new\\(\\s*"([^"]+)"\\s*,\\s*(true|false)\\s*,\\s*(true|false)\\s*,`,
-      "g",
-    );
-    for (const match of (routingCatalog ?? "").matchAll(pattern)) {
-      if (match[2] === "true") add(match[1], "mlx");
-      if (match[3] === "true") add(match[1], "candle");
+  if (routePolicy) {
+    const policy = typeof routePolicy === "string" ? JSON.parse(routePolicy) : routePolicy;
+    for (const row of policy.image ?? []) {
+      if (row.mlxRouted) add(row.id, "mlx");
+      if (row.candleRouted) add(row.id, "candle");
+    }
+    for (const row of policy.video ?? []) {
+      if (row.videoMlxRouted) add(row.id, "mlx");
+      if (row.candleVideoRouted) add(row.id, "candle");
+    }
+  }
+  if (registrySpecs) {
+    const specs = typeof registrySpecs === "string" ? JSON.parse(registrySpecs) : registrySpecs;
+    for (const [id, spec] of Object.entries(specs)) {
+      if (
+        spec?.product?.family === "scail2" &&
+        Array.isArray(spec?.videoRoutes?.candle) &&
+        spec.videoRoutes.candle.length > 0
+      ) {
+        add(id, "candle");
+      }
     }
   }
   // Resolve direct `CONST.contains(&model)` additions in the canonical backend-existence predicate.
-  // Derived capability-table constants need no special handling because the constructor loop above
-  // already reads their source rows. This arm is for genuinely bespoke direct slices such as
+  // Derived capability-table constants need no special handling because route-policy.json above
+  // already carries their rows. This arm is for genuinely bespoke direct slices such as
   // `CANDLE_SCAIL2_VIDEO_MODELS`, and follows the function body rather than hard-coding that name so
   // a future sibling route is discovered by the same oracle.
   const directSlices = new Map();
@@ -331,13 +353,21 @@ export function validate({
   routingCatalog,
   routingCandle,
   routingMlx,
+  routePolicy,
+  registrySpecs,
   schema,
 }) {
   const errors = [];
   const rows = [];
   const unverifiedTiers = [];
   const byId = new Map((manifest.models ?? []).map((entry) => [entry.id, entry]));
-  const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  const routedBackends = routedLanes({
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+  });
   const exceptions = ledger.exceptions ?? [];
 
   if (exceptions.length === 0) {
@@ -942,24 +972,39 @@ function renderMarkdown({ rows, unverifiedTiers }) {
 }
 
 async function readInputs() {
-  const [ledgerBody, manifestBody, mlxFitGate, routingCatalog, routingCandle, routingMlx, schemaBody] =
-    await Promise.all([
-      readFile(path.join(ROOT, LEDGER), "utf8"),
-      readFile(path.join(ROOT, MANIFEST), "utf8"),
-      rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
-      readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
-      readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
-      readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
-      readFile(path.join(ROOT, SCHEMA), "utf8"),
-    ]);
-  return {
-    ledger: parseJsonc(ledgerBody),
-    ledgerSource: ledgerBody,
-    manifest: parseJsonc(manifestBody),
+  const [
+    ledgerBody,
+    manifestBody,
+    memoryEvidence,
     mlxFitGate,
     routingCatalog,
     routingCandle,
     routingMlx,
+    routePolicy,
+    registrySpecs,
+    schemaBody,
+  ] = await Promise.all([
+    readFile(path.join(ROOT, LEDGER), "utf8"),
+    readFile(path.join(ROOT, MANIFEST), "utf8"),
+    readBuiltinMemoryEvidence(ROOT),
+    rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
+    readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
+    readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
+    readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
+    readFile(path.join(ROOT, ROUTE_POLICY), "utf8"),
+    readFile(path.join(ROOT, REGISTRY_SPECS), "utf8"),
+    readFile(path.join(ROOT, SCHEMA), "utf8"),
+  ]);
+  return {
+    ledger: parseJsonc(ledgerBody),
+    ledgerSource: ledgerBody,
+    manifest: projectBuiltinMemoryEvidence(parseJsonc(manifestBody), memoryEvidence),
+    mlxFitGate,
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
     schema: JSON.parse(schemaBody),
   };
 }
@@ -1212,20 +1257,27 @@ async function selfTest() {
   {
     expect(
       "unresolvable lane oracle",
-      validate({ ...inputs, routingCatalog: "", routingCandle: "", routingMlx: "" }).errors,
+      validate({
+        ...inputs,
+        routingCatalog: "",
+        routingCandle: "",
+        routingMlx: "",
+        routePolicy: "",
+        registrySpecs: "",
+      }).errors,
       "no lane could be resolved",
     );
   }
 
-  // 7f. MUTATION CHECK ON THE PARSE ITSELF. A test that only asserts the oracle resolves something is
-  //     a false green, so pin the multi-line form directly: `sensenova_u1_8b_infographic_v2` is
-  //     declared across six lines, and the pre-sc-17395 single-line regex saw NO route for it.
+  // 7f. A test that only asserts the oracle resolves something is a false green, so pin one row
+  //     directly: `sensenova_u1_8b_infographic_v2` (whose wrapped ModelCaps row the pre-sc-17395
+  //     regex missed) must resolve both lanes from its typed route-policy row.
   {
     const lanes = routedLanes(inputs);
     const multiLine = lanes.get("sensenova_u1_8b_infographic_v2");
     if (!multiLine || !multiLine.has("mlx") || !multiLine.has("candle")) {
       failures.push(
-        "multi-line ModelCaps parse: sensenova_u1_8b_infographic_v2 must resolve to mlx+candle, got " +
+        "route-policy lane oracle: sensenova_u1_8b_infographic_v2 must resolve to mlx+candle, got " +
           `${multiLine ? [...multiLine].join(",") : "nothing"}`,
       );
     }

@@ -5,6 +5,7 @@ import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../
 import { noPresetId } from "../../presetUtils.js";
 import { LoraPickerSection, SavePresetPanel, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
+import { mossAccelerationAvailable, mossAccelerationMode } from "../../mossImage.js";
 import { STYLE_GROUPS } from "../../data/styleCatalog.js";
 
 export function ImageGenerationSettings({
@@ -99,8 +100,8 @@ export function ImageGenerationSettings({
                     surface, from the manifest field, as Video Studio does. */}
                 <ModelAttribution model={selectedModel} className="studio-model-attribution" />
               </label>
-                  {model === "moss_image_sft" && !mossEdit ? <label className="checkline">
-                    <input type="checkbox" checked={Boolean(mossDmd)} onChange={(event) => setMossField("acceleration", event.target.checked ? "unmerged_bf16" : "off")} />
+                  {mossAccelerationAvailable(selectedModel) && !mossEdit ? <label className="checkline">
+                    <input type="checkbox" checked={Boolean(mossDmd)} onChange={(event) => setMossField("acceleration", event.target.checked ? mossAccelerationMode : "off")} />
                     8-step acceleration
                   </label> : null}
                     {mossDmd && !mossComponents.ready ? <div role="status">

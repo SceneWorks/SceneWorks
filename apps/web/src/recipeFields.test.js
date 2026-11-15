@@ -70,22 +70,28 @@ describe("recipeRequestedResolution", () => {
   });
 });
 
+const flux3Model = (id) => ({ id, family: "flux3", type: "image" });
+const flux2Dev = { id: "flux2_dev", family: "flux2", type: "image" };
+
 describe("recipeImageDimensionIntent", () => {
   it.each(["flux3_klein", "flux3_klein_base"])("reads %s requested nullable sides independently of actual size", (model) => {
     const recipe = { model, normalizedSettings: { width: 80, height: 64 },
       rawAdapterSettings: { flux3ReferenceEditing: { output: {
         requestedWidth: null, requestedHeight: 48, actualSize: { width: 80, height: 64 },
       } } } };
-    expect(recipeImageDimensionIntent(recipe)).toEqual({ width: null, height: 48 });
-    expect(recipeImageDimensionIntent({ ...recipe, model: "flux2_dev" })).toBeNull();
+    expect(recipeImageDimensionIntent(recipe, flux3Model(model))).toEqual({ width: null, height: 48 });
+    expect(recipeImageDimensionIntent({ ...recipe, model: "flux2_dev" }, flux2Dev)).toBeNull();
+    // A non-builtin flux3-family image model takes the same rule.
+    expect(recipeImageDimensionIntent({ ...recipe, model: "flux3_custom" }, flux3Model("flux3_custom")))
+      .toEqual({ width: null, height: 48 });
   });
 
   it("does not treat missing legacy fields or output dimensions as authored omissions", () => {
     expect(recipeImageDimensionIntent({ model: "flux3_klein", normalizedSettings: { width: 80, height: 64 },
       rawAdapterSettings: { flux3ReferenceEditing: { output: { actualSize: { width: 80, height: 64 } } } },
-    })).toBeNull();
+    }, flux3Model("flux3_klein"))).toBeNull();
     for (const width of [undefined, "", "16", 0, -16, 1.5]) {
-      expect(recipeImageDimensionIntent({ model: "flux3_klein", uiDimensionIntent: { width, height: null } })).toBeNull();
+      expect(recipeImageDimensionIntent({ model: "flux3_klein", uiDimensionIntent: { width, height: null } }, flux3Model("flux3_klein"))).toBeNull();
     }
   });
 });

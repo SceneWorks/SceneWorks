@@ -32,6 +32,31 @@ pub(crate) struct MetricsQuery {
     pub(crate) limit: Option<u32>,
 }
 
+/// Paging of a job's per-item results (SW-7082, `GET /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsQuery {
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+}
+
+/// One per-item result a worker appends: its order among the job's items, and the item object
+/// (which carries its own `itemId`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemBody {
+    pub(crate) position: u64,
+    pub(crate) item: serde_json::Map<String, Value>,
+}
+
+/// Worker → API append of per-item results (SW-7082, `POST /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsAppend {
+    pub(crate) worker_id: Option<String>,
+    pub(crate) items: Vec<JobResultItemBody>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptRefineRequest {
@@ -126,6 +151,16 @@ pub(crate) struct CharactersQuery {
 }
 
 /// Query parameters for the dataset readiness report (sc-6533). The training UI passes what it has
+/// A page of a dataset's batch describe jobs, newest first: skip `offset` jobs, return at most
+/// `limit` (default and maximum 200); `unfinished=true` keeps only jobs not yet finished.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BatchDescribeJobsQuery {
+    pub(crate) unfinished: Option<bool>,
+    pub(crate) offset: Option<u32>,
+    pub(crate) limit: Option<u32>,
+}
+
 /// selected; all are optional and fall back to per-kind defaults in `readiness_context`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -592,6 +627,71 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
     #[serde(default)]
     pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// Request to describe a training dataset's images for a prompt batch (SW-7082). Every field is
+/// optional: `model` defaults to the Vision Captioner (JoyCaption is the other accepted value,
+/// SW-7083), an absent or blank `prompt` uses that model's default describing instruction, and
+/// `itemIds` restricts the run to those items (e.g. re-describing one image).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetBatchDescribeJobRequest {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// The model tier (`q4`, `q8`, `bf16`), named `variant` like every other request that picks a
+    /// tier. Only the Qwen3.8 27B describer has tiers; absent is its default (`q4`), and naming
+    /// one for any other model is refused.
+    #[serde(default)]
+    pub(crate) variant: Option<String>,
+    /// The user's describing instruction. The JSON output contract is always appended by the
+    /// worker and is not part of this text.
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// "Fit to" (SW-7163): the catalog id of an image model that declares
+    /// `image.maxPromptTokens`. Each described image is then condensed into one prompt within that
+    /// limit by the Vision Captioner; the limit is read from the server's catalog entry.
+    #[serde(default)]
+    pub(crate) fit_to: Option<String>,
+    /// Condense-only (SW-7163): rows already described, as the dialog holds them. Only the
+    /// condensing step runs for them; no image is opened. Needs `fitTo`; excludes `itemIds`.
+    #[serde(default)]
+    pub(crate) condense_rows: Option<Vec<CondenseRowRequest>>,
+    /// Measure-only (SW-7163): re-count each `condenseRows` row's `condensedText` (a prompt the
+    /// user edited) against the target. Nothing is generated and no model loads.
+    #[serde(default)]
+    pub(crate) measure_only: bool,
+}
+
+/// One already-described row of a condense-only request: its seven fields (the user may have
+/// edited them) and the image's pixel size.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CondenseRowRequest {
+    pub(crate) item_id: String,
+    #[serde(default)]
+    pub(crate) fields: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) width: Option<u32>,
+    #[serde(default)]
+    pub(crate) height: Option<u32>,
+    /// The row's cut-off notice from its describe run, kept on the condensed item.
+    #[serde(default)]
+    pub(crate) notice: Option<String>,
+    /// Measure-only: the edited condensed prompt to re-count.
+    #[serde(default)]
+    pub(crate) condensed_text: Option<String>,
+}
+
+/// `?model=<repo>` on the describing-prompt routes (SW-7085, SW-7086): which describer's default
+/// instruction and limit to serve. Absent means the Vision Captioner.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DescribePromptQuery {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 /// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed

@@ -3,9 +3,269 @@
 // verbatim so the per-Studio availability gates and the screens themselves agree on
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
-import { candleModelBlock, candleVideoModeBlock } from "./candleGating.js";
-import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
+
+// The 4-step Lightning toggle is the typed `video.supportsLightning` product fact of the two
+// shipped Wan A14B engines, served on every platform. Never infer it from `downloads`: the API
+// keeps only the host OS's rows, and the Lightning pair is a macOS-only row that the Candle worker
+// fetches on first use. Imported same-family checkpoints do not inherit the builtin Lightning route.
+export function wanLightningAvailable(model) {
+  return model?.type === "video" && !model?.importedSource && model?.video?.supportsLightning === true;
+}
+
+// Paired high/low-noise LoRA uploads belong to the two shipped 14B generation backbones.
+// VACE Fun also has sizeClass 14b, but only advertises replace_person.
+export function wanPairedLoraAvailable(model) {
+  return model?.family === "wan-video" && model?.type === "video" && !model?.importedSource &&
+    model?.loraCompatibility?.sizeClass === "14b" &&
+    model?.capabilities?.some((mode) => mode === "text_to_video" || mode === "image_to_video") === true;
+}
+
+export function ltxIcLoraRequired(model, mode) {
+  return model?.family === "ltx-video" && model?.type === "video" &&
+    ["2.3", "2.5"].includes(model?.loraCompatibility?.generation) &&
+    !model?.importedSource &&
+    ["extend_clip", "video_bridge", "replace_person"].includes(mode);
+}
+
+// Candle's native video tier picker needs a shipped Windows/Linux variant ladder. LTX 2.3
+// still uses its separate legacy quantization control; LTX 2.5 has the native tier ladder.
+export function candleVideoTierPickerAvailable(model) {
+  return model?.type === "video" && !model?.importedSource &&
+    !(model?.family === "ltx-video" && model?.loraCompatibility?.generation === "2.3") &&
+    model?.downloads?.some((download) => download.variant &&
+      download.platforms?.some((platform) => platform === "windows" || platform === "linux")) === true;
+}
+
+// Hires.fix needs a second diffusion pass. The catalog states, as an author-owned typed fact,
+// which image engines cannot run it (the shipped low-step SDXL Lightning checkpoint); absent or
+// true means supported. Never infer this from mutable defaults such as `defaults.steps`.
+export function hiresFixUnsupported(model) {
+  return model?.image?.supportsHiresFix === false;
+}
+
+// The FLUX.3 image family: layout boxes, ordered references, reference-canvas geometry,
+// the nvfp4 tier and prompt enhancement all key off this one family/type fact.
+export function isFlux3ImageModel(model) {
+  return model?.family === "flux3" && model?.type === "image";
+}
+
+// Platform support is supplied by the catalog projection of typed routes and feature facts.
+// Readiness switches keep all gates inert until capabilities arrive.
+export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";
+
+// The inert default used until the capabilities endpoint responds (and the permanent value on
+// non-Mac / observe-mode deployments). Every helper below short-circuits to "not blocked".
+export const DEFAULT_MAC_CAPABILITIES = {
+  macGatingActive: false,
+  // The off-Mac switch is inert here for the same reason
+  // `macGatingActive` is: until the capabilities endpoint responds, nothing is gated.
+  candleGatingActive: false,
+  platform: "",
+  notAvailableLabel: MAC_NOT_AVAILABLE_LABEL,
+  features: {},
+  training: { supportedKernels: [], lokrOnWanSupported: false },
+};
+
+function label(caps) {
+  return caps?.notAvailableLabel || MAC_NOT_AVAILABLE_LABEL;
+}
+
+// Compose the user-facing affordance text from a backend UnsupportedReason
+// ({ feature, detail, suggestedEpic }).
+export function macReasonText(caps, reason) {
+  const base = label(caps);
+  if (!reason) return base;
+  const detail = reason.detail || reason.feature || "";
+  const epic = reason.suggestedEpic ? ` (${reason.suggestedEpic})` : "";
+  return detail ? `${base} — ${detail}${epic}` : base;
+}
+
+function featureLabel(feature) {
+  switch (feature) {
+    case "pose":
+      return "pose conditioning";
+    case "reference":
+      return "reference / identity conditioning";
+    case "edit":
+      return "image editing";
+    case "lycoris":
+      return "third-party LyCORIS LoRA";
+    default:
+      return feature;
+  }
+}
+
+// Whether gating is engaged at all (a Mac in MLX-required mode).
+export function macGatingActive(caps) {
+  return Boolean(caps?.macGatingActive);
+}
+
+// A whole model that can't run in the Rust/MLX flow on Mac (torch-only) → hidden/disabled in
+// pickers. Returns `{ blocked, reason, text }` or `null`.
+export function macModelBlock(model, caps) {
+  if (!macGatingActive(caps)) return null;
+  if (model?.macSupport?.supported === false) {
+    const reason = model.macSupport.reason ?? null;
+    return { blocked: true, reason, text: macReasonText(caps, reason) };
+  }
+  return null;
+}
+
+// A per-model feature control (pose / reference / edit / lycoris) the model can't run on MLX.
+// Returns `{ blocked, text }` or `null`.
+export function macModelFeatureBlock(model, caps, feature) {
+  if (!macGatingActive(caps)) return null;
+  const features = model?.macSupport?.features;
+  if (features && features[feature] === false) {
+    return {
+      blocked: true,
+      text: `${label(caps)} — this model's ${featureLabel(feature)} is not available in the native flow on Mac.`,
+    };
+  }
+  return null;
+}
+
+// Whether a video_generate mode routes to MLX for the given (supported) video model.
+export function macVideoModeBlock(model, caps, mode) {
+  if (!macGatingActive(caps)) return null;
+  const modes = model?.macSupport?.features?.videoModes;
+  if (modes && modes[mode] === false) {
+    return {
+      blocked: true,
+      // On Mac the runtime is MLX-only (epic 3482) — there is no torch fallback, so a
+      // blocked mode simply isn't served for this model here (some modes have no MLX path
+      // on this engine; other specialist surfaces may be exposed under a different catalog
+      // model). Don't call it "torch-only".
+      text: `${label(caps)} — the selected model doesn't support this mode on macOS.`,
+    };
+  }
+  return null;
+}
+
+// A non-model Python surface (imageUpscale, poseFromPhoto, personDetect, datasetCaptioning).
+// Returns `{ blocked, reason, text }` or `null`. Video modes are gated per-model via
+// macVideoModeBlock, not here (sc-3773).
+export function macFeatureBlock(caps, key) {
+  if (!macGatingActive(caps)) return null;
+  const feature = caps?.features?.[key];
+  if (feature && feature.supported === false) {
+    const reason = feature.reason ?? null;
+    return { blocked: true, reason, text: macReasonText(caps, reason) };
+  }
+  return null;
+}
+
+// Whether a specific image_upscale engine should be hidden from the picker on this platform.
+// Two engines are platform-restricted (ids match the worker):
+//   * `aura-sr` — a torch-only GigaGAN DROPPED on Mac (sc-3668) and now dropped as an offered engine
+//     on EVERY platform (sc-5499): it has no native (MLX/candle) path and the Python torch backend
+//     that served it off-Mac is retired in Phase 7 (epic 5483), so the picker hides it everywhere
+//     (users don't build on a path about to disappear). Gated off the platform-intrinsic
+//     `imageUpscaleAuraSr` capability (`supported: false` on every platform), so — like SeedVR2 — the
+//     check is gating-independent (hidden even pre-load, when caps haven't arrived). Real-ESRGAN is
+//     the cross-platform default upscaler.
+//   * `seedvr2` — the one-step diffusion upscaler (epic 4811 / sc-4815), the INVERSE of AuraSR:
+//     backed by native MLX on Mac and the Candle CUDA/NVIDIA port on Windows (sc-5928) + Linux
+//     (sc-5160 — candle is CPU+CUDA cross-platform, so Linux rides the Windows port). Gated off the
+//     platform-intrinsic `imageUpscaleSeedvr2` capability (true on macOS + Windows + Linux, in any
+//     mode), so it is hidden only pre-load (no caps yet) and shown on every GPU platform —
+//     independent of the gating switch.
+export function macUpscaleEngineBlocked(caps, engine) {
+  if (engine === "seedvr2") {
+    return caps?.features?.imageUpscaleSeedvr2?.supported !== true;
+  }
+  if (engine === "aura-sr") {
+    return caps?.features?.imageUpscaleAuraSr?.supported !== true;
+  }
+  // Iris restoration (sc-25683): platform-intrinsic like SeedVR2 (native MLX on Mac, Candle on
+  // Windows/Linux). Whether the task is INSTALLED is a separate gate (upscaleEngines.js).
+  if (engine === "iris") {
+    return caps?.features?.imageUpscaleIris?.supported !== true;
+  }
+  return false;
+}
+
+// Whether a training kernel has no native Rust trainer (so its base model is gated in Training).
+export function macTrainingKernelBlocked(caps, kernel) {
+  if (!macGatingActive(caps) || !kernel) return false;
+  const supported = caps?.training?.supportedKernels ?? [];
+  return !supported.includes(kernel);
+}
+
+// Partition a model list into the Mac-available ones (for the picker) — a no-op when gating is off.
+export function macAvailableModels(models, caps) {
+  if (!macGatingActive(caps)) return models ?? [];
+  return (models ?? []).filter((model) => model?.macSupport?.supported !== false);
+}
+
+// The models hidden from a picker on Mac, so a screen can show a "N unavailable" affordance.
+export function macBlockedModels(models, caps) {
+  if (!macGatingActive(caps)) return [];
+  return (models ?? []).filter((model) => model?.macSupport?.supported === false);
+}
+
+export const CANDLE_NOT_AVAILABLE_LABEL = "Not available on this platform (macOS/MLX only)";
+
+// Whether off-Mac gating is engaged at all (the API host is Windows/Linux, so candle is the only
+// lane that can register). Inert until the capabilities endpoint responds, mirroring
+// `macGatingActive`.
+export function candleGatingActive(caps) {
+  return Boolean(caps?.candleGatingActive);
+}
+
+// A whole video model with no candle lane at all (no VIDEO_UI_MODES entry is candle-claimable) →
+// hidden/disabled in pickers off-Mac. Returns `{ blocked, reason, text }` or `null`, the same shape
+// `macModelBlock` returns.
+export function candleModelBlock(model, caps) {
+  if (!candleGatingActive(caps)) return null;
+  if (model?.candleSupport?.supported === false) {
+    const reason = model.candleSupport.reason ?? null;
+    const detail = reason?.detail || reason?.feature || "";
+    return {
+      blocked: true,
+      reason,
+      text: detail
+        ? `${CANDLE_NOT_AVAILABLE_LABEL} — ${detail}`
+        : CANDLE_NOT_AVAILABLE_LABEL,
+    };
+  }
+  return null;
+}
+
+// Whether a `video_generate` mode has a candle lane for the given video model. The off-Mac twin of
+// `macVideoModeBlock`. Returns `{ blocked, text }` or `null`.
+export function candleVideoModeBlock(model, caps, mode) {
+  if (!candleGatingActive(caps)) return null;
+  const modes = model?.candleSupport?.features?.videoModes;
+  if (modes && modes[mode] === false) {
+    return {
+      blocked: true,
+      // Off-Mac the runtime is candle-only — there is no MLX fallback and no torch fallback
+      // (the Python backend was retired in Phase 7), so a blocked mode simply isn't served for
+      // this model here. Name macOS, because that IS where the pair works: a user who sees this
+      // is being told the combination exists, just not on this machine.
+      text: `${CANDLE_NOT_AVAILABLE_LABEL} — this model only supports this mode on macOS.`,
+    };
+  }
+  return null;
+}
+
+// Partition a model list into the ones with a candle lane (for the picker) — a no-op on Mac.
+// A training target whose kernel no candle worker can run (sc-24161 — an MLX-only kernel) →
+// disabled off-Mac, the twin of
+// `macTrainingKernelBlocked`. Keyed on the server's `training.candleSupportedKernels` (the
+// candle-routed set), never a hardcoded kernel list; inert when the field is absent.
+export function candleTrainingKernelBlocked(caps, kernel) {
+  if (!candleGatingActive(caps) || !kernel) return false;
+  const supported = caps?.training?.candleSupportedKernels;
+  return Array.isArray(supported) && !supported.includes(kernel);
+}
+
+export function candleAvailableModels(models, caps) {
+  if (!candleGatingActive(caps)) return models ?? [];
+  return (models ?? []).filter((model) => model?.candleSupport?.supported !== false);
+}
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];

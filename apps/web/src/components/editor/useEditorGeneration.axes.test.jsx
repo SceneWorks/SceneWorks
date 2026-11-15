@@ -209,4 +209,27 @@ describe("useEditorGeneration catalog axes (sc-15441)", () => {
     expect(defaults.negativePrompt).toBe("preset negative");
     expect(defaults).not.toHaveProperty("guidanceScale");
   });
+
+  // A Windows/Linux catalog row: the API drops the macOS-only Lightning download, and the typed
+  // fact still offers the toggle. On, the recipe owns the step count; off, a typed Steps rides.
+  it("offers Lightning from the typed fact on a catalog without the Lightning download", () => {
+    const wan = {
+      id: "wan_2_2_t2v_14b",
+      type: "video",
+      family: "wan-video",
+      video: { supportsLightning: true },
+      downloads: [{ repo: "SceneWorks/wan2.2-t2v-a14b-candle", variant: "q4", platforms: ["windows", "linux"] }],
+    };
+    render([wan]);
+    act(() => latest.setStepsOverride("30"));
+
+    expect(latest.showLightning).toBe(true);
+    expect(latest.lightningActive).toBe(true);
+    expect(latest.buildBasePayload().advanced.lightning).toBe(true);
+    expect(latest.buildBasePayload().advanced).not.toHaveProperty("steps");
+
+    act(() => latest.setLightning(false));
+    expect(latest.buildBasePayload().advanced.lightning).toBe(false);
+    expect(latest.buildBasePayload().advanced.steps).toBe(30);
+  });
 });

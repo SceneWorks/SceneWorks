@@ -63,16 +63,16 @@ const SDXL_CONTROL_DEFAULT_GUIDANCE: f32 = 7.0;
 const SDXL_CONTROL_LIGHTNING_STEPS: u32 = 4;
 const SDXL_CONTROL_LIGHTNING_GUIDANCE: f32 = 1.0;
 
-pub(super) const SDXL_CONTROL_MODELS: &[&str] = &[
-    "sdxl",
-    "realvisxl",
-    "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
-];
-
 fn is_sdxl_control_model(model: &str) -> bool {
-    SDXL_CONTROL_MODELS.contains(&model)
+    sceneworks_core::registry::builtin_model_spec(model).is_some_and(|spec| {
+        spec.routes
+            .get("mlx")
+            .is_some_and(|route| route.id == SDXL_CONTROL_ENGINE_ID)
+            && spec
+                .routes
+                .get("candle")
+                .is_some_and(|route| route.id == SDXL_CONTROL_ENGINE_ID)
+    })
 }
 
 fn has_material_sdxl_control_intent(advanced: &JsonObject) -> bool {
@@ -813,17 +813,15 @@ mod sdxl_control_tests {
 
     #[test]
     fn exact_five_model_family_and_material_candidate_are_pinned() {
-        assert_eq!(
-            SDXL_CONTROL_MODELS,
-            [
-                "sdxl",
-                "realvisxl",
-                "realvisxl_lightning",
-                "illustrious_xl_v1",
-                "illustrious_xl_v2",
-            ]
-        );
-        for model in SDXL_CONTROL_MODELS {
+        let models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
+        for model in models {
+            assert!(is_sdxl_control_model(model));
             assert!(sdxl_control_candidate(&request(json!({
                 "model": model,
                 "advanced": { "poses": [{ "keypoints": [] }] }
@@ -854,7 +852,7 @@ mod sdxl_control_tests {
             "advanced": { "controlMode": "  " }
         }))));
 
-        for model in SDXL_CONTROL_MODELS {
+        for model in models {
             for advanced in [
                 json!({ "poses": "malformed" }),
                 json!({ "poses": [null] }),

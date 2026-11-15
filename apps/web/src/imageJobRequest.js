@@ -1,3 +1,4 @@
+import { isFlux3ImageModel } from "./modelEligibility.js";
 import { resolveAppearance, composeNegativePrompt } from "./data/appearanceCatalog.js";
 import { mossPositivePromptIssue } from "./mossImageAdvancedValidation.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
@@ -52,14 +53,14 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText,
 
 // Canonical emitted references, also used by Studio geometry eligibility. Hidden picker state
 // must never grant a reference-only sizing policy to a request that does not emit that input.
-export function imageJobReferences({ model, mode, multiReference, orderedCharacterReferences = false, sourceWithMultiReference, editSecondPair,
+export function imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences = false, sourceWithMultiReference, editSecondPair,
   sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
   supportsImg2img, img2imgReferenceAssetId, mossEdit = false, mossReferences = null }) {
   if (mossEdit) {
     return { sourceAssetId: undefined, referenceAssetIds: mossReferences, referenceAssetId: undefined };
   }
   if (mode === "character_image" && orderedCharacterReferences &&
-      (model === "flux3_klein" || model === "flux3_klein_base")) {
+      isFlux3ImageModel(selectedModel)) {
     return { sourceAssetId: null, referenceAssetIds, referenceAssetId: null };
   }
   const edit = mode === "edit_image";

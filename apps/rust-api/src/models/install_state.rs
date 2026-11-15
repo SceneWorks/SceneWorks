@@ -1059,7 +1059,17 @@ pub(super) fn co_requisite_cache_health(
             let valid = resolver
                 .discover_source_snapshot(&identity.repo, Some(&identity.revision))
                 .map(|(_, snapshot)| snapshot.join(&identity.file))
-                .is_ok_and(|path| identity.verify(&path).is_ok());
+                .is_ok_and(|path| {
+                    // Catalog reads re-prove the bytes, reading each unchanged file once per host.
+                    identity
+                        .verify(
+                            &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+                                data_dir,
+                            ),
+                            &path,
+                        )
+                        .is_ok()
+                });
             return Some(if valid {
                 HuggingFaceCacheHealth::installed()
             } else {
@@ -1416,6 +1426,16 @@ pub(super) fn model_variant_downloads(model: &Value) -> Vec<&Value> {
                 .unwrap_or_else(|| "default".to_owned());
             seen_variants.insert(key)
         })
+        .collect()
+}
+
+/// The variant keys (`bf16`/`q8`/`q4`, or `default`) whose files are installed on this host, by
+/// the same per-tier probe the catalog's `variants[].installed` reports.
+pub(crate) fn installed_variant_keys(model: &Value, data_dir: &FsPath) -> Vec<String> {
+    model_variant_states(model, data_dir)
+        .into_iter()
+        .filter(|variant| variant.installed)
+        .map(|variant| variant.variant)
         .collect()
 }
 

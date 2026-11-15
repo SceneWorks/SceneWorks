@@ -170,6 +170,7 @@ impl From<JobsStoreError> for ApiError {
                 Self::bad_request(format!("Invalid numeric value for {field}"))
             }
             JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
+            JobsStoreError::InvalidResultItem(detail) => Self::bad_request(detail),
             JobsStoreError::RetryLimit { max_attempts } => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),

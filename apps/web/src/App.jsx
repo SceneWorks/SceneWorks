@@ -52,7 +52,7 @@ import {
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 
-import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./modelEligibility.js";
 import { generationModelsForType } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";

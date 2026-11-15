@@ -23,25 +23,35 @@ import {
   tierQuantize,
   INT8_CONVROT_TIER,
   NVFP4_TIER,
-} from "./quantTier.js";
-import {
-  blanketFloorGb,
-  lightestInstallableTier,
+  endpointEstimate,
+  memoryLane,
   suggestTier,
   tierFits,
-} from "./tierSuggestion.js";
+} from "./quantTier.js";
+import candidate from "./testUtils/catalogBaseline/candidate-catalog.json";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
+import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 
-// The SHIPPED catalog, parsed from the exact bytes the product embeds (same loader shape as
-// imageAxesParity.test.js). Used by the sc-24109 suite at the bottom so its model object is derived
-// from `builtin.models.jsonc` rather than hand-written.
+// The shipped catalog projects product facts from the manifest and memory facts from the evidence
+// store. Use that same projection for the catalog-shaped fixtures below.
 const MANIFEST_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../config/manifests/builtin.models.jsonc",
 );
-const manifestById = new Map(
-  JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")).models.map((model) => [model.id, model]),
+const EVIDENCE_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../config/manifests/registry/evidence.json",
 );
+const manifestById = new Map(
+  projectBuiltinMemoryEvidence(
+    JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")),
+    JSON.parse(readFileSync(EVIDENCE_PATH, "utf8")),
+  ).models.map((model) => [model.id, model]),
+);
+
+// The native catalog fixture (`dump-ui-catalog`) carries the API-served memory guidance.
+const candidateModels = candidate.models;
+const candidateById = new Map(candidateModels.map((model) => [model.id, model]));
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
 // files are present (installState "installed"); every other declared tier reports "missing".
@@ -897,41 +907,33 @@ describe("qwen_image_2_1 tier surface", () => {
 });
 
 // sc-24112 review — the per-tier floors reach the Model Manager's fit questions, driven off the
-// SHIPPED catalog entry rather than hand-typed numbers. Before, no production caller passed a tier
-// to `blanketFloorGb`, so every surface quoted the whole model's scalar at a user who could only
-// ever run q4, and a Candle tier with no measured row read as "fits" on any host.
+// SHIPPED catalog rather than hand-typed numbers. Since SW-7032 every memory number is the API's
+// served `memoryGuidance` (here the native catalog fixture the Rust dump emits); the web only reads it.
 describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   const entry = manifestById.get("qwen_image_2_1");
-  // Catalog-shaped: the manifest `mlx`/`candle` blocks pass through verbatim, and each tier row
-  // carries its footprint and download size, exactly as the /models projection emits them.
-  // `pendingPacked` re-imposes the sc-24112 PENDING shape on q8/q4; the shipped entry is published.
-  function catalogModel({ pendingPacked = false } = {}) {
+  const served = candidateById.get("qwen_image_2_1").memoryGuidance;
+  // Catalog-shaped: the variant rows the /models projection emits, plus the served guidance.
+  function catalogModel() {
     return {
       id: entry.id,
       mlx: entry.mlx,
       candle: entry.candle,
       hasVariantMatrix: true,
       installState: "missing",
+      memoryGuidance: served,
       variants: entry.downloads
         .filter((download) => download.coRequisite !== true && download.variant)
-        .map((download) => {
-          const pending =
-            download.pendingArtifact === true || (pendingPacked && download.variant !== "bf16");
-          return {
-            variant: download.variant,
-            pendingArtifact: pending,
-            installState: pending ? "pending" : "missing",
-            cacheState: "missing",
-            downloadSizeBytes: download.estimatedSizeBytes,
-            footprint: download.footprint ?? null,
-          };
-        }),
+        .map((download) => ({
+          variant: download.variant,
+          installState: "missing",
+          cacheState: "missing",
+        })),
     };
   }
   const variantOf = (model, tier) => model.variants.find((variant) => variant.variant === tier);
 
-  // *Mutation that reds this:* dropping the per-tier floor veto from `tierFits` — the Candle lane
-  // has no measured row, so bf16 then reads "unknown ⇒ fits" on a 32 GB card.
+  // *Mutation that reds this:* the API dropping the per-tier floor veto — the Candle lane has no
+  // measured row, so bf16 then reads "unknown ⇒ fits" on a 32 GB card.
   it("tells a 32 GB host that q4 fits and bf16 does not, on both lanes", () => {
     const model = catalogModel();
     for (const backend of ["mlx", "candle"]) {
@@ -945,10 +947,9 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
     expect(suggestTier(model, 32, { backend: "mlx" })).toBe("q4");
   });
 
-  // The Simple Model Manager's "needs N GB" label, end to end through its call sites
-  // (`needsLabel` → `blanketFloorGb(model, backend, lightestInstallableTier(model))` for a model not
-  // installed; `installedFloorHostGb` → the installed tiers' floors once one is).
-  // *Mutation that reds this:* either call site passing no tier — both then quote the scalar 45.
+  // The Simple Model Manager's "needs N GB" label, end to end through its served rows.
+  // *Mutation that reds this:* the API serving the scalar as the entry floor — every row then
+  // quotes the scalar 45.
   it("labels the Simple Model Manager row with the floor of the tier it would run", () => {
     const published = catalogModel();
     const withInstalled = (tiers) => ({
@@ -965,6 +966,8 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
       expect(needsLabel(published, { backend }), backend).toBe(
         `needs ${entry[backend].minMemoryGbByTier.q4} GB`,
       );
+      expect(memoryLane(published, backend).entryFloorGb).toBe(entry[backend].minMemoryGbByTier.q4);
+      expect(memoryLane(published, backend).entryFloorGb).toBeLessThan(entry[backend].minMemoryGb);
     }
     // Installed, Candle: the installed tiers' own floors, the HEAVIEST ruling once bf16 is there
     // too (the picker can switch to it). No Candle peak estimate exists, so the floors are the label.
@@ -979,47 +982,109 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
     expect(mlxQ4).toBeGreaterThanOrEqual(entry.mlx.minMemoryGbByTier.q4);
     expect(mlxQ4).toBeLessThan(entry.mlx.minMemoryGb);
   });
-  it("quotes the floor of a tier the user can actually install, not the whole model's scalar", () => {
-    // While q8/q4 are pending only bf16 installs, so "can this machine run it" is bf16's floor.
-    const pending = catalogModel({ pendingPacked: true });
-    expect(lightestInstallableTier(pending)).toBe("bf16");
-    expect(blanketFloorGb(pending, "mlx", lightestInstallableTier(pending))).toBe(
-      entry.mlx.minMemoryGbByTier.bf16,
-    );
-    // Published (the shipped entry), the same call quotes q4's — far below the scalar every caller used to show.
-    const published = catalogModel();
-    expect(lightestInstallableTier(published)).toBe("q4");
+});
+
+// SW-7032 pre-capabilities no-op: an entry the API has not served guidance for (an older sidecar
+// during an app update) gets no suggestion, no over-budget flag, no floor label and every resolution
+// — the web never falls back to hand-held numbers.
+describe("served memory guidance absent", () => {
+  it("is a no-op on every reader", () => {
+    const model = {
+      id: "qwen_image_2_1",
+      hasVariantMatrix: true,
+      mlx: { minMemoryGb: 45, minMemoryGbByTier: { q4: 21 } },
+      variants: ["bf16", "q8", "q4"].map((variant) => ({
+        variant,
+        installState: "installed",
+        footprint: { peakMemoryBytes: 200 * 1024 ** 3 },
+      })),
+      limits: { resolutions: ["1024x1024", "2048x2048"] },
+    };
     for (const backend of ["mlx", "candle"]) {
-      const floor = blanketFloorGb(published, backend, lightestInstallableTier(published));
-      expect(floor).toBe(entry[backend].minMemoryGbByTier.q4);
-      expect(floor).toBeLessThan(entry[backend].minMemoryGb);
+      expect(memoryLane(model, backend)).toBeNull();
+      expect(suggestTier(model, 8, { backend })).toBeNull();
+      expect(tierFits(model.variants[0], 8, { model, backend })).toBe(true);
+      expect(endpointEstimate(model, "q4", backend)).toBeNull();
+      expect(needsLabel(model, { backend, hostMemoryGb: 8 })).toBeNull();
     }
+    // With no suggestion, the studio default takes its documented no-signal base.
+    expect(defaultTierSelection(model, null, { autoTier: suggestTier(model, 8) })).toBe("q8");
   });
 });
 
-// sc-22998 / sc-22999: a locally DERIVED tier (YuE2 q8 / q4) reads `derivationPending` until a
-// derived snapshot exists, but it is installable — its download fetches the original and the worker
-// derives the tier — so it is the lightest installable tier a floor is quoted for. A tier that is
-// genuinely unpublished (`pending`) stays excluded.
-describe("a derivation-pending tier is installable (sc-22999)", () => {
-  it("offers the derivable q4 as the lightest installable tier", () => {
-    const model = {
-      hasVariantMatrix: true,
-      variants: [
-        { variant: "bf16", installState: "missing" },
-        { variant: "q8", installState: "derivationPending", derivationPending: true },
-        { variant: "q4", installState: "derivationPending", derivationPending: true },
-      ],
-    };
-    expect(lightestInstallableTier(model)).toBe("q4");
-    const unpublished = {
-      ...model,
-      variants: model.variants.map((variant) =>
-        variant.variant === "q4" ? { variant: "q4", installState: "pending", pendingArtifact: true } : variant,
-      ),
-    };
-    expect(lightestInstallableTier(unpublished)).toBe("q8");
+// SW-7032: the web suggestion is a pure function of the served thresholds. Changing a served value
+// changes the suggestion with no web edit; an unknown host reading or a null threshold always fits.
+describe("served tier suggestion", () => {
+  const lane = (thresholds) => ({
+    suggestion: Object.entries(thresholds).map(([tier, minHostGb]) => ({ tier, minHostGb })),
+    tiers: Object.fromEntries(Object.entries(thresholds).map(([tier, minHostGb]) => [tier, { minHostGb }])),
   });
+  const model = (mlx, candle = lane({})) => ({
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((variant) => ({ variant, installState: "missing" })),
+    memoryGuidance: { mlx, candle },
+  });
+
+  it("walks the served fidelity order and falls back to its smallest tier", () => {
+    const served = model(lane({ bf16: 60, q8: 40, q4: 24 }), lane({ bf16: 50, q8: 30, q4: null }));
+    expect(suggestTier(served, 64, { backend: "mlx" })).toBe("bf16");
+    expect(suggestTier(served, 48, { backend: "mlx" })).toBe("q8");
+    expect(suggestTier(served, 8, { backend: "mlx" })).toBe("q4");
+    expect(suggestTier(served, null, { backend: "mlx" })).toBe("bf16");
+    // Each lane reads only its own thresholds; a null threshold always fits.
+    expect(suggestTier(served, 32, { backend: "candle" })).toBe("q8");
+    expect(suggestTier(served, 8, { backend: "candle" })).toBe("q4");
+    expect(tierFits({ variant: "bf16" }, 59.99, { model: served, backend: "mlx" })).toBe(false);
+    expect(tierFits({ variant: "bf16" }, 60, { model: served, backend: "mlx" })).toBe(true);
+  });
+
+  it("follows a changed served threshold with no web change", () => {
+    const before = model(lane({ bf16: 60, q8: 40, q4: 24 }));
+    const after = model(lane({ bf16: 30, q8: 20, q4: 12 }));
+    expect(suggestTier(before, 32, { backend: "mlx" })).toBe("q4");
+    expect(suggestTier(after, 32, { backend: "mlx" })).toBe("bf16");
+  });
+
+  it("only suggests tiers the entry still declares", () => {
+    const served = model(lane({ bf16: 60, q8: 40, q4: 24 }));
+    const withoutBf16 = { ...served, variants: served.variants.filter((variant) => variant.variant !== "bf16") };
+    expect(suggestTier(withoutBf16, 512, { backend: "mlx" })).toBe("q8");
+    expect(suggestTier({ ...served, hasVariantMatrix: false }, 512, { backend: "mlx" })).toBeNull();
+  });
+});
+
+// Platform-shaped catalogs (the frozen harness feeds every platform the unfiltered downloads, so it
+// cannot see these): the shipped native catalog's served guidance on a Mac host (MLX lane) and on a
+// CUDA host (Candle lane), across a host-memory ladder, never suggests a tier its own lane says
+// does not fit while a lighter one does, and is monotone in host memory.
+describe("shipped catalog served suggestions per platform lane", () => {
+  const HOSTS = [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 512];
+  const order = ["q4", "q8", "bf16"];
+  for (const backend of ["mlx", "candle"]) {
+    it(`${backend}: suggestions fit and never shrink as host memory grows`, () => {
+      let checked = 0;
+      for (const entry of candidateModels) {
+        const variants = [...new Set((entry.downloads ?? []).map((download) => download.variant).filter(Boolean))]
+          .map((variant) => ({ variant, installState: "missing" }));
+        const model = { ...entry, hasVariantMatrix: variants.length > 1, variants };
+        if (suggestTier(model, null, { backend }) === null) continue;
+        let previous = -1;
+        for (const host of HOSTS) {
+          const suggested = suggestTier(model, host, { backend });
+          const fits = (tier) => tierFits({ variant: tier }, host, { model, backend });
+          const rank = order.indexOf(suggested);
+          expect(rank, `${entry.id}@${host}`).toBeGreaterThanOrEqual(previous);
+          previous = rank;
+          if (fits(suggested)) {
+            const heavier = order.slice(rank + 1).filter((tier) => variants.some((v) => v.variant === tier));
+            for (const tier of heavier) expect(fits(tier), `${entry.id}@${host} ${tier}`).toBe(false);
+          }
+          checked += 1;
+        }
+      }
+      expect(checked).toBeGreaterThan(0);
+    });
+  }
 });
 
 describe("bound H3 imported component precision (sc-26686 review)", () => {
@@ -1035,7 +1100,7 @@ describe("bound H3 imported component precision (sc-26686 review)", () => {
 
 describe("FLUX 3 native format capability and installed artifacts", () => {
   const worker = (capabilities, status = "online") => ({ capabilities, status });
-  const model = { id: "flux3_klein", hasVariantMatrix: true, variants: [
+  const model = { id: "flux3_klein", family: "flux3", type: "image", hasVariantMatrix: true, variants: [
     { variant: "q4", installState: "installed" },
     { variant: "fp8r", installState: "installed" },
     { variant: "nvfp4", installState: "missing" },
@@ -1053,7 +1118,8 @@ describe("FLUX 3 native format capability and installed artifacts", () => {
       { tier: "fp8r", label: "FP8R (candle, sm_89+)", disabled: false },
     ]);
     expect(nativeTierEligibility({ id: "flux2_dev" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
-    expect(nativeTierEligibility({ id: "flux3_klein_base" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_klein_base", family: "flux3", type: "image" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_pup", family: "flux3", type: "utility" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
   });
   it("does not invent unavailable base derivations or alias FP8R to affine quantization", () => {
     const base = { ...model, id: "flux3_klein_base", variants: [{ variant: "bf16", installState: "missing" }] };

@@ -56,6 +56,7 @@ import {
   verifyArtifactUnchanged,
 } from "./epic-20738-terminal-cuda-harness.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const profile = () => structuredClone(loadProfile());
@@ -164,9 +165,10 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
     ],
   );
 
-  const manifest = JSON.parse(stripJsoncComments(await readFile(
-    "config/manifests/builtin.models.jsonc", "utf8",
-  )));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+    JSON.parse(await readFile("config/manifests/registry/evidence.json", "utf8")),
+  );
   assert.doesNotThrow(() => validateManifestAuthorities(checked, manifest));
   for (const [modelId, currentRevision, legacyRevision, exactSizes] of [
     [
@@ -248,12 +250,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // sc-26234's whole-repo FLUX 3 entry adds no selective row; main's honest evidence re-record
   // and digest are retained. The Illustrious
   // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
-  // Supra2-IMG components (150 keys). The Illustrious
+  // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "e1b026256135731ac889bdcef9fe569dbc4381f72020f5e3f6f4868a85a2ddba");
+    "01cfe8322e94fa9b1fab317ad93a2336978a5bb75a125d7aef9cf2dab648d6b7");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
@@ -490,9 +492,10 @@ test("sparse execution lifetimes cover only 14, 18, and 19 while retaining share
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
-  const manifest = JSON.parse(stripJsoncComments(await readFile(
-    "config/manifests/builtin.models.jsonc", "utf8",
-  )));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+    JSON.parse(await readFile("config/manifests/registry/evidence.json", "utf8")),
+  );
   const missing = profile();
   missing.cells.pop();
   assert.throws(() => validateProfile(missing), /exactly 19/);

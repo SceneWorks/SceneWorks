@@ -11,7 +11,7 @@ import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
 import { ImportedCheckpointSurface } from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
+import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import {
   extractFamilies,
@@ -23,7 +23,7 @@ import {
   presetLoras,
 } from "../presetUtils.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macModelBlock, wanPairedLoraAvailable } from "../modelEligibility.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes, formatTierBytes, downloadSizeText } from "../formatting.js";
 import {
@@ -48,14 +48,7 @@ import {
   requiresLicenseAcknowledgment,
 } from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { tierLabel } from "../quantTier.js";
-import {
-  blanketFloorGb,
-  lightestInstallableTier,
-  suggestTier,
-  tierFits,
-  sdxlCudaMemoryEstimate,
-} from "../tierSuggestion.js";
+import { endpointEstimate, memoryLane, suggestTier, tierFits, tierLabel } from "../quantTier.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import {
@@ -268,7 +261,7 @@ function deleteResultText(result, name) {
 // this basis; we surface the same order to the user. Each entry is the raw `variants[]` object.
 // "training" (sc-8797) is the extra flat-diffusers LoRA-training-base artifact a tiered model can
 // host (lens on macOS); it renders last so the quant tiers stay the visual focus. It is not in
-// tierSuggestion's fidelity list, so it is never the suggested/preselected download.
+// API-served suggestion order, so it is never the suggested/preselected download.
 const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4", "training"];
 
 function orderedMatrixVariants(model) {
@@ -383,7 +376,7 @@ function ModelTierDownloadPanel({
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
           const overBudget = !tierFits(variant, unifiedMemoryGb, { backend, model });
-          const endpoint = sdxlCudaMemoryEstimate(model, tier, backend);
+          const endpoint = endpointEstimate(model, tier, backend);
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
@@ -730,7 +723,7 @@ export function ModelManagerScreen() {
     : [];
   const showBaseModelSelect = Boolean(baseModelFamily && baseModelOptions.length);
   const ltxBaseModelRequired = importForm.family === "ltx-video";
-  const isMoeBaseModel = WAN_MOE_PAIRED_LORA_MODEL_IDS.has(importForm.baseModel);
+  const isMoeBaseModel = wanPairedLoraAvailable(baseModelOptions.find((model) => model.id === importForm.baseModel));
   const showSecondaryFileSlot = isMoeBaseModel && importForm.mode === "file";
   const moeMissingSecondary = showSecondaryFileSlot && Boolean(importForm.file) && !importForm.secondaryFile;
 
@@ -1192,7 +1185,6 @@ export function ModelManagerScreen() {
       RETIRED_MODEL_CAPABILITIES={RETIRED_MODEL_CAPABILITIES}
       audioCapabilityChips={audioCapabilityChips}
       availabilityBadge={availabilityBadge}
-      blanketFloorGb={blanketFloorGb}
       cacheBusyKey={localCopies.some((entry) => entry.cacheKey === cacheBusyKey) ? cacheBusyKey : ""}
       cacheConvergenceStalled={cacheConvergenceStalled && localCopies.some(isTransitionalEntry)}
       cacheEligibilityBadge={cacheEligibilityBadge}
@@ -1216,13 +1208,13 @@ export function ModelManagerScreen() {
       isTransitionalEntry={isTransitionalEntry}
       licenseAcknowledged={licenseAcks[model.id] === true}
       licenseComponentForModel={licenseComponentForModel}
-      lightestInstallableTier={lightestInstallableTier}
       linkedCorrection={linkedCorrection}
       linkedStatus={linkedStatus}
       localCopiesEnabled={localCopiesEnabled}
       macCapabilities={macCapabilities}
       macModelBlock={macModelBlock}
       memoryBackend={memoryBackend}
+      memoryLane={memoryLane}
       mlxStatusText={mlxStatusText}
       localCopies={localCopies}
       cacheKnown={Boolean(modelCache) && !modelCache.error}

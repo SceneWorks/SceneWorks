@@ -79,19 +79,6 @@ export const PROMPT_REFINE_MODEL_ID = "prompt_refine_anubis_8b";
 // this id to look up install state and offer a download in the caption dialog when missing.
 export const JOY_CAPTION_MODEL_ID = "joycaption_beta_one";
 
-// Wan2.2 A14B MoE video engines (T2V + I2V). These two dual-expert models honor the
-// Lightning fast-4-step toggle (sc-10047/sc-10048, epic 10043) — the worker derives the
-// 4-step/CFG-off recipe from `advanced.lightning` for them and ignores it for the dense
-// 5B (wan_2_2) and non-Wan engines, so the UI only surfaces the toggle for these ids.
-export const WAN_A14B_LIGHTNING_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
-
-// Wan A14B is a two-expert mixture, so its LoRAs come as a high/low-noise PAIR. These base
-// models accept the optional low-noise expert upload in Model Manager (sc-1991) and are the
-// ones the Simple Video Studio's LoRA hint applies to (epic 15404); the dense 5B (wan_2_2) is
-// a single-file LoRA. Same ids as WAN_A14B_LIGHTNING_MODEL_IDS above but a DIFFERENT fact —
-// that one is about the 4-step distilled sampling recipe — so they stay separate constants.
-export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
-
 // Vision captioner (epic 8102, sc-8107/8108). Turns an uploaded reference image into a structured
 // Ideogram-style JSON caption (style + grounded composition) for Ideogram 4 text-to-image variations.
 // As with PROMPT_REFINE_MODEL_ID, the native worker resolves the model by its HF repo string (carried
@@ -100,6 +87,11 @@ export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_
 // both serve the production image-caption request.
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
+
+// The larger dataset describer (feature SW-F365): Create Prompt Batch from Dataset offers it beside
+// the Vision Captioner. Its quant tier travels as the describe request's `variant`.
+export const VISION_DESCRIBE_MODEL_ID = "vision_describe_qwen3_8_27b";
+export const VISION_DESCRIBE_MODEL_REPO = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
 
 // Qwen-Image 2.1 and its two OFFICIAL prompt rewriters (sc-24113, epic 24107).
 //

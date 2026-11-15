@@ -128,6 +128,7 @@ pub async fn run_acceptance_utility_job(settings: &Settings, job: JobSnapshot) {
         settings,
         api.http_client(),
         job,
+        None,
         gen_core::CancelFlag::new(),
     ))
     .await;
@@ -145,7 +146,9 @@ pub fn acceptance_utility_future_sizes() -> (usize, usize) {
             &'static Settings,
             &'static reqwest::Client,
             JobSnapshot,
-        )| crate::run_utility_job(api, settings, http, job, gen_core::CancelFlag::new()),
+        )| {
+            crate::run_utility_job(api, settings, http, job, None, gen_core::CancelFlag::new())
+        },
     );
     let wrapper = size(|(settings, job): (&'static Settings, JobSnapshot)| {
         run_acceptance_utility_job(settings, job)

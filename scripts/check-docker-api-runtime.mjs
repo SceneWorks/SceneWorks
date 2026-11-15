@@ -79,6 +79,9 @@ async function main() {
     SCENEWORKS_API_PORT: port,
     SCENEWORKS_DATA_BIND: tempData,
     SCENEWORKS_CONFIG_BIND: path.resolve("config"),
+    // Leave this absent so Docker creates the bind as root. The one-shot
+    // credentials initializer must prepare it for the non-root API.
+    SCENEWORKS_CREDENTIALS_BIND: path.join(tempRoot, "credentials"),
     // This smoke intentionally exercises the Docker API container's wider in-container
     // bind through a host-loopback published port, without provisioning auth.
     SCENEWORKS_ALLOW_OPEN_BIND: "1",
@@ -128,12 +131,28 @@ async function main() {
       execFileSync("docker", ["run", "--rm", "--entrypoint", "sh", image, "-ec",
         'test "$(id -u)" = 1000; test "$(id -g)" = 1000; test "$HOME" = /home/sceneworks; touch "$HOME/.docker-smoke"; rm "$HOME/.docker-smoke"'],
         { stdio: "inherit" });
+      // The API has now populated the bind. A different UID must fail before
+      // the initializer can inspect or re-own its stored secrets.
+      const wrongUidEnv = {
+        ...env,
+        SCENEWORKS_UID: String(Number(env.SCENEWORKS_UID ?? "1000") + 1),
+      };
+      let refusedForeignOwner = false;
+      try {
+        execFileSync("docker", [...compose, "run", "--no-deps", "--rm", "credentials-init"], {
+          env: wrongUidEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        if (!String(error.stderr).includes("credentials bind belongs to another UID")) throw error;
+        refusedForeignOwner = true;
+      }
+      if (!refusedForeignOwner) throw new Error("credentials init took over a populated foreign-owned bind");
       // The mounted data tree is the home/cache root for arbitrary host UID/GID
       // overrides. Prove the effective identity and a real bind-mounted write.
       execFileSync("docker", [...compose, "exec", "-T", "api", "sh", "-ec",
-        'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = /sceneworks/data; touch "$HOME/cache/.docker-smoke"; rm "$HOME/cache/.docker-smoke"',
+        'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = /sceneworks/data; touch "$HOME/cache/.docker-smoke"; rm "$HOME/cache/.docker-smoke"; test -w /sceneworks/credentials; test "$(stat -c %u /sceneworks/credentials)" = "$1"; test "$(stat -c %u /sceneworks/credentials/worker-source-proof-master)" = "$1"; test "$(stat -c %a /sceneworks/credentials)" = 700; test "$(stat -c %a /sceneworks/credentials/worker-source-proof-master)" = 600',
         "sh", env.SCENEWORKS_UID ?? "1000", env.SCENEWORKS_GID ?? "1000"], { env, stdio: "inherit" });
-      console.log("Docker API image default and Compose UID/GID bind-write checks passed.");
+      console.log("Docker API image, Compose UID/GID, and persisted proof-key checks passed.");
     } catch (error) {
       // The initial log snapshot often happens before create_app reaches the
       // stalled operation. Capture final health and boot logs at the deadline.

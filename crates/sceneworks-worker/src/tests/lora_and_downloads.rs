@@ -1323,9 +1323,19 @@ async fn spawn_tree_stub_with_bodies(
     ) -> Response {
         use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
         assert_eq!(job.job_type, super::JobType::ModelImport);
-        let temp = tempfile::tempdir().unwrap();
-        let store = JobsStore::new(temp.path().join("claims.db"));
-        store.initialize().unwrap();
+        let mut claims = claims.lock().unwrap();
+        // A new retry ID needs its prior claimed row for ancestry verification. A deliberate
+        // same-ID rerun in another fixture assertion starts a fresh mock store instead.
+        if claims
+            .as_ref()
+            .is_none_or(|(_, store)| store.get_job(&job.id).is_ok())
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let store = JobsStore::new(temp.path().join("claims.db"));
+            store.initialize().unwrap();
+            *claims = Some((temp, store));
+        }
+        let (_, store) = claims.as_ref().unwrap();
         store
             .create_job_with_id(
                 job.id.clone(),
@@ -1358,7 +1368,6 @@ async fn spawn_tree_stub_with_bodies(
             .unwrap()
             .expect("actual fixture row is claimable");
         assert_eq!(claimed.id, job.id);
-        *claims.lock().unwrap() = Some((temp, store));
         Json(claimed).into_response()
     }
     async fn progress_route(
@@ -1368,6 +1377,52 @@ async fn spawn_tree_stub_with_bodies(
     ) -> Response {
         posts.lock().expect("posts lock").push(body);
         Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn import_claim_route(
+        State((_, claims)): State<StubState>,
+        axum::extract::Path(claimed_job_id): axum::extract::Path<String>,
+        Json(request): Json<Value>,
+    ) -> Response {
+        use sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY;
+        let claims = claims.lock().unwrap();
+        let Some((_, store)) = claims.as_ref() else {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        };
+        let Ok(mut current) = store.get_job(&claimed_job_id) else {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        };
+        let worker_id = request["workerId"].as_str();
+        let capability = request["capability"].as_str();
+        let target_id = request["targetJobId"].as_str();
+        if current.job_type != super::JobType::ModelImport
+            || current.worker_id.as_deref() != worker_id
+            || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+            || current.payload.get(IMPORT_CLAIM_CAPABILITY_KEY).and_then(Value::as_str) != capability
+            || capability.is_none_or(|value| value.len() != 64)
+        {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+        let mut target_found = false;
+        for _ in 0..64 {
+            if Some(current.id.as_str()) == target_id {
+                target_found = true;
+                break;
+            }
+            let Some(parent) = current.source_job_id.as_deref() else {
+                break;
+            };
+            let Ok(parent_row) = store.get_job(parent) else {
+                break;
+            };
+            current = parent_row;
+        }
+        if !target_found {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+        let payload_matches = request["commitment"].as_str()
+            == Some(crate::imports::model_import_commitment(&current.payload).as_str());
+        current.payload.remove(IMPORT_CLAIM_CAPABILITY_KEY);
+        Json(json!({"job": current, "payloadMatches": payload_matches})).into_response()
     }
     async fn heartbeat_route(
         axum::extract::Path(worker_id): axum::extract::Path<String>,
@@ -1384,6 +1439,7 @@ async fn spawn_tree_stub_with_bodies(
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
         .merge(crate::test_api_stub::job_progress_routes(job_route, progress_route))
         .route("/fixture/claimed-model-import", post(claim_fixture_job))
+        .route("/api/v1/jobs/:job_id/import-claim", post(import_claim_route))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_route),
@@ -2201,13 +2257,17 @@ async fn run_claimed_model_import_fixture(
     client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> super::WorkerResult<()> {
-    claim_model_import_fixture(api, job).await?;
-    super::model_jobs::run_model_import_job(api, settings, client, job).await
+    let claimed = claim_model_import_fixture(api, job).await?;
+    super::model_jobs::run_model_import_job(api, settings, client, &claimed).await
 }
 
-async fn claim_model_import_fixture(api: &ApiClient, job: &JobSnapshot) -> super::WorkerResult<()> {
+async fn claim_model_import_fixture(
+    api: &ApiClient,
+    job: &JobSnapshot,
+) -> super::WorkerResult<JobSnapshot> {
     let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
-    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)
+    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)?;
+    Ok(claimed)
 }
 
 struct ManagedImportFixture {
@@ -3393,23 +3453,27 @@ async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
     )
     .unwrap();
     std::fs::remove_dir_all(&source).unwrap();
-    super::model_jobs::run_model_import_job(
+    let error = super::model_jobs::run_model_import_job(
         &ApiClient::new(&fixture.settings),
         &fixture.settings,
         &reqwest::Client::new(),
         &job,
     )
     .await
-    .unwrap();
+    .expect_err("an unclaimed snapshot cannot authenticate import recovery");
+    assert!(
+        matches!(&error, WorkerError::InvalidPayload(message) if message.contains("private worker proof")),
+        "{error:?}"
+    );
     assert!(
         fixture.manifest_entry().is_none(),
         "a client-side old snapshot cannot authenticate recovery"
     );
-    assert!(posts
+    assert!(!posts
         .lock()
         .unwrap()
         .iter()
-        .any(|post| post["status"] == "failed"));
+        .any(|post| post["status"] == "completed"));
     assert_eq!(
         std::fs::read(
             staged
@@ -3574,12 +3638,13 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     std::fs::create_dir(&fixture.manifest_path).unwrap();
                     let api = ApiClient::new(&fixture.settings);
                     let client = reqwest::Client::new();
-                    claim_model_import_fixture(&api, &job).await.unwrap();
+                    let claimed = claim_model_import_fixture(&api, &job).await.unwrap();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
                         &client,
-                        job.clone(),
+                        claimed,
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;
@@ -3602,13 +3667,14 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     retry.id = "job-upload-retry".into();
                     retry.source_job_id = Some(job.id.clone());
                     retry.attempts = job.attempts.checked_add(1).unwrap();
-                    claim_model_import_fixture(&api, &retry).await.unwrap();
+                    let claimed_retry = claim_model_import_fixture(&api, &retry).await.unwrap();
                     posts.lock().unwrap().clear();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
                         &client,
-                        retry,
+                        claimed_retry,
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;
@@ -3709,5 +3775,186 @@ async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision(
         );
         assert_eq!(entry["importQuantFormat"], "convrot_int8");
         assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+}
+
+/// A Hugging Face hub install: the downloader verifies the blob, and the snapshot file admission
+/// resolves is a link to that blob.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_downloaded_blob_verdict_serves_the_first_admission_check() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    use sha2::{Digest, Sha256};
+
+    let temp = tempdir().expect("tempdir creates");
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.path().join("data");
+    let repo = temp.path().join("hub/models--owner--model");
+    let blob = repo.join("blobs/etag");
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"weights").unwrap();
+    // A multi-GB download's last write is long past by the time its hash ends; a fixture this
+    // small needs its mtime aged to stand outside the stamp's racy window.
+    let settle = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+    };
+    settle(&blob);
+    let snapshot = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../blobs/etag", &snapshot).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"weights"));
+    let api = ApiClient::new(&settings);
+
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+
+    // Admission checks the snapshot file's real path against the pinned digest: it reads nothing.
+    let cache = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let real = std::fs::canonicalize(&snapshot).unwrap();
+    let pinned = format!("sha256:{digest}");
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap(),
+        SourceVerification::Reused
+    );
+
+    // Modified after the download: hashed again and refused.
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    settle(&blob);
+    assert_eq!(
+        cache.verify(&real, &pinned, &|| Ok(())).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+/// A settled blob and the path its hub snapshot entry will take. A hard link moves `ctime` on
+/// Unix just as it moves the NTFS change time on Windows, so these tests run on every platform,
+/// including the Windows lane.
+fn snapshot_entry_fixture(temp: &Path) -> (Settings, PathBuf, PathBuf, String) {
+    use sha2::{Digest, Sha256};
+    let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
+    settings.data_dir = temp.join("data");
+    let repo = temp.join("hub/models--owner--model");
+    let blob = repo.join("blobs/etag");
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"weights").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
+        .unwrap();
+    let entry = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"weights"));
+    (settings, blob, entry, digest)
+}
+
+/// Verify the hard-linked `entry` the way the downloader does after linking it.
+async fn verify_linked_entry(
+    settings: &Settings,
+    blob: &Path,
+    entry: &Path,
+    digest: &str,
+) -> crate::error::WorkerResult<()> {
+    let api = ApiClient::new(settings);
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api: &api,
+        client: &client,
+        settings,
+        job_id: "job-1",
+        cancel_message: "canceled",
+        fresh_download: false,
+    };
+    let progress = crate::downloads::DownloadProgress::new(
+        "model.safetensors",
+        0,
+        Some(7),
+        Duration::from_secs(5),
+    );
+    crate::downloads::verify_snapshot_entry(
+        &context,
+        blob,
+        entry,
+        Some(digest),
+        "model.safetensors",
+        &progress,
+    )
+    .await
+}
+
+/// A snapshot entry that is its own directory entry for the blob (a Windows hard link, or the
+/// copy fallback) is verified again at download time and recorded under the entry's own path, the
+/// path admission resolves, so the first admission after the download reads no bytes.
+#[tokio::test]
+async fn a_hard_linked_snapshot_entry_is_verified_at_download_time() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
+    let api = ApiClient::new(&settings);
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+    std::fs::hard_link(&blob, &entry).unwrap();
+    verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect("the linked entry holds the downloaded bytes");
+    assert_eq!(
+        VerifiedSourceCache::for_data_dir(&settings.data_dir)
+            .verify(
+                &std::fs::canonicalize(&entry).unwrap(),
+                &format!("sha256:{digest}"),
+                &|| Ok(())
+            )
+            .unwrap(),
+        SourceVerification::Reused,
+        "the first admission after the download reads no bytes"
+    );
+}
+
+/// A blob rewritten between its verification and its link — same length, modified time restored
+/// — fails the download, and the old digest is never recorded against the rewritten bytes.
+#[tokio::test]
+async fn a_blob_rewritten_before_its_link_fails_the_download() {
+    use sceneworks_core::verified_source_cache::VerifiedSourceCache;
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
+    let api = ApiClient::new(&settings);
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+    let modified = std::fs::metadata(&blob).unwrap().modified().unwrap();
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    std::fs::hard_link(&blob, &entry).unwrap();
+    let error = verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect_err("substituted bytes fail the download");
+    assert!(
+        error.to_string().contains("failed its integrity check"),
+        "{error}"
+    );
+    let store = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let pinned = format!("sha256:{digest}");
+    for path in [&blob, &entry] {
+        if let Ok(real) = std::fs::canonicalize(path) {
+            assert_ne!(
+                store.recorded(&real).as_deref(),
+                Some(pinned.as_str()),
+                "{} is never recorded as the old digest",
+                path.display()
+            );
+        }
     }
 }

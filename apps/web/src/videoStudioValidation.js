@@ -22,12 +22,8 @@ export const SCAIL2_MODEL_ID = "scail2_14b";
 // set one is a refusal waiting to happen rather than a knob. The Wan-VACE inpainting engines DO
 // honor it and are unchanged.
 //
-// It lives HERE, rather than beside the control in `ReplacePersonPanel.jsx`, for two reasons that
-// both point the same way. `ReplacePersonPanel.jsx` imports this module and not the reverse, so
-// there is no cycle; and this file is a fingerprinted source of `config/backend-capabilities/
-// matrix.json` (`webVideoValidation`) while the panel is not — a predicate that decides what the
-// studio SENDS must sit inside that fingerprint, or it could be edited without the derived matrix
-// noticing. `VideoStudio.jsx` is fingerprinted too, so both readers are covered.
+// The studio and ReplacePersonPanel share this predicate so the visible control and submitted
+// request agree. The panel imports this module, which keeps the dependency direction acyclic.
 //
 // sc-20262 is the story that would make the mode honored. If it lands, delete this predicate rather
 // than adding a second model to it.

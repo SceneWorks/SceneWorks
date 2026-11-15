@@ -519,6 +519,62 @@ fn exact_starvector_manifest_identity_is_fail_closed() {
     assert!(starvector_model_identity("unregistered-starvector").is_err());
 }
 
+#[cfg(native_lane)]
+#[test]
+fn cold_starvector_accepts_only_exact_guard_verified_publisher_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("models/portable-attempts/starvector");
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("model.safetensors"), b"synthetic path fixture").unwrap();
+    let identity = starvector_model_identity("starvector_1b").unwrap();
+    let mut settings = Settings::for_test(temp.path().to_path_buf());
+    settings.gpu_id = if cfg!(target_os = "macos") {
+        "mlx".to_owned()
+    } else {
+        "gpu-0".to_owned()
+    };
+    settings.backend_mlx_enabled = true;
+    settings.backend_candle_enabled = true;
+    active_starvector_backend(&settings).unwrap();
+    let payload = VectorJobPayload {
+        project_id: "project".to_owned(),
+        mode: VectorMode::ImageToSvg,
+        model: identity.model_id.to_owned(),
+        source_asset_id: None,
+        prompt: String::new(),
+        sampling: vector_request(VectorMode::ImageToSvg, "").sampling,
+        detail_budget: vector_request(VectorMode::ImageToSvg, "").detail_budget,
+        model_manifest_entry: json!({
+            "id": identity.model_id,
+            "type": "vector",
+            "adapter": "starvector",
+            "downloads": [{"repo": identity.repository, "revision": identity.revision}],
+            "vector": {"providers": {
+                "mlx": {"available": true, "id": identity.mlx_provider_id},
+                "candle": {"available": true, "id": identity.candle_provider_id}
+            }}
+        }),
+        workflow: None,
+    };
+    assert!(NativeStarVectorProvider::resolve(&settings, &payload).is_err());
+    settings.verified_revision_sources.push(
+        crate::external_library_runtime::VerifiedRevisionSource {
+            model_id: identity.model_id.to_owned(),
+            repository: identity.repository.to_owned(),
+            revision: identity.revision.to_owned(),
+            path: path.clone(),
+        },
+    );
+    assert_eq!(
+        NativeStarVectorProvider::resolve(&settings, &payload)
+            .unwrap()
+            .weights_dir,
+        path
+    );
+    settings.verified_revision_sources[0].repository = "other/repo".to_owned();
+    assert!(NativeStarVectorProvider::resolve(&settings, &payload).is_err());
+}
+
 #[test]
 fn native_terminal_events_publish_only_complete_root_or_eos() {
     let svg = "<svg/>";

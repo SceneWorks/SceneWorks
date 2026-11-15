@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { promptEnhancementAvailable } from "./promptEnhancement.js";
 
-const dev = { id: "flux2_dev", ui: { promptEnhance: true } };
+const dev = { id: "flux2_dev", family: "flux2-dev", type: "image", ui: { promptEnhance: true } };
 
 describe("promptEnhancementAvailable", () => {
   it("admits both FLUX 3 checkpoints on native generation and reference routes", () => {
     for (const id of ["flux3_klein", "flux3_klein_base"]) {
-      const model = { id, ui: { promptEnhance: true } };
+      const model = { id, family: "flux3", type: "image", ui: { promptEnhance: true } };
       for (const backend of ["mlx", "candle"]) {
         for (const mode of ["text_to_image", "edit_image", "character_image", "image_to_image"]) {
           expect(promptEnhancementAvailable({ model, backend, mode })).toBe(true);
@@ -51,14 +51,15 @@ describe("promptEnhancementAvailable", () => {
   it("fails closed for FLUX.2 Klein, unknown backends, missing catalog declarations, and strict control", () => {
     expect(
       promptEnhancementAvailable({
-        model: { id: "flux2_klein_9b", ui: { promptEnhance: true } },
+        model: { id: "flux2_klein_9b", family: "flux2-klein", type: "image", ui: { promptEnhance: true } },
         backend: "candle",
         mode: "text_to_image",
       }),
     ).toBe(false);
     expect(promptEnhancementAvailable({ model: dev, backend: "torch", mode: "text_to_image" })).toBe(false);
+    expect(promptEnhancementAvailable({ model: { id: "flux3_pup", family: "flux3", type: "utility", ui: { promptEnhance: true } }, backend: "mlx", mode: "text_to_image" })).toBe(false);
     expect(
-      promptEnhancementAvailable({ model: { id: "flux2_dev", ui: {} }, backend: "mlx", mode: "text_to_image" }),
+      promptEnhancementAvailable({ model: { ...dev, ui: {} }, backend: "mlx", mode: "text_to_image" }),
     ).toBe(false);
     expect(
       promptEnhancementAvailable({

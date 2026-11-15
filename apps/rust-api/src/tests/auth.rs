@@ -1,6 +1,27 @@
 //! rust-api auth tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// An embedded test worker resolves the same directories as the API under test, inside the test's
+/// temp dir, so the proof key it derives comes from the master that API created and never from the
+/// developer's OS app-config directory.
+#[test]
+fn embedded_test_worker_shares_the_api_config_and_credential_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let api = test_settings(&temp);
+    let worker = test_worker_settings("http://127.0.0.1:0".to_owned(), &api);
+    assert_eq!(worker.credentials_dir, api.credentials_dir);
+    assert_eq!(worker.config_dir, api.config_dir);
+    assert_eq!(worker.data_dir, api.data_dir);
+    for path in [
+        &worker.credentials_dir,
+        &worker.config_dir,
+        &worker.data_dir,
+    ] {
+        assert!(path.starts_with(temp.path()), "{}", path.display());
+    }
+    assert!(worker.credentials.is_empty() && worker.access_token.is_none());
+}
+
 #[test]
 fn access_tokens_are_compared_as_fixed_size_hashes() {
     use crate::auth::token_digest;
@@ -122,6 +143,232 @@ async fn access_token_is_enforced_on_protected_routes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(jobs, json!([]));
+}
+
+/// After an API restart the database still holds a worker's claims, but this process has proven
+/// none under the worker's key. A keyed heartbeat without claims must therefore not leave the
+/// worker authenticated with an EMPTY claim vector (which made every local utility proof time
+/// out): it is refused with a typed code, and the worker's full republication restores the
+/// claims that utility admission reads.
+#[tokio::test]
+async fn keyed_heartbeat_after_api_restart_requires_a_full_claim_republication() {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance, PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let master =
+        sceneworks_core::worker_proof::load_or_create_master(&settings.credentials_dir).unwrap();
+    let key = sceneworks_core::worker_proof::derive_worker_key(&master, "restart-worker").unwrap();
+    let files = vec![PortableArtifactFile {
+        relative_path: "caption-model.safetensors".into(),
+        size_bytes: 3,
+        sha256: format!("sha256:{}", "c".repeat(64)),
+    }];
+    let ledger = portable_file_ledger_sha256(&files).unwrap();
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        "local-captioner",
+        None,
+        &ledger,
+    )
+    .unwrap();
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .unwrap();
+    let claims = serde_json::to_value(vec![claim.clone()]).unwrap();
+
+    let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"restart-worker","gpuId":"cpu","platform":std::env::consts::OS,
+            "capabilities":["cpu","training_caption"],"loadedModels":[],"portableProofKey":key,
+            "portableSourceClaims":claims}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.authenticated_worker_claims.lock().await["restart-worker"].claims,
+        vec![claim.clone()]
+    );
+    drop(state);
+
+    // The API restarts over the same database and credential store; the worker keeps running
+    // and, having acknowledged its inventory generation, heartbeats without claims.
+    let (app, state) = crate::create_app_with_state(settings).unwrap();
+    let heartbeat = "/api/v1/workers/restart-worker/heartbeat";
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        heartbeat,
+        json!({"status":"idle","currentJobId":null,"loadedModels":[],"portableProofKey":key}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE, "{body}");
+    assert!(
+        !state
+            .authenticated_worker_claims
+            .lock()
+            .await
+            .contains_key("restart-worker"),
+        "no claim vector is trusted before the worker proves one under its key"
+    );
+
+    let (status, body) = request(
+        app,
+        "POST",
+        heartbeat,
+        json!({"status":"idle","currentJobId":null,"loadedModels":[],"portableProofKey":key,
+            "portableSourceClaims":claims}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        state.authenticated_worker_claims.lock().await["restart-worker"].claims,
+        vec![claim]
+    );
+}
+
+#[tokio::test]
+async fn worker_source_challenges_require_a_distinct_worker_key_and_route_scope() {
+    use crate::portable_admission::PortableSourceChallenge;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile,
+    };
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.access_token = "ordinary-api-token".to_owned();
+    let master =
+        sceneworks_core::worker_proof::load_or_create_master(&settings.credentials_dir).unwrap();
+    let key = sceneworks_core::worker_proof::derive_worker_key(&master, "proof-worker").unwrap();
+    let (app, state) = crate::create_app_with_state(settings).unwrap();
+    let auth = &[("x-sceneworks-token", "ordinary-api-token")];
+    let register = json!({
+        "workerId":"proof-worker","gpuId":"cpu","platform":std::env::consts::OS,
+        "capabilities":[],"loadedModels":[],"portableProofKey":key
+    });
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            register,
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let file = PortableArtifactFile {
+        relative_path: "private-model.safetensors".into(),
+        size_bytes: 3,
+        sha256: format!("sha256:{}", "a".repeat(64)),
+    };
+    let ledger = portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap();
+    state.portable_source_challenges.lock().insert(
+        "probe-1".to_owned(),
+        PortableSourceChallenge {
+            id: "probe-1".to_owned(),
+            source_id: "logical-source".to_owned(),
+            files: vec![file],
+            expires_at: Some(Instant::now() + Duration::from_secs(30)),
+            proved_worker_ids: BTreeSet::new(),
+            allowed_worker_ids: BTreeSet::from(["proof-worker".to_owned()]),
+        },
+    );
+    let path = "/api/v1/workers/proof-worker/portable-source-challenges";
+    let (denied, body) = request_with_headers(
+        app.clone(),
+        "POST",
+        path,
+        json!({"capability":"b".repeat(64)}),
+        auth,
+    )
+    .await;
+    assert_eq!(denied, StatusCode::BAD_REQUEST);
+    assert!(body.to_string().find("private-model").is_none());
+    let (ok, body) =
+        request_with_headers(app.clone(), "POST", path, json!({"capability":key}), auth).await;
+    assert_eq!(ok, StatusCode::OK);
+    assert_eq!(
+        body[0]["files"][0]["relativePath"],
+        "private-model.safetensors"
+    );
+    let other_key =
+        sceneworks_core::worker_proof::derive_worker_key(&master, "other-worker").unwrap();
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            json!({"workerId":"other-worker","gpuId":"cpu","platform":std::env::consts::OS,
+            "capabilities":[],"loadedModels":[],"portableProofKey":other_key}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (other_status, other_body) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/other-worker/portable-source-challenges",
+        json!({"capability":other_key}),
+        auth,
+    )
+    .await;
+    assert_eq!(other_status, StatusCode::OK);
+    assert_eq!(other_body, json!([]));
+
+    let proof = "/api/v1/workers/proof-worker/portable-source-proof";
+    assert_eq!(request_with_headers(app.clone(), "POST", proof,
+        json!({"id":"probe-1","capability":key,"ledgerSha256":format!("sha256:{}", "b".repeat(64))}), auth).await.0, StatusCode::OK);
+    assert!(state.portable_source_challenges.lock()["probe-1"]
+        .proved_worker_ids
+        .is_empty());
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            proof,
+            json!({"id":"probe-1","capability":key,"ledgerSha256":ledger}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(state.portable_source_challenges.lock()["probe-1"]
+        .proved_worker_ids
+        .contains("proof-worker"));
+
+    let (spoof, _) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"proof-worker","gpuId":"cpu","capabilities":[],"loadedModels":[]}),
+        auth,
+    )
+    .await;
+    assert_eq!(spoof, StatusCode::BAD_REQUEST);
+    let (spoof_claim, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"proof-worker","portableModelBindingVersion":2}),
+        auth,
+    )
+    .await;
+    assert_eq!(spoof_claim, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

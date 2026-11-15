@@ -129,24 +129,12 @@ pub(crate) fn model_file_identity(path: &Path) -> Option<ModelFileIdentity> {
 /// Bind recovery to the server-normalized import request, not just its destination/model ID.
 /// Retry payload edits intentionally require a fresh transaction; they cannot adopt old bytes.
 pub(crate) fn model_import_commitment(payload: &JsonObject) -> String {
-    use sha2::{Digest, Sha256};
-    // Recursively sort object keys even when serde_json's preserve_order feature is enabled.
-    fn canonical(value: &Value) -> Value {
-        match value {
-            Value::Object(object) => {
-                let sorted: std::collections::BTreeMap<_, _> = object
-                    .iter()
-                    .map(|(key, value)| (key.clone(), canonical(value)))
-                    .collect();
-                serde_json::to_value(sorted).expect("JSON map")
-            }
-            Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
-            value => value.clone(),
-        }
-    }
-    let bytes = serde_json::to_vec(&canonical(&Value::Object(payload.clone())))
-        .expect("JSON import payload");
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    let mut authored_payload = payload.clone();
+    authored_payload.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(&Value::Object(
+        authored_payload,
+    ))
+    .expect("JSON import payload")
 }
 
 /// Hosted CPU fixtures emulate the interruption boundary using the SAME managed compiler,

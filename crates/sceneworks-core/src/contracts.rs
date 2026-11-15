@@ -346,6 +346,13 @@ string_enum! {
         // native SCRFD+ArcFace stack); served by the Rust/MLX worker (MLX on Mac, candle off-Mac).
         FaceLikenessCompare => "face_likeness_compare",
         PromptRefine => "prompt_refine",
+        // Dataset prompt-batch describe (SW-7082, SW-7083): the Vision Captioner or JoyCaption
+        // describes every image of a training dataset (or an item-id subset) as six JSON fields
+        // plus its pixel size, for Training Studio's "Create Prompt Batch from Dataset". It has NO
+        // capability of its own: the Vision Captioner runs on the native `core_llm::TextLlm`
+        // provider and routes by `prompt_refine`, JoyCaption by `training_caption` (see
+        // jobs_store::required_capability). Capability-routed, not GPU-required.
+        DatasetBatchDescribe => "dataset_batch_describe",
     }
 }
 
@@ -1075,6 +1082,11 @@ pub fn default_video_upscale_model() -> String {
 pub struct WorkerRegisterRequest {
     pub worker_id: String,
     pub gpu_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
@@ -1089,6 +1101,9 @@ pub struct WorkerRegisterRequest {
 #[serde(rename_all = "camelCase")]
 pub struct WorkerHeartbeatRequest {
     pub status: WorkerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
@@ -1376,6 +1391,8 @@ pub struct QueueSummary {
 pub struct WorkerSnapshot {
     pub id: String,
     pub gpu_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     pub gpu_name: Option<String>,
     pub status: WorkerStatus,
     pub current_job_id: Option<String>,
@@ -1411,6 +1428,12 @@ pub struct WorkerUtilizationSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimRequest {
     pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_model_binding_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_platform: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1419,6 +1442,9 @@ pub struct ClaimRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimResponse {
     pub job: Option<JobSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_model_binding:
+        Option<crate::model_artifacts::portable_binding::PortableRouteBinding>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

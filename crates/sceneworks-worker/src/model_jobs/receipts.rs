@@ -1,6 +1,19 @@
 const ARTIFACT_PROVENANCE_MARKER: &str = ".sceneworks-artifact-provenance.json";
 const ARTIFACT_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_PROVENANCE_LOCK: &str = ".sceneworks-artifact-provenance.lock";
+const PRODUCED_ARTIFACT_MARKER: &str = ".sceneworks-produced-artifact.json";
+const PRODUCED_ARTIFACT_LOCK: &str = ".sceneworks-produced-artifact.lock";
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProducedArtifactReceipt {
+    pub schema_version: u32,
+    pub producer_job_id: String,
+    pub source_artifact_id: String,
+    pub output_model_id: String,
+    pub content_sha256: String,
+    pub tree_stamp: String,
+}
 
 fn lock_app_managed_receipt(root: &Path) -> std::io::Result<FileLock> {
     FileLock::open_exclusive(&root.join(ARTIFACT_PROVENANCE_LOCK))
@@ -74,6 +87,8 @@ fn artifact_files(root: &Path) -> WorkerResult<Vec<PathBuf>> {
             })?;
             if relative == Path::new(ARTIFACT_PROVENANCE_MARKER)
                 || relative == Path::new(ARTIFACT_PROVENANCE_LOCK)
+                || relative == Path::new(PRODUCED_ARTIFACT_MARKER)
+                || relative == Path::new(PRODUCED_ARTIFACT_LOCK)
             {
                 continue;
             }
@@ -171,6 +186,91 @@ fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
         digest.update([0xff]);
     }
     Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+/// Stamp a completed local derivative before its job reports success or its catalog entry is
+/// published. The exact output bytes and producer identity travel together in one atomic marker.
+pub fn write_produced_artifact_receipt(
+    root: &Path,
+    producer_job_id: &str,
+    source_artifact_id: &str,
+    output_model_id: &str,
+) -> WorkerResult<ProducedArtifactReceipt> {
+    if [producer_job_id, source_artifact_id, output_model_id]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(WorkerError::InvalidPayload(
+            "produced artifact identity requires job, source artifact, and output model".to_owned(),
+        ));
+    }
+    let _lock = FileLock::open_exclusive(&root.join(PRODUCED_ARTIFACT_LOCK))?;
+    let receipt = ProducedArtifactReceipt {
+        schema_version: 1,
+        producer_job_id: producer_job_id.to_owned(),
+        source_artifact_id: source_artifact_id.to_owned(),
+        output_model_id: output_model_id.to_owned(),
+        content_sha256: artifact_content_fingerprint(root)?,
+        tree_stamp: artifact_tree_stamp(root)?,
+    };
+    sceneworks_core::fsutil::write_atomic(
+        &root.join(PRODUCED_ARTIFACT_MARKER),
+        &serde_json::to_vec_pretty(&receipt)?,
+    )?;
+    Ok(receipt)
+}
+
+/// [`artifact_content_fingerprint`] through the host's per-tree record. Only a fingerprint equal to
+/// the receipt's `expected` one is recorded, so a mismatch is never reused.
+fn produced_content_fingerprint(
+    cache: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
+    root: &Path,
+    expected: &str,
+) -> WorkerResult<String> {
+    let (fingerprint, _verification) = cache.tree_fingerprint(
+        root,
+        || artifact_files(root),
+        || artifact_content_fingerprint(root),
+        |fingerprint| fingerprint == expected,
+    )?;
+    Ok(fingerprint)
+}
+
+/// Admit a local derivative only while its complete bytes still match the producer's receipt.
+/// Callers also verify that `producer_job_id` names a completed job for the expected source.
+///
+/// The content fingerprint is computed at most once per host while every file under `root` keeps
+/// its stamp: `cache` (the host's shared store) holds the last fingerprint for that exact tree.
+pub fn verify_produced_artifact_receipt(
+    cache: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
+    root: &Path,
+    producer_job_id: &str,
+    source_artifact_id: &str,
+    output_model_id: &str,
+) -> WorkerResult<ProducedArtifactReceipt> {
+    let _lock = FileLock::open_exclusive(&root.join(PRODUCED_ARTIFACT_LOCK))?;
+    let marker = root.join(PRODUCED_ARTIFACT_MARKER);
+    let receipt: ProducedArtifactReceipt = serde_json::from_slice(&std::fs::read(&marker)?)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "invalid produced artifact receipt at {}: {error}",
+                marker.display()
+            ))
+        })?;
+    if receipt.schema_version != 1
+        || receipt.producer_job_id != producer_job_id
+        || receipt.source_artifact_id != source_artifact_id
+        || receipt.output_model_id != output_model_id
+        || !is_sha256_fingerprint(&receipt.content_sha256)
+        || receipt.tree_stamp != artifact_tree_stamp(root)?
+        || receipt.content_sha256 != produced_content_fingerprint(cache, root, &receipt.content_sha256)?
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "produced artifact receipt does not match {}",
+            root.display()
+        )));
+    }
+    Ok(receipt)
 }
 
 /// Write worker-owned provenance while an app-managed artifact is being installed or converted.
@@ -286,7 +386,99 @@ pub(crate) fn app_managed_artifact_provenance(
 #[cfg(test)]
 mod artifact_provenance_tests {
     use super::*;
+    use sceneworks_core::verified_source_cache::VerifiedSourceCache;
     use serde_json::json;
+
+    #[test]
+    fn produced_receipt_binds_job_source_and_exact_output_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let weight = root.path().join("transformer/model.safetensors");
+        std::fs::create_dir_all(weight.parent().unwrap()).unwrap();
+        std::fs::write(&weight, b"trained weights").unwrap();
+        let produced =
+            write_produced_artifact_receipt(root.path(), "job-7", "mage_flow_base", "finetune-7")
+                .unwrap();
+        assert!(produced.content_sha256.starts_with("sha256:"));
+        let verified = tempfile::tempdir().unwrap();
+        let cache = VerifiedSourceCache::for_data_dir(verified.path());
+        assert_eq!(
+            verify_produced_artifact_receipt(
+                &cache,
+                root.path(),
+                "job-7",
+                "mage_flow_base",
+                "finetune-7"
+            )
+            .unwrap()
+            .content_sha256,
+            produced.content_sha256
+        );
+        assert!(verify_produced_artifact_receipt(
+            &cache,
+            root.path(),
+            "job-8",
+            "mage_flow_base",
+            "finetune-7"
+        )
+        .is_err());
+        std::fs::write(&weight, b"substituted").unwrap();
+        assert!(verify_produced_artifact_receipt(
+            &cache,
+            root.path(),
+            "job-7",
+            "mage_flow_base",
+            "finetune-7"
+        )
+        .is_err());
+    }
+
+    fn settle(path: &Path) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_produced_tree_is_fingerprinted_once_per_host() {
+        let root = tempfile::tempdir().unwrap();
+        let weight = root.path().join("transformer/model.safetensors");
+        std::fs::create_dir_all(weight.parent().unwrap()).unwrap();
+        std::fs::write(&weight, b"trained weights").unwrap();
+        settle(&weight);
+        write_produced_artifact_receipt(root.path(), "job-7", "base", "out").unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let verify = |cache: &VerifiedSourceCache| {
+            verify_produced_artifact_receipt(cache, root.path(), "job-7", "base", "out")
+        };
+        let real_root = std::fs::canonicalize(root.path()).unwrap();
+        let fingerprinted_trees =
+            || sceneworks_core::verified_source_cache::read_counts::of(&real_root);
+        let start = fingerprinted_trees();
+        verify(&VerifiedSourceCache::for_data_dir(data.path())).unwrap();
+        assert_eq!(fingerprinted_trees(), start + 1);
+        // A second check, through a second handle on the same host store (the other side's
+        // view), reads no file bytes.
+        verify(&VerifiedSourceCache::for_data_dir(data.path())).unwrap();
+        assert_eq!(fingerprinted_trees(), start + 1, "the unchanged tree is not read");
+
+        // Same-size substitution, an added file and a removed file are each refused.
+        let cache = VerifiedSourceCache::for_data_dir(data.path());
+        std::fs::write(&weight, b"TRAINED WEIGHTS").unwrap();
+        settle(&weight);
+        let error = verify(&cache).unwrap_err();
+        assert!(error.to_string().contains("produced artifact receipt does not match"));
+        std::fs::write(&weight, b"trained weights").unwrap();
+        settle(&weight);
+        let extra = root.path().join("extra.json");
+        std::fs::write(&extra, b"{}").unwrap();
+        assert!(verify(&cache).is_err(), "an added file is refused");
+        std::fs::remove_file(&extra).unwrap();
+        std::fs::remove_file(&weight).unwrap();
+        assert!(verify(&cache).is_err(), "a removed file is refused");
+    }
 
     #[test]
     fn receipt_migration_rechecks_legacy_baseline_and_rejects_malformed_file_lists() {

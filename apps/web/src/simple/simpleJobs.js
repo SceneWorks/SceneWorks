@@ -3,8 +3,7 @@ import { isMossEdit } from "../mossImage.js";
 import { composeStyledPrompt } from "../styleComposer.js";
 import { serializeLora } from "../presetUtils.js";
 import { styleTextForId } from "../data/styleCatalog.js";
-import { defaultTierSelection, installedTiers } from "../quantTier.js";
-import { suggestTier } from "../tierSuggestion.js";
+import { defaultTierSelection, installedTiers, suggestTier } from "../quantTier.js";
 import { readLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 

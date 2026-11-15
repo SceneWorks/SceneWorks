@@ -182,9 +182,10 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
-    /// Explicit quantization bits, before model-specific defaults or tier validation.
+    /// Explicit quantization bits (or the verified portable binding's frozen tier), before
+    /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
-        crate::payload_util::optional_i64(&self.advanced, "mlxQuantize")
+        crate::payload_util::request_quant_bits(&self.advanced)
     }
 
     /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
@@ -385,7 +386,7 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
         .map(str::trim)
         .map(str::to_ascii_lowercase)
         .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
-    if request.model == "realvisxl_lightning" || acceleration_sampler {
+    if !model_supports_hires_fix(request) || acceleration_sampler {
         return Some(
             "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
                 .to_owned(),
@@ -401,6 +402,17 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
         ));
     }
     None
+}
+
+/// The checkpoint's `image.supportsHiresFix` product fact (absent means true). A builtin reads it
+/// from its compiled typed spec, which author choices cannot change, so overriding the model's
+/// defaults in `user.models.jsonc` can never re-enable a pass the checkpoint cannot run. Any other
+/// model reads the manifest entry the request carries.
+fn model_supports_hires_fix(request: &ImageRequest) -> bool {
+    match crate::registry::builtin_model_spec(&request.model) {
+        Some(spec) => spec.product.supports_hires_fix(),
+        None => crate::registry::supports_hires_fix(request.model_manifest_entry.get("image")),
+    }
 }
 
 /// The post-first-pass target side: `dimension × upscale_by`, rounded. Shared by the enqueue
@@ -550,7 +562,13 @@ pub const FP8R_QUANT_TIER: &str = "fp8r";
 /// Klein (distilled) is the only catalog FLUX 3 model; it is also the only model that ships a
 /// publisher FP8R package, so `quantTier: "fp8r"` anywhere else is refused rather than run at some
 /// other precision.
-pub const FLUX3_TIERED_MODEL_IDS: &[&str] = &["flux3_klein", "flux3_klein_base"];
+pub static FLUX3_TIERED_MODEL_IDS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| spec.product.family == "flux3" && spec.product.model_type == "image")
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 /// The `advanced` keys that select a FLUX 3 precision. A consumer that judges the rest of the
 /// request surface strips exactly these once [`flux3_requested_tier`] has accepted them.
@@ -851,6 +869,70 @@ mod tests {
             "projectId": "p", "hiresFix": "yes please"
         })));
         assert!(bad.hires_fix.is_disabled());
+    }
+
+    /// RealVisXL Lightning's Hires.fix exclusion is its typed `image.supportsHiresFix: false`
+    /// fact, which author choices cannot change: overriding its defaults (or trying to override
+    /// the fact itself) in user.models.jsonc still refuses Hires.fix, while a model without the
+    /// fact is unaffected.
+    #[test]
+    fn hires_fix_refusal_follows_the_immutable_supports_hires_fix_fact() {
+        let hires = |model: &str, entry: Value| {
+            ImageRequest::from_payload(&payload(json!({
+                "projectId": "p",
+                "model": model,
+                "mode": "text_to_image",
+                "width": 1024,
+                "height": 1024,
+                "modelManifestEntry": entry,
+                "hiresFix": { "enabled": true, "upscaleBy": 1.5 }
+            })))
+        };
+        let lightning = crate::registry::builtin_model_spec("realvisxl_lightning").unwrap();
+        assert!(!lightning.product.supports_hires_fix());
+        let user = json!({
+            "defaults": { "steps": 4 },
+            "image": { "supportsHiresFix": true },
+            "ui": { "label": "My Lightning" }
+        });
+        let projected = lightning.project(Some(&user));
+        assert_eq!(
+            projected["defaults"]["steps"],
+            json!(4),
+            "the author choice applies"
+        );
+        assert_eq!(
+            projected["image"]["supportsHiresFix"],
+            json!(false),
+            "an author choice cannot change the checkpoint fact"
+        );
+        let refusal = hires_fix_request_error(&hires("realvisxl_lightning", projected), "sdxl")
+            .expect("Hires.fix is refused for RealVisXL Lightning");
+        assert!(refusal.contains("Lightning"), "{refusal}");
+        // The builtin's compiled fact wins even over a carried entry that omits it.
+        assert!(
+            hires_fix_request_error(&hires("realvisxl_lightning", json!({})), "sdxl").is_some()
+        );
+
+        let realvisxl = crate::registry::builtin_model_spec("realvisxl").unwrap();
+        assert!(realvisxl.product.supports_hires_fix());
+        assert_eq!(
+            hires_fix_request_error(&hires("realvisxl", realvisxl.project(None)), "sdxl"),
+            None
+        );
+        // A non-builtin entry carries its own fact.
+        assert!(hires_fix_request_error(
+            &hires(
+                "user_sdxl",
+                json!({ "image": { "supportsHiresFix": false } })
+            ),
+            "sdxl"
+        )
+        .is_some());
+        assert_eq!(
+            hires_fix_request_error(&hires("user_sdxl", json!({})), "sdxl"),
+            None
+        );
     }
 
     #[test]

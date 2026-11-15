@@ -41,7 +41,11 @@ export function OrderedReferenceList({
   onInsertToken,
 }) {
   const inserts = typeof tokenFor === "function" && typeof onInsertToken === "function";
-  if (!Array.isArray(assetIds) || (assetIds.length < 2 && !onRemove && !(inserts && assetIds.length))) {
+  // Only a model whose prompt actually names its references lists a lone reference; for any other
+  // model `tokenFor` yields null and the list keeps its two-reference threshold.
+  const namesReferences = inserts && Array.isArray(assetIds)
+    && assetIds.some((_, index) => tokenFor(index + firstOrdinal - 1));
+  if (!Array.isArray(assetIds) || (assetIds.length < 2 && !onRemove && !namesReferences)) {
     return null;
   }
   const move = (from, to) => onMove ? onMove(from, to) : onChange(moveReference(assetIds, from, to));

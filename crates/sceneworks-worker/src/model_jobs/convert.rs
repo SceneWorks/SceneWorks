@@ -213,17 +213,57 @@ fn resolve_flux2_klein_base_dir(snapshot: &Path, subdir: Option<&str>) -> Option
 /// the split MLX dir. `bits` is the reference `python -m mlx_video.convert --quantize --q-bits <bits>`
 /// recipe (audio-inclusive). Runs MLX, so macOS-only.
 #[cfg(target_os = "macos")]
+fn selected_ltx_converter_upscaler_dir(
+    upscaler_dir: &Path,
+    upscaler_file: &Path,
+    out_dir: &Path,
+) -> Result<(PathBuf, Option<tempfile::TempDir>), String> {
+    if upscaler_file
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("LTX spatial upscaler filename is not repository-relative".to_owned());
+    }
+    let selected = upscaler_dir.join(upscaler_file);
+    let default_name = Path::new(LTX_SPATIAL_UPSCALER_FILE);
+    if !selected.is_file() {
+        return Err("selected LTX spatial upscaler is unavailable".to_owned());
+    }
+    if upscaler_file.file_name() == default_name.file_name() {
+        Ok((selected.parent().unwrap_or(upscaler_dir).to_path_buf(), None))
+    } else {
+        // mlx-gen-ltx reads the spatial upscaler by its canonical basename. The admitted
+        // repository filename may be nested or renamed, so expose only that selected file
+        // under the expected name for this conversion attempt. COPY it, never hard-link:
+        // `selected` can live inside a verified portable snapshot bundle, and
+        // `private_tree_bytes`/`prune_portable_snapshots` enforce Unix `nlink == 1` on every
+        // private snapshot file — a hard link here would raise the source's link count to 2
+        // and make an unrelated source-bound job fail its bundle check with
+        // "private snapshot file has a hard-link alias" (SW-7030). The alias lives only for
+        // this conversion attempt in its own temp dir, so a copy preserves the invariant.
+        let alias = tempfile::tempdir_in(out_dir.parent().unwrap_or(out_dir))
+            .map_err(|error| error.to_string())?;
+        let target = alias.path().join(default_name);
+        std::fs::copy(&selected, &target).map_err(|error| error.to_string())?;
+        Ok((alias.path().to_path_buf(), Some(alias)))
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn convert_ltx_native(
     source_file: &Path,
     upscaler_dir: &Path,
+    upscaler_file: &Path,
     out_dir: &Path,
     bits: i32,
 ) -> Result<(), String> {
+    let (converter_dir, _alias) =
+        selected_ltx_converter_upscaler_dir(upscaler_dir, upscaler_file, out_dir)?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     let opts = runtime_macos::providers::ltx::LtxConvertOpts::audio_quant(bits);
     runtime_macos::providers::ltx::convert_and_assemble(
         source_file,
-        Some(upscaler_dir),
+        Some(&converter_dir),
         out_dir,
         &opts,
     )
@@ -235,6 +275,7 @@ fn convert_ltx_native(
 fn convert_ltx_native(
     _source_file: &Path,
     _upscaler_dir: &Path,
+    _upscaler_file: &Path,
     _out_dir: &Path,
     _bits: i32,
 ) -> Result<(), String> {
@@ -404,9 +445,9 @@ const ANIMA_DIT_FILES: &[&str] = &[
     "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
 ];
 /// The shared dense Qwen3-0.6B text encoder, reused bf16 in every Anima tier (repo-relative).
-const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetensors";
+const ANIMA_TE_FILE: &str = sceneworks_core::portable_convert_sources::ANIMA_TE_FILE;
 /// The shared dense Qwen-Image VAE, reused bf16 in every Anima tier (repo-relative).
-const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
+const ANIMA_VAE_FILE: &str = sceneworks_core::portable_convert_sources::ANIMA_VAE_FILE;
 
 /// Test-only hardcoded regression pin for the Anima DiT quant-target partition, mirroring
 /// `runtime_macos::providers::anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
@@ -625,6 +666,7 @@ enum ConvertPlan {
     Ltx {
         source_file: PathBuf,
         upscaler_dir: PathBuf,
+        upscaler_file: PathBuf,
         bits: i32,
     },
     /// FLUX.2-dev gated diffusers snapshot → packed Q`bits` dir (sc-5921): pre-quantize the DiT +
@@ -704,6 +746,24 @@ fn unknown_converter_error(model_id: &str, converter: &str) -> ConvertPlanError 
 /// construction inside the 350-line job body; here each becomes an `Err(ConvertPlanError)` value and
 /// the caller performs the SINGLE `fail_job`. Still async because the LTX arm may fetch the upscaler
 /// (`ensure_ltx_upscaler_cached`), and real infra errors (`?`) propagate as the outer `WorkerError`.
+fn bound_convert_aux_source(
+    payload: &serde_json::Map<String, Value>,
+    source_id: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    if !advanced.is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+        return Ok(None);
+    }
+    advanced
+        .and_then(|value| crate::portable_aux_sources::bound_aux_path(value, source_id))
+        .map(Some)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "portable conversion lacks verified {source_id} source"
+            ))
+        })
+}
+
 async fn resolve_convert_plan(
     api: &ApiClient,
     settings: &Settings,
@@ -736,8 +796,13 @@ async fn resolve_convert_plan(
                     detail: format!("Expected {source_file_name} in {source_repo}."),
                 }));
             }
-            let Some(base_snapshot) = huggingface_snapshot_dir(&settings.data_dir, &base_repo)
-            else {
+            let bound = bound_convert_aux_source(&job.payload, "flux2_convert_base")?;
+            let base_snapshot = if let Some(bound) = bound {
+                Some(bound)
+            } else {
+                huggingface_snapshot_dir(&settings.data_dir, &base_repo)
+            };
+            let Some(base_snapshot) = base_snapshot else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is not installed.",
                     detail: format!(
@@ -750,7 +815,11 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = optional_payload_string(&job.payload, "baseSubdir");
+            let base_subdir = if job.payload.get("advanced").and_then(Value::as_object).is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+                None
+            } else {
+                optional_payload_string(&job.payload, "baseSubdir")
+            };
             let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is installed but incomplete.",
@@ -778,10 +847,14 @@ async fn resolve_convert_plan(
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
-            let Some(upscaler_dir) =
+            let bound = bound_convert_aux_source(&job.payload, "ltx_convert_upscaler")?;
+            let upscaler_dir = if let Some(bound) = bound {
+                bound.join(&upscaler_file).is_file().then_some(bound)
+            } else {
                 ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
                     .await?
-            else {
+            };
+            let Some(upscaler_dir) = upscaler_dir else {
                 return Ok(Err(ConvertPlanError {
                     message: "LTX-2.3 spatial upscaler is unavailable.",
                     detail: format!(
@@ -795,6 +868,7 @@ async fn resolve_convert_plan(
             ConvertPlan::Ltx {
                 source_file,
                 upscaler_dir,
+                upscaler_file: PathBuf::from(upscaler_file),
                 bits,
             }
         }
@@ -958,6 +1032,114 @@ async fn resolve_convert_plan(
         }
     };
     Ok(Ok(plan))
+}
+
+#[cfg(test)]
+mod portable_conversion_source_tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_converter_receives_default_and_nested_selected_upscaler() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = root.path().join("snapshot");
+        let output = root.path().join("output");
+        std::fs::create_dir_all(snapshot.join("weights")).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(snapshot.join(LTX_SPATIAL_UPSCALER_FILE), b"default").unwrap();
+        std::fs::write(snapshot.join("weights/upscaler.safetensors"), b"nested").unwrap();
+        let (default_dir, default_alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new(LTX_SPATIAL_UPSCALER_FILE),
+            &output,
+        )
+        .unwrap();
+        assert!(default_alias.is_none());
+        assert_eq!(default_dir, snapshot);
+        let (nested_dir, _nested_alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new("weights/upscaler.safetensors"),
+            &output,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(nested_dir.join(LTX_SPATIAL_UPSCALER_FILE)).unwrap(), b"nested");
+        assert_ne!(nested_dir, snapshot);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renamed_upscaler_alias_copies_without_hard_linking_the_private_snapshot() {
+        // SW-7030: a renamed `upscalerFile` stages the selected file under the canonical
+        // basename for mlx-gen-ltx. `upscaler_dir` can be a verified portable snapshot
+        // bundle (`ltx_convert_upscaler`), whose files must keep Unix nlink == 1: a
+        // concurrent source-bound job's `prune_portable_snapshots` walks every existing
+        // bundle with `private_tree_bytes` BEFORE checking its lease, so one aliased file
+        // fails that unrelated job with "private snapshot file has a hard-link alias" even
+        // below the cache limits. Staging must copy, never hard-link.
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = root.path().join("snapshot");
+        let output = root.path().join("output");
+        std::fs::create_dir_all(snapshot.join("weights")).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        let selected = snapshot.join("weights/upscaler.safetensors");
+        std::fs::write(&selected, b"private snapshot upscaler").unwrap();
+        let (alias_dir, alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new("weights/upscaler.safetensors"),
+            &output,
+        )
+        .unwrap();
+        // The alias exposes the selected bytes under the canonical name...
+        assert_eq!(
+            std::fs::read(alias_dir.join(LTX_SPATIAL_UPSCALER_FILE)).unwrap(),
+            b"private snapshot upscaler"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&selected).unwrap().nlink(),
+                1,
+                "staging a renamed upscaler must not alias the private snapshot file"
+            );
+        }
+        // ...and the source bundle keeps passing the private-tree invariant a concurrent
+        // job checks while this conversion retains its alias.
+        crate::external_library_runtime::private_tree_bytes(&snapshot).unwrap();
+        drop(alias);
+        assert!(selected.is_file());
+        crate::external_library_runtime::private_tree_bytes(&snapshot).unwrap();
+    }
+
+    #[test]
+    fn bound_converter_source_refuses_omission_without_legacy_fallback() {
+        let legacy = serde_json::json!({"baseRepo":"owner/base"});
+        assert!(bound_convert_aux_source(legacy.as_object().unwrap(), "flux2_convert_base")
+            .unwrap()
+            .is_none());
+        let bound = serde_json::json!({"advanced":{"__portableAuxPaths":{"flux2_convert_base":"/leased/borrowed"}}});
+        assert_eq!(
+            bound_convert_aux_source(bound.as_object().unwrap(), "flux2_convert_base")
+                .unwrap(),
+            Some(PathBuf::from("/leased/borrowed"))
+        );
+        assert!(bound_convert_aux_source(bound.as_object().unwrap(), "ltx_convert_upscaler")
+            .is_err());
+    }
+
+    #[test]
+    fn bound_flux2_directory_is_a_complete_borrowed_root() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["tokenizer", "text_encoder", "vae"] {
+            std::fs::create_dir(root.path().join(name)).unwrap();
+        }
+        assert_eq!(
+            resolve_flux2_klein_base_dir(root.path(), None),
+            Some(root.path().to_path_buf())
+        );
+        std::fs::remove_dir(root.path().join("vae")).unwrap();
+        assert!(resolve_flux2_klein_base_dir(root.path(), None).is_none());
+    }
 }
 
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
@@ -1144,8 +1326,8 @@ pub(crate) async fn run_model_convert_job(
 
     // The native MLX converters are blocking and not interruptible mid-run (minutes on real
     // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
-    // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
-    // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
+    // temp dir is removed so it can never be promoted by the atomic rename below. Finalization
+    // makes any borrowed private-snapshot links durable before the rename.
     let convert_cancel_message = format!("{backend} conversion canceled by user.");
     check_cancel(api, &job.id, &convert_cancel_message).await?;
     let temp = temp_dir.clone();
@@ -1171,11 +1353,12 @@ pub(crate) async fn run_model_convert_job(
         ConvertPlan::Ltx {
             source_file,
             upscaler_dir,
+            upscaler_file,
             bits,
         } => {
             let backend = backend.clone();
             crate::load_progress::spawn_blocking(move || {
-                convert_ltx_native(&source_file, &upscaler_dir, &temp, bits).map_err(|detail| {
+                convert_ltx_native(&source_file, &upscaler_dir, &upscaler_file, &temp, bits).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
             })
@@ -1279,6 +1462,10 @@ pub(crate) async fn run_model_convert_job(
     if plan_is_ltx {
         provision_ltx_eros_gemma(api, settings, job).await?;
     }
+    // A completed conversion is a local derivative. Stamp the producer and exact output bytes
+    // before reporting success, so later training/generation admission never trusts a marker or
+    // mutable catalog path as its identity.
+    write_produced_artifact_receipt(&final_dir, &job.id, &source_repo, &model_id)?;
     let calibration_opt_in = job
         .payload
         .get("memoryCalibrationProvenanceRequired")

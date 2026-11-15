@@ -14,15 +14,16 @@ export const MUTABLE_FILES = [
   "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-  "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+  "config/engine-capabilities/runtime/capabilities.mlx.json",
+  "config/manifests/registry/route-policy.json",
   "crates/sceneworks-worker/src/training_jobs.rs",
 ];
 export const TESTS = {
   target: ["sceneworks-core", "training::moss_training_s1_tests::moss_targets_keep_explicit_checkpoint_and_method_choices"],
   library: ["sceneworks-core", "lora_family::moss_training_adapter_tests::moss_adapters_apply_on_both_base_and_sft"],
   scheduler: ["sceneworks-core", "jobs_store::routing::catalog::moss_native_training_routing_tests::moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic"],
-  catalog: ["sceneworks-core", "jobs_store::routing::catalog::tests::routed_model_lists_match_snapshot"],
-  matrix: ["sceneworks-core", "jobs_store::routing::matrix::tests::checked_in_matrix_matches_all_authoritative_sources"],
+  catalog: ["sceneworks-core", "jobs_store::routing::catalog::tests::routed_model_lists_match_typed_policy"],
+  matrix: ["sceneworks-core", "registry::trainer_routes::tests::moss_trainer_routes_match_product_targets"],
   thin: ["sceneworks-worker", "training_jobs::tests::moss_shared_finalization_defaults_strict_options_and_preserves_explicit_sampler"],
   protocol: ["sceneworks-worker", "training_jobs::tests::moss_native_requests_keep_official_bf16_source_and_requested_compute_for_both_methods"],
 };
@@ -69,7 +70,7 @@ export function patchText(text, patch) {
 export function loadRegistry(root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
   const bytes = readFileSync(path.join(root, REGISTRY_PATH));
   const spec = JSON.parse(bytes);
-  requireFact(spec.schema_version === 2 && Array.isArray(spec.cases) && spec.cases.length === 74 && !Object.hasOwn(spec, "carried"), "closed 74-case executed registry required");
+  requireFact(spec.schema_version === 2 && Array.isArray(spec.cases) && spec.cases.length === 75 && !Object.hasOwn(spec, "carried"), "closed 75-case executed registry required");
   const ids = new Set();
   for (const item of spec.cases) {
     requireFact(/^SW-[A-Za-z0-9-]+$/.test(item.id) && !ids.has(item.id), "duplicate/invalid case id"); ids.add(item.id);

@@ -1,4 +1,28 @@
 use super::*;
+use crate::tests::support::*;
+
+#[tokio::test]
+async fn vector_type_is_not_accepted_by_the_generic_import_api() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        serde_json::json!({
+            "name": "Custom vector checkpoint",
+            "type": "vector",
+            "source": { "kind": "huggingFace", "repo": "owner/checkpoint" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string()
+            .contains("Model type must be one of image, video, audio, utility"),
+        "{body}"
+    );
+}
 
 fn legacy() -> ModelImportRequest {
     ModelImportRequest {

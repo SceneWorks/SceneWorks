@@ -30,7 +30,9 @@ describe("MiniMax-H3 reference resize replay (sc-26691)", () => {
   });
 
   it("recognises stock and imported H3 entries", () => {
-    expect(isMinimaxH3Entry({ id: "minimax_h3" })).toBe(true);
+    expect(isMinimaxH3Entry({ id: "minimax_h3", family: "minimax-h3" })).toBe(true);
+    // SW-7032: the typed family decides, never an id prefix.
+    expect(isMinimaxH3Entry({ id: "minimax_h3" })).toBe(false);
     expect(isMinimaxH3Entry({ id: "community_h3", family: "minimax-h3" })).toBe(true);
     expect(isMinimaxH3Entry({ id: "bernini", family: "bernini" })).toBe(false);
   });

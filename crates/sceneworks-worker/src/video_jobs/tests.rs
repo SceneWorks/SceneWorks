@@ -12679,6 +12679,112 @@ fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
     assert_eq!(default.expect("default resolves"), old.join("q4"));
 }
 
+/// The guard's private manifest locator wins over complete operator and mutable app installs.
+/// A missing frozen byte must fail instead of falling back to either unverified source.
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let frozen_snapshot = temp.path().join("frozen");
+    let frozen_model = frozen_snapshot.join("q4");
+    let frozen_gemma = frozen_snapshot.join("gemma");
+    let override_model = temp.path().join("operator-model");
+    let override_gemma = temp.path().join("operator-gemma");
+    write_complete_ltx_dir(&frozen_model);
+    write_complete_ltx_dir(&override_model);
+    write_complete_gemma_dir(&frozen_gemma);
+    write_complete_gemma_dir(&override_gemma);
+    let settings = Settings {
+        data_dir: temp.path().to_path_buf(),
+        ..offline_settings()
+    };
+    write_complete_ltx_dir(&settings.data_dir.join("models/mlx/ltx_2_3_base_q4"));
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "frozen",
+        "advanced": {"__portableFrozenSources": true, "__portableBoundTier": "q4"},
+        "modelManifestEntry": {"paths": {"model": frozen_model}}
+    }));
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_LTX_DIR", override_model.to_str().unwrap()),
+            ("LTX_GEMMA_DIR", override_gemma.to_str().unwrap()),
+        ],
+        || {
+            // The overlay is process-wide: install it under the crate env lock so a concurrent
+            // resolver test (resolve_ltx_eros_gemma_prefers_local_sibling) never observes it.
+            let _frozen_scope =
+                sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(
+                    vec![
+                    sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
+                        repository: LTX_BUNDLE_REPO.to_owned(),
+                        revision: LTX_BUNDLE_REVISION.to_owned(),
+                        snapshot_root: frozen_snapshot.clone(),
+                        files: Vec::new(),
+                    },
+                ],
+                )
+                .unwrap();
+            assert_eq!(
+                resolve_ltx_model_dir(&settings, &request).unwrap(),
+                frozen_model
+            );
+            assert_eq!(portable_ltx_gemma_dir().unwrap(), frozen_gemma);
+            std::fs::remove_file(frozen_model.join("vocoder.safetensors")).unwrap();
+            assert!(resolve_ltx_model_dir(&settings, &request).is_err());
+            std::fs::remove_file(frozen_gemma.join("config.json")).unwrap();
+            assert!(portable_ltx_gemma_dir().is_err());
+        },
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_ltx25_primary_uses_bound_variant_and_tier() {
+    let temp = tempfile::tempdir().unwrap();
+    let frozen = temp.path().join("frozen");
+    let selected = frozen.join("dev/q8");
+    std::fs::create_dir_all(&selected).unwrap();
+    for file in LTX25_TIER_REQUIRED_FILES {
+        std::fs::write(selected.join(file), b"x").unwrap();
+    }
+    let settings = Settings {
+        data_dir: temp.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let payload = json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "frozen",
+        "advanced": {"transformerVariant": "dev", "mlxQuantize": 8,
+                     "__portableFrozenSources": true, "__portableBoundTier": "q8"},
+        "modelManifestEntry": {"paths": {"model": frozen}}
+    });
+    let selected_request = request(payload.clone());
+    assert_eq!(
+        resolve_ltx_model_dir(&settings, &selected_request).unwrap(),
+        selected
+    );
+    let mut missing_tier = payload;
+    missing_tier["advanced"]
+        .as_object_mut()
+        .unwrap()
+        .remove("__portableBoundTier");
+    assert!(resolve_ltx_model_dir(&settings, &request(missing_tier)).is_err());
+}
+
 /// LTX-2.5 is a sealed public bundle. A mutable main ref or a larger sibling snapshot must never
 /// replace the exact revision named by the builtin manifest.
 #[cfg(target_os = "macos")]
@@ -13186,6 +13292,73 @@ fn ltx_gemma_override_path_requires_complete_dir() {
 
     // Unset override → None (the bundled/cache resolution proceeds).
     assert!(ltx_gemma_override_path(None).is_none());
+}
+
+/// Codex review of PR #3379 (4559512305): the Candle LTX and SCAIL-2 tier selectors read the
+/// verified binding's frozen tier when the request names none, instead of their own default, so a
+/// sibling tier installed beside the served package is never selected. Malformed explicit values
+/// are still refused. Portable cores of Candle-only selectors, so they run on every native lane.
+#[cfg(native_lane)]
+#[test]
+fn candle_video_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
+    let advanced = |value: Value| value.as_object().unwrap().clone();
+    let bound_q4 = advanced(json!({"__portableBoundTier": "q4"}));
+    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
+    let unselected = advanced(json!({}));
+    let malformed = advanced(json!({"mlxQuantize": "eight", "__portableBoundTier": "q4"}));
+
+    // SCAIL-2: the unselected baseline is dense bf16; a binding frozen at q4 runs q4.
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&unselected),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q4), Ok("q4"));
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q8), Ok("q8"));
+    assert!(super::candle::candle_scail2_tier_key(&malformed).is_err());
+    assert!(super::candle::candle_scail2_tier_key(&advanced(json!({"mlxQuantize": 6}))).is_err());
+
+    // LTX: the unselected default is q4; a binding frozen at q8 runs q8.
+    assert_eq!(super::candle::candle_ltx_tier_key(&unselected), Some("q4"));
+    assert_eq!(super::candle::candle_ltx_tier_key(&bound_q8), Some("q8"));
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"__portableBoundTier": "bf16"}))),
+        Some("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&malformed), None);
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier:
+    // SCAIL-2 reads it as "no tier named" (dense bf16); LTX fails it closed.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"}));
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&null_with_binding),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&null_with_binding), None);
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": null}))),
+        None
+    );
+    // Every value the Candle LTX source resolver test refuses still refuses (tests.rs, the
+    // `unsupported LTX Candle tier ... must fail closed` loop), except bits <= 0, which select bf16
+    // here and are refused by the bundle lookup, which has no bf16 tier.
+    for invalid in [
+        json!(5),
+        json!(7),
+        json!(9),
+        json!("bf16"),
+        json!("8.0"),
+        json!(8.0),
+    ] {
+        assert_eq!(
+            super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": invalid.clone()}))),
+            None,
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": {"bits": 8}}))),
+        None
+    );
 }
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;

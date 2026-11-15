@@ -1780,16 +1780,9 @@ fn materialize_items(
     inputs: Vec<TrainingDatasetItemInput>,
     now: &str,
 ) -> ProjectStoreResult<Vec<TrainingDatasetItem>> {
-    let mut item_ids = Vec::new();
+    let item_ids = assign_item_ids(inputs.iter())?;
     let mut items = Vec::new();
-    for (index, input) in inputs.into_iter().enumerate() {
-        let item_id = item_id_for_input(&input, index)?;
-        if item_ids.iter().any(|existing| existing == &item_id) {
-            return Err(ProjectStoreError::BadRequest(
-                "Training dataset item IDs must be unique".to_owned(),
-            ));
-        }
-        item_ids.push(item_id.clone());
+    for (input, item_id) in inputs.into_iter().zip(item_ids) {
         let item = materialize_item(
             project_path,
             media_dir,
@@ -1819,16 +1812,9 @@ fn materialize_external_items(
     inputs: Vec<ExternalTrainingDatasetItemInput>,
     now: &str,
 ) -> ProjectStoreResult<Vec<TrainingDatasetItem>> {
-    let mut item_ids = Vec::new();
+    let item_ids = assign_item_ids(inputs.iter().map(|input| &input.item))?;
     let mut items = Vec::with_capacity(inputs.len());
-    for (index, input) in inputs.into_iter().enumerate() {
-        let item_id = item_id_for_input(&input.item, index)?;
-        if item_ids.iter().any(|existing| existing == &item_id) {
-            return Err(ProjectStoreError::BadRequest(
-                "Training dataset item IDs must be unique".to_owned(),
-            ));
-        }
-        item_ids.push(item_id.clone());
+    for (input, item_id) in inputs.into_iter().zip(item_ids) {
         items.push(materialize_external_item(
             media_dir, modality, input, item_id, now,
         )?);
@@ -1925,14 +1911,47 @@ fn materialize_external_item(
     })
 }
 
-fn item_id_for_input(input: &TrainingDatasetItemInput, index: usize) -> ProjectStoreResult<String> {
-    match input.id.as_deref() {
-        Some(id) if is_safe_id(id) => Ok(id.to_owned()),
-        Some(_) => Err(ProjectStoreError::BadRequest(
-            "Invalid training dataset item ID".to_owned(),
-        )),
-        None => Ok(format!("item_{:04}", index + 1)),
+/// Resolves every input's item ID up front. Explicit IDs are validated and must be unique; an
+/// input without one (a newly added image — the editor resends saved items with their IDs) gets
+/// `item_{position}` when that is free, else the next free `item_NNNN`. Generating positionally
+/// alone collided with a kept item's ID whenever an edit removed or reordered images before
+/// adding one, refusing the save with "item IDs must be unique".
+fn assign_item_ids<'a>(
+    inputs: impl Iterator<Item = &'a TrainingDatasetItemInput>,
+) -> ProjectStoreResult<Vec<String>> {
+    let explicit = inputs
+        .map(|input| match input.id.as_deref() {
+            Some(id) if is_safe_id(id) => Ok(Some(id.to_owned())),
+            Some(_) => Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset item ID".to_owned(),
+            )),
+            None => Ok(None),
+        })
+        .collect::<ProjectStoreResult<Vec<_>>>()?;
+    let mut taken = std::collections::HashSet::new();
+    for id in explicit.iter().flatten() {
+        if !taken.insert(id.clone()) {
+            return Err(ProjectStoreError::BadRequest(
+                "Training dataset item IDs must be unique".to_owned(),
+            ));
+        }
     }
+    Ok(explicit
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            id.unwrap_or_else(|| {
+                let mut ordinal = index + 1;
+                loop {
+                    let candidate = format!("item_{ordinal:04}");
+                    if taken.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                    ordinal += 1;
+                }
+            })
+        })
+        .collect())
 }
 
 fn materialize_item(
@@ -2798,6 +2817,90 @@ mod tests {
             .unwrap();
         assert!(cleared.items[0].caption.text.is_empty());
         assert!(!images.join("item_1.txt").exists());
+    }
+
+    fn id_input(id: Option<&str>) -> TrainingDatasetItemInput {
+        serde_json::from_value(json!({ "id": id, "path": "x.png" })).unwrap()
+    }
+
+    #[test]
+    fn assign_item_ids_skips_ids_kept_items_already_hold() {
+        // The editor resends saved items with their IDs and new images without one; a new image
+        // in position 2 must not take `item_0002` from a kept item later in the list.
+        let inputs = [
+            id_input(Some("item_0003")),
+            id_input(None),
+            id_input(Some("item_0002")),
+            id_input(None),
+        ];
+        assert_eq!(
+            assign_item_ids(inputs.iter()).unwrap(),
+            ["item_0003", "item_0004", "item_0002", "item_0005"]
+        );
+        // Positional IDs are unchanged when free (fresh create).
+        let fresh = [id_input(None), id_input(None)];
+        assert_eq!(
+            assign_item_ids(fresh.iter()).unwrap(),
+            ["item_0001", "item_0002"]
+        );
+        // Genuinely duplicated explicit IDs are still refused.
+        let dupes = [id_input(Some("same")), id_input(Some("same"))];
+        assert!(matches!(
+            assign_item_ids(dupes.iter()),
+            Err(ProjectStoreError::BadRequest(detail)) if detail == "Training dataset item IDs must be unique"
+        ));
+    }
+
+    #[test]
+    fn dataset_save_adding_an_image_after_removing_one_does_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_training_dataset_table(dir.path()).unwrap();
+        let store = TrainingDatasetStore::new(dir.path().to_path_buf());
+        let images = dataset_root(dir.path(), "ds_test").join("images");
+        fs::create_dir_all(&images).unwrap();
+        let mut dataset_items = Vec::new();
+        for id in ["item_0001", "item_0002"] {
+            fs::write(images.join(format!("{id}.png")), b"png-bytes").unwrap();
+            dataset_items.push(item(id, id));
+        }
+        let mut dataset: TrainingDataset = serde_json::from_value(json!({
+            "schemaVersion": TRAINING_CONTRACT_SCHEMA_VERSION,
+            "id": "ds_test", "version": 1, "projectId": "proj", "name": "Test",
+            "modality": "image", "status": "draft",
+            "createdAt": utc_now(), "updatedAt": utc_now(), "items": []
+        }))
+        .unwrap();
+        dataset.items = dataset_items;
+        store.save_dataset(&dataset).unwrap();
+        fs::write(dir.path().join("new.png"), b"new-bytes").unwrap();
+        // Remove item_0001, keep item_0002, add a new image second: positionally it was item_0002.
+        let saved = store
+            .update_dataset(
+                "proj",
+                "ds_test",
+                serde_json::from_value(json!({
+                    "items": [
+                        { "id": "item_0002", "path": "training/datasets/ds_test/images/item_0002.png" },
+                        { "path": "new.png" }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .expect("saving an added image beside a kept item succeeds");
+        let ids = saved
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["item_0002", "item_0003"]);
+        assert_eq!(
+            fs::read(images.join("item_0002.png")).unwrap(),
+            b"png-bytes"
+        );
+        assert_eq!(
+            fs::read(images.join("item_0003.png")).unwrap(),
+            b"new-bytes"
+        );
     }
 
     fn cache_entry(content_hash: &str, bucket_edge: u32) -> CachedTier0Scalars {

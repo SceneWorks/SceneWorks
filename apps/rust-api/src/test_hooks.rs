@@ -3,6 +3,28 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
+pub(crate) type PinnedMetadataFixture = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &[String],
+        ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>
+        + Send
+        + Sync,
+>;
+pub(crate) type PinnedMetadataRemote = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &[String],
+        ) -> Result<
+            Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>,
+            String,
+        > + Send
+        + Sync,
+>;
+type DynamicHfRevisionFixture = fn(&str, &str) -> Option<&'static str>;
+
 #[derive(Default)]
 pub(crate) struct TestHooks {
     pub(crate) parquet_finalize_before_validation_once: Mutex<Option<Arc<BlockingIoTestHook>>>,
@@ -12,6 +34,19 @@ pub(crate) struct TestHooks {
         Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
+    pub(crate) pinned_metadata_override: Arc<Mutex<Option<PinnedMetadataFixture>>>,
+    /// Stand-in for the Hugging Face pinned-metadata request only (the persisted trusted ledger
+    /// and the process cache still run in front of it): `Err` models an unreachable network.
+    pub(crate) pinned_metadata_remote: Arc<Mutex<Option<PinnedMetadataRemote>>>,
+    /// Hold every pinned publisher metadata lookup until the watched value is `true`: a stalled
+    /// Hugging Face answer, without a network endpoint or a real wait.
+    pub(crate) pinned_metadata_gate: Arc<Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,
+    /// The Hugging Face endpoint portable admission uses in this test (a loopback stub). Unit
+    /// tests never read `SCENEWORKS_HUGGINGFACE_BASE_URL` for admission: it is process-wide, so a
+    /// concurrent test would pick up another test's (possibly stopped) stub.
+    pub(crate) huggingface_base_url: Arc<Mutex<Option<String>>>,
+    /// Freeze synthetic mutable repository refs in route tests without contacting Hugging Face.
+    pub(crate) dynamic_hf_revision_override: Arc<Mutex<Option<DynamicHfRevisionFixture>>>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,

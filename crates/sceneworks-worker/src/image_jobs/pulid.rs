@@ -405,7 +405,19 @@ pub(super) async fn generate_pulid_flux_stream(
         project_path,
     )?;
 
-    let weights = ensure_pulid_weights(api, settings, job).await?;
+    let mut _portable_face_lease = None;
+    let weights = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let (adapter, eva, face_dir, lease) =
+            crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
+        _portable_face_lease = Some(lease);
+        PulidWeights {
+            adapter,
+            eva,
+            face_dir,
+        }
+    } else {
+        ensure_pulid_weights(api, settings, job).await?
+    };
     // Feed the engine's weight seam from the resolved cache paths on the `LoadSpec` (the `pulid_flux`
     // loader resolves the PuLID adapter + EVA + face stack from `LoadSpec::identity`, sc-8827). The
     // paths ride the spec into the spawned load task — no process-global env mutation (the old
@@ -718,14 +730,9 @@ mod pulid_tests {
         assert!(!inputs.use_pid);
         assert!(!inputs.has_phases);
 
-        let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin manifest parses");
-        let manifest = manifest["models"]
-            .as_array()
-            .and_then(|models| models.iter().find(|model| model["id"] == PULID_MODEL))
-            .and_then(Value::as_object)
+        // The production accessor: the shipped row with its typed memory evidence projected in,
+        // which is the `modelManifestEntry` the API attaches to a PuLID job (SW-7031).
+        let manifest = sceneworks_core::builtin_manifests::builtin_model_entry(PULID_MODEL)
             .expect("shipped PuLID manifest");
         let identity_spec = || {
             let mut spec = LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))

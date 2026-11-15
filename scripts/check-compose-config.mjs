@@ -70,6 +70,7 @@ function assertRuntimeDefaults(config, label, options = {}) {
   const apiPublishHost = options.apiPublishHost ?? "127.0.0.1";
   const apiPort = options.apiPort ?? "8010";
   const api = config.services?.api;
+  const credentialsInit = config.services?.["credentials-init"];
   const allowedHosts = String(api?.environment?.SCENEWORKS_MCP_ALLOWED_HOSTS ?? "")
     .split(",").map((host) => host.trim()).filter(Boolean);
   if (!allowedHosts.includes("api")) {
@@ -84,6 +85,24 @@ function assertRuntimeDefaults(config, label, options = {}) {
   // Split the removed key so the story's cleanup grep does not report this assertion as a live reference.
   const removedRuntimeKey = ["SCENEWORKS_API", "RUNTIME"].join("_");
   assertEqual(api?.build?.dockerfile, "docker/rust.Dockerfile", `${label} api dockerfile`);
+  assertEqual(credentialsInit?.build?.target, "rust-api", `${label} credentials init image`);
+  assertEqual(credentialsInit?.user, "0:0", `${label} credentials init identity`);
+  assertEqual(credentialsInit?.network_mode, "none", `${label} credentials init network`);
+  assertEqual(credentialsInit?.read_only, true, `${label} credentials init filesystem`);
+  assertEqual(credentialsInit?.restart, "no", `${label} credentials init restart`);
+  assertEqual(credentialsInit?.volumes?.length, 1, `${label} credentials init mount count`);
+  assertEqual(credentialsInit?.cap_drop?.join(","), "ALL", `${label} credentials init dropped capabilities`);
+  assertEqual(credentialsInit?.cap_add?.join(","), "CHOWN,FOWNER", `${label} credentials init added capabilities`);
+  assertEqual(credentialsInit?.security_opt?.join(","), "no-new-privileges:true", `${label} credentials init security option`);
+  assertEqual(credentialsInit?.environment?.SCENEWORKS_UID, "1000", `${label} credentials init UID`);
+  assertEqual(credentialsInit?.environment?.SCENEWORKS_GID, "1000", `${label} credentials init GID`);
+  assertEqual(api?.depends_on?.["credentials-init"]?.condition, "service_completed_successfully", `${label} init before API`);
+  assertWritableMount(credentialsInit, "/sceneworks/credentials", `${label} credentials init mount`);
+  const initCredentialSource = credentialsInit?.volumes?.find((item) => item?.target === "/sceneworks/credentials")?.source;
+  for (const name of ["api", "worker", "rust-worker"]) {
+    const source = config.services?.[name]?.volumes?.find((item) => item?.target === "/sceneworks/credentials")?.source;
+    assertEqual(source, initCredentialSource, `${label} ${name} shares prepared credential bind`);
+  }
   assertPublishedPort(api, Number(apiPort), apiPublishHost, apiPort, `${label} api`);
   assertMissing(api?.environment, removedRuntimeKey, `${label} api runtime switch`);
   assertWritableMount(api, "/sceneworks/config", `${label} api config mount`);
@@ -162,6 +181,8 @@ try {
   for (const name of ["api", "worker", "rust-worker"]) {
     assertEqual(ids.services?.[name]?.user, "1234:2345", `${name} UID/GID override`);
   }
+  assertEqual(ids.services?.["credentials-init"]?.environment?.SCENEWORKS_UID, "1234", "credentials init UID override");
+  assertEqual(ids.services?.["credentials-init"]?.environment?.SCENEWORKS_GID, "2345", "credentials init GID override");
   console.log("SceneWorks compose config check passed.");
 } finally {
   await rm(tempRoot, { recursive: true, force: true });

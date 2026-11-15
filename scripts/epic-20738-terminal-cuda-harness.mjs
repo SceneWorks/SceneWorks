@@ -19,6 +19,7 @@ import addFormats from "ajv-formats";
 import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
 import { claimKey, patternToRegExp } from "./check-download-patterns.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 
 export const PROFILE_NAME = "epic-20738-candle-cuda-terminal-v1";
 export const PROFILE_PATH = "config/terminal-evidence/epic-20738-cuda.json";
@@ -198,11 +199,15 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // sc-26325 adds the two exact official MOSS Base/SFT listings: 147 keys; every prior row is unchanged.
 // sc-26234's whole-repository FLUX 3 download (files: []) adds no selective census row;
 // preserve main's honest evidence re-record and its pinned digest.
+// SW-7119 adds the Qwen3.8 27B describer's upstream listing
+// (huihui-ai/Huihui-Qwen3.8-27B-abliterated@739e3c5b…) and its MLX q4/q8 re-host
+// (SceneWorks/qwen3.8-27b-abliterated-mlx@76f3c445…) and Candle q4/q8 re-host
+// (SceneWorks/qwen3.8-27b-abliterated-candle@accaccc1…): 153 keys; every prior row is unchanged.
 // sw7104 pins the published MiniMax-H3-Image MLX q8/q4 DiT and PE tiers (SceneWorks/minimax-h3-image-mlx
-// @6f62669b…, SceneWorks/minimax-h3-image-pe @fdcc4059…): 154 keys.
+// @6f62669b…, SceneWorks/minimax-h3-image-pe @fdcc4059…); merged with main's record: 157 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "e1b026256135731ac889bdcef9fe569dbc4381f72020f5e3f6f4868a85a2ddba";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "01cfe8322e94fa9b1fab317ad93a2336978a5bb75a125d7aef9cf2dab648d6b7";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
@@ -4197,9 +4202,12 @@ export async function runCampaign(args, options = {}) {
     if (pin !== inference.sha) {
       fail(`SceneWorks pins inference ${pin} but the checked-out inference HEAD is ${inference.sha}`);
     }
-    const manifest = JSON.parse(stripJsoncComments(await readFile(
-      path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
-    )));
+    const manifest = projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(await readFile(
+        path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
+      ))),
+      await readBuiltinMemoryEvidence(sceneworks.root),
+    );
     validateManifestAuthorities(profile, manifest);
     const downloadEvidencePath = path.join(sceneworks.root, DOWNLOAD_EVIDENCE_PATH);
     const downloadEvidenceBytes = await readFile(downloadEvidencePath, "utf8");
@@ -5281,7 +5289,10 @@ async function main() {
     });
     const profile = validateProfile(loadProfile(profilePath));
     const pin = await liveInferencePin();
-    const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
+    const manifest = projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+      await readBuiltinMemoryEvidence(ROOT),
+    );
     validateManifestAuthorities(profile, manifest);
     const downloadEvidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
     const { artifactExpectedFiles: expected } =

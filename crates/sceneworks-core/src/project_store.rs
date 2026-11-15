@@ -156,7 +156,8 @@ use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
-    optional_str, optional_u64, random_hex, read_json, relative_string, required_str, write_json,
+    optional_str, optional_u64, random_hex, read_json, relative_string, required_str, sql_int,
+    write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;

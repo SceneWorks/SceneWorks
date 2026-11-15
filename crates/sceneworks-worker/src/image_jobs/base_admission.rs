@@ -590,6 +590,11 @@ mod tests {
         // `free + reclaimable_pool`, and a pool blind to this resident occupant falsely rejects a
         // stock model that fits once the single-slot cache evicts the import (the "needs ~49 GB
         // but GPU 0 has ~43 GB" reject with a ~23 GB Kreamania checkpoint resident).
+        //
+        // The admission reads the process-global small-card cap, which other tests set (the depth
+        // lane's 4 GB emulation refused this 8 GB floor on Windows CI). Pin a card that fits the
+        // floor under the crate-wide env lock instead of inheriting whatever a sibling left there.
+        let _env = crate::test_env::EnvVars::set(&[(crate::vram_gate::CUDA_VRAM_CAP_ENV, "24")]);
         let runtime = tokio::runtime::Runtime::new().expect("runtime builds");
         let gpu_id = "base-admission-cached-note-gpu";
         let admission = CachedCandleBaseFloorAdmission {

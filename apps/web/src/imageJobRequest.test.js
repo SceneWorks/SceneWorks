@@ -100,7 +100,7 @@ describe("buildImageJobRequest", () => {
   it("sends original layout and attachment ids identically for single and batch overrides", () => {
     const flux3Layout = { version: 1, boxes: [{ id: "remove", desc: "vase", from: "ref_image_0",
       reference_id: "instance-b", src_bbox: [0, -0.123456789012345, 1, 1], tgt_bbox: null }] };
-    const state = img2imgPidState({ model: "flux3_klein", mode: "edit_image", multiReference: true,
+    const state = img2imgPidState({ model: "flux3_klein", selectedModel: { id: "flux3_klein", family: "flux3", type: "image" }, mode: "edit_image", multiReference: true,
       supportsImg2img: false, referenceAssetIds: ["same", "same"], flux3Layout,
       flux3ReferenceIds: ["instance-a", "instance-b"] });
     const single = buildImageJobRequest(state);
@@ -109,7 +109,8 @@ describe("buildImageJobRequest", () => {
     expect(batch.advanced.flux3_layout).toEqual(single.advanced.flux3_layout);
     expect(batch.advanced.flux3_reference_ids).toEqual(["instance-a", "instance-b"]);
     expect(batch.referenceAssetIds).toEqual(["same", "same"]);
-    const unrelated = buildImageJobRequest({ ...state, model: "flux2_dev" });
+    const unrelated = buildImageJobRequest({ ...state, model: "flux2_dev",
+      selectedModel: { id: "flux2_dev", family: "flux2", type: "image" } });
     expect(unrelated.advanced).not.toHaveProperty("flux3_layout");
     expect(unrelated.advanced).not.toHaveProperty("flux3_reference_ids");
   });

@@ -10,7 +10,7 @@ import {
   macTrainingKernelBlocked,
   macUpscaleEngineBlocked,
   macVideoModeBlock,
-} from "./macGating.js";
+} from "./modelEligibility.js";
 
 const gating = {
   macGatingActive: true,

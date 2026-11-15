@@ -58,6 +58,9 @@ sha2 = { version = "0.10" }
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.7" }
 base64 = { version = "0.22" }
+# Windows-only: desktop (job objects) and core (source-stamp change time) each add their own
+# features. 0.59 is the version tauri already locks.
+windows-sys = { version = "0.59" }
 fs2 = { version = "0.4" }
 glob = { version = "0.3" }
 parking_lot = { version = "0.12" }
@@ -160,7 +163,9 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 ] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`, only so sceneworks-core can allow unsafe on its one Windows FFI function
+# (`checkpoint_plan_store::windows_change_time`); every other use is still an error.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"

@@ -59,7 +59,7 @@ struct RegistryFingerprint {
     #[cfg(unix)]
     changed_nanoseconds: i64,
     // Stable Rust does not expose the filesystem ChangeTime on Windows, and
-    // this workspace forbids unsafe Win32 calls. File identity covers atomic
+    // this workspace denies unsafe Win32 calls outside the source-stamp change time. File identity covers atomic
     // replacement; a fixed-size digest from the same open handle covers every
     // in-place rewrite even when length and last-write time are restored.
     #[cfg(windows)]
@@ -252,8 +252,23 @@ impl ProjectStore {
     }
 
     pub fn list_projects(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
+        self.list_projects_inner(true)
+    }
+
+    /// List existing projects without initializing the app-managed data directories.
+    /// Background source inventory uses this path while inspecting a fresh workspace.
+    pub fn list_projects_read_only(&self) -> ProjectStoreResult<Vec<ProjectSummary>> {
+        self.list_projects_inner(false)
+    }
+
+    fn list_projects_inner(
+        &self,
+        initialize_data_dirs: bool,
+    ) -> ProjectStoreResult<Vec<ProjectSummary>> {
         let mut registry_cache = self.lock.lock();
-        self.ensure_data_dirs()?;
+        if initialize_data_dirs {
+            self.ensure_data_dirs()?;
+        }
         let mut projects = Vec::new();
         for item in self.load_registry(&mut registry_cache)? {
             // The reserved global pose + keypoint libraries are addressable by id but

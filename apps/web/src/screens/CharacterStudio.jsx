@@ -19,7 +19,7 @@ import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioS
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { angleModelUsable, downloadOffersFor, poseModelUsable } from "../modelEligibility.js";
-import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../modelEligibility.js";
 
 const characterTypes = [
   ["person", "Person"],

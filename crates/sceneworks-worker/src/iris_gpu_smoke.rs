@@ -281,7 +281,7 @@ async fn iris_worker_gpu_smoke() {
 /// One `nvidia-smi` reading of `memory.used` (MiB) on physical GPU `index`, or `None` when the
 /// query fails.
 #[cfg(not(target_os = "macos"))]
-fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
+pub(crate) fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
     let output = std::process::Command::new("nvidia-smi")
         .args([
             "--query-gpu=memory.used",

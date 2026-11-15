@@ -4,7 +4,7 @@ import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes } from "../formatting.js";
 import { hasPresentCredential } from "../credentials.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
-import { macModelBlock } from "../macGating.js";
+import { macModelBlock } from "../modelEligibility.js";
 import { modelCapabilityChips } from "../modelCapabilities.js";
 import { normalizeLoraFamily } from "../presetUtils.js";
 import {
