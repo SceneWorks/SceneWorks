@@ -2472,6 +2472,12 @@
     },
     "portableModelBinding": {
       "backend": "candle",
+      "expectedProvider": {
+        "modelId": "z_image_turbo",
+        "modelSlot": "modelManifestEntry",
+        "operation": "image_generate",
+        "providerId": "z_image_turbo"
+      },
       "models": [
         {
           "authoredOptionsSha256": "sha256:295ca5d853fdfb3786a120372790a1274ef483dabaf9957be7c512394653f34a",
