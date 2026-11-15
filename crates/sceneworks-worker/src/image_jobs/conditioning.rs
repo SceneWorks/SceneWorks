@@ -120,8 +120,8 @@ pub(super) fn resolve_sensenova_candle_true_cfg(request: &ImageRequest) -> f32 {
         1.0
     };
     request
-        .advanced_f64("trueCfgScale")
-        .or_else(|| request.advanced_f64("imageGuidanceScale"))
+        .authored_advanced_f64("trueCfgScale")
+        .or_else(|| request.authored_advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(default)
         .clamp(1.0, 10.0)

@@ -5340,34 +5340,55 @@ fn mlx_model_table_maps_known_families() {
 #[cfg(target_os = "macos")]
 #[test]
 fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
+    let authored = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "imageGuidanceScale": 2.5 }
+    });
+    let effective = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 1.5, "imageGuidanceScale": 2.5 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_sensenova_img_cfg(&resolved), 2.5);
+    let omitted = json!({ "projectId": "p", "mode": "edit_image" });
+    let resolved =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), effective.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_sensenova_img_cfg(&resolved), 1.0);
     // Image guidance (true_cfg): edit default 1.0, character default 1.5, override via
     // imageGuidanceScale, floored at 1.0.
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({ "projectId": "p", "mode": "edit_image" }))),
+        resolve_sensenova_img_cfg(&bound_request(
+            json!({ "projectId": "p", "mode": "edit_image" })
+        )),
         1.0
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(
+        resolve_sensenova_img_cfg(&bound_request(
             json!({ "projectId": "p", "mode": "character_image" })
         )),
         1.5
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "character_image",
             "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
         }))),
         3.0
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "character_image",
             "advanced": { "imageGuidanceScale": 2.5 }
         }))),
         2.5
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "edit_image",
             "advanced": { "imageGuidanceScale": 0.2 }
         }))),
@@ -5377,23 +5398,23 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
     // Timestep shift: default 3.0, schedulerShift (or legacy timestepShift) overrides,
     // non-positive falls back to 3.0.
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({ "projectId": "p" }))),
+        resolve_sensenova_timestep_shift(&bound_request(json!({ "projectId": "p" }))),
         3.0
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "schedulerShift": 4.5 }
         }))),
         4.5
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "timestepShift": 2.0 }
         }))),
         2.0
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "schedulerShift": 0.0 }
         }))),
         3.0
@@ -12341,6 +12362,25 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
         vec!["first".to_owned(), "second".to_owned()]
     );
     assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
+    let authored = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "imageGuidanceScale": 2.5 }
+    });
+    let effective = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 1.5, "imageGuidanceScale": 2.5 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_sensenova_candle_true_cfg(&resolved), 2.5);
+    let omitted = json!({ "projectId": "p", "mode": "edit_image" });
+    let resolved =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), effective.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_sensenova_candle_true_cfg(&resolved), 1.0);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (derived wired MLX pose family) whose control
