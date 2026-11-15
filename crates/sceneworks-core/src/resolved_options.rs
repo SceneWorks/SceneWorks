@@ -934,9 +934,10 @@ impl<'a> BindingInput<'a> {
             .and_then(|map| {
                 std::iter::once(spec.key)
                     .chain(spec.aliases.iter().copied())
-                    .find(|spelling| map.contains_key(*spelling))
+                    .find_map(|spelling| map.get(spelling).map(|authored| (spelling, authored)))
             })
-            .map(|spelling| Origin::Authored { spelling })
+            .filter(|(_, authored)| !authored.is_null() || value.is_null())
+            .map(|(spelling, _)| Origin::Authored { spelling })
             .unwrap_or(Origin::Default(spec.default));
         Ok(Some((spec, value, origin)))
     }
@@ -1039,12 +1040,13 @@ impl<'a> BindingInput<'a> {
                 expected: "finite number",
             },
         )?;
-        let origin =
-            if Self::parent(self.authored, location).is_some_and(|map| map.contains_key(alias)) {
-                Origin::Authored { spelling: alias }
-            } else {
-                Origin::Default(spec.default)
-            };
+        let origin = if Self::parent(self.authored, location)
+            .is_some_and(|map| map.get(alias).is_some_and(|authored| !authored.is_null()))
+        {
+            Origin::Authored { spelling: alias }
+        } else {
+            Origin::Default(spec.default)
+        };
         Ok(Some(Bound { value, origin }))
     }
 
@@ -1124,6 +1126,51 @@ mod tests {
         assert!(matches!(
             input
                 .number("advanced", "guidanceScale")
+                .unwrap()
+                .unwrap()
+                .origin,
+            Origin::Default(_)
+        ));
+    }
+
+    #[test]
+    fn null_replaced_by_default_does_not_claim_authored_origin() {
+        let authored = obj(
+            json!({"advanced":{"guidanceScale":null,"schedulerShift":null,"timestepShift":null}}),
+        );
+        let effective =
+            obj(json!({"advanced":{"guidanceScale":1.0,"schedulerShift":3.0,"timestepShift":3.0}}));
+        let input = BindingInput::new(&authored, &effective);
+        assert!(matches!(
+            input
+                .number("advanced", "guidanceScale")
+                .unwrap()
+                .unwrap()
+                .origin,
+            Origin::Default(_)
+        ));
+        assert!(matches!(
+            input
+                .number_exact_alias("advanced", "timestepShift")
+                .unwrap()
+                .unwrap()
+                .origin,
+            Origin::Default(_)
+        ));
+        assert!(matches!(
+            input
+                .number("advanced", "schedulerShift")
+                .unwrap()
+                .unwrap()
+                .origin,
+            Origin::Default(_)
+        ));
+        let authored = obj(json!({"advanced":{"schedulerShift":null,"timestepShift":2.0}}));
+        let effective = obj(json!({"advanced":{"schedulerShift":3.0,"timestepShift":2.0}}));
+        let input = BindingInput::new(&authored, &effective);
+        assert!(matches!(
+            input
+                .number("advanced", "schedulerShift")
                 .unwrap()
                 .unwrap()
                 .origin,

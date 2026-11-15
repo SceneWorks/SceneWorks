@@ -13135,6 +13135,16 @@ fn krea_turbo_on_raw_keeps_turbo_recipe_after_raw_defaults_materialize() {
     assert_eq!(facts["guidanceScale"], Value::Null);
 
     let authored = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":null,"guidanceScale":null}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_authored_steps(&request, &turbo), 8);
+    assert_eq!(krea_turbo_on_raw_guidance(&request), None);
+
+    let authored = json!({"projectId":"p","model":"krea_2_raw",
         "advanced":{"steps":12,"guidanceScale":0.5}});
     let request =
         ImageRequest::from_resolved(authored.as_object().unwrap(), authored.as_object().unwrap())
