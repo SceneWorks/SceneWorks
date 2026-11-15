@@ -143,6 +143,24 @@ pub(super) fn huggingface_filtered_cache_health(
     // Whether the COARSE check found none of the filter's patterns present — the "cleanly absent
     // tier" signal, captured before the tier-completeness augmentation below can add entries.
     let coarse_all_absent = missing.len() == files.len();
+    // A filter that names every file explicitly (no glob) is installed only when ONE cached
+    // revision holds all of them: the loader reads a single snapshot, so files spread across
+    // revisions (a newer revision's partial download beside an older one) are not an install.
+    if !files.is_empty() && !files.iter().any(|pattern| pattern_contains_glob(pattern)) {
+        if let Some(coherent) = snapshots
+            .iter()
+            .map(|snapshot| {
+                files
+                    .iter()
+                    .filter(|pattern| !snapshot_contains_pattern(snapshot, pattern))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .min_by_key(Vec::len)
+        {
+            missing = coherent;
+        }
+    }
 
     // A flat sharded Transformers checkpoint commonly declares an index plus `model-*.safetensors`.
     // The glob is satisfied by the FIRST shard, so the coarse pattern check alone can call a torn

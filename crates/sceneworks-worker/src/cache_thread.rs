@@ -206,22 +206,20 @@ where
         self.entry.as_ref().map(|entry| &entry.model)
     }
 
-    /// What a load of `key` would find: [`CacheAccess::Warm`] when `key` is resident (the load reuses
-    /// it), else [`CacheAccess::Cold`] after dropping any different resident entry, exactly as the
-    /// load's own miss would before allocating. A caller can then read the live memory budget the
-    /// incoming load will actually see, before it commits to loading.
+    /// What a load of `key` would find, without evicting anything: [`CacheAccess::Warm`] when `key`
+    /// is resident (the load reuses it), else [`CacheAccess::Cold`] with the different resident
+    /// entry's key, which the load's own miss drops before allocating. A memory check decides on
+    /// that first, so a load it refuses leaves the resident model in place.
     #[cfg_attr(
         not(all(not(target_os = "macos"), feature = "backend-candle")),
         allow(dead_code)
     )]
-    pub(crate) fn evict_unless_resident(&mut self, key: &K) -> CacheAccess {
-        if self.entry.as_ref().is_some_and(|entry| entry.key == *key) {
-            return CacheAccess::Warm;
+    pub(crate) fn access_for(&self, key: &K) -> (CacheAccess, Option<&K>) {
+        match &self.entry {
+            Some(entry) if entry.key == *key => (CacheAccess::Warm, None),
+            Some(entry) => (CacheAccess::Cold, Some(&entry.key)),
+            None => (CacheAccess::Cold, None),
         }
-        if self.entry.take().is_some() && self.evict_before_load {
-            release_backend_cache_after_evict();
-        }
-        CacheAccess::Cold
     }
 
     /// Load (on a miss) or reuse (on a hit) the model for `key`, then run `run` against it.

@@ -15674,9 +15674,9 @@
       //     q8 34 — engine 35,291,474,440 B (33,657 MiB); measured peak 34,409 MiB (run
       //             43604907453). 34 GiB is 34,816 MiB.
       //     bf16 65 — engine 69,520,866,634 B (66,300 MiB); measured peak above baseline
-      //               57,121 MiB at 1536x1536 (run 43687782761). 65 GiB is 66,560 MiB: only 260 MiB
-      //               above the engine's figure, which the engine reads after this process's own
-      //               CUDA context exists.
+      //               57,121 MiB (run 43687782761) and 57,319 MiB (run 43701927797), both at
+      //               1536x1536. 65 GiB is 66,560 MiB: only 260 MiB above the engine's figure, which
+      //               the engine reads after this process's own CUDA context exists.
       //   `candle.measured` stays false: the floors are set by the engine's load requirement, not
       //   by a calibrated measurement, so the block cannot claim calibrated evidence.
       //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
@@ -15692,7 +15692,10 @@
       //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
       //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 28).
       //
-      // The file list names what the loader reads, so a metadata-only revision can never look
+      // Each row names every file the loader reads (the q4/q8 rows list the six files of their
+      // tier folder rather than a `<tier>/*` glob), so a tier counts as installed only when every
+      // listed file is present in one cached revision: the API's install state, the job's tier
+      // check and the worker all apply that rule, so a cancelled tier download never looks
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
       "id": "vision_describe_qwen3_8_27b",
       "autoDownload": false,
@@ -15710,7 +15713,7 @@
           "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
           "variant": "q4",
           "default": true,
-          "files": ["q4/*"],
+          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 19995477764,
           "footprint": { "diskSizeBytes": 19995477764 }
@@ -15720,7 +15723,7 @@
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
           "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
           "variant": "q8",
-          "files": ["q8/*"],
+          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 32371297322,
           "footprint": { "diskSizeBytes": 32371297322 }
@@ -15731,7 +15734,7 @@
           "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
           "variant": "q4",
           "default": true,
-          "files": ["q4/*"],
+          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 19995370331,
           "footprint": { "diskSizeBytes": 19995370331 }
@@ -15741,7 +15744,7 @@
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
           "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
           "variant": "q8",
-          "files": ["q8/*"],
+          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 32371188675,
           "footprint": { "diskSizeBytes": 32371188675 }

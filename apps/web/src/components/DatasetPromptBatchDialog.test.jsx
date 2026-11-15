@@ -24,7 +24,27 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted } = await import("./DatasetPromptBatchDialog.jsx");
+const { DESCRIBE_MODELS, DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted } = await import("./DatasetPromptBatchDialog.jsx");
+const { default: candidateCatalog } = await import("../testUtils/catalogBaseline/candidate-catalog.json");
+const { readFileSync } = await import("node:fs");
+
+// The dialog's 27B tier radios must match what the catalog and the shared contract offer: the same
+// tier keys in the same order (core QWEN38_27B_DESCRIBER_TIERS, every one a catalog row); sizes come
+// from the catalog at render time, never from a label.
+describe("Qwen3.8 27B tier choices", () => {
+  it("match the core tiers and every tier has a catalog row", () => {
+    const core = readFileSync(`${process.cwd()}/../../crates/sceneworks-core/src/dataset_batch_describe.rs`, "utf8");
+    const coreTiers = [...core.match(/QWEN38_27B_DESCRIBER_TIERS: \[&str; \d+\] = \[([^\]]*)\]/)[1].matchAll(/"([a-z0-9]+)"/g)].map((m) => m[1]);
+    const entry = candidateCatalog.models.find((model) => model.id === "vision_describe_qwen3_8_27b");
+    const tiers = DESCRIBE_MODELS.find((model) => model.id === "vision_describe_qwen3_8_27b").tiers;
+    expect(tiers.map(([key]) => key)).toEqual(coreTiers);
+    for (const [key, label] of tiers) {
+      expect(entry.downloads.some((row) => row.variant === key), key).toBe(true);
+      // Sizes are never written into the label: the dialog prints each tier's catalog size.
+      expect(label, key).not.toMatch(/GB|GiB|\(/);
+    }
+  });
+});
 const { formatPromptBatch } = await import("../promptBatchDescribe.js");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
@@ -777,9 +797,10 @@ describe("DatasetPromptBatchDialog", () => {
     await chooseModel("vision_describe_qwen3_8_27b");
     await settle();
     expect([...document.body.querySelectorAll('input[name="dataset-prompt-batch-tier"]')].map((input) => input.closest("label").textContent)).toEqual([
-      "q4 (20 GB)",
-      "q8 (32 GB) — not installed",
-      "Full precision (56 GB) — not installed",
+      `q4 (${formatTierBytes(TIER_BYTES.q4)})`,
+      `q8 (${formatTierBytes(TIER_BYTES.q8)}) — not installed`,
+      // No size served for bf16 in this catalog: none rather than a guessed one.
+      "Full precision — not installed",
     ]);
     expect(tierInput("q4").checked).toBe(true);
     // The prompt editor follows the 27B's own default, as for the Vision Captioner.
@@ -821,7 +842,7 @@ describe("DatasetPromptBatchDialog", () => {
     await settle();
     const notice = document.body.querySelector(".required-models-notice");
     expect(notice.textContent).toContain("Describing the dataset needs a model");
-    expect(notice.textContent).toContain("Vision Describer (Qwen3.8-27B) Full precision (56 GB)");
+    expect(notice.textContent).toContain("Vision Describer (Qwen3.8-27B) Full precision");
     // No per-tier size for bf16: no size rather than the default tier's.
     expect(notice.querySelector("small")).toBeNull();
     expect(button("Describe images").disabled).toBe(true);
@@ -832,8 +853,10 @@ describe("DatasetPromptBatchDialog", () => {
     await click(tierInput("q8"));
     await settle();
     const q8Notice = document.body.querySelector(".required-models-notice");
-    expect(q8Notice.textContent).toContain("q8 (32 GB)");
+    // One figure in one unit: the radio and the download panel print the same catalog size.
+    expect(q8Notice.textContent).toContain("Vision Describer (Qwen3.8-27B) q8");
     expect(q8Notice.querySelector("small").textContent).toBe(formatTierBytes(TIER_BYTES.q8));
+    expect(tierInput("q8").closest("label").textContent).toContain(`(${formatTierBytes(TIER_BYTES.q8)})`);
     const labels = [...q8Notice.querySelectorAll("button")].map((node) => node.textContent.trim());
     expect(labels).toContain("running");
     expect(labels).not.toContain("queued");
@@ -992,6 +1015,63 @@ describe("DatasetPromptBatchDialog", () => {
     });
   });
 
+  it("says on each row which model and tier its re-run uses, whatever is selected above", async () => {
+    context.models = [...context.models, describerWithTiers("q4")];
+    serveHistory([{ id: "job_q4", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" } }]);
+    serveStoredRuns({ job_q4: [described("item_a", 300, 400)] });
+    await render();
+    // The 27B at q8, which is not installed, selected above: the notice is about that selection.
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    expect(document.body.querySelector(".required-models-notice").textContent).toContain("Vision Describer (Qwen3.8-27B) q8");
+    // The row's re-run reproduces the row's own describer and tier, and says so.
+    const note = document.body.querySelector('[data-item-id="item_a"] [data-row-note="rerun-with"]');
+    expect(note.textContent).toBe("Re-runs with Vision Describer (Qwen3.8-27B) q4");
+    expect(rerunButton("item_a").disabled).toBe(false);
+    await click(rerunButton("item_a"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body)).toMatchObject({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      itemIds: ["item_a"],
+    });
+  });
+
+  it("marks the 27B not installed only when no tier is, and a missing tier on its own radio", async () => {
+    const modelLabel = () => document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent;
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    expect(modelLabel()).not.toContain("not installed");
+    expect(tierInput("q8").closest("label").textContent).toContain("— not installed");
+  });
+
+  it("marks the 27B not installed when no tier is installed", async () => {
+    context.models = [...context.models, describerWithTiers()];
+    await render();
+    expect(document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent).toContain(
+      "— not installed",
+    );
+  });
+
+  it("says the model files are being checked when the start request is slow", async () => {
+    let answer;
+    trainingApi.batchDescribeJobs.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    const note = () => document.body.querySelector('[data-run-note="checking-files"]');
+    expect(note().textContent).toContain("Checking the model files before the job starts.");
+    await act(async () => answer({ id: "job_1", status: "queued", progress: 0 }));
+    await settle();
+    expect(note()).toBeNull();
+  });
+
   it("checks a re-run against the row's own tier install and prompt limit (SW-7122)", async () => {
     joyInstalled();
     context.models = [...context.models, describerWithTiers("q4")];
@@ -1013,7 +1093,7 @@ describe("DatasetPromptBatchDialog", () => {
     });
     await render();
     expect(rerunButton("item_b").disabled).toBe(true);
-    expect(rerunButton("item_b").title).toBe("Vision Describer (Qwen3.8-27B) Full precision (56 GB) is not installed.");
+    expect(rerunButton("item_b").title).toBe("Vision Describer (Qwen3.8-27B) Full precision is not installed.");
     expect(rerunButton("item_a").disabled).toBe(false);
     expect(rerunButton("item_c").disabled).toBe(false);
 
@@ -1492,7 +1572,7 @@ describe("DatasetPromptBatchDialog", () => {
     });
     const condense = button("Condense for Krea 2 Turbo (1)");
     expect(condense.disabled).toBe(true);
-    expect(condense.title).toBe("Vision Describer (Qwen3.8-27B) q8 (32 GB) is not installed, so its rows cannot be condensed.");
+    expect(condense.title).toBe("Vision Describer (Qwen3.8-27B) q8 is not installed, so its rows cannot be condensed.");
     expect(button("Measure").disabled).toBe(false);
     await click(button("Measure"));
     await settle();

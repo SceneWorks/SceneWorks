@@ -115,6 +115,18 @@ class Bf16Test(unittest.TestCase):
         self.assertEqual(row["files"], [*provision.BF16_FILES, provision.BF16_SHARD_PATTERN])
         self.assertEqual(row["estimatedSizeBytes"], provision.BF16_ESTIMATED_BYTES)
 
+    def test_quantised_repository_revision_and_totals_match_the_catalog_rows(self):
+        specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
+        rows = {row["variant"]: row for row in specs["vision_describe_qwen3_8_27b"]["product"]["downloads"]
+                if row["repo"] == provision.REPO}
+        self.assertEqual(sorted(rows), sorted(provision.TIER_BYTES))
+        for tier, total in provision.TIER_BYTES.items():
+            row = rows[tier]
+            self.assertEqual(row["revision"], provision.REVISION, tier)
+            self.assertEqual(row["estimatedSizeBytes"], total, tier)
+            # The download fetches the tier folder; the catalog names every file in it.
+            self.assertTrue(all(name.startswith(f"{tier}/") for name in row["files"]), tier)
+
     def test_plans_keep_quantised_as_the_default_and_size_bf16_disk(self):
         repo, revision, _, read, patterns, minimum = provision.plan("quantised")
         self.assertEqual((repo, revision, read, patterns, minimum),

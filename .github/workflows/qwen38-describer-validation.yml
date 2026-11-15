@@ -54,11 +54,10 @@ jobs:
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
       SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
       SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION: ${{ inputs.gpu_admission }}
-      # Free memory a shared run needs on the card before it starts. q4 and q8: the measured peak
-      # (21,993 MiB for q4, 34,409 MiB for q8) plus room for a large image. bf16 is DERIVED, never
-      # measured: candle-llm's own load admission asks for 1.25x the bf16 payload free on the device
-      # before it reads a weight (about 66,300 MiB for ~55.6 GB of shards), above the catalog's
-      # derived 58 GiB floor, so 70,000 MiB leaves ~3.7 GB for this process's CUDA context.
+      # Free memory a shared run needs on the card before it starts: at least candle-llm's own load
+      # requirement for the tier (21,248 / 33,657 / 66,300 MiB for q4 / q8 / bf16) and its measured
+      # peak above baseline (21,995 / 34,409 / 57,319 MiB), plus room for this process's CUDA
+      # context. The catalog's Candle floors are 22 / 34 / 65 GiB, set from the same two numbers.
       SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB: ${{ inputs.tier == 'bf16' && '70000' || inputs.tier == 'q8' && '40000' || '28000' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
