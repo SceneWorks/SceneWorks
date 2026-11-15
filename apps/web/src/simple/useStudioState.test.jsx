@@ -5,6 +5,12 @@ import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { readSimpleStudioSnapshot, seedSimpleStudiosFromServer } from "../simpleStudioStore.js";
 
+const { persistNavigationPreferencesMock } = vi.hoisted(() => ({ persistNavigationPreferencesMock: vi.fn(async () => {}) }));
+vi.mock("../uiPreferences.js", async (importOriginal) => ({
+  ...await importOriginal(),
+  persistNavigationPreferences: persistNavigationPreferencesMock,
+}));
+
 // A studio UNMOUNTS when you navigate away (the shell renders exactly one screen), so
 // without the shell-held store every knob would be re-seeded from the catalog on the way
 // back — the model snapping to whichever entry happens to sort first. These tests drive the
@@ -65,17 +71,19 @@ function baseContext(overrides = {}) {
 }
 
 function renderShell(root, context, props = {}) {
+  const { key, ...shellProps } = props;
   return act(async () => {
     root.render(
       <AppContext.Provider value={context}>
         <SimpleShell
+          key={key}
           accent="teal"
           lockedToSimple={false}
           onAccentChange={() => {}}
           onModeChange={() => {}}
           onSimpleDefaultChange={() => {}}
           simpleDefault
-          {...props}
+          {...shellProps}
         />
       </AppContext.Provider>,
     );
@@ -132,6 +140,7 @@ describe("Simple studio state across navigation", () => {
     // ui-preferences copy), so without this a snapshot flushed by one case restores into
     // the next and the catalog-default assertions read the previous test's picks.
     window.localStorage.clear();
+    persistNavigationPreferencesMock.mockClear();
     ({ container, root } = mountRoot());
   });
 
@@ -162,6 +171,48 @@ describe("Simple studio state across navigation", () => {
     expect(fieldValue(container, "Model")).toBe("Z-Image");
     expect(container.querySelector("#su-image-prompt").value).toBe("a lighthouse at dusk");
     expect(fieldValue(container, "Resolution")).toBe(size);
+  });
+
+  it("keeps an unsupported saved snapshot intact while studios and other projects stay usable", async () => {
+    const original = JSON.stringify({ "project-1": { image: { optionsSchemaVersion: 9, prompt: "future" } } });
+    window.localStorage.setItem("sceneworks-simple-studio", original);
+    await renderShell(root, baseContext(), { key: "project-1", preferencesHydrated: true });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("version 9");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("will not be saved");
+
+    await typePrompt(container, "session-only edit");
+    await click(navButton(container, "Queue"));
+    expect(container.querySelector(".su-topbar-title").textContent).toContain("Queue");
+    await click(navButton(container, "Audio"));
+    expect(container.querySelector(".su-topbar-title").textContent).toContain("Audio Studio");
+    await click(navButton(container, "Settings"));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("will not be saved");
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
+    expect(window.localStorage.getItem("sceneworks-simple-studio")).toBe(original);
+    expect(persistNavigationPreferencesMock).not.toHaveBeenCalled();
+
+    const second = baseContext({ activeProject: { id: "project-2", name: "Second" } });
+    await renderShell(root, second, { key: "project-2", preferencesHydrated: true });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await click(navButton(container, "Image"));
+    await typePrompt(container, "second project edit");
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
+    expect(persistNavigationPreferencesMock).toHaveBeenCalled();
+    expect(readSimpleStudioSnapshot("project-2").image.prompt).toBe("second project edit");
+    expect(JSON.parse(window.localStorage.getItem("sceneworks-simple-studio"))["project-1"].image.prompt).toBe("future");
+  });
+
+  it("stops a delayed write if the saved snapshot becomes unreadable after restore", async () => {
+    await renderShell(root, baseContext(), { preferencesHydrated: true });
+    seedSimpleStudiosFromServer({ "project-1": { image: { optionsSchemaVersion: 9, prompt: "future" } } });
+    const original = window.localStorage.getItem("sceneworks-simple-studio");
+    await typePrompt(container, "new session edit");
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 450)));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("version 9");
+    expect(window.localStorage.getItem("sceneworks-simple-studio")).toBe(original);
+    expect(persistNavigationPreferencesMock).not.toHaveBeenCalled();
+    await click(navButton(container, "Queue"));
+    expect(container.querySelector(".su-topbar-title").textContent).toContain("Queue");
   });
 
   it("keeps each studio's state separate", async () => {
