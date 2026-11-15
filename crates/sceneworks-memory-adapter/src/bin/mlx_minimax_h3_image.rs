@@ -486,13 +486,14 @@ mod tests {
         }
     }
 
-    /// A packed tier the catalog still marks `pendingArtifact` is refused by name before any env
-    /// var is read, exactly as the worker refuses it.
+    /// The published packed tiers pass the catalog check and reach the env read; a tier the catalog
+    /// still marks `pendingArtifact` (bf16 is the upstream root, so it has no such row) is refused
+    /// by name before any env var is read.
     #[test]
-    fn an_unpublished_packed_tier_is_refused_before_the_env_read() {
+    fn a_published_packed_tier_reaches_the_env_read() {
         for tier in ["q8", "q4"] {
             let error = protocol::minimax_h3_image_inputs(ENVS, tier).expect_err(tier);
-            assert!(error.contains("pendingArtifact"), "{tier}: {error}");
+            assert!(!error.contains("pendingArtifact"), "{tier}: {error}");
         }
     }
 }

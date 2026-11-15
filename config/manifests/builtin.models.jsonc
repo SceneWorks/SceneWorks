@@ -26584,13 +26584,9 @@
     // fetched.
     //
     // TIERS. bf16 is upstream's `transformer_diffusers/` + `pdd_fused_heads.safetensors`. q8/q4 are
-    // the SW-7093 packs (`SceneWorks/minimax-h3-image-mlx/{q8,q4}/`), NOT YET PUBLISHED: they carry
-    // the null-SHA placeholder and `pendingArtifact` together (the sc-24112 pairing), so neither is
-    // offered for install and bf16 — the only installable tier — is the default. Their sizes are
-    // DERIVED, not measured: the bf16 DiT bytes scaled by MiniMax-H3's own published q8/q4 to bf16
-    // transformer ratio (the same packing policy, `gen_core_h3::h3_image_tier`), plus the dense
-    // 12,388,808 B heads file. The terminal item publishes them, pins the revision, drops the flag
-    // and replaces the derived sizes with the hosted byte totals.
+    // the SW-7093 packs (`SceneWorks/minimax-h3-image-mlx/{q8,q4}/`), published and pinned to the hub
+    // revision below; bf16 stays the default. Their sizes are the hosted byte totals; the output heads
+    // sit inside the shards, so only bf16 fetches `pdd_fused_heads.safetensors`.
     //
     // The DiT tier is staged as the `transformer_diffusers` component and the snapshot root (VAE,
     // tokenizer) comes from the tier-agnostic rows; the worker builds that LoadSpec
@@ -26637,24 +26633,24 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-mlx",
-          "revision": "0000000000000000000000000000000000000000",
-          "pendingArtifact": true,
+          "revision": "6f62669b919bccdbf51b08c696fbb84542000a87",
           "variant": "q8",
-          "files": ["q8/transformer_diffusers/*", "q8/pdd_fused_heads.safetensors"],
-          // DERIVED (unpublished): 66,289,496,116 x 35,302,064,357 / 66,280,569,250 + 12,388,808.
-          "estimatedSizeBytes": 35319207753,
-          "footprint": { "diskSizeBytes": 35319207753, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "files": ["q8/transformer_diffusers/*"],
+          // Hub tree at the pinned revision: q8/transformer_diffusers/ 35,310,991,850 B (14 files). The
+          // per-step output heads (`pdd_proj_out.*`) are inside the shards, so there is no separate heads file.
+          "estimatedSizeBytes": 35310991850,
+          "footprint": { "diskSizeBytes": 35310991850, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-mlx",
-          "revision": "0000000000000000000000000000000000000000",
-          "pendingArtifact": true,
+          "revision": "6f62669b919bccdbf51b08c696fbb84542000a87",
           "variant": "q4",
-          "files": ["q4/transformer_diffusers/*", "q4/pdd_fused_heads.safetensors"],
-          // DERIVED (unpublished): 66,289,496,116 x 18,780,109,783 / 66,280,569,250 + 12,388,808.
-          "estimatedSizeBytes": 18795027953,
-          "footprint": { "diskSizeBytes": 18795027953, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "files": ["q4/transformer_diffusers/*"],
+          // Hub tree at the pinned revision: q4/transformer_diffusers/ 18,789,037,468 B (14 files). The
+          // per-step output heads (`pdd_proj_out.*`) are inside the shards, so there is no separate heads file.
+          "estimatedSizeBytes": 18789037468,
+          "footprint": { "diskSizeBytes": 18789037468, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         // --- the tier-agnostic snapshot root: the 2-D VAE, the tokenizer the t2i prompt is encoded
         // with, and the processor the edit route reads (SW-7092). Same pinned revision as the bf16
@@ -27782,13 +27778,10 @@
       // which never carries `prompt/` — has them.
       //
       // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
-      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. bf16/q8/q4 are the
-      // SW-7099 conversions (`SceneWorks/minimax-h3-image-pe/{bf16,q8,q4}/`), NOT YET PUBLISHED: null
-      // SHA + `pendingArtifact`, so none is offered for install yet. Their sizes are DERIVED, not
-      // measured: 25,598,361,600 quantized decoder-projection parameters (the NVFP4 packed set) at 16 /
-      // 8.5 / 4.5 bits each, plus 1,758,366,960 dense parameters (embeddings, head, vision tower) at
-      // bf16, plus the 20,284,856 B of tokenizer and config sidecars. The terminal item publishes them,
-      // pins the revision, drops the flag and replaces the derived sizes with the hosted totals.
+      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7099 MLX
+      // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published, pinned and macOS-only; their sizes are
+      // the hosted totals. The Candle conversions sit beside them (`candle-q8/`, `candle-q4/`) and are not declared
+      // here yet. bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
       "id": "minimax_h3_image_pe",
       "autoDownload": false,
       "macOnly": false,
@@ -27835,24 +27828,26 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "0000000000000000000000000000000000000000",
-          "pendingArtifact": true,
+          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
           "variant": "q8",
           "files": ["q8/*"],
-          // DERIVED (unpublished): 25,598,361,600 x 8.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
-          "estimatedSizeBytes": 30735277976,
-          "footprint": { "diskSizeBytes": 30735277976, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // MLX layout only: the Candle layout is published beside it as `candle-q8/` and is not declared yet.
+          "platforms": ["macos"],
+          // Hub tree at the pinned revision: q8/ 31,927,190,423 B (7 files).
+          "estimatedSizeBytes": 31927190423,
+          "footprint": { "diskSizeBytes": 31927190423, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "0000000000000000000000000000000000000000",
-          "pendingArtifact": true,
+          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
           "variant": "q4",
           "files": ["q4/*"],
-          // DERIVED (unpublished): 25,598,361,600 x 4.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
-          "estimatedSizeBytes": 17936097176,
-          "footprint": { "diskSizeBytes": 17936097176, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // MLX layout only: the Candle layout is published beside it as `candle-q4/` and is not declared yet.
+          "platforms": ["macos"],
+          // Hub tree at the pinned revision: q4/ 19,763,707,887 B (7 files).
+          "estimatedSizeBytes": 19763707887,
+          "footprint": { "diskSizeBytes": 19763707887, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         // The prompt files, read at run time from the upstream snapshot for every tier.
         {

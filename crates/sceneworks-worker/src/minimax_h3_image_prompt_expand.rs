@@ -376,6 +376,16 @@ mod tests {
         entry.as_object().unwrap().clone()
     }
 
+    /// The catalog entry as a macOS worker receives it: the published q8/q4 MLX rows are macOS-only,
+    /// so tests of those rows must not depend on the host this suite runs on.
+    fn macos_entry() -> JsonObject {
+        let mut entry = Value::Object(catalog_entry());
+        sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+            &mut entry, "macos",
+        );
+        entry.as_object().unwrap().clone()
+    }
+
     fn snapshot(data: &Path, repo: &str, revision: &str) -> PathBuf {
         let dir = crate::huggingface_hub_cache_dir(data)
             .join(format!("models--{}", repo.replace('/', "--")))
@@ -454,7 +464,8 @@ mod tests {
         assert!(!is_pending_artifact_download(&nvfp4));
         for tier in ["bf16", "q8", "q4"] {
             let row = model_download_for_variant(&value, tier).expect("converted row");
-            assert!(is_pending_artifact_download(&row), "{tier}");
+            // bf16 is still unpublished; the macOS q8/q4 packs are pinned to the hub revision.
+            assert_eq!(is_pending_artifact_download(&row), tier == "bf16", "{tier}");
             assert_eq!(row_tier_subdir(&row).as_deref(), Some(tier));
         }
         // The engine's pinned revision is the catalog's, for the weights and the prompts alike.
@@ -470,7 +481,7 @@ mod tests {
     #[test]
     fn a_pending_tier_resolves_to_nothing_and_its_absence_says_how_to_install() {
         let (data, _cache) = isolated();
-        let entry = shipped_entry();
+        let entry = macos_entry();
         // Nothing installed: the error names the Models screen and that H3-Image needs none of it.
         let error = resolve_dirs(&settings(data.path()), &entry, None, None).unwrap_err();
         assert!(error.to_string().contains("Models screen"), "{error}");
@@ -484,7 +495,7 @@ mod tests {
     #[test]
     fn a_published_converted_tier_loads_its_weights_and_reads_upstream_prompts() {
         let (data, _cache) = isolated();
-        let mut entry = shipped_entry();
+        let mut entry = macos_entry();
         // Stand in for the terminal item's publication of the q8 tier.
         let published = "1111111111111111111111111111111111111111";
         for row in entry["downloads"].as_array_mut().unwrap() {

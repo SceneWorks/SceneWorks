@@ -198,9 +198,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // sc-26325 adds the two exact official MOSS Base/SFT listings: 147 keys; every prior row is unchanged.
 // sc-26234's whole-repository FLUX 3 download (files: []) adds no selective census row;
 // preserve main's honest evidence re-record and its pinned digest.
+// sw7104 pins the published MiniMax-H3-Image MLX q8/q4 DiT and PE tiers (SceneWorks/minimax-h3-image-mlx
+// @6f62669b…, SceneWorks/minimax-h3-image-pe @fdcc4059…): 154 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "af802a78822a8844b8a47e487de5314dabddc93267bce9fd2744acf4342d632e";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "e1b026256135731ac889bdcef9fe569dbc4381f72020f5e3f6f4868a85a2ddba";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
