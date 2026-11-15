@@ -1996,11 +1996,19 @@ fn the_phase_cap_matches_the_multi_phase_validators() {
 /// so a valid UI/API job can never first discover a stale limit when it is shared.
 #[test]
 fn the_pose_cap_matches_the_request_and_web_validators() {
-    let request = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    let request = read_repo_file("crates/sceneworks-options/src/image_request.rs");
+    let options = read_repo_file("crates/sceneworks-options/src/lib.rs");
     assert!(
-        request.contains("pub(crate) const MAX_COUNT: u32 = 8;")
-            && request.contains("pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;"),
+        request.contains("pub const MAX_COUNT: u32 = 8;")
+            && options.contains("pub const MAX_JOB_POSES: usize = 64;")
+            && sceneworks_options::MAX_JOB_POSES
+                == 8 * sceneworks_options::image_request::MAX_COUNT as usize,
         "the Rust pose-output ceiling moved; reconcile the API, share envelope, and web picker"
+    );
+    let facade = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    assert!(
+        facade.contains("pub use sceneworks_options::MAX_JOB_POSES;"),
+        "the core request contract must reexport the portable pose cap"
     );
     let share = read_repo_file("crates/sceneworks-core/src/workflow_share.rs");
     assert!(
