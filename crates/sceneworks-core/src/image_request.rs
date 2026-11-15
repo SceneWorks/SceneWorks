@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
-    array_or_empty, declared_resolution, int_array, nonempty_string_or, object_or_empty,
-    optional_i64, optional_id, string_list, string_or,
+    array_or_empty, int_array, nonempty_string_or, object_or_empty, optional_i64, optional_id,
+    string_list, string_or,
 };
 use crate::resolved_options::{BindingError, BindingInput, Bound};
 
@@ -49,16 +49,15 @@ const DEFAULT_COUNT: u32 = 4;
 
 /// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
 /// still unread (sc-12335 — a menu, and a separate question from this default).
-const MIN_COUNT: u32 = 1;
 /// `pub(crate)` so `workflow_share`'s pose budget can be derived from it rather than restate it:
 /// a pose set is the pose lane's batch size (one image per pose), so this is the ceiling it is
 /// measured against.
-pub(crate) const MAX_COUNT: u32 = 8;
+pub use sceneworks_options::image_request::MAX_COUNT;
 
 /// The historical ceiling on `advanced.steps` the generic image lane forwards (raised to a model's
 /// own default where that is higher). The worker clamps above it; Image Studio's Steps input
 /// mirrors it (`BASE_MAX_STEPS`), and Supra2's request boundary refuses above it (sc-24215).
-pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
+pub use sceneworks_options::image_request::BASE_MAX_IMAGE_STEPS;
 
 /// The maximum number of strict poses one image-generation job may render.
 ///
@@ -70,7 +69,7 @@ pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
 ///
 /// This is the product/request contract. The workflow-share envelope derives its entry cap from
 /// this value, and the web's mechanically pinned twin is checked by a cross-file drift test.
-pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
+pub use sceneworks_options::MAX_JOB_POSES;
 
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
@@ -93,22 +92,7 @@ pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
 ///
 /// Same never-invent-from-a-typo posture as its siblings: a declared count outside
 /// [`MIN_COUNT`]`..=`[`MAX_COUNT`] is not a batch anyone meant, so it falls back to the blanket.
-pub fn default_count(model_manifest_entry: &JsonObject) -> Option<u32> {
-    model_manifest_entry
-        .get("defaults")
-        .and_then(Value::as_object)
-        .and_then(|defaults| defaults.get("count"))
-        .and_then(Value::as_u64)
-        .filter(|count| (u64::from(MIN_COUNT)..=u64::from(MAX_COUNT)).contains(count))
-        .map(|count| count as u32)
-}
-
-/// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
-/// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
-/// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
-/// sharing one envelope across lanes.
-const MIN_DIMENSION: u32 = 256;
-const MAX_DIMENSION: u32 = 4096;
+pub use sceneworks_options::image_request::default_count;
 
 /// `defaults.resolution` from a resolved manifest entry as `(width, height)`, or `None` for the
 /// blanket [`DEFAULT_DIMENSION`] square.
@@ -121,9 +105,7 @@ const MAX_DIMENSION: u32 = 4096;
 /// `768x768`.
 ///
 /// Same never-invent-from-a-typo posture as its video twin; see [`declared_resolution`].
-pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
-    declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
-}
+pub use sceneworks_options::image_request::default_resolution;
 
 /// The two caller-selectable PiD checkpoint fields; filename confinement remains a native
 /// artifact-selection check after binding.
@@ -938,9 +920,7 @@ fn model_supports_hires_fix(request: &ImageRequest) -> bool {
 
 /// The post-first-pass target side: `dimension × upscale_by`, rounded. Shared by the enqueue
 /// gate above and the worker's HiresFixPlan.
-pub fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
-    (dimension as f64 * upscale_by as f64).round() as u32
-}
+pub use sceneworks_options::image_request::hires_fix_target_dimension;
 
 pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
     let normalized = value
@@ -1784,68 +1764,9 @@ mod tests {
     }
 }
 
-fn unsigned_or(value: Option<&Value>, default: u32) -> u32 {
-    value
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(default)
-}
-
-/// Count validation shared by typed HTTP requests and raw worker payloads.
-pub fn image_count_error(count: u32) -> Option<String> {
-    (!(MIN_COUNT..=MAX_COUNT).contains(&count)).then(|| "count must be between 1 and 8".to_owned())
-}
-
-/// Validate raw queued intent before tolerant parsing can hide malformed fields. Uses the canonical
-/// manifest's existing per-model envelope and FLUX.3's reference-derived geometry contract.
-pub fn validate_image_request_payload(
-    payload: &JsonObject,
-    entry: &JsonObject,
-) -> Result<(), String> {
-    for key in ["count", "width", "height"] {
-        if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
-            if value.as_u64().and_then(|n| u32::try_from(n).ok()).is_none() {
-                return Err(format!("{key} must be an unsigned integer"));
-            }
-        }
-    }
-    let count = unsigned_or(
-        payload.get("count"),
-        default_count(entry).unwrap_or(DEFAULT_COUNT),
-    );
-    if let Some(error) = image_count_error(count) {
-        return Err(error);
-    }
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_MODEL);
-    let reference_derived = flux3::is_model(model) && !flux3::parse(payload)?.asset_ids.is_empty();
-    if !reference_derived {
-        let (width, height) =
-            default_resolution(entry).unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
-        if let Some(error) = crate::image_limits::image_dimension_error(
-            model,
-            unsigned_or(payload.get("width"), width),
-            unsigned_or(payload.get("height"), height),
-            entry,
-            MIN_DIMENSION,
-            MAX_DIMENSION,
-        ) {
-            return Err(error);
-        }
-    }
-    let upscale = match payload.get("upscale").filter(|v| !v.is_null()) {
-        None => ImageUpscaleRequest::default(),
-        Some(value) => serde_json::from_value::<ImageUpscaleRequest>(value.clone())
-            .map_err(|error| format!("upscale: {error}"))?,
-    };
-    upscale.validate()
-}
+pub use sceneworks_options::image_request::{
+    image_count_error, unsigned_or, validate_image_request_payload,
+};
 
 #[cfg(test)]
 mod request_validation_tests {
