@@ -1163,6 +1163,7 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_resolved(authored, &effective).expect("fixture options bind")
 }
 
+#[cfg(native_lane)]
 fn assert_invalid_effective_options(value: Value) {
     let authored = value.as_object().expect("fixture request object");
     assert!(ImageRequest::from_resolved(authored, authored).is_err());
