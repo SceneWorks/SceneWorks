@@ -4,14 +4,17 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIELDS, GUARD_ACTOR, REPO, TEST_NAME, main, stage, summary, validateReceipt, validateResult } from './qwen38-describer-evidence.mjs';
+import { FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, main, pinnedSnapshots, stage, summary, validateReceipt,
+  validateResult } from './qwen38-describer-evidence.mjs';
+
+const PINNED = pinnedSnapshots();
 
 function result(tier = 'q4') {
   return {
     schema_version: 1,
     test_fqn: `qwen38_describer_gpu_smoke::${TEST_NAME}`,
-    repo: REPO, revision: 'a'.repeat(40), tier,
-    weights_dir: 'E:\\huggingface\\hub\\fixture',
+    repo: PINNED[tier].repo, revision: PINNED[tier].revision, tier,
+    weights_dir: `E:\\huggingface\\hub\\${PINNED[tier].relativeDir.replaceAll('/', '\\')}`,
     image: { kind: 'synthetic-scene', width: 512, height: 384 },
     fields: Object.fromEntries(FIELDS.map((name) => [name, `${name} text | with a pipe`])),
     wall_seconds: 42.5, wall_time_scope: 'fixture',
@@ -60,10 +63,14 @@ for (const name of FIELDS) {
 }
 for (const [name, mutate, tier] of [
   ['a different tier than requested', (copy) => { copy.tier = 'q8'; }, 'q4'],
-  ['an unsupported tier', () => {}, 'bf16'],
+  ['an unsupported tier', () => {}, 'q2'],
   ['another test', (copy) => { copy.test_fqn = 'other::test'; }, 'q4'],
   ['another repository', (copy) => { copy.repo = 'someone/else'; }, 'q4'],
   ['an unpinned revision', (copy) => { copy.revision = 'main'; }, 'q4'],
+  ['another cached revision', (copy) => { copy.revision = 'b'.repeat(40); }, 'q4'],
+  ['a quantised tier from the upstream repository', (copy) => { copy.repo = UPSTREAM_REPO; }, 'q4'],
+  ['a weights folder outside the pinned snapshot', (copy) => { copy.weights_dir = 'E:\\huggingface\\hub\\fixture'; }, 'q4'],
+  ['a quantised tier at the snapshot root', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4$/, ''); }, 'q4'],
   ['missing wall time', (copy) => { delete copy.wall_seconds; }, 'q4'],
   ['missing peak memory', (copy) => { delete copy.gpu_memory.peak_mib; }, 'q4'],
   ['a peak that was never sampled', (copy) => { copy.gpu_memory.peak_mib = 0; }, 'q4'],
@@ -76,6 +83,22 @@ for (const [name, mutate, tier] of [
     assert.throws(() => validateResult(copy, tier));
   });
 }
+test('each tier pins its own repository, revision and weights folder from the catalog', () => {
+  for (const tier of ['q4', 'q8']) {
+    assert.equal(PINNED[tier].repo, REHOST_REPO);
+    assert.equal(PINNED[tier].relativeDir,
+      `models--SceneWorks--qwen3.8-27b-abliterated-candle/snapshots/${PINNED[tier].revision}/${tier}`);
+  }
+  assert.equal(PINNED.bf16.repo, UPSTREAM_REPO);
+  assert.equal(PINNED.bf16.relativeDir, `models--huihui-ai--Huihui-Qwen3.8-27B-abliterated/snapshots/${PINNED.bf16.revision}`);
+  assert.notEqual(PINNED.bf16.revision, PINNED.q4.revision);
+  // A bf16 result is accepted at the upstream root and refused inside a tier folder or from the re-host.
+  validateResult(result('bf16'), 'bf16');
+  assert.throws(() => validateResult({ ...result('bf16'), weights_dir: `${result('bf16').weights_dir}\\bf16` }, 'bf16'), /weights_dir/);
+  assert.throws(() => validateResult({ ...result('bf16'), repo: REHOST_REPO }, 'bf16'), /must load from/);
+  // A catalog without the row is refused rather than guessed.
+  assert.throws(() => pinnedSnapshots({ vision_describe_qwen3_8_27b: { product: { downloads: [] } } }), /one SceneWorks/);
+});
 test('the guard receipt must come from this actor and complete', () => {
   validateReceipt(receipt());
   assert.throws(() => validateReceipt(receipt(false)));

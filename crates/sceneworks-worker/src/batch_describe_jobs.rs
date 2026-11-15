@@ -185,6 +185,56 @@ pub(crate) fn qwen38_describer_weights_dir(
     }
 }
 
+/// The catalog's pinned snapshot of a Qwen3.8 27B tier, as [`qwen38_describer_weights_dir`]
+/// resolves it on a platform whose quantised tiers come from `rehost_repo`.
+#[cfg(all(test, native_lane))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Qwen38PinnedSnapshot {
+    pub(crate) repo: String,
+    pub(crate) revision: String,
+    /// The weights folder relative to the hub cache:
+    /// `models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier.
+    pub(crate) relative_dir: PathBuf,
+}
+
+/// Read a tier's pinned snapshot from the catalog `entry`'s download rows: full precision (`bf16`)
+/// is the upstream repository's row at its root, a quantised tier is `rehost_repo`'s row for that
+/// variant, in its `<tier>/` folder. `None` when the catalog has no such row.
+#[cfg(all(test, native_lane))]
+pub(crate) fn qwen38_pinned_snapshot(
+    entry: &JsonObject,
+    tier: &str,
+    rehost_repo: &str,
+) -> Option<Qwen38PinnedSnapshot> {
+    let repo = if tier == "bf16" {
+        QWEN38_27B_DESCRIBER_REPO
+    } else {
+        rehost_repo
+    };
+    let revision = entry
+        .get("downloads")?
+        .as_array()?
+        .iter()
+        .find(|row| {
+            row.get("repo").and_then(Value::as_str) == Some(repo)
+                && row.get("variant").and_then(Value::as_str) == Some(tier)
+        })?
+        .get("revision")?
+        .as_str()?
+        .to_owned();
+    let mut relative_dir = PathBuf::from(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join(&revision);
+    if tier != "bf16" {
+        relative_dir.push(tier);
+    }
+    Some(Qwen38PinnedSnapshot {
+        repo: repo.to_owned(),
+        revision,
+        relative_dir,
+    })
+}
+
 /// The memory (GB) a Qwen3.8 27B tier needs on `lane` (`mlx` or `candle`): that lane's
 /// `minMemoryGbByTier[tier]` floor in the catalog entry the job carries, else the lane's
 /// `minMemoryGb`. `None` when the job carries no such entry or floor (then nothing is refused).

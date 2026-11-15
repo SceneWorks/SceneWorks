@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -76,6 +77,58 @@ class MismatchedFilesTest(unittest.TestCase):
         self.write("q8/model.safetensors", 39)
         self.assertEqual(provision.mismatched_files(self.snapshot, self.expected),
                          [("q8/model.safetensors", 40, 39)])
+
+
+BF16_ENTRIES = [
+    (".gitattributes", 5), ("README.md", 7),
+    *((name, 10) for name in provision.BF16_FILES),
+    ("model-00001-of-00002.safetensors", 600), ("model-00002-of-00002.safetensors", 320),
+    ("extra/model-00001.safetensors", 999),
+]
+BF16_TOTAL = 10 * len(provision.BF16_FILES) + 920
+
+
+class Bf16Test(unittest.TestCase):
+    def test_keeps_the_named_files_and_the_top_level_shards(self):
+        expected = provision.bf16_expected_files(BF16_ENTRIES, estimated=BF16_TOTAL)
+        self.assertEqual(sorted(expected), sorted([*provision.BF16_FILES, "model-00001-of-00002.safetensors",
+                                                   "model-00002-of-00002.safetensors"]))
+        self.assertEqual(sum(expected.values()), BF16_TOTAL)
+
+    def test_refuses_a_missing_named_file_no_shards_or_a_total_off_the_estimate(self):
+        without_index = [e for e in BF16_ENTRIES if e[0] != "model.safetensors.index.json"]
+        with self.assertRaisesRegex(RuntimeError, "no sized model.safetensors.index.json"):
+            provision.bf16_expected_files(without_index, estimated=BF16_TOTAL)
+        without_shards = [e for e in BF16_ENTRIES if not e[0].startswith("model-")]
+        with self.assertRaisesRegex(RuntimeError, "no sized model-\\*.safetensors shards"):
+            provision.bf16_expected_files(without_shards, estimated=BF16_TOTAL)
+        with self.assertRaisesRegex(RuntimeError, "the catalog estimates"):
+            provision.bf16_expected_files(BF16_ENTRIES, estimated=BF16_TOTAL * 2)
+
+    def test_matches_the_catalog_bf16_row(self):
+        specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
+        rows = [row for row in specs["vision_describe_qwen3_8_27b"]["product"]["downloads"]
+                if row.get("variant") == "bf16"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["repo"], row["revision"]), (provision.BF16_REPO, provision.BF16_REVISION))
+        self.assertEqual(row["files"], [*provision.BF16_FILES, provision.BF16_SHARD_PATTERN])
+        self.assertEqual(row["estimatedSizeBytes"], provision.BF16_ESTIMATED_BYTES)
+
+    def test_plans_keep_quantised_as_the_default_and_size_bf16_disk(self):
+        repo, revision, _, read, patterns, minimum = provision.plan("quantised")
+        self.assertEqual((repo, revision, read, patterns, minimum),
+                         (provision.REPO, provision.REVISION, provision.expected_files, ["q4/*", "q8/*"], 70 * 10**9))
+        repo, revision, _, read, patterns, minimum = provision.plan("bf16")
+        self.assertEqual((repo, read, minimum), (provision.BF16_REPO, provision.bf16_expected_files, 75 * 10**9))
+        self.assertEqual(patterns, [*provision.BF16_FILES, "model-*.safetensors"])
+        with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
+            provision.plan("q2")
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent, prefix="qwen38-provision-unit-") as cache:
+            self.assertEqual(provision.snapshot_dir(Path(cache), repo, revision).relative_to(cache).parts,
+                             ("models--huihui-ai--Huihui-Qwen3.8-27B-abliterated", "snapshots", revision))
+        with self.assertRaisesRegex(RuntimeError, "74.9 GB free; provisioning needs at least 75 GB"):
+            provision.require_free_space(74_900_000_000, provision.BF16_MIN_FREE_BYTES)
 
 
 class FreeSpaceTest(unittest.TestCase):
