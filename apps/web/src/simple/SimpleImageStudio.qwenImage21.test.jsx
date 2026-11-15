@@ -236,6 +236,12 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     await act(async () => setInput(fieldById("su-image-width"), "2048"));
     expect(container.querySelector(".su-error")).toBeNull();
     expect(container.querySelector(".su-generate").disabled).toBe(false);
+
+    for (const width of ["0", "-32"]) {
+      await act(async () => setInput(fieldById("su-image-width"), width));
+      expect(container.querySelector(".su-error")?.textContent).toContain("between 32 and 2752");
+      expect(container.querySelector(".su-generate").disabled).toBe(true);
+    }
   });
 
   it("reads the variation ladder from the model instead of the hardcoded [1,2,4,6]", async () => {
