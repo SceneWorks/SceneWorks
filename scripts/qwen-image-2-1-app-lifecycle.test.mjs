@@ -156,7 +156,7 @@ function assertDispatcherIsolation(workflow) {
   const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
   const headers = [...jobsText.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
   const jobs = headers.map((match) => match[1]);
-  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "flux3-app-lifecycle", "flux3-terminal-host", "flux3-terminal-queue", "load-progress-selector", "load-progress-acceptance", "qwen-app-lifecycle", "minimax-h3-image-train-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "flux3-app-lifecycle", "flux3-terminal-host", "flux3-terminal-queue", "load-progress-selector", "load-progress-acceptance", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const jobBlock = (name) => {
     const index = jobs.indexOf(name), header = headers[index];
     return header && jobsText.slice(header.index + header[0].length, headers[index + 1]?.index);
@@ -178,7 +178,6 @@ function assertDispatcherIsolation(workflow) {
       assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["moss-selector-preflight", "qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
       assert.deepEqual(runs("flux3-image-klein-app-lifecycle", backend), ["moss-selector-preflight", "flux3-app-lifecycle"], "FLUX3 proof must skip all catalog mutation steps");
       assert.deepEqual(runs("iris-mlx-real-weights", backend), ["moss-selector-preflight", "iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
-      assert.deepEqual(runs("minimax-h3-image-train-app-lifecycle", backend), ["moss-selector-preflight", "minimax-h3-image-train-app-lifecycle"], "H3-Image training proof must skip all catalog mutation steps");
       assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["moss-selector-preflight", "supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
       assert.deepEqual(runs("flux3-image-klein-terminal-host", backend), ["moss-selector-preflight", "flux3-terminal-host"], "FLUX3 terminal host step must skip all catalog mutation steps");
       assert.deepEqual(runs("flux3-image-klein-terminal-queue", backend), ["moss-selector-preflight", "flux3-terminal-queue"], "FLUX3 queue must skip all catalog mutation steps");

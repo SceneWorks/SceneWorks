@@ -92,7 +92,6 @@ on:
           - supra2-mlx-real-weights
           - sdxl-cuda-endpoints
           - sdxl-cuda-admitted-replay
-          - minimax-h3-image-train-app-lifecycle
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -498,22 +497,6 @@ jobs:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       runner_target: ${{ inputs.qwen_app_runner_target }}
-  minimax-h3-image-train-app-lifecycle:
-    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'minimax-h3-image-train-app-lifecycle' }}
-    needs: moss-selector-preflight
-    permissions:
-      contents: read
-    # SW-7103 AC1 (SW-F363): install the MiniMax-H3-Image q4 tier, train a t2i and an edit-pair LoRA
-    # through the Training Studio route, check the LoRA library, and render with each LoRA through
-    # the Image Studio route on ONE backend (`backend`: mlx = nax-macos-2, candle = the Windows CUDA
-    # real-weights host). `ref` must be the exact dispatched SHA. Like the app proofs above it skips
-    # both catalog jobs: no walk, no commit, no push, no PR.
-    uses: ./.github/workflows/minimax-h3-image-train-app-lifecycle.yml
-    with:
-      source_sha: ${{ inputs.ref }}
-      inference_sha: ${{ inputs.inference_sha }}
-      backend: ${{ inputs.backend == 'candle' && 'cuda' || 'mlx' }}
-      tier: q4
   iris-mlx-real-weights:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'iris-mlx-real-weights' }}
     needs: moss-selector-preflight
