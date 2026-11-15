@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "164dcb3199a52a17ca397955494d207da1e8e190",
+  "inferenceRevision": "5891ba8b510b9bedb015936b35226f0f11ccf1f5",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -2031,7 +2031,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "518f90834f0c966156cde795bd1f01dd335d79744c825f537d5f678efb1fd058",
+      "digest": "10078afd7de40083d769e42b076be7e005f412f7ac2fea27773a8e0f1a5b6915",
       "closureFileCount": 581,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -2983,7 +2983,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "9e524d6d1403f9d462b8733f9a0f607543cf1f5cae4679d7a32cddea7def797f",
+      "digest": "531b432bdf8bf3ffe97f48f043d174aeae350b8ddff31522614f17f8a8944e1c",
       "closureFileCount": 581,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -3935,7 +3935,7 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "fff535c7bc52916b7234046297c9d5425278dde648e14fe664885616cef0a4da",
+      "digest": "0745a4624e4cea6171038735a04375d755e891639404f2acfc866c6c9163adcf",
       "closureFileCount": 581,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -8884,7 +8884,7 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "5a18643df4f625bb98055dcee37a0c75ffddd6530bc1e4c2716eba4f889685f3",
+      "digest": "34b10e197be35e6468efe8e611aa82ad2be1e0135b3cfa39ba0638ed64ce4bad",
       "closureFileCount": 569,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -9903,7 +9903,7 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "06f79add5e9007ca4050b3a5696899392e14f8e07fe10cc091861a86807c65af",
+      "digest": "048ff8e4c7766dedcd2f2748a5f53ee61be3f03ff48a4951f41bb7c92f2e0eb4",
       "closureFileCount": 569,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -31647,7 +31647,7 @@
         "crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "03225b9d05b4bdeffda71fab55b84c260e5c1ad4f645ab0c1fa8722482578647",
+      "digest": "efbfd500983a6c13924d1fe15b0dd109d053a1eb369a3ebb88326c49652ff58c",
       "closureFileCount": 581,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -40855,7 +40855,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "1a01ccbe85c78e0921af1424eb43913f6f5e305adb3b4e19079ac6ad439fc9fc",
+      "digest": "85cd460e0d44215ee3f3c5a14be00ed4745ba05bf82f41a5b7e590de139f0073",
       "closureFileCount": 587,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -41810,7 +41810,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "3b1fbbca8f8f39e781b0f55e16852fe70a20b6323443dc6fde68beae6e666a22",
+      "digest": "55b3a4a7c549bed0aa32be8ce737ef1571ac762952646feb328b613fe7883e99",
       "closureFileCount": 587,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -42765,7 +42765,7 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "d4747fcf913ddb008b5e394c14caed198b7f6b49818171991cc31e48be8438b5",
+      "digest": "6608151bea84a8386d553b39d679e8035ddf32558d980082a423cca0ae00bed6",
       "closureFileCount": 587,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
