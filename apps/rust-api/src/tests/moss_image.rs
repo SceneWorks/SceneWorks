@@ -1734,8 +1734,8 @@ async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_r
                     json!([ids[0], ids[0], ids[0], ids[0], ids[0]]),
                     StatusCode::BAD_REQUEST,
                 ),
-                (json!([ids[0], null]), StatusCode::UNPROCESSABLE_ENTITY),
-                (json!([ids[0], 42]), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!([ids[0], null]), StatusCode::BAD_REQUEST),
+                (json!([ids[0], 42]), StatusCode::BAD_REQUEST),
                 (json!([ids[0], " bad"]), StatusCode::BAD_REQUEST),
                 (
                     json!([ids[0], ids[1], "missing-reference"]),
@@ -1751,6 +1751,19 @@ async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_r
                 let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs",
                     json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"edit","referenceAssetIds":references})).await;
                 assert_eq!(status, expected_status, "{references}: {error}");
+                if references
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| !value.is_string())
+                {
+                    assert_eq!(error["code"], "invalid_generation_option");
+                    assert_eq!(error["field"], "referenceAssetIds");
+                    assert_eq!(
+                        error["context"],
+                        json!({"kind":"image","model":model,"mode":"edit_image","field":"referenceAssetIds"})
+                    );
+                }
                 assert_eq!(
                     state
                         .jobs_store

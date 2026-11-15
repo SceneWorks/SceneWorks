@@ -1,0 +1,12 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+const path = process.argv[2];
+assert.ok(path, "pass the compiled wasm_validation_corpus.wasm path");
+const module = await WebAssembly.compile(await readFile(path));
+assert.deepEqual(WebAssembly.Module.imports(module), [], "portable policy must have no host imports");
+const instance = await WebAssembly.instantiate(module);
+instance.exports.main();
+const corpus = JSON.parse(await readFile(new URL("./fixtures/validation_corpus.json",import.meta.url),"utf8"));
+const count = corpus.cases.length;
+assert.ok(count > 0);
+console.log(`${count} shared validation cases and independent frozen policy assertions passed in WASM`);

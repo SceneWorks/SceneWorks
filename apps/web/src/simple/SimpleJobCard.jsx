@@ -1,3 +1,4 @@
+import { jobFailureMessage } from "../generationRefusal.js";
 import React, { useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { errorStatuses, pendingStatuses, terminalStatuses } from "../jobTypes.js";
@@ -103,7 +104,7 @@ export function SimpleJobCard({ job, onCancel, onDismiss }) {
   const progress = Number(job.progress);
   const hasProgress = Number.isFinite(progress) && progress > 0;
   const cancelable = jobIsCancelable(job);
-  const error = errorStatuses.has(job.status) ? String(job.error ?? job.message ?? "").trim() : "";
+  const error = errorStatuses.has(job.status) ? String(jobFailureMessage(job)).trim() : "";
   // A running job with no progress reading yet gets an indeterminate bar rather than a
   // 0% one, so "working" is distinguishable from "stuck at zero" (mirrors the advanced
   // WorkerProgressCard).

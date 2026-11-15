@@ -24,11 +24,11 @@ use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
-    ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
-    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
-    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
+    ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest, GenerationMetrics,
+    GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject,
+    PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary, RetryJobRequest,
+    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    WorkerTerminationRequest,
 };
 #[cfg(test)]
 use sceneworks_core::hf_home::huggingface_hub_cache_dir;
@@ -71,9 +71,8 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder,
-    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, ReferenceSetVerdict,
+    default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
+    resolve_duration, resolve_fps,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -484,12 +483,14 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
 // `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
 // the number and drifting.
-pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
+
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. Image pose coordinates have a separate bounded data budget in
 // `validate_image_prompt_extras`; the remaining settings still obey this ceiling.
-const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
+#[cfg(test)]
+const MAX_ADVANCED_JSON_BYTES: usize =
+    sceneworks_core::request_validation::shape::MAX_ADVANCED_JSON_BYTES;
 
 struct ApiJson<T>(T);
 
@@ -502,50 +503,55 @@ where
     type Rejection = Response;
 
     async fn from_request(request: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<Value>::from_request(request, state).await {
-            Ok(Json(value)) => {
-                let value = if value.is_object() {
-                    let carrier = if std::any::TypeId::of::<T>()
-                        == std::any::TypeId::of::<JobCreateRequest>()
-                    {
-                        let interleave = value
-                            .get("type")
-                            .cloned()
-                            .and_then(|value| serde_json::from_value::<JobType>(value).ok())
-                            == Some(JobType::ImageInterleave);
-                        sceneworks_core::options::upgrade::job_carrier(if interleave {
-                            "interleave"
-                        } else {
-                            ""
-                        })
-                    } else if std::any::TypeId::of::<T>()
-                        == std::any::TypeId::of::<InterleaveJobRequest>()
-                    {
-                        sceneworks_core::options::upgrade::Carrier::InterleaveRequest
-                    } else {
-                        sceneworks_core::options::upgrade::Carrier::Request
-                    };
-                    sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(
-                        |error| {
-                            ApiError::typed(
-                                StatusCode::UNPROCESSABLE_ENTITY,
-                                error.to_string(),
-                                error.code,
-                                json!({ "field": error.field }),
-                            )
-                            .into_response()
-                        },
-                    )?
+        let Json(mut value) = Json::<Value>::from_request(request, state)
+            .await
+            .map_err(json_rejection_response)?;
+        if value.is_object() {
+            let carrier = if std::any::TypeId::of::<T>()
+                == std::any::TypeId::of::<JobCreateRequest>()
+            {
+                let interleave = value
+                    .get("type")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<JobType>(value).ok())
+                    == Some(JobType::ImageInterleave);
+                sceneworks_core::options::upgrade::job_carrier(if interleave {
+                    "interleave"
                 } else {
-                    value
-                };
-                // Shared raw shape validation follows upgrade, before DTO defaults/coercion.
-                serde_json::from_value(value)
-                    .map(Self)
-                    .map_err(|error| json_decode_error_response(error.to_string()))
-            }
-            Err(rejection) => Err(json_rejection_response(rejection)),
+                    ""
+                })
+            } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<InterleaveJobRequest>()
+            {
+                sceneworks_core::options::upgrade::Carrier::InterleaveRequest
+            } else {
+                sceneworks_core::options::upgrade::Carrier::Request
+            };
+            value =
+                sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(|error| {
+                    ApiError::typed(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        error.to_string(),
+                        error.code,
+                        json!({ "field": error.field }),
+                    )
+                    .into_response()
+                })?;
         }
+        if let Some(kind) = generation_wire_kind::<T>() {
+            let payload = value.as_object().ok_or_else(|| {
+                ApiError::bad_request("Generation request must be an object").into_response()
+            })?;
+            sceneworks_core::request_validation::validate_shape(kind, payload)
+                .map_err(|error| ApiError::from(error).into_response())?;
+            // The upgrader checked this envelope field; strict DTOs only own options.
+            value
+                .as_object_mut()
+                .expect("request object")
+                .remove("optionsSchemaVersion");
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|error| json_decode_error_response(error.to_string()))
     }
 }
 

@@ -37,11 +37,6 @@ mod imp {
         parse_plan, run_training_execution, training_progress, validate_training_plan,
     };
 
-    /// The only kernel the studio job trains today — the Krea 2 pose-ControlNet branch. The API stamps
-    /// it into the plan (`krea_control` target); a plan with any other kernel is rejected here rather
-    /// than mis-dispatched (the executor maps `krea_control` → the `krea_2_control` engine trainer).
-    const CONTROL_KERNEL: &str = "krea_control";
-
     /// YOLO person-gate confidence floor when `advanced.personGate` is on — drop a target with no
     /// detected person so a pose branch isn't trained on empty skeletons. Deliberately permissive
     /// (Dataset Doctor runs the richer quality pass).
@@ -100,12 +95,9 @@ mod imp {
         // detector setup, or GPU rendering. The rewritten rendered-dataset plan is validated again by
         // `run_training_execution` after preparation.
         validate_training_plan(settings, &plan)?;
-        if plan.target.kernel != CONTROL_KERNEL {
-            return Err(WorkerError::InvalidPayload(format!(
-                "control_training expects a '{CONTROL_KERNEL}' plan, got kernel '{}'.",
-                plan.target.kernel
-            )));
-        }
+        let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+        sceneworks_core::request_validation::validate("control_training", &job.payload, &facts)
+            .map_err(WorkerError::Validation)?;
         if plan.dataset.items.is_empty() {
             return Err(WorkerError::InvalidPayload(
                 "control_training plan has no dataset items to render conditions from.".to_owned(),
@@ -498,11 +490,11 @@ mod imp {
                 "planVersion": 1,
                 "jobId": "job-control",
                 "target": {
-                    "targetId": "krea_control_target",
+                    "targetId": "krea_2_control",
                     "kernel": "krea_control",
-                    "family": "krea",
+                    "family": "krea_2",
                     "modality": "image",
-                    "outputKind": "controlnet",
+                    "outputKind": "control_branch",
                     "baseModel": "krea_2_raw",
                     "baseModelPath": data_dir.join("models/krea").display().to_string()
                 },
@@ -519,7 +511,7 @@ mod imp {
                     "rank": 16,
                     "alpha": 16,
                     "learningRate": 0.0001,
-                    "steps": 10,
+                    "steps": 200,
                     "batchSize": 1,
                     "gradientAccumulation": 1,
                     "resolution": 512,
@@ -538,7 +530,7 @@ mod imp {
                 "provenance": {
                     "datasetId": "ds-1",
                     "datasetVersion": 1,
-                    "targetId": "krea_control_target",
+                    "targetId": "krea_2_control",
                     "baseModel": "krea_2_raw",
                     "configSnapshot": {},
                     "outputLoraId": "control-1",

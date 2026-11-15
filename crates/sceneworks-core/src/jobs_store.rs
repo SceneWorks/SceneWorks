@@ -39,6 +39,7 @@ fn mint_import_claim_capability(
 
 mod result_items;
 mod routing;
+pub(crate) use routing::catalog::video_route_facts;
 
 pub use result_items::{
     JobResultItemWrite, JobResultItemsPage, JOB_RESULT_ITEMS_PAGE_BYTES,

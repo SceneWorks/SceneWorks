@@ -7,6 +7,7 @@ use syn::visit::{self, Visit};
 use syn::{Expr, FnArg, Item, Lit, Meta, Pat};
 
 const ROOTS: &[&str] = &[
+    "crates/sceneworks-options/src",
     "crates/sceneworks-core/src",
     "crates/sceneworks-worker/src",
     "crates/sceneworks-mcp/src",
@@ -389,8 +390,30 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if let Some(values) = self.strings(&item.expr) {
             self.bindings.strings.insert(item.ident.to_string(), values);
         }
-        let keys = if item.ident == "TECHNIQUE_KEYS" && self.file.contains("/training/") {
+        let keys = if item.ident == "TECHNIQUE_KEYS"
+            && (self.file.contains("/training/") || self.file.contains("/training_validation/"))
+        {
             self.strings(&item.expr)
+        } else if self.file == "crates/sceneworks-options/src/sensenova_validation.rs"
+            && item.ident == "INTERLEAVE_ADVANCED_INTEGERS"
+        {
+            if let Expr::Array(array) = unwrapped(&item.expr) {
+                Some(
+                    array
+                        .elems
+                        .iter()
+                        .flat_map(|entry| {
+                            let Expr::Tuple(tuple) = unwrapped(entry) else {
+                                panic!("SenseNova integer declaration must be a tuple")
+                            };
+                            self.strings(&tuple.elems[0])
+                                .expect("finite SenseNova integer key")
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
         } else if item.ident == "IRIS_MICRO_STEP_FIELDS" {
             // The boolean separates top-level config fields from advanced-bag keys.
             if let Expr::Array(array) = unwrapped(&item.expr) {
@@ -424,7 +447,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 self.coverage.reads.insert(Read {
                     file: self.file.into(),
                     function: item.ident.to_string(),
-                    location: "training.config.advanced",
+                    location: if self.file
+                        == "crates/sceneworks-options/src/sensenova_validation.rs"
+                    {
+                        "advanced"
+                    } else {
+                        "training.config.advanced"
+                    },
                     key,
                 });
             }
@@ -983,13 +1012,14 @@ fn common_constant_names_and_training_context_stay_scoped() {
 // This is intentionally not a blanket exemption for a training module or function.
 fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'static str> {
     match (file, function, expression) {
-        ("crates/sceneworks-core/src/training.rs", "inverted_window_message", "max_key") =>
+        ("crates/sceneworks-options/src/sensenova_validation.rs","canonical_numbers","computed expression") => Some("integer carrier normalization iterates only INTERLEAVE_ADVANCED_INTEGERS; its tuple keys are structurally checked"),
+        ("crates/sceneworks-options/src/training_validation.rs", "inverted_window_message", "max_key") =>
             Some("diagnostic-only max key supplied by technique parsers; their finite TECHNIQUE_KEYS are checked"),
-        ("crates/sceneworks-core/src/training/body_losses.rs", "schedule", "every_key" | "min_key" | "max_key" | "loss.weight_key(...)") =>
+        ("crates/sceneworks-options/src/training_validation/body_losses.rs", "schedule", "every_key" | "min_key" | "max_key" | "loss.weight_key(...)") =>
             Some("BodyLoss formats the three loss prefixes; its explicit TECHNIQUE_KEYS table is checked"),
-        ("crates/sceneworks-core/src/training/face_losses.rs", "schedule", "weight_key" | "min_key" | "max_key" | "every_key") =>
+        ("crates/sceneworks-options/src/training_validation/face_losses.rs", "schedule", "weight_key" | "min_key" | "max_key" | "every_key") =>
             Some("schedule destructures the caller's four-key array; the owning TECHNIQUE_KEYS table is checked"),
-        ("crates/sceneworks-core/src/training/iris.rs", "validate_micro_steps", "field") =>
+        ("crates/sceneworks-options/src/training_validation/iris.rs", "validate_micro_steps", "field") =>
             Some("IRIS_MICRO_STEP_FIELDS selects sampleEvery/lrWarmupSteps from advanced; steps/saveEvery are top-level config fields"),
         _ => None,
     }
@@ -1014,7 +1044,7 @@ fn production_advanced_reads_resolve_to_option_specs() {
     for (file, function, expression) in &coverage.dynamic {
         if let Some(reason) = dynamic_reason(file, function, expression) {
             let domain_file = if function == "inverted_window_message" {
-                "crates/sceneworks-core/src/training/face_losses.rs"
+                "crates/sceneworks-options/src/training_validation/face_losses.rs"
             } else {
                 file.as_str()
             };
@@ -1395,11 +1425,11 @@ fn javascript_mutations_require_registered_options() {
 #[test]
 fn windows_source_paths_preserve_scoped_rules_and_reject_unknown_keys() {
     let rust_file = source_path(Path::new(
-        r"crates\sceneworks-core\src\training\body_losses.rs",
+        r"crates\sceneworks-options\src\training_validation\body_losses.rs",
     ));
     assert_eq!(
         rust_file,
-        "crates/sceneworks-core/src/training/body_losses.rs"
+        "crates/sceneworks-options/src/training_validation/body_losses.rs"
     );
     let rust = scan(&[(
         rust_file.clone(),
@@ -1565,4 +1595,13 @@ fn timeline_context_reads_require_nested_declarations() {
             1
         );
     }
+}
+
+#[test]
+fn sensenova_integer_tables_cannot_hide_an_unregistered_control() {
+    let source = "crates/sceneworks-options/src/sensenova_validation.rs";
+    let valid=scan(&[(source.into(),syn::parse_file(r#"const INTERLEAVE_ADVANCED_INTEGERS: &[(&str,i64,i64,i64)] = &[("maxImages",6,1,10)];"#).unwrap())]);
+    assert!(missing(&valid).is_empty());
+    let invalid=scan(&[(source.into(),syn::parse_file(r#"const INTERLEAVE_ADVANCED_INTEGERS: &[(&str,i64,i64,i64)] = &[("__unknown_integer_option__",6,1,10)];"#).unwrap())]);
+    assert_eq!(missing(&invalid).len(), 1);
 }

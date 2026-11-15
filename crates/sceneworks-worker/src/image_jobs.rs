@@ -237,69 +237,15 @@ fn requested_decoder_id(
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
-const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
-const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
-
+#[cfg(native_lane)]
+use sceneworks_core::request_validation::prompt_enhancement::FACT_KEY as PROMPT_ENHANCEMENT_FACT_KEY;
+#[cfg(any(test, native_lane))]
 fn parse_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
 ) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
-    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned"
-        )));
-    }
-    let enabled = match advanced.get("enhancePrompt") {
-        None => false,
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(_) => {
-            return Err(WorkerError::InvalidPayload(
-                "advanced.enhancePrompt must be a boolean".to_owned(),
-            ));
-        }
-    };
-    let temperature = advanced
-        .get("enhanceTemperature")
-        .map(|value| {
-            let value = value
-                .as_f64()
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "advanced.enhanceTemperature must be a finite number".to_owned(),
-                    )
-                })?;
-            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
-                )));
-            }
-            Ok(value as f32)
-        })
-        .transpose()?;
-    let max_token_limit = crate::prompt_enhancement_max_tokens(model_id);
-    let max_tokens = advanced
-        .get("enhanceMaxTokens")
-        .map(|value| {
-            let value = value.as_u64().ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "advanced.enhanceMaxTokens must be an integer".to_owned(),
-                )
-            })?;
-            if !(1..=max_token_limit).contains(&value) {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
-                )));
-            }
-            Ok(value as u32)
-        })
-        .transpose()?;
-    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
-        return Err(WorkerError::InvalidPayload(
-            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
-        ));
-    }
-    Ok((enabled, temperature, max_tokens))
+    sceneworks_core::request_validation::prompt_enhancement::fields(model_id, advanced)
+        .map_err(WorkerError::Validation)
 }
 
 #[cfg(native_lane)]
@@ -438,31 +384,13 @@ fn validate_prompt_enhancement_request(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.model, &request.advanced)?;
-    if !enabled {
+    if !sceneworks_core::request_validation::prompt_enhancement::validate(
+        &request.model,
+        &request.advanced,
+    )
+    .map_err(WorkerError::Validation)?
+    {
         return Ok(());
-    }
-    if !matches!(
-        request.model.as_str(),
-        "flux2_dev" | "flux3_klein" | "flux3_klein_base"
-    ) {
-        return Err(WorkerError::InvalidPayload(
-            "prompt enhancement is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it"
-                .to_owned(),
-        ));
-    }
-    let strict_control = request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-        || request.advanced.contains_key("controlWeights")
-        || request.advanced.contains_key("controlImage")
-        || request.advanced.contains_key("controlMode");
-    if strict_control {
-        return Err(WorkerError::InvalidPayload(
-            "prompt enhancement cannot be combined with strict control".to_owned(),
-        ));
     }
     validate_prompt_enhancement_route(request, settings)
 }

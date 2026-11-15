@@ -16,11 +16,11 @@ model-inference-proof = []
 sceneworks-options = { path = "../sceneworks-options" }
 reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "4a36a7f8c9645110df4df656ca9d492e55ab6c7c" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "4a36a7f8c9645110df4df656ca9d492e55ab6c7c" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "4a36a7f8c9645110df4df656ca9d492e55ab6c7c" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
 # The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "4a36a7f8c9645110df4df656ca9d492e55ab6c7c" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
 directories = "5"
 fs2 = { workspace = true }
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's
@@ -34,7 +34,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 # sc-22713: a planner draft is corrected by a local 8B model that cannot count lines, so a parse
 # failure has to name the FIELD ("shots[3].startState"), not the offset. Already in the lock via
 # axum, so this adds no package to the build.
-serde_path_to_error = "0.1"
+serde_path_to_error = { workspace = true }
 mime_guess = { workspace = true }
 url = "2.5"
 # sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.
@@ -104,6 +104,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [build-dependencies]
+sceneworks-options = { path = "../sceneworks-options" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = "0.28"

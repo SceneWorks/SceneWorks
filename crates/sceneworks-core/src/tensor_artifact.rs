@@ -1,6 +1,5 @@
 //! Bounded, inert NPY artifacts carried by the existing project asset store.
 //! Values are never pickled, converted to a lower precision, or rewritten on import.
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
 
@@ -9,14 +8,7 @@ pub const MAX_DATA_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 4096;
 pub const MAX_REQUEST_BYTES: usize = 1280 * 1024 * 1024 + 128 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TensorMetadata {
-    pub dtype: String,
-    pub shape: Vec<usize>,
-    pub byte_length: usize,
-    pub sha256: String,
-}
+pub use sceneworks_options::moss_advanced::TensorMetadata;
 
 fn header(file: &mut File) -> Result<(TensorMetadata, usize, Vec<u8>), String> {
     let stat = file.metadata().map_err(|e| e.to_string())?;

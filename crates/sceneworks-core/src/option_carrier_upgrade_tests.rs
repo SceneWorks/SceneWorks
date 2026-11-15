@@ -122,3 +122,14 @@ fn an_unknown_v2_recipe_cannot_be_silently_dropped() {
     assert!(parse_workflow_share(&envelope).is_err());
     assert_eq!(envelope, original);
 }
+
+#[test]
+fn upgrade_preserves_malformed_request_fields_for_shared_shape_validation() {
+    use crate::options::upgrade::{upgrade, Carrier};
+    let request = json!({"task":"image_caption","sourceAssetId":"source","prompt":null});
+    let upgraded = upgrade(&request, Carrier::Request).unwrap();
+    assert_eq!(upgraded["prompt"], Value::Null);
+    let refusal =
+        crate::request_validation::validate_shape("promptRefine", upgraded.as_object().unwrap());
+    assert!(refusal.is_err());
+}

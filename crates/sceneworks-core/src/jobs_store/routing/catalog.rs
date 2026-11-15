@@ -258,11 +258,12 @@ pub(crate) fn video_model_mac_support(model: &str) -> ModelMacSupport {
 /// pair. If the API's mapping and the probe's mapping ever disagree, the gating oracle answers a
 /// question about a job type that is never enqueued — the gate reads green and the user still hangs.
 pub fn video_job_type_for_mode(mode: &str) -> JobType {
-    match mode {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
+    use sceneworks_options::video_eligibility::VideoJobKind;
+    match VideoJobKind::for_mode(mode) {
+        VideoJobKind::Extend => JobType::VideoExtend,
+        VideoJobKind::Bridge => JobType::VideoBridge,
+        VideoJobKind::Replace => JobType::PersonReplace,
+        VideoJobKind::Generate => JobType::VideoGenerate,
     }
 }
 
@@ -831,6 +832,35 @@ impl VideoModelCaps {
 // Generated from the schema-validated router product policy in the static ModelSpec build.
 include!(concat!(env!("OUT_DIR"), "/model-route-policy.rs"));
 
+/// Project the same immutable typed ModelSpec facts served to browser validation. Unknown or
+/// imported model ids have no builtin route facts; their declared plan is checked separately.
+pub(crate) fn video_route_facts(
+    model: &str,
+) -> sceneworks_options::video_eligibility::VideoRouteFacts {
+    crate::registry::builtin_model_specs()
+        .find(|spec| spec.product.id == model)
+        .map(|spec| {
+            let facts = spec.option_route_facts();
+            sceneworks_options::video_eligibility::VideoRouteFacts::from_value(Some(&facts))
+        })
+        .or_else(|| {
+            VIDEO_MODEL_CAPS
+                .iter()
+                .find(|caps| caps.id == model)
+                .map(|caps| {
+                    // Historical aliases have no public ModelSpec row but retain compiled route policy.
+                    sceneworks_options::video_eligibility::VideoRouteFacts::new(
+                        caps.video_mlx_routed,
+                        caps.candle_video_routed,
+                        caps.candle_video_i2v,
+                        caps.candle_video_vace,
+                        false,
+                    )
+                })
+        })
+        .unwrap_or_default()
+}
+
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
 /// tables above (sc-9495). Expands to a compile-time-built array of exactly the ids whose column is
 /// `true`, in table-row order, so the generated constant is a drop-in for the hand-written list it
@@ -1038,17 +1068,6 @@ pub fn checkpoint_plan_checkpoint_id(entry: &Map<String, Value>) -> Option<&str>
         .filter(|id| !id.is_empty())
 }
 
-/// [`checkpoint_plan_checkpoint_id`] reached through a request payload's forwarded
-/// `modelManifestEntry` — the shape the routing predicates hold (sc-20651).
-pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
-    payload: &Map<String, Value>,
-) -> Option<&str> {
-    payload
-        .get("modelManifestEntry")
-        .and_then(Value::as_object)
-        .and_then(checkpoint_plan_checkpoint_id)
-}
-
 /// Whether one backend lane claims this plan-backed H3 video probe WITH a compatible adapter.
 /// The catalog's advertisement derives from the same predicates the scheduler consults, so the
 /// UI can never offer an adapter stack no lane will claim.
@@ -1092,51 +1111,6 @@ pub fn imported_video_adapter_surface_claimable(
                     &payload,
                 ))
     })
-}
-
-/// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
-/// lanes, because both providers load a staged DiT directory through the same `transformer`
-/// component seam.
-///
-/// Keyed on the forwarded `modelManifestEntry` ([`crate::minimax_h3_import::entry_is_imported_minimax_h3`]),
-/// never on the model id, and narrow on every axis because a claim is a promise a worker arm exists:
-/// * **id** — never a builtin video id. A builtin id names the shipped weights; a plan forwarded
-///   under one would render the imported bytes under another checkpoint's name (or, on a lane that
-///   ignored the plan, the shipped bytes under the imported one).
-/// * **shape** — the explicitly declared FL2VA, Ref2VA, or hybrid operation union. Tensor shapes
-///   and model names never imply task compatibility. Builtin predicates validate conditioning,
-///   while the imported entry and plan remain the weight identity.
-/// * **adapters** — the native H3 LoRA/LoKr and turbo surface. The same partition predicate owns
-///   request shape; source topology, target namespace and pruning-basis compatibility are validated
-///   by the native installer against the selected imported task, never by substituting stock weights.
-///
-/// This is a claim, not a load: the worker still resolves and re-verifies the plan, the binding and
-/// the resident components, and refuses by name when it cannot.
-pub(crate) fn plan_backed_minimax_h3_video_eligible(
-    model: &str,
-    payload: &Map<String, Value>,
-) -> bool {
-    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
-        return false;
-    };
-    if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
-        return false;
-    }
-    if matches!(
-        model,
-        crate::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
-            | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
-    ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
-        || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
-    {
-        return false;
-    }
-    let has_references = payload.get("mode").and_then(Value::as_str) == Some("reference_to_video");
-    let Ok(partition) = crate::minimax_h3_import::entry_partition_model(entry, has_references)
-    else {
-        return false;
-    };
-    super::candle::video_request_candle_eligible(partition, payload)
 }
 
 /// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the
@@ -1845,6 +1819,7 @@ derive_model_list! {
     pub(crate) CANDLE_VIDEO_ROUTED_MODELS, VIDEO_MODEL_CAPS, candle_video_routed
 }
 
+#[cfg(test)]
 derive_model_list! {
     /// The candle video models that run image→video ONLY (a source image is required), not txt2video —
     /// Wan2.2 14B I2V + SVD (derived from [`VIDEO_MODEL_CAPS`]`.candle_video_i2v`, sc-9495). Subset of
@@ -1852,6 +1827,7 @@ derive_model_list! {
     pub(crate) CANDLE_VIDEO_I2V_ROUTED_MODELS, VIDEO_MODEL_CAPS, candle_video_i2v
 }
 
+#[cfg(test)]
 derive_model_list! {
     /// The candle video models eligible for the Wan-VACE advanced modes (derived from
     /// [`VIDEO_MODEL_CAPS`]`.candle_video_vace`, sc-9495). These route to the single candle `wan_vace`
