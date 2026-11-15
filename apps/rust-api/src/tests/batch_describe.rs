@@ -441,3 +441,192 @@ async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
     assert_eq!(status, StatusCode::OK, "{none}");
     assert_eq!(none, json!([]));
 }
+
+/// SW-7163: "Fit to" carries the target's own catalog entry (the worker reads the limit from it),
+/// and a condense-only request carries each row's fields and size on its job items.
+#[tokio::test]
+async fn batch_describe_fit_to_carries_the_targets_catalog_entry() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": " krea_2_turbo ", "maxPromptTokens": 50_000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = &job["payload"];
+    assert_eq!(payload["fitTo"], "krea_2_turbo");
+    assert_eq!(payload["fitToManifestEntry"]["id"], "krea_2_turbo");
+    assert_eq!(
+        payload["fitToManifestEntry"]["image"]["maxPromptTokens"],
+        1024
+    );
+    assert!(payload.get("condenseOnly").is_none());
+    assert_eq!(payload["items"].as_array().unwrap().len(), 3);
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "fitTo": "krea_2_raw",
+            "prompt": "not sent for a condense-only job",
+            "condenseRows": [
+                { "itemId": item_ids[2], "width": 640, "height": 480,
+                  "fields": { "description": "An edited woman, woman_1.", "pose": "woman_1 — seated" } },
+                { "itemId": item_ids[0], "fields": { "style": "A photograph." }, "notice": "Cut off." },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = &job["payload"];
+    assert_eq!(payload["condenseOnly"], true);
+    assert_eq!(payload["fitTo"], "krea_2_raw");
+    assert!(payload.get("prompt").is_none());
+    let items = payload["items"].as_array().unwrap();
+    let ids: Vec<_> = items.iter().map(|item| item["itemId"].clone()).collect();
+    assert_eq!(
+        ids,
+        vec![json!(item_ids[0]), json!(item_ids[2])],
+        "dataset order"
+    );
+    assert_eq!(
+        items[1]["fields"]["description"],
+        "An edited woman, woman_1."
+    );
+    assert_eq!(
+        (items[1]["width"].clone(), items[1]["height"].clone()),
+        (json!(640), json!(480))
+    );
+    assert_eq!(items[0]["width"], Value::Null);
+    assert_eq!(items[0]["notice"], "Cut off.");
+    // Job listings carry the target's prompt facts and tokenizer sources, not its whole entry.
+    let entry = &payload["fitToManifestEntry"];
+    assert_eq!(entry["image"]["maxPromptTokens"], 1024);
+    assert_eq!(entry["image"]["promptOverflow"], "refuse");
+    assert_eq!(entry["adapter"], "mlx_krea");
+    assert!(entry["downloads"][0]["repo"].is_string());
+    assert!(entry.get("licenseNotice").is_none() && entry.get("ui").is_none());
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "fitTo": "krea_2_turbo",
+            "measureOnly": true,
+            "condenseRows": [{ "itemId": item_ids[1], "fields": { "description": "woman_1" },
+                               "condensedText": "woman_1 sits." }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["measureOnly"], true);
+    assert!(job["payload"].get("condenseOnly").is_none());
+    assert_eq!(job["payload"]["items"][0]["condensedText"], "woman_1 sits.");
+}
+
+#[tokio::test]
+async fn batch_describe_refuses_an_unusable_fit_to_target_or_condense_rows() {
+    use sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_FIELD_CHARS;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = |fields: Value| json!({ "itemId": item_ids[0], "fields": fields });
+    for (body, field, expect) in [
+        (
+            json!({ "fitTo": "no_such_model" }),
+            "fitTo",
+            "Unknown Fit to model",
+        ),
+        (
+            json!({ "fitTo": "supra2_img" }),
+            "fitTo",
+            "reads only 128 prompt tokens",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "style": " ", "pose": "" }))] }),
+            "condenseRows",
+            "no text in any field",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({
+                "style": "x".repeat(MAX_DESCRIBE_FIELD_CHARS),
+                "pose": "x".repeat(MAX_DESCRIBE_FIELD_CHARS),
+                "camera": "x",
+            }))] }),
+            "condenseRows",
+            "at most 32000 can be condensed",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "measureOnly": true, "condenseRows": [row(json!({ "style": "a" }))] }),
+            "condenseRows",
+            "no condensed prompt to measure",
+        ),
+        (
+            json!({ "fitTo": "z_image_turbo" }),
+            "fitTo",
+            "declares no prompt token limit",
+        ),
+        (
+            json!({ "model": JOYCAPTION_REPO, "fitTo": "krea_2_turbo" }),
+            "fitTo",
+            "JoyCaption rows are not condensed",
+        ),
+        (
+            json!({ "condenseRows": [row(json!({ "style": "A photograph." }))] }),
+            "condenseRows",
+            "needs a fitTo target",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [] }),
+            "condenseRows",
+            "at least one row",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "itemIds": [item_ids[0]], "condenseRows": [row(json!({ "style": "A photograph." }))] }),
+            "condenseRows",
+            "not both",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "mood": "calm" }))] }),
+            "condenseRows",
+            "unknown field \"mood\"",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [
+                row(json!({ "style": "x".repeat(MAX_DESCRIBE_FIELD_CHARS + 1) }))
+            ] }),
+            "condenseRows",
+            "longer than 16000 characters",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [row(json!({ "style": "a" })), row(json!({ "style": "b" }))] }),
+            "condenseRows",
+            "appears twice",
+        ),
+        (
+            json!({ "fitTo": "krea_2_turbo", "condenseRows": [{ "itemId": "not_an_item", "fields": { "style": "a" } }] }),
+            "itemIds",
+            "Unknown dataset item id(s): not_an_item.",
+        ),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &route, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        assert_eq!(error["context"]["field"], field, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expect),
+            "{expect}: {error}"
+        );
+    }
+}

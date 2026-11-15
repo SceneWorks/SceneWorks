@@ -174,6 +174,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        // SW-7163: the describe job's "Fit to" step reads only the target image model's installed
+        // tokenizer (its pinned primary snapshot) to count a condensed prompt exactly.
+        source_files: &["crates/sceneworks-worker/src/batch_describe_condense.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/vector_jobs.rs"],
         categories: &[Category::Image, Category::Primary],
         resolution: Resolution::SharedContract {
