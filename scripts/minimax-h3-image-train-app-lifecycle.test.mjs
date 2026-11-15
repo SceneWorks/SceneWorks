@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { assertDiskBudget, assertPlan, assertRendered, assertSelection, assertTrained, BUILD_HEADROOM_BYTES, CAPTIONS, decodePng, FAMILY, imageBody, LICENSE_URL, meanAbsoluteDifference, MODEL_ID, STATE_HEADROOM_BYTES, syntheticPng, TARGETS, tierRows, trainingBody, TRAINING } from "./minimax-h3-image-train-app-lifecycle.mjs";
+import { assertDiskBudget, chooseCudaCard, CUDA_LEASE_KEY, parseCudaCards, assertPlan, assertRendered, assertSelection, assertTrained, BUILD_HEADROOM_BYTES, CAPTIONS, decodePng, FAMILY, imageBody, LICENSE_URL, meanAbsoluteDifference, MODEL_ID, STATE_HEADROOM_BYTES, syntheticPng, TARGETS, tierRows, trainingBody, TRAINING } from "./minimax-h3-image-train-app-lifecycle.mjs";
 
 const read = (name) => readFile(new URL(name, import.meta.url), "utf8");
 const SHA = "a".repeat(40), PIN = "b".repeat(40);
@@ -127,4 +127,28 @@ test("the workflow is reachable only from the manual dispatcher and pins each ba
   assert.match(dispatcher, /minimax-h3-image-train-app-lifecycle:\n {4}if: \$\{\{ needs\.moss-selector-preflight\.outputs\.enabled != 'true' && inputs\.profile == 'minimax-h3-image-train-app-lifecycle' \}\}/);
   assert.match(dispatcher, /uses: \.\/\.github\/workflows\/minimax-h3-image-train-app-lifecycle\.yml\n {4}with:\n {6}source_sha: \$\{\{ inputs\.ref \}\}/);
   assert.match(dispatcher, /backend: \$\{\{ inputs\.backend == 'candle' && 'cuda' \|\| 'mlx' \}\}/);
+});
+
+test("the CUDA lifecycle runs only as the child of the exact-UUID lease on the card chosen before the build", async () => {
+  const workflow = await read("../.github/workflows/minimax-h3-image-train-app-lifecycle.yml");
+  const cuda = workflow.slice(workflow.indexOf("\n  cuda:"));
+  const select = cuda.indexOf("--select-cuda-card"), build = cuda.indexOf("--build-only"), lease = cuda.indexOf("windows_cuda_execution.py");
+  assert.ok(select > 0 && select < build && build < lease, "choose the card, build without a lease, then run under it");
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor minimax-h3-image-train-app --budget-minutes [0-9]+ --physical-indices %H3I_APP_CUDA_INDEX% -- node scripts\\minimax-h3-image-train-app-lifecycle\.mjs\n/);
+  assert.doesNotMatch(cuda, /functional-coexistence/, "strict-idle admission only");
+  assert.equal((cuda.match(/node scripts[\\/]minimax-h3-image-train-app-lifecycle\.mjs(?:\n|$)/g) ?? []).length, 1, "the lifecycle itself is launched once, under the lease");
+  const mlx = workflow.slice(workflow.indexOf("\n  mlx:"), workflow.indexOf("\n  cuda:"));
+  assert.ok(mlx.indexOf("--build-only") > 0 && mlx.indexOf("--build-only") < mlx.lastIndexOf("node scripts/minimax-h3-image-train-app-lifecycle.mjs\n"));
+  const script = await read("./minimax-h3-image-train-app-lifecycle.mjs");
+  assert.equal(CUDA_LEASE_KEY, "SW_CI_CUDA_EXECUTION_ACTIVE");
+  assert.match(await read("./ci/windows_cuda_execution.py"), /ACTIVE_KEY = "SW_CI_CUDA_EXECUTION_ACTIVE"/);
+  assert.match(script, /if \(phase === "run"\) fact\(env\[CUDA_LEASE_KEY\]/);
+  assert.match(script, /assertTrained\(completed, library, metadata, mode, receipt\.worker\.gpuId, workerId\)/, "results carry backend_label(gpu_id), not the lane name");
+});
+
+test("the leased card is the largest by total memory, lowest index on a tie, never by free memory", () => {
+  const cards = parseCudaCards("0, GPU-aaaa-1, RTX A, 49140\n1, GPU-bbbb-2, RTX B, 97887\n2, GPU-cccc-3, RTX C, 97887\n");
+  assert.equal(chooseCudaCard(cards).index, "1");
+  assert.throws(() => parseCudaCards(""), /no usable CUDA card/);
+  assert.throws(() => parseCudaCards("0, not-a-uuid, X, 100"), /no usable CUDA card/);
 });

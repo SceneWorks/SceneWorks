@@ -71,6 +71,10 @@ jobs:
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
+      - name: Build the API and worker at this commit
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: H3I_APP_WEIGHTS="$HOME/sceneworks-rw-weights" node scripts/minimax-h3-image-train-app-lifecycle.mjs --build-only
       - name: Install, train t2i and edit LoRAs, and render with them through the owned API and MLX worker
         env:
           H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
@@ -123,7 +127,15 @@ jobs:
         run: |
           node scripts/select-windows-cargo-cache.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
-      - name: Install, train t2i and edit LoRAs, and render with them through the owned API and Candle worker
+      # The card is chosen from fixed inventory before the build, and the lifecycle then runs as the
+      # child of the host-global exact-UUID CUDA lease on that card (strict idle), so it never
+      # trains on a card another real-weight job holds. The build itself takes no GPU lease.
+      - name: Choose the CUDA card to lease
+        shell: powershell
+        run: |
+          node scripts/minimax-h3-image-train-app-lifecycle.mjs --select-cuda-card
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA card selection failed' }
+      - name: Build the API and Candle worker at this commit
         shell: cmd
         env:
           H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
@@ -133,12 +145,22 @@ jobs:
           set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
           set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
           set "PATH=%CUDA_PATH%\bin;%PATH%"
-          node scripts/minimax-h3-image-train-app-lifecycle.mjs
+          node scripts/minimax-h3-image-train-app-lifecycle.mjs --build-only
+      - name: Install, train t2i and edit LoRAs, and render with them through the owned API and Candle worker under the CUDA lease
+        shell: cmd
+        env:
+          H3I_APP_OUTPUT: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          set "PATH=%CUDA_PATH%\bin;%PATH%"
+          python -I scripts/ci/windows_cuda_execution.py --actor minimax-h3-image-train-app --budget-minutes 660 --physical-indices %H3I_APP_CUDA_INDEX% -- node scripts\minimax-h3-image-train-app-lifecycle.mjs
       - name: Retain the receipt, service logs, inputs and renders
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: minimax-h3-image-train-app-cuda-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          path: |
+            ${{ runner.temp }}/h3i-train-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-minimax-h3-image-train-app/
           if-no-files-found: error
           retention-days: 30

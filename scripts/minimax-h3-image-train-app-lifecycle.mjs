@@ -9,7 +9,7 @@
 // Reuses the Qwen-Image 2.1 (sc-24163) and FLUX3 (sc-26234) app-lifecycle helpers unchanged.
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rename, stat, statfs, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, cp, mkdir, open, readFile, readdir, realpath, rename, stat, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -195,12 +195,22 @@ async function ownedFile(file, root) {
   return resolved;
 }
 
-// The CUDA card with the most free memory, in PCI bus order (the inference trainer lane's rule).
-async function selectCudaCard() {
-  const { stdout } = await execFile("nvidia-smi", ["--query-gpu=index,uuid,name,memory.total,memory.free", "--format=csv,noheader,nounits"], { timeout: 30_000, windowsHide: true });
-  const cards = stdout.trim().split(/\r?\n/).map((line) => { const [index, uuid, name, total, free] = line.split(",").map((value) => value.trim()); return { index, uuid, name, total_mib: Number(total), free_mib: Number(free) }; });
-  fact(cards.length > 0 && cards.every((card) => /^[0-9]+$/.test(card.index) && Number.isFinite(card.free_mib)), "nvidia-smi reported no usable CUDA card");
-  return { selected: cards.reduce((best, card) => (card.free_mib > best.free_mib ? card : best)), cards };
+// The env var scripts/ci/windows_cuda_execution.py sets for the child it launches under its lease.
+export const CUDA_LEASE_KEY = "SW_CI_CUDA_EXECUTION_ACTIVE";
+
+export function parseCudaCards(stdout) {
+  const cards = stdout.trim().split(/\r?\n/).map((line) => { const [index, uuid, name, total] = line.split(",").map((value) => value.trim()); return { index, uuid, name, total_mib: Number(total) }; });
+  fact(cards.length > 0 && cards.every((card) => /^[0-9]+$/.test(card.index) && /^GPU-[A-Za-z0-9-]+$/.test(card.uuid) && Number.isFinite(card.total_mib)), "nvidia-smi reported no usable CUDA card");
+  return cards;
+}
+// The card the lease is taken on: the largest total memory, lowest PCI index on a tie. Chosen from
+// fixed inventory (never current free memory), so the strict-idle lease waits for that card.
+export function chooseCudaCard(cards) {
+  return cards.reduce((best, card) => (card.total_mib > best.total_mib ? card : best));
+}
+async function cudaCards() {
+  const { stdout } = await execFile("nvidia-smi", ["--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader,nounits"], { timeout: 30_000, windowsHide: true });
+  return parseCudaCards(stdout);
 }
 
 function childEnvironment(env, { backend, weights, card }) {
@@ -217,7 +227,9 @@ function childEnvironment(env, { backend, weights, card }) {
   return child;
 }
 
-export async function runLifecycle(env = process.env) {
+// phase "build" compiles the API/worker binary into the attempt's output (no GPU, no lease);
+// phase "run" (on Windows, only as the child of the CUDA lease) runs the whole app lifecycle.
+export async function runLifecycle(env = process.env, { phase = "run" } = {}) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const { backend, tier } = assertSelection(env);
   fact(env.H3I_APP_OUTPUT && env.H3I_APP_WEIGHTS && env.RUNNER_TEMP, "H3I_APP_OUTPUT, H3I_APP_WEIGHTS and RUNNER_TEMP required");
@@ -227,7 +239,9 @@ export async function runLifecycle(env = process.env) {
   await mkdir(evidence, { recursive: true }); await mkdir(logs, { recursive: true });
   const receipt = { schema_version: 1, kind: "minimax_h3_image_train_app_lifecycle", status: "running", started_at: new Date().toISOString(), identity: { backend, tier, source_sha: env.H3I_APP_SOURCE_SHA, inference_sha: env.H3I_APP_INFERENCE_SHA, runner_name: env.RUNNER_NAME, run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT }, settings: { training: TRAINING, render: RENDER, captions: CAPTIONS, dataset: "one public synthetic 1024x1024 image per mode (edit: one reference + target)" }, events: [], cases: [] };
   const secrets = new Set(Object.entries(env).filter(([key, value]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(key) && value?.length >= 8).map(([, value]) => value));
-  const save = async () => { await writeFile(path.join(evidence, "receipt.tmp"), redactSensitiveText(JSON.stringify(receipt, null, 2) + "\n", secrets)); await rename(path.join(evidence, "receipt.tmp"), path.join(evidence, "receipt.json")); };
+  const receiptName = phase === "build" ? "build-receipt.json" : "receipt.json";
+  receipt.phase = phase;
+  const save = async () => { await writeFile(path.join(evidence, "receipt.tmp"), redactSensitiveText(JSON.stringify(receipt, null, 2) + "\n", secrets)); await rename(path.join(evidence, "receipt.tmp"), path.join(evidence, receiptName)); };
   await save();
   const children = [], handles = [], controller = new AbortController();
   let endpoint;
@@ -263,7 +277,12 @@ export async function runLifecycle(env = process.env) {
       const hardware = JSON.parse((await execFile("system_profiler", ["SPHardwareDataType", "-json"], { timeout: 30_000 })).stdout).SPHardwareDataType;
       receipt.identity.hardware = hardware.map(({ chip_type, physical_memory, machine_model }) => ({ chip_type, physical_memory, machine_model }));
     } else {
-      const cards = await selectCudaCard(); card = cards.selected; receipt.identity.cuda = cards;
+      // The workflow chose the card before the build and leased exactly that UUID for this run.
+      const cards = await cudaCards();
+      card = cards.find((item) => item.index === env.H3I_APP_CUDA_INDEX);
+      fact(card, `H3I_APP_CUDA_INDEX ${env.H3I_APP_CUDA_INDEX} names no CUDA card`);
+      if (phase === "run") fact(env[CUDA_LEASE_KEY], "the CUDA lifecycle must run as the child of scripts/ci/windows_cuda_execution.py");
+      receipt.identity.cuda = { selected: card, cards, lease_holder_pid: env[CUDA_LEASE_KEY] ?? null };
     }
     // Disk: the persistent task-owned weights root plus this attempt's build and state.
     const weights = path.resolve(env.H3I_APP_WEIGHTS), hub = path.join(weights, "hub");
@@ -272,14 +291,18 @@ export async function runLifecycle(env = process.env) {
     const entry = JSON.parse(catalog).models.find((model) => model.id === MODEL_ID); fact(entry, "shipped catalog entry missing");
     const rows = tierRows(entry, tier, process.platform);
     const fs = await statfs(weights, { bigint: true });
-    receipt.disk = assertDiskBudget({ freeBytes: Number(fs.bavail * fs.bsize), missingBytes: await missingTierBytes(hub, rows), includeBuild: true });
+    receipt.disk = assertDiskBudget({ freeBytes: Number(fs.bavail * fs.bsize), missingBytes: await missingTierBytes(hub, rows), includeBuild: phase === "build" });
     receipt.identity.weights_root = weights; await save();
-    // Build the ordinary API/worker binary at this commit.
+    // The ordinary API/worker binary at this commit, built by the build phase of this job.
     const target = path.join(output, "target");
-    const features = backend === "cuda" ? ["--features", "backend-candle"] : [];
-    await checked("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api", ...features, "--message-format=json-render-diagnostics"], { ...env, CARGO_TARGET_DIR: target }, "build");
-    fact(await git("status", "--porcelain") === "", "build changed the checkout");
     const binary = path.join(target, "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+    if (phase === "build") {
+      const features = backend === "cuda" ? ["--features", "backend-candle"] : [];
+      await checked("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api", ...features, "--message-format=json-render-diagnostics"], { ...env, CARGO_TARGET_DIR: target }, "build");
+      fact(await git("status", "--porcelain") === "", "build changed the checkout");
+      receipt.identity.binary_sha256 = await hash(binary); receipt.status = "built";
+      return receipt;
+    }
     receipt.identity.binary_sha256 = await hash(binary);
     const identity = attemptIdentity(output), { state, workerId } = identity;
     await mkdir(path.join(state, "data", "projects"), { recursive: true }); await mkdir(path.join(state, "credentials")); await cp(path.join(root, "config"), path.join(state, "config"), { recursive: true });
@@ -342,7 +365,9 @@ export async function runLifecycle(env = process.env) {
       const library = await wait(async () => (await must("GET", `/api/v1/loras?projectId=${project.id}`)).find((item) => item.id === completed.result?.loraId), 120, "LoRA library registration");
       const adapter = await ownedFile(completed.result.outputPath, state), metadata = await safetensorsMetadata(adapter);
       Object.assign(record, { completed_job: completed, library_entry: library, adapter: { file: path.basename(adapter), bytes: (await stat(adapter)).size, sha256: await hash(adapter), metadata } });
-      record.training = assertTrained(completed, library, metadata, mode, backend, workerId); await save();
+      // The worker labels results with its device id (`backend_label(gpu_id)`): "mlx", or the
+      // CUDA card index on Candle.
+      record.training = assertTrained(completed, library, metadata, mode, receipt.worker.gpuId, workerId); await save();
       // 4. Render through the Image Studio route with the LoRA, and the same request without it.
       record.renders = [];
       const pngs = [];
@@ -383,15 +408,22 @@ export async function runLifecycle(env = process.env) {
     // Keep the owned service logs with the evidence (the receipt redacts tokens; logs never see one).
     for (const name of await readdir(logs).catch(() => [])) if (name !== "build.log") await copyFile(path.join(logs, name), path.join(evidence, name)).catch(() => {});
   }
-  fact(receipt.status === "passed", "owned process cleanup failed");
+  fact(receipt.status === (phase === "build" ? "built" : "passed"), "owned process cleanup failed");
   return receipt;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  fact(args.length === 0 || (args.length === 1 && args[0] === "--preflight-only"), "only --preflight-only is supported");
+  fact(args.length === 0 || (args.length === 1 && ["--preflight-only", "--select-cuda-card", "--build-only"].includes(args[0])), "only --preflight-only, --select-cuda-card or --build-only is supported");
   const run = async () => {
     if (args[0] === "--preflight-only") { assertSelection(process.env); console.log("preflight passed"); return; }
+    if (args[0] === "--select-cuda-card") {
+      fact(process.env.GITHUB_ENV, "GITHUB_ENV required");
+      const card = chooseCudaCard(await cudaCards());
+      await appendFile(process.env.GITHUB_ENV, `H3I_APP_CUDA_INDEX=${card.index}\n`);
+      console.log(`selected CUDA card ${card.index} ${card.uuid} ${card.name} ${card.total_mib} MiB`); return;
+    }
+    if (args[0] === "--build-only") { const receipt = await runLifecycle(process.env, { phase: "build" }); console.log(`${receipt.status}: ${receipt.identity.binary_sha256}`); return; }
     if (process.platform === "darwin" && await enterMacMetalExecution(11 * 60 * 60)) return;
     const receipt = await runLifecycle(process.env);
     console.log(`${receipt.status}: ${receipt.cases.length} trained LoRAs, ${receipt.cases.reduce((sum, item) => sum + (item.renders?.length ?? 0), 0)} renders`);
