@@ -1459,7 +1459,7 @@ mod tests {
         let options = VideoOptions::bind(&BindingInput::new(&authored, &effective)).unwrap();
         assert_eq!(options.steps.unwrap().value, 8);
         assert_eq!(options.guidance_scale.unwrap().value, 3.5);
-        assert_eq!(options.no_audio.unwrap().value, true);
+        assert!(options.no_audio.unwrap().value);
         assert_eq!(options.reference_image_resize_mode.unwrap().value, "match");
         assert!(options.vae_decoder.is_none());
 

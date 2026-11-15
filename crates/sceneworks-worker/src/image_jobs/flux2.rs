@@ -57,6 +57,7 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
@@ -725,10 +726,13 @@ pub(super) async fn generate_flux2_edit_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
@@ -1421,10 +1425,13 @@ pub(super) async fn generate_flux2_dev_control_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling = super::sampling::explicit_sampling_request(request);
     // sc-20799: this lane wires no PiD decode path at all, so `advanced.usePid` was discarded here

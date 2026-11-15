@@ -2660,8 +2660,7 @@ pub(super) async fn generate_video(
         settings,
         job,
         backend,
-        options,
-        portable_aux,
+        (options, portable_aux),
         input,
         crate::inference_runtime::load,
     )
@@ -2686,13 +2685,16 @@ pub(super) async fn generate_video_using(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
-    options: &sceneworks_core::video_request::VideoOptions,
-    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
+    resolved: (
+        &sceneworks_core::video_request::VideoOptions,
+        &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
+    ),
     mut input: VideoGenInput,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
+    let (options, portable_aux) = resolved;
     if input.veda.as_ref().is_some_and(|veda| veda.enabled) {
         if portable_aux.has_paths() {
             let path = portable_aux.path("veda_predictor").ok_or_else(|| {

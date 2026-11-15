@@ -23,13 +23,13 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::JsonObject;
-use crate::Path;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
@@ -184,10 +184,13 @@ pub(super) async fn generate_sensenova_edit_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;

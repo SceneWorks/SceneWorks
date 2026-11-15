@@ -94,15 +94,14 @@ pub(crate) fn resolve_lane_request_controls(
             })
         })
         .transpose()?;
-    if controls::supports_scheduler_shift(&request.model_manifest_entry) {
-        if request
+    if controls::supports_scheduler_shift(&request.model_manifest_entry)
+        && request
             .advanced_f64("schedulerShift")
             .is_some_and(|shift| !shift.is_finite() || shift <= 0.0)
-        {
-            return Err(refuse(
-                "advanced.schedulerShift must be a finite value > 0".to_owned(),
-            ));
-        }
+    {
+        return Err(refuse(
+            "advanced.schedulerShift must be a finite value > 0".to_owned(),
+        ));
     }
     if cfg_interval.is_some() && !caps.supports_cfg_interval {
         return Err(refuse(format!(
@@ -416,7 +415,8 @@ mod tests {
             "advanced": advanced,
             "modelManifestEntry": { "id": "m", "image": image },
         });
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        let payload = payload.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     fn sized_request(candle: Value) -> ImageRequest {
@@ -426,7 +426,8 @@ mod tests {
             "prompt": "x",
             "modelManifestEntry": { "id": "iris_3b", "candle": candle },
         });
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        let payload = payload.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     /// sc-25684: one declared per-megapixel term charges every image-megapixel beyond the one 1024²

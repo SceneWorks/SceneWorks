@@ -27,6 +27,7 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
@@ -542,10 +543,13 @@ pub(super) async fn generate_krea_control_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let weights_dir = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(

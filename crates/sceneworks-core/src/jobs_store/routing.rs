@@ -410,19 +410,6 @@ pub(super) fn route_nested_array_nonempty(
     )
 }
 
-/// Nested equivalent of [`has_nonempty_or_malformed_array`]. A malformed parent object or child
-/// carrier fails closed; a missing/null parent and a missing/null/empty child mean "not supplied".
-#[cfg(test)]
-pub(super) fn has_nonempty_or_malformed_nested_array(
-    payload: &Map<String, Value>,
-    object_key: &str,
-    array_key: &str,
-) -> bool {
-    debug_assert_eq!(object_key, "advanced");
-    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    route_nested_array_material(&facts, array_key)
-}
-
 pub(super) fn route_nested_array_material(
     facts: &crate::resolved_options::RouteOptionFacts,
     array_key: &str,
@@ -436,21 +423,6 @@ pub(super) fn route_nested_array_material(
         crate::resolved_options::RouteField::Valid(1..)
             | crate::resolved_options::RouteField::Invalid
     )
-}
-
-/// True when an optional nested carrier is present with any non-null value. A malformed parent
-/// object also fails closed. These carriers are emitted only when their feature is active, so an
-/// empty string/object or wrong scalar is malformed rather than an alternate representation of
-/// "not supplied"; callers must not silently ignore it.
-#[cfg(test)]
-pub(super) fn has_nonnull_or_malformed_nested_carrier(
-    payload: &Map<String, Value>,
-    object_key: &str,
-    carrier_key: &str,
-) -> bool {
-    debug_assert_eq!(object_key, "advanced");
-    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    route_carrier_material(&facts, carrier_key)
 }
 
 pub(super) fn route_carrier_material(
@@ -472,20 +444,6 @@ pub(super) fn route_carrier_material(
         "convRot" => facts.conv_rot.is_present_nonnull(),
         _ => panic!("undeclared advanced route carrier: {carrier_key}"),
     }
-}
-
-/// True when an optional advanced numeric knob is present but is neither a finite JSON number nor a
-/// finite numeric string. Missing and null mean "use the model default"; malformed authored values
-/// fail closed so a submitted control can never be silently replaced by that default.
-#[cfg(test)]
-pub(super) fn has_malformed_optional_nested_number(
-    payload: &Map<String, Value>,
-    object_key: &str,
-    number_key: &str,
-) -> bool {
-    debug_assert_eq!(object_key, "advanced");
-    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    route_number_malformed(&facts, number_key)
 }
 
 pub(super) fn route_number_malformed(
@@ -551,15 +509,6 @@ pub(super) fn probe_image_precision_options_from_facts(
         RouteField::Invalid => return Err("advanced.convRot is malformed".to_owned()),
     };
     Ok(options)
-}
-
-/// Unsupported structural carriers for Krea's reference edit lane. LoRAs, quant selection,
-/// guidance, and text-style controls are deliberately allowed; mask/control/pose/phase inputs have
-/// no consumer in the edit provider and therefore fail closed.
-#[cfg(test)]
-pub(super) fn krea_edit_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
-    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    krea_edit_has_unsupported_carrier_with_facts(payload, &facts)
 }
 
 pub(super) fn krea_edit_has_unsupported_carrier_with_facts(

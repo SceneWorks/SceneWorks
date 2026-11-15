@@ -37,6 +37,7 @@ use super::CandleBaseEvidence;
 use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
@@ -44,7 +45,6 @@ use super::Quant;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::JsonObject;
-use crate::Path;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
@@ -546,10 +546,13 @@ pub(super) async fn generate_krea_multiphase_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
 

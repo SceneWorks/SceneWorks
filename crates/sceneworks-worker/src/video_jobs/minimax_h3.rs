@@ -1633,8 +1633,7 @@ pub(super) async fn generate_minimax_h3_using(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )
@@ -1867,8 +1866,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )

@@ -1444,8 +1444,7 @@ async fn execute_candle_svd_route(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )
@@ -1625,8 +1624,7 @@ async fn execute_candle_registry_video_route(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )

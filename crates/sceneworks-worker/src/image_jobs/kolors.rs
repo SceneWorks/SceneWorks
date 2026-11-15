@@ -28,6 +28,7 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
@@ -379,10 +380,13 @@ pub(super) async fn generate_kolors_control_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let kolors = mlx_model("kolors")
         .ok_or_else(|| WorkerError::InvalidPayload("kolors model row missing".to_owned()))?;

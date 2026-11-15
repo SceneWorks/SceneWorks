@@ -596,8 +596,7 @@ impl RuntimeSourceGuard {
                 job_type,
                 payload,
                 settings,
-                &plans,
-                &converted_co_requirements,
+                (&plans, &converted_co_requirements),
                 &source_options,
                 cancellation,
             )?;
@@ -1297,11 +1296,8 @@ fn selected_portable_aux_ids(
     backend: &str,
     options: &SourceOptionFacts,
 ) -> WorkerResult<Vec<String>> {
-    let auxiliary = options.effective.auxiliary_selection();
-    let mut ids =
-        required_portable_aux_source_ids_resolved(job_type, payload, entry, backend, &auxiliary)
-            .map_err(invalid_binding)?;
-    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+    let mut auxiliary = options.effective.auxiliary_selection();
+    let plan = if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
             payload
                 .get("plan")
@@ -1309,6 +1305,23 @@ fn selected_portable_aux_ids(
                 .ok_or_else(|| invalid_binding("training plan is absent"))?,
         )
         .map_err(|error| invalid_binding(error.to_string()))?;
+        let entry_id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_binding("model entry lacks id"))?;
+        let training = sceneworks_core::resolved_options::IrisTrainingOptions::bind(
+            &sceneworks_core::resolved_options::BindingInput::new(payload, payload),
+        )
+        .map_err(|error| invalid_binding(error.to_string()))?;
+        auxiliary.training = Some(training.auxiliary_selection(&plan, entry_id));
+        Some(plan)
+    } else {
+        None
+    };
+    let mut ids =
+        required_portable_aux_source_ids_resolved(job_type, payload, entry, backend, &auxiliary)
+            .map_err(invalid_binding)?;
+    if let Some(plan) = plan {
         if entry.get("id").and_then(serde_json::Value::as_str)
             == Some(plan.target.base_model.as_str())
         {
@@ -2665,11 +2678,11 @@ fn verify_portable_route(
     job_type: &JobType,
     payload: &JsonObject,
     settings: &Settings,
-    plans: &[EntryPlan],
-    converted_co_requirements: &[ExternalArtifactRequirement],
+    prepared_sources: (&[EntryPlan], &[ExternalArtifactRequirement]),
     options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
+    let (plans, converted_co_requirements) = prepared_sources;
     route
         .validate()
         .map_err(|error| invalid_binding(error.to_string()))?;
@@ -5878,7 +5891,7 @@ mod tests {
         let interrupted = cache_entry.join("staging-interrupted");
         std::fs::create_dir_all(&interrupted).unwrap();
         std::fs::write(interrupted.join("partial"), b"incomplete").unwrap();
-        let payload = json!({
+        let payload = json!({"projectId":"p", "prompt":"x",
             "model":"m", "modelManifestEntry":{"id":"m", "downloads":[],
                 "paths":{"model":second}}
         })
@@ -5955,7 +5968,7 @@ mod tests {
         let mut model = local_binding("modelManifestEntry", "m", &selected, None);
         model.variant = "local".to_owned();
         let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
-        let payload = json!({"model":"m", "advanced":{"modelPath":substituted},
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "advanced":{"modelPath":substituted},
             "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":selected}}})
         .as_object()
         .unwrap()
@@ -6072,17 +6085,17 @@ mod tests {
             "baseModelManifestEntry":{"id":"sdxl", "downloads":[], "paths":{"model":source}},
             "plan":{
                 "schemaVersion":1, "planVersion":1, "jobId":"job-1",
-                "target":{"targetId":"base_lora", "kernel":"sdxl_lora", "family":"sdxl",
+                "target":{"targetId":"sdxl_lora", "kernel":"sdxl_lora", "family":"sdxl",
                     "modality":"image", "outputKind":"lora", "baseModel":"sdxl",
                     "baseModelPath":"/other-host/models/base"},
                 "dataset":{"datasetId":"ds", "datasetVersion":1,
                     "rootPath":"/other-host/dataset", "items":[]},
-                "config":{"rank":16, "alpha":32, "learningRate":0.0001, "steps":1,
-                    "batchSize":1, "gradientAccumulation":1, "resolution":512,
+                "config":{"rank":16, "alpha":32, "learningRate":0.0001, "steps":200,
+                    "batchSize":1, "gradientAccumulation":1, "resolution":768,
                     "saveEvery":1, "seed":1, "optimizer":"adamw8bit", "advanced":{}},
                 "output":{"loraId":"lora", "outputDir":"/other-host/output",
                     "fileName":"lora.safetensors", "format":"safetensors", "triggerWords":[]},
-                "provenance":{"datasetId":"ds", "datasetVersion":1, "targetId":"base_lora",
+                "provenance":{"datasetId":"ds", "datasetVersion":1, "targetId":"sdxl_lora",
                     "baseModel":"sdxl", "configSnapshot":{}, "outputLoraId":"lora",
                     "sourceJobId":"job-1", "createdAt":"2026-11-07T00:00:00Z"}
             }
@@ -6338,7 +6351,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let payload = json!({
+        let payload = json!({"projectId":"p", "prompt":"x",
             "model":"flux_dev", "mode":"character_image", "referenceAssetId":"reference",
             "modelManifestEntry":{"id":"flux_dev", "downloads":[], "paths":{"model":model}}
         })
@@ -6525,7 +6538,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let payload = json!({"model":"m", "modelManifestEntry":{
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "modelManifestEntry":{
             "id":"m", "downloads":[], "paths":{"model":model},
             "components":[{"id":"text_encoder", "path":changed}]
         }})
@@ -6561,7 +6574,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let payload = json!({"model":"m",
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m",
             "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
             "baseModelManifestEntry":{"id":"base", "downloads":[], "paths":{"model":base}}
         })
@@ -6650,6 +6663,9 @@ mod tests {
     fn portable_binding_uses_adapter_slot_even_when_ids_repeat() {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
+        let project = sceneworks_core::project_store::ProjectStore::new(data.clone(), "worker")
+            .create_project("portable adapter slot")
+            .unwrap();
         let model = data.join("models/imports/demo/model.safetensors");
         let first = data.join("loras/first.safetensors");
         let second = data.join("loras/second.safetensors");
@@ -6697,7 +6713,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"m", "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
+        let payload = json!({"projectId":project.id, "prompt":"x", "model":"m", "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
             "loras":[{"id":"same", "path":first}, {"id":"same", "path":second}]
         }).as_object().unwrap().clone();
         RuntimeSourceGuard::begin_with_binding(
@@ -7037,8 +7053,7 @@ mod tests {
                 &JobType::ImageGenerate,
                 &payload,
                 &worker_settings,
-                &[],
-                &[],
+                (&[], &[]),
                 &SourceOptionFacts::syntax(&payload),
                 None,
             )
@@ -7206,7 +7221,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"m", "variant":"q4", "modelManifestEntry":{
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "variant":"q4", "modelManifestEntry":{
             "id":"m", "downloads":[{"provider":"huggingface", "repo":"guardfx/glob",
                 "revision":REV_A, "variant":"q4", "files":["q4/*"]}]
         }})

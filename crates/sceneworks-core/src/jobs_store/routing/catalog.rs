@@ -2066,13 +2066,6 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
     CANDLE_ROUTED_TRAINING_KERNELS.contains(kernel)
 }
 
-/// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
-#[cfg(test)]
-pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
-    let route = crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan);
-    moss_training_plan_is_supported_with_facts(plan, &route)
-}
-
 pub(crate) fn moss_training_plan_is_supported_with_facts(
     plan: &Map<String, Value>,
     route: &crate::resolved_options::TrainingRouteFacts,
@@ -3562,7 +3555,7 @@ mod tests {
     /// passed its own tests, because each layer was correct in isolation. sc-15328 itself: the
     /// manifest advertised `loraCompatibility.families = ["mage-flow"]` on the three Mage generation
     /// variants, the picker therefore offered a trained Mage adapter as "installed and compatible",
-    /// `mage_flow_mlx_eligible` refused any payload with a non-empty `loras`, and every Mage
+    /// the old Mage Flow route predicate refused any payload with a non-empty `loras`, and every Mage
     /// `ModelCaps` row is `candle_lora: false`. No lane claimed the job. It did not fail — it sat
     /// `queued` / "Waiting for an available worker." **forever**, next to an idle mlx worker, with
     /// no error and no terminal state. That is strictly worse than a rejection.

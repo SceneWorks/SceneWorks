@@ -29,6 +29,14 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+/// The destination shared by a native image route's artifact writer and receipt.
+#[cfg(native_lane)]
+#[derive(Clone, Copy)]
+struct ImageOutputTarget<'a> {
+    project_path: &'a std::path::Path,
+    backend: &'a str,
+}
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.

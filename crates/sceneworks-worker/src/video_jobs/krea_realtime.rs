@@ -830,8 +830,7 @@ pub(super) async fn generate_krea_realtime_using(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )

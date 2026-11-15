@@ -76,6 +76,7 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 #[cfg(not(target_os = "macos"))]
 use super::ImagePlan;
 use super::ImageRequest;
@@ -978,10 +979,13 @@ pub(super) async fn generate_krea_imported_control_stream(
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedControlSources>,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
     let PreparedKreaImportedControlSources {
@@ -1243,10 +1247,13 @@ pub(super) async fn generate_krea_imported_control_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let dit_pin = resolve_imported_krea_dit_pin(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
@@ -2164,10 +2171,13 @@ pub(super) async fn generate_krea_imported_stream(
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedSources>,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
     let PreparedKreaImportedSources {

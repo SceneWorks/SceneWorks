@@ -694,8 +694,7 @@ pub(super) async fn generate_mochi_using(
         settings,
         job,
         backend,
-        request.options(),
-        &request.portable_aux,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )

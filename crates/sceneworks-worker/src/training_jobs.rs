@@ -1402,7 +1402,7 @@ fn validate_training_target_config_resolved(
     // refused for a trainer whose descriptor does not declare the technique (E3), and — VAE anchor
     // — for a family with no cataloged tiny x0 decoder / — E-LatentLPIPS — for a family with no
     // published weights. Installed weights are checked in `apply_latent_perceptual`.
-    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques, &options)?;
+    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques, options)?;
 
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
@@ -2248,7 +2248,7 @@ fn apply_face_losses_resolved(
     }
     if let Some(lm) = landmark {
         config.face_landmark_loss = gen_core::FaceLandmarkLossConfig {
-            schedule: schedule(&lm),
+            schedule: schedule(lm),
             model_dir: Some(installed_aux_model_dir(
                 settings,
                 &FACEMESH_V2_MODEL,

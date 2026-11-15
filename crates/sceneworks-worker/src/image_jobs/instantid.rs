@@ -30,6 +30,7 @@ use super::BodyPoint;
 use super::BodyPoint;
 use super::GenerationOutput;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 #[cfg(not(target_os = "macos"))]
@@ -1129,10 +1130,13 @@ pub(super) async fn generate_instantid_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     execution: &super::conditioning::ResolvedImageExecution,
-    project_path: &Path,
-    backend: &str,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sdxl_base = resolve_instantid_sdxl_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("InstantID base (RealVisXL) not found".to_owned())
