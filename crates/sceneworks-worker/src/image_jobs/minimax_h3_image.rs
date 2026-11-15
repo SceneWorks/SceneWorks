@@ -593,7 +593,7 @@ mod tests {
     fn the_training_load_spec_resolves_the_render_tier_and_refuses_an_uninstalled_one() {
         let temporary = tempfile::tempdir().unwrap();
         let (data, _guard) = isolated_cache(temporary.path());
-        let mut entry = shipped_entry();
+        let entry = shipped_entry();
         let refused = training_load_spec_in(&entry, &data, None).unwrap_err();
         assert!(
             refused.to_string().contains("needs an installed tier"),
