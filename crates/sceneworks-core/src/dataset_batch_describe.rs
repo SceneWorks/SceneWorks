@@ -1,6 +1,8 @@
 //! Shared contract of the `dataset_batch_describe` job (SW-7082, SW-7083): the values the API
 //! validates a request against, the scheduler routes it by, and the worker describes with, kept in
-//! one place so the three cannot drift.
+//! one place so the three cannot drift. With a "Fit to" target the worker also condenses each
+//! image's seven fields into one prompt that fits the target image model's prompt token limit; the
+//! bounds of that step live here too.
 
 use serde_json::{Map, Value};
 
@@ -22,6 +24,65 @@ pub const DESCRIBE_FIELDS: [&str; 7] = [
     "lighting",
     "environment",
 ];
+
+/// Longest text kept in, or accepted for, one description field. The worker caps each parsed
+/// field at this; a condense-only request (whose rows the user may have edited) is refused above it.
+pub const MAX_DESCRIBE_FIELD_CHARS: usize = 16_000;
+
+/// Characters the batch block's `[W:H]` line and its newline take at most (`[21:9]` plus `\n`,
+/// with one to spare). The condensed prompt shares the route's character limit with that line.
+pub const RATIO_LINE_CHARS: usize = 8;
+
+/// Characters the batch formatter adds around each person label when it wraps it as a `{{label}}`
+/// batch variable.
+pub const LABEL_WRAP_CHARS: usize = 4;
+
+/// The share of the target model's limit a condensed prompt must stay within when its size is
+/// only estimated (counted with the describer's own tokenizer, not the target's): the margin
+/// covers the difference between the two tokenizers.
+pub const CONDENSE_ESTIMATE_PERCENT: usize = 85;
+
+/// How much stricter the one retry's word target is than the first attempt's, as a percentage.
+pub const CONDENSE_RETRY_PERCENT: usize = 85;
+
+/// The prompt context, in text-encoder tokens, a catalog entry declares for its image model
+/// (`image.maxPromptTokens`); `None` when it declares none. The "Fit to" targets are exactly the
+/// entries for which this is `Some`.
+pub fn prompt_token_limit(entry: &Value) -> Option<usize> {
+    entry
+        .get("image")?
+        .get("maxPromptTokens")?
+        .as_u64()
+        .filter(|tokens| *tokens > 0)
+        .and_then(|tokens| usize::try_from(tokens).ok())
+}
+
+/// The token count a condensed prompt must not exceed for a model with `limit`: the limit itself
+/// when the count is exact (measured with the target model's own tokenizer, template included),
+/// [`CONDENSE_ESTIMATE_PERCENT`] of it when the count is an estimate.
+pub fn condense_token_bound(limit: usize, exact: bool) -> usize {
+    if exact {
+        limit
+    } else {
+        limit * CONDENSE_ESTIMATE_PERCENT / 100
+    }
+}
+
+/// The character count a condensed prompt's batch block must not exceed: the route's prompt
+/// limit less the `[W:H]` line.
+pub fn condense_char_bound() -> usize {
+    crate::MAX_PROMPT_CHARS - RATIO_LINE_CHARS
+}
+
+/// The word count the condensing rewrite is told to stay under for a token and character bound.
+/// English prose runs about 4 words to 3 tokens and about 6 characters a word with its space, so
+/// the target is the tighter of the two bounds expressed in words, less a 10% margin so a reply
+/// that overshoots its word count a little still fits.
+pub fn condense_word_target(token_bound: usize, char_bound: usize) -> usize {
+    let by_tokens = token_bound * 3 / 4;
+    let by_chars = char_bound / 6;
+    by_tokens.min(by_chars) * 9 / 10
+}
 
 /// Longest describing instruction a Vision Captioner request may carry, in characters. The default
 /// instruction is about 9,500 characters; this leaves room for a much longer edit without letting
@@ -125,6 +186,32 @@ mod tests {
         );
         assert_eq!(max_describe_prompt_chars(Some(JOYCAPTION_REPO)), 3_000);
         assert_eq!(max_describe_prompt_chars(None), 32_000);
+    }
+
+    #[test]
+    fn a_fit_to_limit_is_the_declared_prompt_token_count_only() {
+        use serde_json::json;
+        let declared = json!({ "image": { "maxPromptTokens": 1024 } });
+        assert_eq!(prompt_token_limit(&declared), Some(1024));
+        for undeclared in [
+            json!({}),
+            json!({ "image": {} }),
+            json!({ "image": { "maxPromptTokens": 0 } }),
+            json!({ "image": { "maxPromptTokens": "1024" } }),
+        ] {
+            assert_eq!(prompt_token_limit(&undeclared), None, "{undeclared}");
+        }
+    }
+
+    #[test]
+    fn an_estimated_count_keeps_a_margin_and_the_word_target_obeys_both_bounds() {
+        assert_eq!(condense_token_bound(1024, true), 1024);
+        assert_eq!(condense_token_bound(1024, false), 870);
+        assert_eq!(condense_char_bound(), 3_992);
+        // Krea 2: the 4,000-character route limit binds before 1,024 tokens of English.
+        assert_eq!(condense_word_target(1024, condense_char_bound()), 598);
+        // A small token context binds before the character limit.
+        assert_eq!(condense_word_target(128, condense_char_bound()), 86);
     }
 
     #[test]

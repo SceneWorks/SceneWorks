@@ -218,13 +218,15 @@ export function nativeResolutionHint(model) {
     : null;
 }
 
-// sc-24215: `image.maxPromptTokens` — the engine reads that many prompt tokens and truncates the
-// rest (never refused; the image records a `prompt_truncated` warning).
+// sc-24215: `image.maxPromptTokens` — the engine reads that many prompt tokens. What it does with
+// more is `image.promptOverflow` (SW-7163): `truncate` (the default; the image records a
+// `prompt_truncated` warning) or `refuse` (Krea 2 fails the render with a length error).
 export function promptTokenLimitHint(model) {
   const tokens = model?.image?.maxPromptTokens;
-  return Number.isInteger(tokens) && tokens > 0
-    ? `${model.name} reads up to ${tokens} prompt tokens; anything longer is truncated and the image is flagged.`
-    : null;
+  if (!(Number.isInteger(tokens) && tokens > 0)) return null;
+  return model.image.promptOverflow === "refuse"
+    ? `${model.name} reads up to ${tokens.toLocaleString("en-US")} prompt tokens; a longer prompt is refused.`
+    : `${model.name} reads up to ${tokens} prompt tokens; anything longer is truncated and the image is flagged.`;
 }
 
 // The patch-grid hint (sc-25681): `image.patchGridVisibleBelow` (Iris-3B, 1024) — informational,

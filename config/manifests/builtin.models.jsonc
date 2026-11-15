@@ -6490,7 +6490,12 @@
         "supportsGuidance": true,
         "supportsNegativePrompt": true,
         "negativePromptRequiresGuidance": true,
-        "guidanceOffValue": 0
+        "guidanceOffValue": 0,
+        // SW-7163: the condition encoder's prompt context in tokens, its 34-token template prefix
+        // included (mlx-gen-krea / candle-gen-krea `MAX_TEXT_TOKENS`). The engine REFUSES a longer
+        // prompt (sc-9047) rather than truncating it, hence `promptOverflow`.
+        "maxPromptTokens": 1024,
+        "promptOverflow": "refuse"
       },
       // Krea 2 Turbo (epic 7565) — Krea AI's from-scratch foundation image model, TDM-distilled to a
       // few-step (~8), CFG-free rectified-flow student: a Qwen3-VL-4B text encoder (12-layer learned
@@ -6744,7 +6749,10 @@
       "image": {
         "supportsSchedulerShift": true,
         "negativePromptRequiresGuidance": true,
-        "guidanceOffValue": 0
+        "guidanceOffValue": 0,
+        // SW-7163: the same 1,024-token condition-encoder context as Krea 2 Turbo, refused above it.
+        "maxPromptTokens": 1024,
+        "promptOverflow": "refuse"
       },
       // Krea 2 Raw (epic 9992) — the UNDISTILLED 12B single-stream DiT, now a first-class text-to-image
       // GENERATION model (TRUE classifier-free guidance: a real guidance scale + optional negative

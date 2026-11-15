@@ -1517,13 +1517,46 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let fit_to = match payload
+        .fit_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => {
+            let entry = crate::models::resolve_model_manifest_entry(&state, id).await?;
+            Some((id.to_owned(), fit_to_target_entry(id, entry)?))
+        }
+        None => None,
+    };
+    let condense_rows = validate_condense_rows(&payload, fit_to.is_some())?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
         move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
     })
     .await?;
-    let items = batch_describe_items(&dataset, &dataset_root, payload.item_ids.as_deref())?;
+    let item_ids = condense_rows
+        .as_ref()
+        .map(|rows| rows.keys().cloned().collect::<Vec<_>>());
+    let mut items = batch_describe_items(
+        &dataset,
+        &dataset_root,
+        item_ids.as_deref().or(payload.item_ids.as_deref()),
+    )?;
+    if let Some(rows) = &condense_rows {
+        for item in &mut items {
+            let row = item
+                .get("itemId")
+                .and_then(Value::as_str)
+                .and_then(|id| rows.get(id));
+            if let (Some(object), Some(row)) = (item.as_object_mut(), row) {
+                object.insert("fields".to_owned(), json!(row.fields));
+                object.insert("width".to_owned(), json!(row.width));
+                object.insert("height".to_owned(), json!(row.height));
+            }
+        }
+    }
     let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_batch_describe",
@@ -1542,8 +1575,18 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
-    if let Some(prompt) = prompt {
+    if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
+    }
+    if let Some((id, entry)) = fit_to {
+        // The target's own catalog entry, so the worker reads the limit (and finds the target's
+        // tokenizer) from the server's catalog, never from a client number. It is not a model the
+        // job loads, so it rides outside the model-source carriers.
+        job_payload.insert("fitTo".to_owned(), json!(id));
+        job_payload.insert("fitToManifestEntry".to_owned(), entry);
+    }
+    if condense_rows.is_some() {
+        job_payload.insert("condenseOnly".to_owned(), json!(true));
     }
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -1618,6 +1661,84 @@ pub(crate) fn validate_batch_describe_request(
         ));
     }
     Ok((model, prompt.map(str::to_owned)))
+}
+
+/// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it
+/// for `id`: refused when the id is not in the catalog or its entry declares no
+/// `image.maxPromptTokens`.
+pub(crate) fn fit_to_target_entry(id: &str, entry: Value) -> Result<Value, ApiError> {
+    if entry.as_object().is_none_or(|object| object.is_empty()) {
+        return Err(training_field_error(
+            "fitTo",
+            format!("Unknown Fit to model {id:?}."),
+        ));
+    }
+    if sceneworks_core::dataset_batch_describe::prompt_token_limit(&entry).is_none() {
+        return Err(training_field_error(
+            "fitTo",
+            format!("Fit to model {id:?} declares no prompt token limit."),
+        ));
+    }
+    Ok(entry)
+}
+
+/// A condense-only request's rows by item id (SW-7163), `None` for an ordinary describe request.
+/// Condensing needs a Fit to target and the Vision Captioner (JoyCaption has no text step), takes
+/// its items from the rows (so `itemIds` is refused beside them), and accepts at most one row per
+/// item, each field one of the seven and no longer than a described field can be.
+pub(crate) fn validate_condense_rows(
+    payload: &DatasetBatchDescribeJobRequest,
+    has_fit_to: bool,
+) -> Result<Option<std::collections::BTreeMap<String, crate::dto::CondenseRowRequest>>, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        is_joycaption_model, DESCRIBE_FIELDS, MAX_DESCRIBE_FIELD_CHARS,
+    };
+    if has_fit_to && is_joycaption_model(payload.model.as_deref()) {
+        return Err(training_field_error(
+            "fitTo",
+            "Fit to needs the Vision Captioner; JoyCaption rows are not condensed.",
+        ));
+    }
+    let Some(rows) = payload.condense_rows.as_ref() else {
+        return Ok(None);
+    };
+    let refuse = |detail: String| Err(training_field_error("condenseRows", detail));
+    if !has_fit_to {
+        return refuse("condenseRows needs a fitTo target.".to_owned());
+    }
+    if payload.item_ids.is_some() {
+        return refuse("Send condenseRows or itemIds, not both.".to_owned());
+    }
+    if rows.is_empty() {
+        return refuse("condenseRows must hold at least one row.".to_owned());
+    }
+    let mut by_id = std::collections::BTreeMap::new();
+    for row in rows {
+        if let Some(name) = row
+            .fields
+            .keys()
+            .find(|name| !DESCRIBE_FIELDS.contains(&name.as_str()))
+        {
+            return refuse(format!(
+                "Row {} has an unknown field {name:?}.",
+                row.item_id
+            ));
+        }
+        if let Some((name, _)) = row
+            .fields
+            .iter()
+            .find(|(_, text)| text.chars().count() > MAX_DESCRIBE_FIELD_CHARS)
+        {
+            return refuse(format!(
+                "Row {} field {name:?} is longer than {MAX_DESCRIBE_FIELD_CHARS} characters.",
+                row.item_id
+            ));
+        }
+        if by_id.insert(row.item_id.clone(), row.clone()).is_some() {
+            return refuse(format!("Row {} appears twice.", row.item_id));
+        }
+    }
+    Ok(Some(by_id))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the

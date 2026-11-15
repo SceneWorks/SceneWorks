@@ -43,8 +43,19 @@
 //! event would carry it). One item is bounded too: each field is capped at
 //! [`MAX_DESCRIBE_FIELD_CHARS`], and an item whose JSON still exceeded the store's
 //! `MAX_JOB_RESULT_ITEM_BYTES` would be replaced by a flagged item without its text.
+//!
+//! **Fit to (SW-7163).** With a `fitTo` target the Vision Captioner also condenses each described
+//! image into one prompt within the target image model's prompt token limit (see
+//! [`condense`]); a `condenseOnly` job condenses rows already described (their seven fields ride
+//! in the payload) without opening an image or describing again. JoyCaption does not condense.
 
 use super::*;
+
+#[cfg(native_lane)]
+#[path = "batch_describe_condense.rs"]
+mod condense;
+#[cfg(native_lane)]
+use condense::{condense_fields, CondenseFuture, CondenseReply, Condensed, FitTarget};
 
 #[cfg(native_lane)]
 use futures_util::future::BoxFuture;
@@ -88,7 +99,8 @@ const MAX_ITEM_ERROR_CHARS: usize = 1_000;
 /// makes the bound independent of the tokenizer, so seven fields, each JSON-escaped at worst six
 /// bytes per character, stay well under the store's per-item limit (`MAX_JOB_RESULT_ITEM_BYTES`).
 #[cfg(native_lane)]
-pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize = 16_000;
+pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize =
+    sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_FIELD_CHARS;
 
 /// Which describer the job's `model` field selects.
 #[cfg(native_lane)]
@@ -715,6 +727,18 @@ pub(crate) trait BatchDescriber: Send + Sync {
     fn recover(&self, raw: &str) -> Option<Result<DescribedFields, String>> {
         recover_cut_off_reply(raw)
     }
+
+    /// Whether this describer runs the "Fit to" condensing step ([`Self::condense`]). JoyCaption
+    /// has no text-only path, so its rows are never condensed.
+    fn condenses(&self) -> bool {
+        false
+    }
+
+    /// One text-only generation with the loaded model: `system` is the condensing instruction,
+    /// `user` the fields. Only called when [`Self::condenses`].
+    fn condense(&self, _system: String, _user: String, _cancel: CancelFlag) -> CondenseFuture {
+        Box::pin(async { Ok(Err("This describer does not condense.".to_owned())) })
+    }
 }
 
 /// The Vision Captioner (Qwen3-VL) describer: a JSON-constrained decode on the resident refine-model
@@ -726,17 +750,15 @@ struct VisionCaptionerDescriber {
 }
 
 #[cfg(native_lane)]
-impl BatchDescriber for VisionCaptionerDescriber {
-    fn describe(
+impl VisionCaptionerDescriber {
+    /// The cache key both generations use: the condensing step must hit the model the describe
+    /// call loaded, so its spec and requirements are the describe call's exactly.
+    fn load_key(
         &self,
-        image: image::DynamicImage,
-        prompt: &DescribePrompt,
-        cancel: CancelFlag,
-    ) -> DescribeFuture {
-        use gen_core::core_llm::{
-            Constraint, Content, Message, ModelRequirements, Role, Sampling, StreamEvent,
-            TextLlmRequest, ThinkingMode,
-        };
+    ) -> (
+        gen_core::core_llm::LoadSpec,
+        gen_core::core_llm::ModelRequirements,
+    ) {
         let spec = gen_core::core_llm::LoadSpec {
             source: self.weights_dir.to_string_lossy().into_owned(),
             // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
@@ -745,7 +767,24 @@ impl BatchDescriber for VisionCaptionerDescriber {
         // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
         // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
         // flip to vision at load (see `prompt_refine_jobs`).
-        let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
+        let requirements = gen_core::core_llm::ModelRequirements::default()
+            .with_constraint(gen_core::core_llm::Constraint::Json);
+        (spec, requirements)
+    }
+}
+
+#[cfg(native_lane)]
+impl BatchDescriber for VisionCaptionerDescriber {
+    fn describe(
+        &self,
+        image: image::DynamicImage,
+        prompt: &DescribePrompt,
+        cancel: CancelFlag,
+    ) -> DescribeFuture {
+        use gen_core::core_llm::{
+            Content, Message, Role, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
+        };
+        let (spec, requirements) = self.load_key();
         let system = prompt.system();
         let user = prompt.user.clone();
         let job_id = self.job_id.clone();
@@ -809,6 +848,64 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 Ok(generation
                     .map(|output| output.text)
+                    .map_err(|error| format!("Vision Captioner generation failed: {error}")))
+            },
+        ))
+    }
+
+    fn condenses(&self) -> bool {
+        true
+    }
+
+    /// The text-only rewrite on the model the describe call left resident (same cache key, so no
+    /// second load and no new memory admission): plain text, thinking disabled.
+    fn condense(&self, system: String, user: String, cancel: CancelFlag) -> CondenseFuture {
+        use gen_core::core_llm::{
+            FinishReason, Message, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
+        };
+        let (spec, requirements) = self.load_key();
+        let job_id = self.job_id.clone();
+        let kv_compression = crate::llm_kv_cache::worker_default_policy();
+        Box::pin(crate::refine_model_cache::with_cached_refiner(
+            spec,
+            requirements,
+            "Vision Captioner load failed",
+            move |model| -> WorkerResult<Result<CondenseReply, String>> {
+                let request = TextLlmRequest {
+                    progress: Some(crate::load_progress::text_observer()),
+                    messages: vec![Message::system(system), Message::user(user)],
+                    sampling: Sampling {
+                        temperature: 0.4,
+                        top_p: 0.9,
+                        ..Sampling::default()
+                    },
+                    max_new_tokens: condense::CONDENSE_MAX_NEW_TOKENS,
+                    constraint: None,
+                    cancel,
+                    thinking: ThinkingMode::Disabled,
+                    kv_compression,
+                    ..Default::default()
+                };
+                let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
+                let generation =
+                    crate::load_progress::generate_text(model, &request, &mut |event| {
+                        if matches!(event, StreamEvent::Token { .. }) {
+                            cache_bound.note_event();
+                        }
+                    });
+                crate::llm_kv_cache::KvCacheRecord::of(
+                    crate::llm_kv_cache::NATIVE_LLM_ENGINE,
+                    request.kv_compression,
+                    &generation,
+                    |output| output.kv_cache.as_ref(),
+                )
+                .emit(&job_id);
+                Ok(generation
+                    .map(|output| CondenseReply {
+                        generated_tokens: output.usage.generated_tokens as usize,
+                        cut_off: output.finish_reason == Some(FinishReason::Length),
+                        text: output.text,
+                    })
                     .map_err(|error| format!("Vision Captioner generation failed: {error}")))
             },
         ))
@@ -990,6 +1087,9 @@ struct DescribeItem {
     /// The image's path relative to the dataset root (echoed so the UI can show a thumbnail).
     relative_path: String,
     asset_id: Option<String>,
+    /// A condense-only job's row as the dialog holds it: the seven fields (the user may have
+    /// edited them) and the image's pixel size. The image itself is never opened.
+    given: Option<(DescribedFields, Option<(u32, u32)>)>,
 }
 
 /// One item of the job result, in dataset order.
@@ -999,6 +1099,9 @@ struct DescribedItem {
     item: DescribeItem,
     size: Option<(u32, u32)>,
     outcome: Result<DescribedFields, String>,
+    /// The "Fit to" condensed prompt; absent without a target (the item's shape is then exactly
+    /// what it was before the step existed).
+    condensed: Option<Condensed>,
 }
 
 #[cfg(native_lane)]
@@ -1016,6 +1119,9 @@ impl DescribedItem {
             object.insert((*name).to_owned(), json!(text));
         }
         object.insert("notice".to_owned(), json!(fields.notice));
+        if let Some(condensed) = &self.condensed {
+            object.insert("condensed".to_owned(), condensed.to_json());
+        }
         object.insert("failed".to_owned(), json!(self.outcome.is_err()));
         object.insert(
             "error".to_owned(),
@@ -1030,13 +1136,13 @@ impl DescribedItem {
 }
 
 #[cfg(native_lane)]
-fn bounded_error(error: &str) -> String {
+pub(crate) fn bounded_error(error: &str) -> String {
     bounded_text(error, MAX_ITEM_ERROR_CHARS)
 }
 
 /// `text` cut to at most `max` characters, with an ellipsis marking a cut.
 #[cfg(native_lane)]
-fn bounded_text(text: &str, max: usize) -> String {
+pub(crate) fn bounded_text(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
@@ -1061,6 +1167,7 @@ fn stored_item_json(item: &DescribedItem) -> Value {
         },
         size: item.size,
         outcome: Err("The description was too large to store.".to_owned()),
+        condensed: None,
     }
     .to_json()
 }
@@ -1095,6 +1202,65 @@ struct BatchDescribeRequest {
     dataset_id: String,
     dataset_version: Value,
     items: Vec<DescribeItem>,
+    /// The "Fit to" target, when the job has one.
+    fit: Option<FitTarget>,
+    /// Condense the given rows only: no image is opened and nothing is described.
+    condense_only: bool,
+}
+
+/// A condense-only item's given fields: a `fields` object of the seven text fields (a missing one
+/// is empty; an unknown name, a non-string or an over-long value is refused) and its `width` and
+/// `height`.
+#[cfg(native_lane)]
+fn given_row(
+    item: &crate::analysis_jobs_common::DatasetItem<'_>,
+) -> WorkerResult<(DescribedFields, Option<(u32, u32)>)> {
+    let invalid = |detail: String| {
+        WorkerError::InvalidPayload(format!(
+            "Dataset batch describe item {} {detail}",
+            item.item_id
+        ))
+    };
+    let object = item
+        .object
+        .get("fields")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("has no fields to condense.".to_owned()))?;
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !DESCRIBE_FIELDS.contains(&key.as_str()))
+    {
+        return Err(invalid(format!("has an unknown field {unknown:?}.")));
+    }
+    let mut fields: [String; DESCRIBE_FIELDS.len()] = Default::default();
+    for (slot, name) in fields.iter_mut().zip(DESCRIBE_FIELDS) {
+        *slot = match object.get(name) {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(text)) if text.chars().count() <= MAX_DESCRIBE_FIELD_CHARS => {
+                text.trim().to_owned()
+            }
+            Some(_) => {
+                return Err(invalid(format!(
+                    "field {name:?} must be text of at most {MAX_DESCRIBE_FIELD_CHARS} characters."
+                )))
+            }
+        };
+    }
+    let dimension = |key: &str| {
+        item.object
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    let size = dimension("width").zip(dimension("height"));
+    Ok((
+        DescribedFields {
+            fields,
+            notice: None,
+        },
+        size,
+    ))
 }
 
 #[cfg(native_lane)]
@@ -1120,6 +1286,14 @@ fn parse_batch_describe_request(
         }
     };
     let (prompt, default_prompt) = DescribePrompt::for_instruction(model, instruction);
+    let fit = condense::parse_fit_target(payload)?;
+    let condense_only = payload.get("condenseOnly").and_then(Value::as_bool) == Some(true);
+    if condense_only && (fit.is_none() || model == DescribeModel::JoyCaption) {
+        return Err(WorkerError::InvalidPayload(
+            "Dataset batch describe condenseOnly needs a fitTo target and the Vision Captioner."
+                .to_owned(),
+        ));
+    }
     let items = parse_dataset_items(
         settings,
         payload,
@@ -1137,6 +1311,11 @@ fn parse_batch_describe_request(
                     .to_owned(),
                 asset_id: crate::payload::trimmed_string(item.object.get("assetId"))
                     .map(str::to_owned),
+                given: if condense_only {
+                    Some(given_row(&item)?)
+                } else {
+                    None
+                },
             })
         },
     )?;
@@ -1155,6 +1334,8 @@ fn parse_batch_describe_request(
             .cloned()
             .unwrap_or(Value::Null),
         items,
+        fit,
+        condense_only,
     })
 }
 
@@ -1188,13 +1369,18 @@ fn batch_describe_result(
     result.insert("describedCount".to_owned(), json!(described.len() - failed));
     result.insert("failedCount".to_owned(), json!(failed));
     result.insert("canceled".to_owned(), json!(canceled));
+    result.insert(
+        "fitTo".to_owned(),
+        json!(request.fit.as_ref().map(|fit| fit.model_id.as_str())),
+    );
+    result.insert("condenseOnly".to_owned(), json!(request.condense_only));
     result
 }
 
 /// Progress before image `index` (0-based) of `total` starts: 0.08 at the first image, 0.96 once
 /// every image is done.
 #[cfg(native_lane)]
-fn image_progress(done: usize, total: usize) -> f64 {
+pub(crate) fn image_progress(done: usize, total: usize) -> f64 {
     0.08 + 0.88 * (done as f64 / total.max(1) as f64)
 }
 
@@ -1204,7 +1390,14 @@ pub(crate) async fn run_dataset_batch_describe_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let request = parse_batch_describe_request(settings, &job.payload)?;
+    let mut request = parse_batch_describe_request(settings, &job.payload)?;
+    let condenses = request.model == DescribeModel::VisionCaptioner;
+    if let Some(fit) = request.fit.as_mut().filter(|_| condenses) {
+        match condense::exact_token_counter(settings, fit) {
+            Ok(counter) => fit.counter = Some(counter),
+            Err(reason) => fit.estimate_reason = Some(reason),
+        }
+    }
     let describer: Box<dyn BatchDescriber> = match request.model {
         DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber {
             weights_dir: resolve_app_managed_model_dir(
@@ -1259,6 +1452,12 @@ async fn run_batch_describe(
             canceled = true;
             break;
         }
+        let condensing = request.fit.as_ref().filter(|_| describer.condenses());
+        let verb = if request.condense_only {
+            "Condensing"
+        } else {
+            "Describing"
+        };
         update_job(
             api,
             &job.id,
@@ -1266,54 +1465,85 @@ async fn run_batch_describe(
                 JobStatus::Running,
                 ProgressStage::Running,
                 image_progress(index, total),
-                &format!("Describing image {} of {total}.", index + 1),
+                &format!("{verb} image {} of {total}.", index + 1),
                 None,
                 backend,
             ),
         )
         .await?;
 
-        let path = item.image_path.clone();
-        let decoded = crate::load_progress::spawn_blocking(move || {
-            crate::image_decode::decode_image_any(&path)
-        })
-        .await
-        .map_err(|error| task_join_error("batch describe image decode", error))?;
-        let outcome = match decoded {
-            Err(error) => DescribedItem {
+        let mut outcome = if let Some((fields, size)) = &item.given {
+            // Condense-only: the row as the dialog holds it; the image is never opened.
+            DescribedItem {
                 item: item.clone(),
-                size: None,
-                outcome: Err(format!("The image could not be read: {error}")),
-            },
-            Ok(image) => {
-                let size = (image.width(), image.height());
-                let described = describe_with_retries(
+                size: *size,
+                outcome: Ok(fields.clone()),
+                condensed: None,
+            }
+        } else {
+            let Some(outcome) = describe_item(
+                api,
+                settings,
+                job,
+                &request,
+                describer,
+                item,
+                (index, total),
+            )
+            .await?
+            else {
+                canceled = true;
+                break;
+            };
+            outcome
+        };
+        if let (Some(fit), Ok(fields)) = (condensing, &outcome.outcome) {
+            if !request.condense_only {
+                update_job(
                     api,
-                    settings,
-                    job,
-                    describer,
-                    &request.prompt,
-                    image,
-                    (index, total),
+                    &job.id,
+                    progress_payload_for_backend(
+                        JobStatus::Running,
+                        ProgressStage::Running,
+                        image_progress(index, total),
+                        &format!(
+                            "Condensing image {} of {total} for {}.",
+                            index + 1,
+                            fit.name
+                        ),
+                        None,
+                        backend,
+                    ),
                 )
                 .await?;
-                let Some(outcome) = described else {
-                    // This image was interrupted mid-description: it has no result to return.
+            }
+            let fields = fields.fields.clone();
+            match condense_fields(api, settings, job, describer, fit, &fields, (index, total))
+                .await?
+            {
+                Some(condensed) => outcome.condensed = Some(condensed),
+                None => {
+                    // Canceled while condensing: a newly described image keeps its fields; a
+                    // condense-only row is unchanged, so nothing is stored for it.
+                    if !request.condense_only {
+                        append_result_item(api, &job.id, described.len(), &outcome).await?;
+                        described.push(outcome);
+                    }
                     canceled = true;
                     break;
-                };
-                DescribedItem {
-                    item: item.clone(),
-                    size: Some(size),
-                    outcome,
                 }
             }
-        };
+        }
         // Store the item before the post that counts it, so a reader that sees `processedCount`
         // reach N can always read N items.
         append_result_item(api, &job.id, described.len(), &outcome).await?;
         described.push(outcome);
         let done = described.len();
+        let finished = if request.condense_only {
+            "Condensed"
+        } else {
+            "Described"
+        };
         update_job(
             api,
             &job.id,
@@ -1321,7 +1551,7 @@ async fn run_batch_describe(
                 JobStatus::Running,
                 ProgressStage::Running,
                 image_progress(done, total),
-                &format!("Described {done} of {total} images."),
+                &format!("{finished} {done} of {total} images."),
                 Some(batch_describe_result(&request, &described, false)),
                 backend,
             ),
@@ -1350,7 +1580,9 @@ async fn run_batch_describe(
         .iter()
         .filter(|item| item.outcome.is_err())
         .count();
-    let message = if failed == 0 {
+    let message = if request.condense_only {
+        format!("Condensed {total} image(s).")
+    } else if failed == 0 {
         format!("Described {total} image(s).")
     } else {
         format!(
@@ -1372,6 +1604,53 @@ async fn run_batch_describe(
     )
     .await?;
     Ok(())
+}
+
+/// Decode and describe one image. `None` when the job was canceled mid-description (the image has
+/// no result to return).
+#[cfg(native_lane)]
+async fn describe_item(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &BatchDescribeRequest,
+    describer: &dyn BatchDescriber,
+    item: &DescribeItem,
+    (index, total): (usize, usize),
+) -> WorkerResult<Option<DescribedItem>> {
+    let path = item.image_path.clone();
+    let decoded =
+        crate::load_progress::spawn_blocking(move || crate::image_decode::decode_image_any(&path))
+            .await
+            .map_err(|error| task_join_error("batch describe image decode", error))?;
+    let image = match decoded {
+        Err(error) => {
+            return Ok(Some(DescribedItem {
+                item: item.clone(),
+                size: None,
+                outcome: Err(format!("The image could not be read: {error}")),
+                condensed: None,
+            }))
+        }
+        Ok(image) => image,
+    };
+    let size = (image.width(), image.height());
+    let described = describe_with_retries(
+        api,
+        settings,
+        job,
+        describer,
+        &request.prompt,
+        image,
+        (index, total),
+    )
+    .await?;
+    Ok(described.map(|outcome| DescribedItem {
+        item: item.clone(),
+        size: Some(size),
+        outcome,
+        condensed: None,
+    }))
 }
 
 /// Describe one image, describing it again (at most [`BatchDescriber::parse_retries`] more times)

@@ -773,9 +773,11 @@ fn a_structured_pose_is_stored_as_one_text_field_in_the_result_item() {
             image_path: PathBuf::from("/data/images/item_1.png"),
             relative_path: "images/item_1.png".to_owned(),
             asset_id: None,
+            given: None,
         },
         size: Some((8, 8)),
         outcome: Ok(parsed),
+        condensed: None,
     };
     let stored = stored_item_json(&item);
     assert_eq!(
@@ -1036,6 +1038,10 @@ struct StubDescriber {
     cancel_after: Option<(usize, Arc<AtomicBool>)>,
     /// `Some(retries)` behaves like JoyCaption: the lenient parse and that many parse retries.
     joycaption_like: Option<usize>,
+    /// Each condensing call's (system, user) and the replies it answers, in order. A stub that is
+    /// not JoyCaption-like condenses, like the Vision Captioner.
+    condense_calls: Mutex<Vec<(String, String)>>,
+    condense_replies: Mutex<VecDeque<WorkerResult<Result<CondenseReply, String>>>>,
 }
 
 impl StubDescriber {
@@ -1045,7 +1051,17 @@ impl StubDescriber {
             replies: Mutex::new(replies.into()),
             cancel_after: None,
             joycaption_like: None,
+            condense_calls: Mutex::default(),
+            condense_replies: Mutex::default(),
         }
+    }
+
+    fn with_condense_replies(
+        mut self,
+        replies: Vec<WorkerResult<Result<CondenseReply, String>>>,
+    ) -> Self {
+        self.condense_replies = Mutex::new(replies.into());
+        self
     }
 
     fn joycaption_like(replies: Vec<WorkerResult<Result<String, String>>>) -> Self {
@@ -1092,6 +1108,24 @@ impl BatchDescriber for StubDescriber {
 
     fn parse_retries(&self) -> usize {
         self.joycaption_like.unwrap_or(0)
+    }
+
+    fn condenses(&self) -> bool {
+        self.joycaption_like.is_none()
+    }
+
+    fn condense(&self, system: String, user: String, _cancel: CancelFlag) -> CondenseFuture {
+        self.condense_calls
+            .lock()
+            .expect("condense calls lock")
+            .push((system, user));
+        let reply = self
+            .condense_replies
+            .lock()
+            .expect("condense replies lock")
+            .pop_front()
+            .expect("a queued reply per condensing call");
+        Box::pin(async move { reply })
     }
 }
 
@@ -1994,11 +2028,24 @@ fn one_image_can_never_exceed_the_per_item_limit() {
         image_path: PathBuf::from("/data/images/item_1.png"),
         relative_path: "images/item_1.png".to_owned(),
         asset_id: Some("asset-1".to_owned()),
+        given: None,
     };
     let described = DescribedItem {
         item: item.clone(),
         size: Some((4096, 4096)),
         outcome: Ok(parsed),
+        condensed: Some(Condensed {
+            target: "krea_2_turbo".to_owned(),
+            limit: 1024,
+            text: "\u{1}".repeat(MAX_DESCRIBE_FIELD_CHARS + 1),
+            tokens: Some(1024),
+            exact: false,
+            estimate_reason: Some("\u{1}".repeat(MAX_ITEM_ERROR_CHARS)),
+            characters: MAX_DESCRIBE_FIELD_CHARS + 1,
+            over: true,
+            failed: false,
+            notice: Some("\u{1}".repeat(MAX_ITEM_ERROR_CHARS)),
+        }),
     };
     let encoded = stored_item_json(&described).to_string().len();
     assert!(
@@ -2009,6 +2056,7 @@ fn one_image_can_never_exceed_the_per_item_limit() {
         item,
         size: None,
         outcome: Err("\u{1}".repeat(50_000)),
+        condensed: None,
     };
     assert!(
         stored_item_json(&failed).to_string().len()
@@ -2026,12 +2074,14 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
             image_path: PathBuf::from("/data/x.png"),
             relative_path: "\u{1}".repeat(sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES),
             asset_id: None,
+            given: None,
         },
         size: Some((10, 20)),
         outcome: Ok(DescribedFields {
             fields: std::array::from_fn(|_| "text".to_owned()),
             notice: None,
         }),
+        condensed: None,
     };
     let stored = stored_item_json(&described);
     assert!(stored.to_string().len() <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES);
@@ -2039,4 +2089,501 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
     assert_eq!(stored["failed"], true);
     assert_eq!(stored["width"], 10);
     assert_eq!(stored["description"], "");
+}
+
+// ── Fit to: the condensing step (SW-7163) ─────────────────────────────────────────────────────
+
+#[test]
+fn the_condense_section_is_fixed_and_carries_its_rules() {
+    let system = condense::condense_system(586);
+    assert!(
+        !system.contains("{max_words}"),
+        "the word target is filled in"
+    );
+    for rule in [
+        "ONE flowing prompt of at most 586 words",
+        "covers all seven fields",
+        "Every person label",
+        "exactly as written",
+        "Each person's pose above everything else",
+        "own left and right",
+        "frame-left and frame-right",
+        "relative to the camera",
+        "Cut style, camera, lighting and environment detail first",
+        "Shorten pose last",
+        "no headings, no field names, no lists",
+        "no commentary",
+        "Thinking is not needed",
+    ] {
+        assert!(
+            system.contains(rule),
+            "the condense instruction says {rule:?}"
+        );
+    }
+    // It is never part of either describer's editable default instruction.
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        assert!(!default_describe_instruction(model).contains("ONE flowing prompt"));
+    }
+}
+
+#[test]
+fn person_labels_are_whole_lowercase_noun_underscore_number_words() {
+    assert_eq!(
+        condense::person_labels(
+            "A woman, woman_1, faces man_12; woman_1's hand. Man_2 x_y item_3a"
+        ),
+        vec!["woman_1", "man_12", "woman_1"]
+    );
+}
+
+#[test]
+fn the_condense_user_turn_is_every_non_empty_field_with_one_pose_line_per_person() {
+    let mut fields: [String; DESCRIBE_FIELDS.len()] = Default::default();
+    fields[0] = "A woman, woman_1.".to_owned();
+    fields[1] = "woman_1 — Body line: upright\nman_1 — Body line: seated".to_owned();
+    fields[6] = "A kitchen.".to_owned();
+    let user = condense::condense_user(&fields);
+    assert!(user.ends_with(
+        "Description: A woman, woman_1.\nPose: woman_1 — Body line: upright\nPose: man_1 — Body \
+         line: seated\nEnvironment: A kitchen."
+    ));
+    assert!(!user.contains("Style:"), "an empty field is left out");
+}
+
+/// The Vision Captioner reply of one image with one person, woman_1, in every field.
+fn labelled_reply() -> String {
+    reply(
+        &DESCRIBE_FIELDS
+            .iter()
+            .map(|field| (*field, json!(format!("woman_1 {field}"))))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn condense_reply(
+    text: &str,
+    generated_tokens: usize,
+) -> WorkerResult<Result<CondenseReply, String>> {
+    Ok(Ok(CondenseReply {
+        text: text.to_owned(),
+        generated_tokens,
+        cut_off: false,
+    }))
+}
+
+/// A target catalog entry declaring `limit` prompt tokens.
+fn fit_entry(limit: u64) -> Value {
+    json!({
+        "id": "krea_2_turbo",
+        "name": "Krea 2 Turbo",
+        "adapter": "mlx_krea",
+        "image": { "maxPromptTokens": limit },
+        "downloads": [],
+    })
+}
+
+/// item_1 only, fit to `entry`.
+fn fit_payload(stage: &Stage, entry: Value) -> Value {
+    let mut payload = one_image_payload(stage, VISION_CAPTIONER_REPO);
+    payload["fitTo"] = entry["id"].clone();
+    payload["fitToManifestEntry"] = entry;
+    payload
+}
+
+/// Counts one token per whitespace-separated word, standing in for the target's own tokenizer.
+struct WordCounter;
+
+impl condense::PromptTokenCounter for WordCounter {
+    fn count(&self, text: &str) -> Result<usize, String> {
+        Ok(text.split_whitespace().count())
+    }
+}
+
+/// Run the job like `run_job`, with `counter` as the target's exact counter when given.
+async fn run_fit_job(
+    stage: &Stage,
+    payload: Value,
+    describer: &dyn BatchDescriber,
+    counter: Option<Box<dyn condense::PromptTokenCounter>>,
+) -> WorkerResult<()> {
+    let api = ApiClient::new(&stage.settings);
+    let mut job: JobSnapshot =
+        serde_json::from_value(job_value("describe-job", false)).expect("job");
+    job.payload = payload.as_object().expect("payload object").clone();
+    let mut request = parse_batch_describe_request(&stage.settings, &job.payload)?;
+    let fit = request.fit.as_mut().expect("the job has a target");
+    match counter {
+        Some(counter) => fit.counter = Some(counter),
+        None => fit.estimate_reason = Some("Krea 2 Turbo is not installed".to_owned()),
+    }
+    run_batch_describe(&api, &stage.settings, &job, request, describer).await
+}
+
+fn running_messages(api: &StubApi) -> Vec<String> {
+    posts(api)
+        .iter()
+        .filter(|body| body["status"] == "running")
+        .map(|body| body["message"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_condensed_prompt_that_fits_first_time_is_stored_beside_the_seven_fields() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let text = "A woman, woman_1, stands upright facing the camera in a kitchen.";
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))])
+        .with_condense_replies(vec![condense_reply(&format!("  {text}\n"), 300)]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one condensing generation, no retry");
+    // An estimate is held to 85% of 1,024 (870); the word target is the tighter bound less 10%.
+    assert!(calls[0].0.contains("at most 586 words"), "{}", calls[0].0);
+    assert!(calls[0].1.contains("Description: woman_1 description"));
+    let item = &stored_items(&api)[0];
+    for field in DESCRIBE_FIELDS {
+        assert_eq!(
+            item[field],
+            format!("woman_1 {field}"),
+            "the fields stay stored"
+        );
+    }
+    let condensed = &item["condensed"];
+    assert_eq!(condensed["target"], "krea_2_turbo");
+    assert_eq!(condensed["limitTokens"], 1024);
+    assert_eq!(condensed["text"], text, "whitespace is stripped");
+    assert_eq!(condensed["tokens"], 300);
+    assert_eq!(condensed["tokenCount"], "estimate");
+    assert_eq!(condensed["estimateReason"], "Krea 2 Turbo is not installed");
+    assert_eq!(condensed["characters"], text.chars().count());
+    assert_eq!(condensed["over"], false);
+    assert_eq!(condensed["failed"], false);
+    assert_eq!(condensed["notice"], Value::Null);
+    assert!(
+        running_messages(&api).contains(&"Condensing image 1 of 1 for Krea 2 Turbo.".to_owned())
+    );
+    assert_eq!(
+        terminal(&api, "completed")["result"]["fitTo"],
+        "krea_2_turbo"
+    );
+}
+
+#[tokio::test]
+async fn an_exact_count_uses_the_targets_tokenizer_and_the_full_limit() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    // The describer's own count (2,000) would be over; the exact count (4 words) is not.
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 stands upright smiling.", 2_000),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        Some(Box::new(WordCounter)),
+    )
+    .await
+    .expect("job completes");
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert!(calls[0].0.contains("at most 598 words"), "{}", calls[0].0);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["tokens"], 4);
+    assert_eq!(condensed["tokenCount"], "exact");
+    assert_eq!(condensed["estimateReason"], Value::Null);
+    assert_eq!(condensed["over"], false);
+}
+
+#[tokio::test]
+async fn an_over_long_prompt_is_retried_once_with_a_stricter_target_and_then_fits() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("woman_1 at great length.", 900),
+        condense_reply("woman_1 briefly.", 400),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].0.contains("at most 498 words"), "{}", calls[1].0);
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["text"], "woman_1 briefly.");
+    assert_eq!(condensed["tokens"], 400);
+    assert_eq!(condensed["over"], false);
+    assert!(running_messages(&api)
+        .iter()
+        .any(|message| message.contains("again (attempt 2)")));
+}
+
+#[tokio::test]
+async fn a_prompt_still_over_after_the_retry_is_stored_over_with_a_plain_notice() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let long = format!("woman_1 {}", "word ".repeat(900));
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply(&long, 1_200),
+        Ok(Ok(CondenseReply {
+            text: long.clone(),
+            generated_tokens: 1_100,
+            cut_off: true,
+        })),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(
+        describer.condense_calls.lock().unwrap().len(),
+        2,
+        "one retry only"
+    );
+    let condensed = &stored_items(&api)[0]["condensed"];
+    assert_eq!(condensed["over"], true);
+    assert_eq!(
+        condensed["failed"], false,
+        "an over prompt is kept, marked over"
+    );
+    assert_eq!(condensed["tokens"], 1_100);
+    let notice = condensed["notice"].as_str().expect("a notice");
+    assert!(
+        notice.starts_with("Still over the limit after one retry"),
+        "{notice}"
+    );
+    assert!(notice.contains("cut off"), "{notice}");
+    assert!(notice.contains("about 1100 of 870 tokens"), "{notice}");
+    assert_eq!(
+        condensed["text"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        901,
+        "never truncated to fit"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_missing_a_label_is_retried_then_reported_failed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]).with_condense_replies(vec![
+        condense_reply("A woman stands.", 100),
+        condense_reply("A woman stands upright.", 100),
+    ]);
+    run_fit_job(
+        &stage,
+        fit_payload(&stage, fit_entry(1024)),
+        &describer,
+        None,
+    )
+    .await
+    .expect("job completes");
+    assert_eq!(
+        describer.condense_calls.lock().unwrap().len(),
+        2,
+        "retried once"
+    );
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["failed"], false, "the description itself stands");
+    let condensed = &item["condensed"];
+    assert_eq!(condensed["failed"], true);
+    assert!(condensed["notice"]
+        .as_str()
+        .unwrap()
+        .contains("leaves out woman_1 even after one retry"));
+}
+
+#[tokio::test]
+async fn a_condense_only_job_opens_no_image_and_never_describes() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["condenseOnly"] = json!(true);
+    // item_2 has no image on disk: a condense-only job never reads it.
+    payload["items"] = json!([{
+        "itemId": "item_2",
+        "imagePath": stage.dataset_root.join("images/item_2.png").display().to_string(),
+        "relativePath": "images/item_2.png",
+        "assetId": null,
+        "width": 640,
+        "height": 480,
+        "fields": { "description": "An edited woman, woman_1.", "pose": "woman_1 — seated" },
+    }]);
+    // No describe reply is queued: a describe call would panic the test.
+    let describer = StubDescriber::new(Vec::new())
+        .with_condense_replies(vec![condense_reply("woman_1 sits, edited.", 50)]);
+    run_fit_job(&stage, payload, &describer, None)
+        .await
+        .expect("job completes");
+    assert!(
+        describer.calls.lock().unwrap().is_empty(),
+        "nothing is described"
+    );
+    let calls = describer.condense_calls.lock().unwrap().clone();
+    assert!(calls[0]
+        .1
+        .contains("Description: An edited woman, woman_1."));
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["itemId"], "item_2");
+    assert_eq!(
+        (item["width"].clone(), item["height"].clone()),
+        (json!(640), json!(480))
+    );
+    assert_eq!(item["description"], "An edited woman, woman_1.");
+    assert_eq!(item["style"], "", "a field the row did not send is empty");
+    assert_eq!(item["failed"], false);
+    assert_eq!(item["condensed"]["text"], "woman_1 sits, edited.");
+    assert!(running_messages(&api).contains(&"Condensing image 1 of 1.".to_owned()));
+    let completed = terminal(&api, "completed");
+    assert_eq!(completed["message"], "Condensed 1 image(s).");
+    assert_eq!(completed["result"]["condenseOnly"], true);
+}
+
+#[tokio::test]
+async fn joycaption_rows_are_never_condensed() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["model"] = json!(JOYCAPTION_REPO);
+    let describer = StubDescriber::joycaption_like(vec![Ok(Ok(labelled_reply()))]);
+    run_fit_job(&stage, payload, &describer, None)
+        .await
+        .expect("job completes");
+    assert!(describer.condense_calls.lock().unwrap().is_empty());
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["description"], "woman_1 description");
+    assert!(item.get("condensed").is_none(), "{item}");
+}
+
+#[tokio::test]
+async fn a_job_without_a_target_stores_items_without_a_condensed_object() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, VISION_CAPTIONER_REPO),
+        &describer,
+    )
+    .await
+    .expect("job completes");
+    assert!(describer.condense_calls.lock().unwrap().is_empty());
+    assert!(stored_items(&api)[0].get("condensed").is_none());
+    assert_eq!(terminal(&api, "completed")["result"]["fitTo"], Value::Null);
+}
+
+#[test]
+fn the_limit_comes_from_the_carried_catalog_entry_never_the_request() {
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let parse = |payload: Value| {
+        parse_batch_describe_request(&stage.settings, payload.as_object().unwrap())
+    };
+    let mut spoofed = fit_payload(&stage, fit_entry(200));
+    spoofed["maxPromptTokens"] = json!(50_000);
+    spoofed["limitTokens"] = json!(50_000);
+    let request = parse(spoofed).expect("parses");
+    let fit = request.fit.expect("a target");
+    assert_eq!((fit.model_id.as_str(), fit.limit), ("krea_2_turbo", 200));
+    assert_eq!(fit.name, "Krea 2 Turbo");
+
+    let refuse = |payload: Value, expect: &str| match parse(payload) {
+        Err(WorkerError::InvalidPayload(message)) => {
+            assert!(message.contains(expect), "{message}")
+        }
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("refused: {expect}"),
+    };
+    let mut other_entry = fit_payload(&stage, fit_entry(200));
+    other_entry["fitTo"] = json!("krea_2_raw");
+    refuse(other_entry, "carries no catalog entry");
+    let mut no_limit = fit_payload(&stage, fit_entry(200));
+    no_limit["fitToManifestEntry"]["image"] = json!({});
+    refuse(no_limit, "declares no image.maxPromptTokens");
+    let mut no_target = one_image_payload(&stage, VISION_CAPTIONER_REPO);
+    no_target["condenseOnly"] = json!(true);
+    refuse(no_target, "needs a fitTo target");
+    let mut joy = fit_payload(&stage, fit_entry(200));
+    joy["model"] = json!(JOYCAPTION_REPO);
+    joy["condenseOnly"] = json!(true);
+    refuse(joy, "the Vision Captioner");
+    let mut unknown_field = fit_payload(&stage, fit_entry(200));
+    unknown_field["condenseOnly"] = json!(true);
+    unknown_field["items"][0]["fields"] = json!({ "mood": "calm" });
+    refuse(unknown_field, "unknown field \"mood\"");
+    let mut no_fields = fit_payload(&stage, fit_entry(200));
+    no_fields["condenseOnly"] = json!(true);
+    refuse(no_fields, "has no fields to condense");
+}
+
+#[test]
+fn the_exact_counter_needs_an_installed_tier_tokenizer_and_a_known_adapter() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = test_settings(dir.path());
+    let entry = json!({
+        "downloads": [{
+            "repo": "SceneWorks/krea-2-turbo-mlx",
+            "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "files": ["q8/transformer/*", "q8/tokenizer/*", "../tokenizer/*"],
+        }],
+    });
+    assert!(
+        condense::tokenizer_roots(&settings, &entry).is_empty(),
+        "nothing installed"
+    );
+    let payload = json!({ "fitTo": "krea_2_turbo", "fitToManifestEntry": fit_entry(1024) });
+    let fit = condense::parse_fit_target(payload.as_object().unwrap())
+        .unwrap()
+        .unwrap();
+    match condense::exact_token_counter(&settings, &fit) {
+        Err(reason) => assert_eq!(reason, "Krea 2 Turbo is not installed"),
+        Ok(_) => panic!("no tokenizer is installed"),
+    }
+    let mut unknown = fit;
+    unknown.entry["adapter"] = json!("mlx_supra2");
+    match condense::exact_token_counter(&settings, &unknown) {
+        Err(reason) => assert!(reason.contains("no tokenizer-only counter"), "{reason}"),
+        Ok(_) => panic!("no counter for this adapter"),
+    }
+}
+
+/// The Fit to limit Krea 2 declares is the cap its engine admits prompts against (template prefix
+/// included), on this build's own backend, and the catalog says a longer prompt is refused, not
+/// truncated (the engine fails loud, sc-9047).
+#[test]
+fn krea_2_declares_its_engines_prompt_token_cap_and_that_it_refuses_beyond_it() {
+    #[cfg(target_os = "macos")]
+    let engine_cap = runtime_macos::providers::krea::text_encoder::tokenizer::MAX_TEXT_TOKENS;
+    #[cfg(not(target_os = "macos"))]
+    let engine_cap = runtime_cuda::providers::krea::pipeline::MAX_TEXT_TOKENS;
+    for id in ["krea_2_turbo", "krea_2_raw"] {
+        let entry = Value::Object(crate::test_env::shipped_catalog_entry(id));
+        assert_eq!(
+            sceneworks_core::dataset_batch_describe::prompt_token_limit(&entry),
+            Some(engine_cap),
+            "{id}"
+        );
+        assert_eq!(entry["image"]["promptOverflow"], "refuse", "{id}");
+        assert_eq!(
+            entry["adapter"], "mlx_krea",
+            "{id}: the exact counter keys on it"
+        );
+    }
 }

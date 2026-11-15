@@ -294,6 +294,12 @@ describe("Supra2-IMG interface hints (sc-24215)", () => {
     expect(promptTokenLimitHint({ name: "P", image: {} })).toBeNull();
     expect(promptTokenLimitHint({ name: "P", image: { maxPromptTokens: 0 } })).toBeNull();
   });
+
+  it("says a refusing engine refuses a longer prompt instead of truncating it (SW-7163)", () => {
+    expect(promptTokenLimitHint({ name: "Krea 2 Turbo", image: { maxPromptTokens: 1024, promptOverflow: "refuse" } })).toBe(
+      "Krea 2 Turbo reads up to 1,024 prompt tokens; a longer prompt is refused.",
+    );
+  });
 });
 
 it("uses the provider's CFG-off value for offset guidance", () => {

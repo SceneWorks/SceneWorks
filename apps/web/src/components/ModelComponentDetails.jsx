@@ -60,7 +60,9 @@ export function modelLimitLines(model) {
   }
   if (Number.isInteger(model?.image?.maxPromptTokens)) {
     lines.push(
-      `Prompt: up to ${model.image.maxPromptTokens} tokens (longer prompts are truncated and flagged on the result)`,
+      model.image.promptOverflow === "refuse"
+        ? `Prompt: up to ${model.image.maxPromptTokens} tokens (longer prompts are refused)`
+        : `Prompt: up to ${model.image.maxPromptTokens} tokens (longer prompts are truncated and flagged on the result)`,
     );
   }
   return lines;

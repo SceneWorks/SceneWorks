@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractKeys, parsePromptResolution, splitPromptLines } from "./promptBatch.js";
-import { formatPromptBatch, snapRatio, wrapLabels } from "./promptBatchDescribe.js";
+import { condensedSizeText, fitToTargets, formatPromptBatch, snapRatio, wrapLabels } from "./promptBatchDescribe.js";
 
 const fields = (over = {}) => ({
   description: "man_1 walks past woman_1",
@@ -108,5 +108,66 @@ describe("formatPromptBatch", () => {
     const { text, skipped } = formatPromptBatch([empty, results[0]]);
     expect(skipped).toEqual([empty]);
     expect(text).toBe(formatPromptBatch([results[0]]).text);
+  });
+});
+
+describe("Fit to (SW-7163)", () => {
+  const condensed = (over = {}) => ({
+    target: "krea_2_turbo",
+    limitTokens: 1024,
+    text: "A man, man_1, walks past woman_1\n on a street.",
+    tokens: 612,
+    tokenCount: "exact",
+    characters: 46,
+    over: false,
+    failed: false,
+    notice: null,
+    ...over,
+  });
+  const row = (over = {}) => ({ itemId: "a", width: 1500, height: 1000, fields: fields(), condensed: condensed(), ...over });
+
+  it("offers the catalog models that declare a prompt token limit", () => {
+    expect(
+      fitToTargets([
+        { id: "krea_2_turbo", name: "Krea 2 Turbo", image: { maxPromptTokens: 1024 } },
+        { id: "z_image_turbo", name: "Z-Image Turbo", image: {} },
+        { id: "supra2_img", name: "Supra2-IMG", image: { maxPromptTokens: 128 } },
+        { id: "broken", image: { maxPromptTokens: "1024" } },
+      ]),
+    ).toEqual([
+      { id: "krea_2_turbo", name: "Krea 2 Turbo", limit: 1024 },
+      { id: "supra2_img", name: "Supra2-IMG", limit: 128 },
+    ]);
+    expect(fitToTargets(undefined)).toEqual([]);
+  });
+
+  it("uses the condensed prompt for the selected target, one line with labels wrapped", () => {
+    expect(formatPromptBatch([row()], { fitTo: "krea_2_turbo" }).text).toBe(
+      "[3:2]\nA man, {{man_1}}, walks past {{woman_1}} on a street.",
+    );
+    expect(extractKeys(formatPromptBatch([row()], { fitTo: "krea_2_turbo" }).text.split("\n---\n"))).toEqual([
+      "man_1",
+      "woman_1",
+    ]);
+  });
+
+  it("keeps the seven-field block with Fit to off, for another target, or after a failed condense", () => {
+    const fieldsBlock = formatPromptBatch([row({ condensed: null })]).text;
+    expect(fieldsBlock.startsWith("[3:2]\nDescription: {{man_1}} walks past {{woman_1}}")).toBe(true);
+    expect(formatPromptBatch([row()]).text).toBe(fieldsBlock);
+    expect(formatPromptBatch([row()], { fitTo: "krea_2_raw" }).text).toBe(fieldsBlock);
+    expect(formatPromptBatch([row({ condensed: condensed({ failed: true }) })], { fitTo: "krea_2_turbo" }).text).toBe(
+      fieldsBlock,
+    );
+    // An item stored before the step existed has no `condensed` at all.
+    const { condensed: _none, ...old } = row();
+    expect(formatPromptBatch([old], { fitTo: "krea_2_turbo" }).text).toBe(fieldsBlock);
+  });
+
+  it("states an exact size plainly and an estimate as about", () => {
+    expect(condensedSizeText(condensed())).toBe("612 of 1,024 tokens");
+    expect(condensedSizeText(condensed({ tokenCount: "estimate", tokens: 1100 }))).toBe("about 1,100 of 1,024 tokens");
+    expect(condensedSizeText(condensed({ tokens: null }))).toBeNull();
+    expect(condensedSizeText(null)).toBeNull();
   });
 });

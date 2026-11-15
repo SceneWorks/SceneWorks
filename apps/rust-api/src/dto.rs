@@ -646,6 +646,29 @@ pub(crate) struct DatasetBatchDescribeJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// "Fit to" (SW-7163): the catalog id of an image model that declares
+    /// `image.maxPromptTokens`. Each described image is then condensed into one prompt within that
+    /// limit by the Vision Captioner; the limit is read from the server's catalog entry.
+    #[serde(default)]
+    pub(crate) fit_to: Option<String>,
+    /// Condense-only (SW-7163): rows already described, as the dialog holds them. Only the
+    /// condensing step runs for them; no image is opened. Needs `fitTo`; excludes `itemIds`.
+    #[serde(default)]
+    pub(crate) condense_rows: Option<Vec<CondenseRowRequest>>,
+}
+
+/// One already-described row of a condense-only request: its seven fields (the user may have
+/// edited them) and the image's pixel size.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CondenseRowRequest {
+    pub(crate) item_id: String,
+    #[serde(default)]
+    pub(crate) fields: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) width: Option<u32>,
+    #[serde(default)]
+    pub(crate) height: Option<u32>,
 }
 
 /// `?model=<repo>` on the describing-prompt routes (SW-7085, SW-7086): which describer's default

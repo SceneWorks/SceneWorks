@@ -78,6 +78,12 @@ describe("ModelComponentDetails", () => {
     expect(container.textContent).not.toContain("Total download");
   });
 
+  it("says a refusing engine refuses a longer prompt (SW-7163)", () => {
+    expect(modelLimitLines({ image: { maxPromptTokens: 1024, promptOverflow: "refuse" } })).toEqual([
+      "Prompt: up to 1024 tokens (longer prompts are refused)",
+    ]);
+  });
+
   it("renders nothing for a model that declares no per-component licence or prompt limit", async () => {
     const plain = {
       id: "plain",
