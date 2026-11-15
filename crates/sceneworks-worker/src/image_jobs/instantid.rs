@@ -763,6 +763,19 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
     )
 }
 
+pub(super) fn instantid_controlnet_scale(request: &ImageRequest, angle_set: bool) -> f32 {
+    let default = if angle_set {
+        INSTANTID_ANGLE_CONTROLNET_SCALE
+    } else {
+        INSTANTID_CONTROLNET_SCALE
+    };
+    request
+        .authored_advanced_f64("controlnetConditioningScale")
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .clamp(0.0, 2.0)
+}
+
 /// Resolve InstantID quantization. **fp16 (dense) is the default** — the validated identity
 /// envelope (ArcFace-cosine 0.82 @1024²); Q8/Q4 only on an explicit `advanced.mlxQuantize` /
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
@@ -1207,17 +1220,7 @@ pub(super) async fn generate_instantid_stream(
     // The angle set runs a softer landmark lock by default (sc-8354) so the off-axis views clear the
     // blur floor; identity/pose modes keep the standard 0.80. An explicit slider value (now surfaced
     // on the Angle Set card) still wins via the same `controlnetConditioningScale` key.
-    let controlnet_default = if angle_set {
-        INSTANTID_ANGLE_CONTROLNET_SCALE
-    } else {
-        INSTANTID_CONTROLNET_SCALE
-    };
-    let controlnet_scale = super::sampling::resolved_f32_clamped(
-        request,
-        "controlnetConditioningScale",
-        controlnet_default,
-        0.0..=2.0,
-    );
+    let controlnet_scale = instantid_controlnet_scale(request, angle_set);
     let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(INSTANTID_SDXL_REPO)
         .to_owned();

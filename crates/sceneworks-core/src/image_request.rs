@@ -578,6 +578,17 @@ impl ImageRequest {
         value.as_ref().map(|bound| bound.value)
     }
 
+    /// A route with its own sampling recipe can ignore another model's materialized step default.
+    pub fn authored_advanced_steps(&self) -> Option<i64> {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .steps
+            .as_ref()
+            .filter(|bound| matches!(bound.origin, Origin::Authored { .. }))
+            .map(|bound| bound.value)
+    }
+
     pub fn advanced_f64(&self, key: &'static str) -> Option<f64> {
         self.advanced_f64_bound(key).map(|bound| bound.value)
     }

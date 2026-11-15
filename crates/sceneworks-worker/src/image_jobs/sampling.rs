@@ -51,8 +51,17 @@ pub(super) fn resolved_text(request: &ImageRequest, key: &'static str, default: 
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(native_lane)]
 pub(super) fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
-    request
-        .advanced_i64("steps")
+    resolve_steps_with(request, model, request.advanced_i64("steps"))
+}
+
+#[cfg(native_lane)]
+pub(super) fn resolve_authored_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
+    resolve_steps_with(request, model, request.authored_advanced_steps())
+}
+
+#[cfg(native_lane)]
+fn resolve_steps_with(request: &ImageRequest, model: &ResolvedModel, steps: Option<i64>) -> u32 {
+    steps
         .and_then(|value| u32::try_from(value).ok())
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather

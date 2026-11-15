@@ -13058,6 +13058,63 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     );
 }
 
+#[cfg(native_lane)]
+#[test]
+fn krea_turbo_on_raw_keeps_turbo_recipe_after_raw_defaults_materialize() {
+    use super::krea_turbo_raw::{krea_turbo_on_raw_guidance, krea_turbo_on_raw_raw_settings};
+    use super::sampling::resolve_authored_steps;
+    let turbo = mlx_model(KREA_TURBO_ENGINE_ID).unwrap();
+    let authored = json!({"projectId":"p","model":"krea_2_raw","advanced":{}});
+    let effective = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":52,"guidanceScale":1.0}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    let steps = resolve_authored_steps(&request, &turbo);
+    let guidance = krea_turbo_on_raw_guidance(&request);
+    assert_eq!(steps, 8);
+    assert_eq!(guidance, None);
+    let facts = krea_turbo_on_raw_raw_settings(&request, "raw", steps, guidance, None);
+    assert_eq!(facts["steps"], 8);
+    assert_eq!(facts["guidanceScale"], Value::Null);
+
+    let authored = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":12,"guidanceScale":0.5}});
+    let request =
+        ImageRequest::from_resolved(authored.as_object().unwrap(), authored.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_authored_steps(&request, &turbo), 12);
+    assert_eq!(krea_turbo_on_raw_guidance(&request), Some(0.5));
+    let facts = krea_turbo_on_raw_raw_settings(&request, "raw", 12, Some(0.5), None);
+    assert_eq!(facts["steps"], 12);
+    assert_eq!(facts["guidanceScale"], 0.5);
+}
+
+#[cfg(native_lane)]
+#[test]
+fn instantid_angle_set_keeps_its_default_after_manifest_resolution() {
+    use super::instantid::instantid_controlnet_scale;
+    let authored = json!({"projectId":"p","model":"instantid_realvisxl","advanced":{}});
+    let effective = json!({"projectId":"p","model":"instantid_realvisxl",
+        "advanced":{"controlnetConditioningScale":0.8}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(instantid_controlnet_scale(&request, true), 0.65);
+    assert_eq!(instantid_controlnet_scale(&request, false), 0.8);
+
+    let authored = json!({"projectId":"p","model":"instantid_realvisxl",
+        "advanced":{"controlnetConditioningScale":1.2}});
+    let request =
+        ImageRequest::from_resolved(authored.as_object().unwrap(), authored.as_object().unwrap())
+            .unwrap();
+    assert_eq!(instantid_controlnet_scale(&request, true), 1.2);
+}
+
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
 // `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
 // into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
