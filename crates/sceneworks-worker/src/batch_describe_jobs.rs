@@ -333,17 +333,31 @@ pub(crate) fn flatten_pose(value: &Value) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
-/// Whether a `pose` object is a map keyed by label rather than one entry: it has members, and none
-/// of them is a slot or `label`.
+/// Whether a `pose` object is a map keyed by label rather than one entry (see
+/// [`is_lone_pose_entry`]).
 #[cfg(native_lane)]
 fn is_pose_map(map: &JsonObject) -> bool {
     !map.is_empty()
-        && !map.keys().any(|key| {
-            key.eq_ignore_ascii_case("label")
-                || POSE_SLOTS
+        && !is_lone_pose_entry(
+            map.iter()
+                .map(|(key, value)| (key.as_str(), Some(value.is_object()))),
+        )
+}
+
+/// Whether a `pose` object's members make it ONE entry rather than a map keyed by label: it has a
+/// `label` member, or a slot-named member whose value is not an object. A map's values are the
+/// entries (objects), so a label that happens to be a slot name still reads as a map key. Each
+/// member is its key and whether its value is an object (`None` when the value is not known yet,
+/// as for a member cut off before its value began).
+#[cfg(native_lane)]
+fn is_lone_pose_entry<'a>(members: impl IntoIterator<Item = (&'a str, Option<bool>)>) -> bool {
+    members.into_iter().any(|(key, is_object)| {
+        key.eq_ignore_ascii_case("label")
+            || (is_object == Some(false)
+                && POSE_SLOTS
                     .iter()
-                    .any(|(slot, _)| key.eq_ignore_ascii_case(slot))
-        })
+                    .any(|(slot, _)| key.eq_ignore_ascii_case(slot)))
+    })
 }
 
 /// One person's stored pose line; empty when the entry has no label and no slot text at all.
@@ -462,14 +476,42 @@ pub(crate) fn recover_cut_off_reply(raw: &str) -> Option<Result<DescribedFields,
             .is_some_and(|key| key.eq_ignore_ascii_case("pose"))
     }) {
         let partial = cut.partial.trim_start();
-        let is_map = partial.starts_with('{');
-        let entries = if is_map || partial.starts_with('[') {
-            open_members(&partial[1..], is_map)
-                .map(|inner| inner.complete)
+        let is_object = partial.starts_with('{');
+        let mut entries = if is_object || partial.starts_with('[') {
+            open_members(&partial[1..], is_object)
+                .map(|inner| {
+                    // An object that never closed is either one entry cut part-way (dropped
+                    // whole, never half-kept) or a map keyed by label (its complete entries kept,
+                    // the cut last one dropped).
+                    if is_object {
+                        let cut_member = inner.cut.as_ref().and_then(|member| {
+                            let started = member.partial.trim_start();
+                            member.key.as_deref().map(|key| {
+                                (key, (!started.is_empty()).then(|| started.starts_with('{')))
+                            })
+                        });
+                        let members = inner
+                            .complete
+                            .iter()
+                            .map(|(key, value)| {
+                                (key.as_deref().unwrap_or_default(), Some(value.is_object()))
+                            })
+                            .chain(cut_member);
+                        if is_lone_pose_entry(members) {
+                            return Vec::new();
+                        }
+                    }
+                    inner.complete
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
         };
+        if is_object {
+            // A map entry that is not an entry object or text cannot be a person.
+            entries.retain(|(_, value)| value.is_object() || value.is_string());
+        }
+        let is_map = is_object;
         pose_cut = Some(entries.len());
         let value = if is_map {
             Value::Object(

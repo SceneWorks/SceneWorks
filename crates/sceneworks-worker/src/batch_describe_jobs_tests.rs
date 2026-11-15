@@ -669,6 +669,74 @@ fn a_cut_off_map_shaped_pose_keeps_its_complete_entries() {
 }
 
 #[test]
+fn a_lone_pose_entry_cut_part_way_is_dropped_not_read_as_a_map() {
+    // The review's input: one entry object (not a list), cut inside it.
+    let raw = "{\"description\":\"a woman\",\"pose\":{\"label\":\"woman_1\",\"body_line\":\"upright\",\"stance\":\"stand";
+    let recovered = recover_cut_off_reply(raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[0], "a woman");
+    assert_eq!(recovered.fields[POSE], "", "no half entry is kept");
+    let notice = recovered.notice.unwrap();
+    assert!(
+        notice.starts_with(
+            "The reply reached the length limit: the pose was cut off before any person was \
+             complete, so it is left out;"
+        ),
+        "{notice}"
+    );
+    assert!(!notice.contains("covers only"), "{notice}");
+    // Without a label, a slot with a text value still marks it as one entry.
+    let unlabeled =
+        "{\"description\":\"a dog\",\"pose\":{\"body_line\":\"a dog, lying\",\"stance\":\"on";
+    let recovered = recover_cut_off_reply(unlabeled).unwrap().unwrap();
+    assert_eq!(recovered.fields[POSE], "");
+}
+
+#[test]
+fn a_lone_pose_entry_that_completed_is_kept_when_a_later_field_is_cut() {
+    let raw = format!(
+        "{{\"description\":\"a woman\",\"pose\":{},\"style\":\"a 1970s col",
+        entry_json("woman_1", true)
+    );
+    let recovered = recover_cut_off_reply(&raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("woman_1"));
+    assert_eq!(
+        field_text(&recovered, "style"),
+        "",
+        "the cut style is dropped"
+    );
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: style, camera, composition, lighting, \
+             environment were cut off."
+        )
+    );
+}
+
+#[test]
+fn a_map_key_that_is_a_slot_name_is_still_a_label() {
+    // A map whose keys are labels; one label happens to be a slot name. Its value is an entry
+    // object, so it is a map key, complete or cut off.
+    let complete = format!(
+        "{{\"description\":\"two\",\"pose\":{{\"head\":{},\"woman_1\":{}}}}}",
+        entry_json("head", false),
+        entry_json("woman_1", false)
+    );
+    let parsed = parse_described_fields(&complete).expect("parses");
+    assert_eq!(
+        parsed.fields[POSE],
+        format!("{}\n{}", pose_line_for("head"), pose_line_for("woman_1"))
+    );
+    let cut = &complete[..complete.find("\"woman_1\"").unwrap() + 40];
+    let recovered = recover_cut_off_reply(cut).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("head"));
+    assert!(recovered
+        .notice
+        .unwrap()
+        .contains("the pose covers only the first 1 person"));
+}
+
+#[test]
 fn a_six_field_reply_from_before_pose_still_parses() {
     let legacy: Vec<(&str, Value)> = DESCRIBE_FIELDS
         .iter()
