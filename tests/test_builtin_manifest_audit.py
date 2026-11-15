@@ -4177,11 +4177,10 @@ def test_minimax_h3_image_downloads_only_the_diffusers_components():
     assert primaries["bf16"]["default"] is True
     assert primaries["bf16"].get("pendingArtifact") is None
     for tier in ("q8", "q4"):
-        assert primaries[tier]["pendingArtifact"] is True
-        assert primaries[tier]["files"] == [
-            f"{tier}/transformer_diffusers/*",
-            f"{tier}/pdd_fused_heads.safetensors",
-        ]
+        assert primaries[tier].get("pendingArtifact") is None
+        assert primaries[tier]["revision"] == "6f62669b919bccdbf51b08c696fbb84542000a87"
+        # The output heads are inside the quantized shards; only bf16 fetches the heads file.
+        assert primaries[tier]["files"] == [f"{tier}/transformer_diffusers/*"]
 
 
 def test_minimax_h3_image_size_envelope_is_its_own():
@@ -4271,7 +4270,7 @@ _PE_PROMPT_FILES = [
 
 def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     """E17: its own entry — the published NVFP4 tier (Blackwell CUDA, so Windows/Linux only), the
-    three converted tiers pending publication (null SHA + `pendingArtifact`), and a `prompt`
+    bf16 conversion pending publication (null SHA + `pendingArtifact`), the published macOS q8/q4, and a `prompt`
     co-requisite that fetches the five prompt files from the UPSTREAM snapshot for every tier."""
     entry = _models_by_id()["minimax_h3_image_pe"]
     assert entry["type"] == "utility"
@@ -4289,10 +4288,14 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     assert nvfp4["default"] is True and nvfp4.get("pendingArtifact") is None
     assert nvfp4["platforms"] == ["windows", "linux"]
     assert not any(pattern.startswith("prompt") for pattern in nvfp4["files"])
-    for tier in ("bf16", "q8", "q4"):
+    assert primaries["bf16"]["pendingArtifact"] is True
+    assert primaries["bf16"]["revision"] == "0" * 40
+    assert primaries["bf16"]["files"] == ["bf16/*"]
+    for tier in ("q8", "q4"):
         row = primaries[tier]
-        assert row["pendingArtifact"] is True, tier
-        assert row["revision"] == "0" * 40, tier
+        assert row.get("pendingArtifact") is None, tier
+        assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", tier
+        assert row["platforms"] == ["macos"], tier
         assert row["files"] == [f"{tier}/*"], tier
     prompt_rows = [
         download
