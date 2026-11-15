@@ -10,6 +10,16 @@ pub struct ShapeError {
 }
 
 pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
+    if kind == "video" {
+        if let Some(Value::String(mode)) = payload.get("mode") {
+            if mode != mode.trim() {
+                return Err(ShapeError {
+                    field: "mode".to_owned(),
+                    detail: "mode must not contain leading or trailing whitespace".to_owned(),
+                });
+            }
+        }
+    }
     if let Some(value) = payload
         .get("advanced")
         .and_then(|advanced| advanced.get("steps"))
@@ -33,16 +43,28 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
         "sourceAssetIds",
     ] {
         if let Some(Value::Array(values)) = payload.get(key) {
-            if values.iter().any(|value| {
-                value
-                    .as_str()
-                    .is_none_or(|id| id.trim().is_empty() || id != id.trim())
-            }) {
+            if values
+                .iter()
+                .any(|value| value.as_str().is_some_and(|id| id.trim().is_empty()))
+            {
                 return Err(ShapeError {
                     field: key.to_owned(),
-                    detail: format!(
-                        "{key} must contain nonblank string ids without surrounding whitespace"
-                    ),
+                    detail: format!("{key} must not contain blank ids"),
+                });
+            }
+            if values
+                .iter()
+                .any(|value| value.as_str().is_some_and(|id| id != id.trim()))
+            {
+                return Err(ShapeError {
+                    field: key.to_owned(),
+                    detail: format!("{key} must not contain leading or trailing whitespace"),
+                });
+            }
+            if values.iter().any(|value| !value.is_string()) {
+                return Err(ShapeError {
+                    field: key.to_owned(),
+                    detail: format!("{key} must contain only string ids"),
                 });
             }
         }
@@ -126,6 +148,29 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                                 .is_ok()
                         })
                     }
+                    Shape::OneOf(description) if spec.id == "audio.editMode" => {
+                        value.as_str().is_some_and(|text| {
+                            text.trim().is_empty()
+                                || description
+                                    .split(" | ")
+                                    .any(|choice| choice.eq_ignore_ascii_case(text))
+                        })
+                    }
+                    Shape::OneOf(_) if spec.id == "advanced.referenceImageResizeMode" => {
+                        if let Some(advanced) = parent.as_object() {
+                            if let Err(detail) =
+                                crate::video_request::requested_reference_image_resize_mode(
+                                    advanced,
+                                )
+                            {
+                                return Err(ShapeError {
+                                    field: "advanced.referenceImageResizeMode".to_owned(),
+                                    detail,
+                                });
+                            }
+                        }
+                        true
+                    }
                     Shape::OneOf(_) if spec.location == "promptRefine" => value.is_string(),
                     Shape::OneOf(description)
                         if !spec.compatibility.contains("Unknown or absent")
@@ -168,4 +213,65 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shape;
+    use serde_json::json;
+
+    #[test]
+    fn audio_edit_mode_keeps_case_insensitive_compatibility_without_normalizing() {
+        for token in ["Extend", "INPAINT", "repaint", "", "  "] {
+            let payload = json!({"editMode": token});
+            assert!(shape("audio", &payload).is_ok(), "{token:?}");
+            assert_eq!(payload["editMode"], token);
+        }
+        for token in ["Extend ", "unknown"] {
+            assert!(shape("audio", &json!({"editMode": token})).is_err());
+        }
+        assert!(shape("audio", &json!({"editMode": 1})).is_err());
+        assert!(shape("audio", &json!({"iclMode": "SINGLE"})).is_err());
+    }
+
+    #[test]
+    fn video_lists_and_mode_report_the_specific_invalid_value() {
+        for key in [
+            "referenceAssetIds",
+            "sourceClipAssetIds",
+            "referenceAudioAssetIds",
+        ] {
+            for (id, expected) in [
+                ("  ", "blank ids"),
+                (" id ", "leading or trailing whitespace"),
+            ] {
+                let error = shape("video", &json!({key: [id]})).unwrap_err();
+                assert_eq!(error.field, key);
+                assert!(error.detail.contains(expected), "{}", error.detail);
+            }
+        }
+        let error = shape("video", &json!({"mode": " animate_character "})).unwrap_err();
+        assert_eq!(error.field, "mode");
+        assert_eq!(
+            error.detail,
+            "mode must not contain leading or trailing whitespace"
+        );
+        assert!(shape("video", &json!({"referenceAssetIds": [1]})).is_err());
+    }
+
+    #[test]
+    fn h3_resize_uses_the_owner_diagnostic() {
+        let error = shape(
+            "video",
+            &json!({"advanced": {"referenceImageResizeMode": "crop"}}),
+        )
+        .unwrap_err();
+        assert_eq!(error.field, "advanced.referenceImageResizeMode");
+        assert!(error.detail.contains("must be one of"));
+        assert!(shape(
+            "video",
+            &json!({"advanced": {"referenceImageResizeMode": "match"}})
+        )
+        .is_ok());
+    }
 }

@@ -577,6 +577,7 @@ fn decode_vector(payload: &JsonObject) -> Result<VectorRequest, ValidationRefusa
     let mut authored = payload.clone();
     for key in [
         "modelManifestEntry",
+        "modelManifestEntries",
         "modelProvenance",
         "workflow",
         "expectedImportedModelRef",
@@ -599,4 +600,52 @@ fn validate_yue2(kind: &str, payload: &JsonObject) -> Result<(), ValidationRefus
         detail: error.message,
         context: Box::new(json!({})),
     })
+}
+
+#[cfg(test)]
+mod vector_workflow_tests {
+    use super::*;
+
+    #[test]
+    fn promoted_vector_workflow_keeps_its_raster_source_outside_strict_request_decoding() {
+        let payload = json!({
+            "projectId": "p",
+            "model": "starvector_1b",
+            "mode": "image_to_svg",
+            "sourceAssetId": "retained_raster",
+            "modelManifestEntry": {"id": "starvector_1b"},
+            "modelManifestEntries": [{"id": "flux_dev"}],
+            "workflow": {"kind": "raster_to_vector"}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let entry = json!({
+            "id": "starvector_1b",
+            "type": "vector",
+            "adapter": "starvector",
+            "capabilities": ["image_to_svg"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        validate_shape("vector", &payload).expect("promoted parent remains a valid vector request");
+        let resolved = resolve("vector", &payload, &entry).expect("worker admission succeeds");
+        assert_eq!(
+            resolved["modelManifestEntries"],
+            payload["modelManifestEntries"]
+        );
+        assert_eq!(payload["modelManifestEntries"], json!([{"id": "flux_dev"}]));
+
+        let mut malformed = payload.clone();
+        malformed.insert("sampling".into(), json!({"temperature": 3}));
+        assert_eq!(
+            validate_shape("vector", &malformed).unwrap_err().field,
+            "sampling.temperature"
+        );
+        malformed.remove("sampling");
+        malformed.insert("unrecognizedAuthorField".into(), json!(1));
+        assert!(validate_shape("vector", &malformed).is_err());
+    }
 }

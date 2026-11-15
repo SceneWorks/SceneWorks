@@ -2036,7 +2036,7 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
                 "sourceAssetId": raster_id,
                 "fixtureSvg": "<svg/>"
             }),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
         ),
         (
             json!({
@@ -2053,8 +2053,17 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
             StatusCode::BAD_REQUEST,
         ),
     ] {
-        let (status, _) = request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
-        assert_eq!(status, expected_status);
+        let is_unknown_field = body.get("fixtureSvg").is_some();
+        let (status, error) =
+            request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
+        assert_eq!(status, expected_status, "{error}");
+        if is_unknown_field {
+            assert_eq!(error["code"], "invalid_generation_option");
+            assert!(error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fixtureSvg"));
+        }
     }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
@@ -5488,7 +5497,10 @@ async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
     }
 
     for (advanced, detail) in [
-        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": "yes" }),
+            "advanced.enhancePrompt has an invalid value",
+        ),
         (
             json!({ "enhancePrompt": true, "enhanceTemperature": 2.01 }),
             "must be between 0 and 2",
@@ -6211,7 +6223,7 @@ async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_ref
         ),
         // The typed shape guard the create path applies to the same field.
         (
-            "advanced.decoder must be a decoder id string",
+            "advanced.decoder has an invalid value",
             json!({ "decoder": 7 }),
         ),
     ] {
@@ -8575,7 +8587,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown ICL mode",
             json!({ "model": "yue_en_icl", "iclMode": "triple", "iclReferenceAssetId": "a" }),
-            "iclMode must be one of",
+            "iclMode has an invalid value",
         ),
         (
             "ICL fields without a mode",
@@ -8632,7 +8644,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown tier",
             json!({ "model": "yue_en_cot", "quantTier": "q2" }),
-            "quantTier must be",
+            "quantTier has an invalid value",
         ),
         (
             "missing lyrics",
@@ -8667,7 +8679,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown output limiter",
             json!({ "model": "yue_en_cot", "outputLimiter": "normalize" }),
-            "outputLimiter must be one of",
+            "outputLimiter has an invalid value",
         ),
         (
             "output limiter on a non-song model",
@@ -9901,7 +9913,8 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(error["detail"], "upscale.factor must be 2 or 4");
+    assert_eq!(error["code"], "invalid_generation_option");
+    assert_eq!(error["field"], "upscale.factor");
 }
 
 #[tokio::test]
@@ -11775,10 +11788,8 @@ async fn bernini_video_modes_validate_required_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        blank_audio["detail"],
-        "referenceAudioAssetIds must not contain blank ids"
-    );
+    assert_eq!(blank_audio["code"], "invalid_generation_option");
+    assert_eq!(blank_audio["field"], "referenceAudioAssetIds");
 
     // A complete video_to_video request creates a base video_generate job that
     // carries the source clip.
@@ -12336,7 +12347,7 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         );
 
         for (malformed, expected) in [
-            (json!("not-an-array"), "must be an array of string ids"),
+            (json!("not-an-array"), "has an invalid value for Strings"),
             (
                 json!(["character-primary", 7]),
                 "must contain only string ids",
@@ -12651,13 +12662,9 @@ async fn generation_job_routes_reject_incompatible_loras() {
         "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters"
     );
 
+    // LTX's extend, bridge, and replace routes do not support LoRAs at all; the
+    // shared admission gate rejects them before the family compatibility check.
     for (mode, extra) in [
-        ("image_to_video", json!({ "sourceAssetId": "asset-image" })),
-        ("text_to_video", json!({})),
-        (
-            "first_last_frame",
-            json!({ "sourceAssetId": "asset-first", "lastFrameAssetId": "asset-last" }),
-        ),
         ("extend_clip", json!({ "sourceClipAssetId": "asset-video" })),
         (
             "video_bridge",
@@ -12666,6 +12673,24 @@ async fn generation_job_routes_reject_incompatible_loras() {
         (
             "replace_person",
             json!({ "sourceClipAssetId": "asset-video", "personTrackId": "track-1", "characterId": "character-1" }),
+        ),
+    ] {
+        let mut payload = json!({"projectId": project_id, "mode": mode, "prompt": "motion",
+            "model": "ltx_2_3", "loras": [{ "id": "qwen_style" }]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{mode}: {error}");
+        assert_eq!(error["field"], "mode", "{mode}: {error}");
+    }
+    for (mode, extra) in [
+        ("image_to_video", json!({ "sourceAssetId": "asset-image" })),
+        ("text_to_video", json!({})),
+        (
+            "first_last_frame",
+            json!({ "sourceAssetId": "asset-first", "lastFrameAssetId": "asset-last" }),
         ),
     ] {
         let mut payload = json!({
@@ -15247,7 +15272,11 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
             "guidance interval",
         ),
         ("", json!({ "cfgInterval": [0.9, 0.1] }), "0 <= start"),
-        ("", json!({ "captionOverflow": "loud" }), "caption-overflow"),
+        (
+            "",
+            json!({ "captionOverflow": "loud" }),
+            "advanced.captionOverflow",
+        ),
         ("", json!({ "schedulerShift": -1 }), "> 0"),
         ("", json!({ "sampler": "heun" }), "does not offer"),
     ] {
@@ -15255,7 +15284,8 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
         let detail = body["detail"].as_str().unwrap_or_default();
         assert!(
-            detail.contains("iris_3b") && detail.contains(fragment),
+            (detail.contains("iris_3b") || body["context"]["model"] == "iris_3b")
+                && detail.contains(fragment),
             "{advanced}: {detail}"
         );
     }
@@ -17422,18 +17452,13 @@ async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
         "diffusers"
     );
 
-    for (model, advanced, needle) in [
-        (
-            "minimax_h3",
-            json!({ "referenceImageResizeMode": "crop" }),
-            "advanced.referenceImageResizeMode must be one of",
-        ),
-        (
-            "wan_i2v",
-            json!({ "referenceImageResizeMode": "match" }),
-            "is not supported by wan_i2v",
-        ),
-    ] {
+    // The non-H3 refusal is covered at the static policy owner; wan_i2v has no
+    // eligible route in this API configuration and the route refuses it first.
+    for (model, advanced, needle) in [(
+        "minimax_h3",
+        json!({ "referenceImageResizeMode": "crop" }),
+        "advanced.referenceImageResizeMode must be one of",
+    )] {
         let (status, error) = request(
             app.clone(),
             "POST",
@@ -18871,7 +18896,8 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
                 "/api/v1/video/jobs",
                 json!({
                     "projectId": project_id,
-                    "mode": "text_to_video",
+                    "mode": if model == "minimax_h3_ref" { "reference_to_video" } else { "text_to_video" },
+                    "referenceAssetIds": if model == "minimax_h3_ref" { vec!["reference-image"] } else { vec![] },
                     "prompt": "a cellist on a rooftop",
                     "model": model,
                     "loras": [{ "id": lora, "weight": 1.0 }]
@@ -19580,6 +19606,14 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
         }))
         .expect("image job request parses")
     };
+    let validate = |model: &str, advanced: Value| {
+        let payload = serde_json::to_value(job(model, advanced)).unwrap();
+        sceneworks_core::request_validation::validate(
+            "image",
+            payload.as_object().unwrap(),
+            &serde_json::Map::new(),
+        )
+    };
     for advanced in [
         json!({}),
         json!({"quantTier": "fp8r"}),
@@ -19590,7 +19624,7 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
     ] {
         for model in ["flux3_klein", "flux3_klein_base"] {
             assert!(
-                crate::validate_image_job(&job(model, advanced.clone())).is_ok(),
+                validate(model, advanced.clone()).is_ok(),
                 "{model}: {advanced}"
             );
         }
@@ -19609,9 +19643,11 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
         ("flux3_klein", json!({"mlxQuantize": 6})),
         ("flux3_klein", json!({"quantTier": "int8-convrot"})),
     ] {
-        let error =
-            crate::validate_image_job(&job(model, advanced.clone())).expect_err("tier refusal");
-        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{model} {advanced}");
+        let error = validate(model, advanced.clone()).expect_err("tier refusal");
+        assert_eq!(
+            error.code, "invalid_generation_option",
+            "{model} {advanced}"
+        );
         assert!(
             error.detail.contains(model),
             "{model} {advanced}: {}",
@@ -19635,7 +19671,7 @@ async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_der
     for model in ["flux3_klein", "flux3_klein_base"] {
         for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
             let mut payload = json!({
-                "model":model,"advanced":{"quantTier":tier},
+                "projectId":"project-1","prompt":"a lighthouse","model":model,"advanced":{"quantTier":tier},
                 "modelManifestEntry":{"id":model,"downloads":[{"variant":tier}]}
             })
             .as_object()
