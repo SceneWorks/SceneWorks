@@ -230,3 +230,14 @@ changed only in their source identity; `old-observations.json` changed in 111 ro
 Studio (`poses` 51, `test` 33, `angles` 27 across the three platforms). The integrated registry
 branch matches every re-captured row and behavior case.
 
+
+## Deliberate change after capture: Krea 2 prompt limit (SW-7163)
+
+Krea 2 Turbo and Krea 2 Raw now declare their 1,024-token text-to-image prompt limit, and Simple
+Image shows "… reads up to 1,024 prompt tokens; a longer prompt is refused." in text-to-image
+(not in edit, which encodes with a larger limit). A re-capture cannot record this: the capture
+script runs only at the pinned pre-registry SHA, and current main dumps the registry catalog. So
+`old-observations.json` gains exactly that hint in the six `simpleImage/krea_2_*/text_to_image`
+rows (three platforms). A one-off check observed each row with the current candidate, asserted
+that the hint was the only difference, and wrote the rows with `renderBaseline`. No other row,
+the population, `old-catalog.json` or `old-behavior.json` changed.

@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory reviewed at inference revision 354b41cc (inference main after the sc-27934 external MOSS LoRA engines; it contains 56dd728f, SceneWorks/inference#1389, the MLX tiled int8 GEMM the sc-26691 campaign needs): 804 provenance candidates and 137 production-Rust crate prefixes. Since 0b80ec51 inference epic sc-27252 split gen-core into sibling backend-neutral crates (crates/contracts/gen-core-*); that is first-party code moved out of gen-core, not new third-party source, so each sibling keeps the classification its code had (per-crate architecture areas or crate decisions), and the Veda top-k and InstantID OpenCV-kps ports follow their files into gen-core-h3 / gen-core-family. Incoming iOS/runtime, Iris quantization, SDXL memory contracts and source-bound security changes are retained alongside MOSS training. FLUX 3 (candle-gen-flux3, mlx-gen-flux3), iOS-runtime (runtime-ios, mlx-gen-ios-catalog) and vendored clip-regex sources are not classified by this review; check-license-coverage reports them as open items.",
-  "inferenceRevision": "c5893d36c0cbbb54c89241cff3e1bea173dd51da",
-  "auditDigest": "b9c3da813efca092be0a703c216670662e7b0e4f5b203049263295b6a4a3b656",
+  "inferenceRevision": "96969df88f387505f3c5e2377e45442a70b51c87",
+  "auditDigest": "a8a111da39cb1d7a64f1e99c6ece40d98aa80a042fbebc7a6e31140f79764f13",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "c5893d36c0cbbb54c89241cff3e1bea173dd51da",
+    "revision": "96969df88f387505f3c5e2377e45442a70b51c87",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 807,
-    "populationSha256": "d053d7c4dc51dff3d5eafb8954044a30178adec87c83fc951e8d3b71fd32a1f0"
+    "populationSha256": "30d94870d7a9097a52638b0bb17a1c24463a107b8d83b94c584ca6d9e818b8c4"
   },
   "portedSourceAreas": [
     {
@@ -1055,7 +1055,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "c5893d36c0cbbb54c89241cff3e1bea173dd51da",
+    "revision": "96969df88f387505f3c5e2377e45442a70b51c87",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 141,
     "cratePopulationSha256": "0545ba760a6cbb4cb1437c8275615223f60ffe8ac1a00a7e44507e3b99bcc5aa"

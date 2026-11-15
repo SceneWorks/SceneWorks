@@ -174,6 +174,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        // SW-7163: the describe job's "Fit to" step reads only the target image model's installed
+        // tokenizer (its pinned primary snapshot) to count a condensed prompt exactly.
+        source_files: &["crates/sceneworks-worker/src/batch_describe_condense.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/vector_jobs.rs"],
         categories: &[Category::Image, Category::Primary],
         resolution: Resolution::SharedContract {
@@ -593,6 +602,9 @@ mod tests {
         "crates/sceneworks-worker/src/ladder_e2e_sc18101.rs",
         "crates/sceneworks-worker/src/mage_flow_q8_mlx_smoke.rs",
         "crates/sceneworks-worker/src/pid_tier_mlx_smoke.rs",
+        // SW-7120: the Qwen3.8 27B describer CUDA validation, an #[ignore]d test module compiled only
+        // under cfg(all(test, not(macos), backend-candle)) and run only by its dispatched workflow.
+        "crates/sceneworks-worker/src/qwen38_describer_gpu_smoke.rs",
         "crates/sceneworks-worker/src/resolution_sweep.rs",
         "crates/sceneworks-worker/src/sana_mlx_smoke.rs",
         "crates/sceneworks-worker/src/sd3_5_mlx_smoke.rs",

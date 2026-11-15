@@ -64,6 +64,9 @@ sha2 = { version = "0.10" }
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.7" }
 base64 = { version = "0.22" }
+# Windows-only: desktop (job objects) and core (source-stamp change time) each add their own
+# features. 0.59 is the version tauri already locks.
+windows-sys = { version = "0.59" }
 fs2 = { version = "0.4" }
 glob = { version = "0.3" }
 parking_lot = { version = "0.12" }
@@ -166,7 +169,9 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 ] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`, only so sceneworks-core can allow unsafe on its one Windows FFI function
+# (`checkpoint_plan_store::windows_change_time`); every other use is still an error.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
@@ -190,9 +195,9 @@ all = "warn"
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "c5893d36c0cbbb54c89241cff3e1bea173dd51da" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "96969df88f387505f3c5e2377e45442a70b51c87" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "96969df88f387505f3c5e2377e45442a70b51c87" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "96969df88f387505f3c5e2377e45442a70b51c87" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

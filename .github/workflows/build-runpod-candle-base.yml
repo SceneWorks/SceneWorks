@@ -1,7 +1,8 @@
 name: Build RunPod Candle base
 
-# Manual, source-bound refresh of the prebuilt CUDA worker. Release publication
-# consumes an immutable digest from this image only after its source guard passes.
+# Manual, source-bound refresh of the prebuilt CUDA worker. Feature acceptance
+# may build it before main merge; publication consumes its immutable digest only
+# after the source guard passes. No branch push starts this workflow.
 on:
   workflow_dispatch:
 
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.repository == 'SceneWorks/SceneWorks' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release/next') }}
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release/next' || startsWith(github.ref, 'refs/heads/feature/')) }}
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:

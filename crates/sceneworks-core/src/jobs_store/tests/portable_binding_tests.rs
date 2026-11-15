@@ -1116,3 +1116,35 @@ fn candle_claim_does_not_defer_portable_image_to_ineligible_mlx_worker() {
         );
     }
 }
+
+/// SW-7163: a measure-only describe job is model-free (no describer source is bound, and the
+/// historical upgrade never selects it); a condense-only or ordinary describe job still runs its
+/// describer and stays a model job, as does a non-boolean `measureOnly`.
+#[test]
+fn a_measure_only_describe_job_is_model_free_and_a_condense_only_one_is_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let describe = |payload: Value| {
+        let mut job = request();
+        job.job_type = JobType::DatasetBatchDescribe;
+        job.payload = payload.as_object().unwrap().clone();
+        store.create_job(job).unwrap()
+    };
+    let measure = describe(json!({ "measureOnly": true, "fitTo": "krea_2_turbo" }));
+    let condense = describe(json!({ "condenseOnly": true, "fitTo": "krea_2_turbo" }));
+    let numeric = describe(json!({ "measureOnly": 1 }));
+    for (job, model_free) in [(&measure, true), (&condense, false), (&numeric, false)] {
+        assert_eq!(
+            crate::model_artifacts::portable_binding::model_free_job(&job.job_type, &job.payload),
+            model_free,
+            "{:?}",
+            job.payload
+        );
+    }
+    let queued = store.unbound_queued_model_jobs(8).unwrap();
+    assert_eq!(
+        queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&condense.id, &numeric.id]
+    );
+}

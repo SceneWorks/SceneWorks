@@ -1059,7 +1059,17 @@ pub(super) fn co_requisite_cache_health(
             let valid = resolver
                 .discover_source_snapshot(&identity.repo, Some(&identity.revision))
                 .map(|(_, snapshot)| snapshot.join(&identity.file))
-                .is_ok_and(|path| identity.verify(&path).is_ok());
+                .is_ok_and(|path| {
+                    // Catalog reads re-prove the bytes, reading each unchanged file once per host.
+                    identity
+                        .verify(
+                            &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+                                data_dir,
+                            ),
+                            &path,
+                        )
+                        .is_ok()
+                });
             return Some(if valid {
                 HuggingFaceCacheHealth::installed()
             } else {

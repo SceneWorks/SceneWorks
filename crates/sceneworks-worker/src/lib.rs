@@ -581,7 +581,7 @@ use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 // SW-7082 — the dataset prompt-batch describe job: a vision-language describer over a training
-// dataset's images, six description fields + pixel size per image, for Training Studio's prompt batch.
+// dataset's images, seven description fields + pixel size per image, for Training Studio's prompt batch.
 mod batch_describe_jobs;
 use batch_describe_jobs::run_dataset_batch_describe_job;
 // Qwen-Image 2.1 (sc-24113, epic 24107). Two small, pure adapters kept OUT of the 4k-line
@@ -657,6 +657,12 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+
+// Real-weight CUDA validation of the Qwen3.8 27B describer (SW-7120). Test-only + candle-only and
+// ignored, like the other worker GPU smokes; only the dispatch-only
+// `qwen38-describer-validation.yml` workflow runs it.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod qwen38_describer_gpu_smoke;
 // Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
 // descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
 // NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the

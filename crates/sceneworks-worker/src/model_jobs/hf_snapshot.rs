@@ -908,7 +908,19 @@ pub(crate) fn resolve_optional_component(
             // (component simply not staged), never an out-of-snapshot host file.
             let path = safe_join(&snapshot, file).ok()?;
             match sceneworks_core::managed_file::ManagedFileIdentity::from_download(download) {
-                Ok(Some(identity)) if identity.verify(&path).is_err() => return None,
+                // Proves the bytes each load; an unchanged file is read once per host.
+                Ok(Some(identity))
+                    if identity
+                        .verify(
+                            &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+                                &settings.data_dir,
+                            ),
+                            &path,
+                        )
+                        .is_err() =>
+                {
+                    return None
+                }
                 Err(_) => return None,
                 _ => {}
             }

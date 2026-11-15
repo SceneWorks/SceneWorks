@@ -1504,10 +1504,11 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
-/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
-/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
-/// Captioner, `training_caption` for JoyCaption). The worker
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner, JoyCaption (SW-7083) or
+/// the Qwen3.8 27B describer at a tier describes each image of the dataset (or of `itemIds`, in
+/// dataset order) as seven JSON fields plus its pixel size; `fitTo` and `condenseRows` add or run
+/// only the condensing step. The job routes by the capability of its model (`prompt_refine` for
+/// the Vision Captioner-class describers, `training_caption` for JoyCaption). The worker
 /// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
 /// the user's instruction.
 pub(crate) async fn create_training_dataset_batch_describe_job(
@@ -1515,14 +1516,51 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let (model, tier, prompt) = validate_batch_describe_request(&payload)?;
+    let fit_to = match payload
+        .fit_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => {
+            let entry = crate::models::resolve_model_manifest_entry(&state, id).await?;
+            Some((id.to_owned(), fit_to_target_entry(id, entry)?))
+        }
+        None => None,
+    };
+    let condense_rows = validate_condense_rows(&payload, fit_to.is_some())?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
         move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
     })
     .await?;
-    let items = batch_describe_items(&dataset, &dataset_root, payload.item_ids.as_deref())?;
+    let item_ids = condense_rows
+        .as_ref()
+        .map(|rows| rows.keys().cloned().collect::<Vec<_>>());
+    let mut items = batch_describe_items(
+        &dataset,
+        &dataset_root,
+        item_ids.as_deref().or(payload.item_ids.as_deref()),
+    )?;
+    if let Some(rows) = &condense_rows {
+        for item in &mut items {
+            let row = item
+                .get("itemId")
+                .and_then(Value::as_str)
+                .and_then(|id| rows.get(id));
+            if let (Some(object), Some(row)) = (item.as_object_mut(), row) {
+                object.insert("fields".to_owned(), json!(row.fields));
+                object.insert("width".to_owned(), json!(row.width));
+                object.insert("height".to_owned(), json!(row.height));
+                object.insert("notice".to_owned(), json!(row.notice));
+                if payload.measure_only {
+                    object.insert("condensedText".to_owned(), json!(row.condensed_text));
+                }
+            }
+        }
+    }
     let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_batch_describe",
@@ -1541,8 +1579,28 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
-    if let Some(prompt) = prompt {
+    // A tiered describer carries its tier on every request mode: a condense-only job reloads the
+    // tier the row was described with, never the default.
+    if let Some(tier) = tier {
+        job_payload.insert("variant".to_owned(), json!(tier));
+    }
+    if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
+    }
+    if let Some((id, entry)) = fit_to {
+        // A projection of the target's own catalog entry, so the worker reads the limit (and
+        // finds the target's tokenizer) from the server's catalog, never from a client number.
+        // It is not a model the job loads, so it rides outside the model-source carriers.
+        job_payload.insert("fitTo".to_owned(), json!(id));
+        job_payload.insert("fitToManifestEntry".to_owned(), fit_to_projection(&entry));
+    }
+    if condense_rows.is_some() {
+        let mode = if payload.measure_only {
+            "measureOnly"
+        } else {
+            "condenseOnly"
+        };
+        job_payload.insert(mode.to_owned(), json!(true));
     }
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -1550,19 +1608,43 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
+    // Describe and condense-only jobs load the tier, so it must be installed. A model-free job
+    // (measure-only) loads no describer and carries no source, the same rule the source
+    // preparation above and the claim gate apply.
+    let model_free = sceneworks_core::model_artifacts::portable_binding::model_free_job(
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+    );
+    if let Some(tier) = tier.filter(|_| !model_free) {
+        ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+    }
     let requested_gpu = payload.requested_gpu;
+    // Freeze the exact source each worker route loads (for a tiered describer, that tier's row on
+    // that platform) now, like the other dataset jobs, so a claim runs only what was admitted.
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetBatchDescribe,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetBatchDescribe,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1601,9 +1683,13 @@ pub(crate) async fn list_training_dataset_batch_describe_jobs(
 /// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
-) -> Result<(&'static str, Option<String>), ApiError> {
-    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+) -> Result<(&'static str, Option<&'static str>, Option<String>), ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        max_describe_prompt_chars, resolve_describe_tier,
+    };
     let model = resolve_describe_model(payload.model.as_deref())?;
+    let tier = resolve_describe_tier(Some(model), payload.variant.as_deref())
+        .map_err(|message| training_field_error("variant", message))?;
     let prompt = payload
         .prompt
         .as_deref()
@@ -1616,22 +1702,218 @@ pub(crate) fn validate_batch_describe_request(
             format!("The describing prompt must be at most {limit} characters for this model."),
         ));
     }
-    Ok((model, prompt.map(str::to_owned)))
+    Ok((model, tier, prompt.map(str::to_owned)))
+}
+
+/// Refuse a describe tier this host has not installed, before the job is queued. Each tier is its
+/// own download (the q4 and q8 tiers are separate folders of a re-host), so the model being
+/// installed in some tier says nothing about the tier the request names.
+fn ensure_describe_tier_installed(
+    data_dir: &std::path::Path,
+    job_payload: &JsonObject,
+    tier: &str,
+) -> Result<(), ApiError> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let Some(entry) = job_payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+    else {
+        return Err(ApiError::internal(
+            "Qwen3.8 27B describe job carries no catalog entry",
+        ));
+    };
+    let mut entry = entry.clone();
+    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
+    if crate::models::installed_variant_keys(&entry, data_dir)
+        .iter()
+        .any(|installed| installed == tier)
+    {
+        return Ok(());
+    }
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(QWEN38_27B_DESCRIBER_MODEL_ID);
+    Err(ApiError::model_artifact_conflict(
+        format!(
+            "The {tier} tier of {name} is not installed. Download that tier in the Model \
+             Manager, or choose a tier that is installed."
+        ),
+        "model_artifact_incomplete",
+    ))
+}
+
+/// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it
+/// for `id`: refused when the id is not in the catalog, or its entry declares no
+/// `image.maxPromptTokens` or one below `MIN_FIT_TO_PROMPT_TOKENS` (too small to hold every
+/// person's pose).
+pub(crate) fn fit_to_target_entry(id: &str, entry: Value) -> Result<Value, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{prompt_token_limit, MIN_FIT_TO_PROMPT_TOKENS};
+    if entry.as_object().is_none_or(|object| object.is_empty()) {
+        return Err(training_field_error(
+            "fitTo",
+            format!("Unknown Fit to model {id:?}."),
+        ));
+    }
+    match prompt_token_limit(&entry) {
+        None => Err(training_field_error(
+            "fitTo",
+            format!("Fit to model {id:?} declares no prompt token limit."),
+        )),
+        Some(limit) if limit < MIN_FIT_TO_PROMPT_TOKENS => Err(training_field_error(
+            "fitTo",
+            format!(
+                "Fit to model {id:?} reads only {limit} prompt tokens; a Fit to target needs at \
+                 least {MIN_FIT_TO_PROMPT_TOKENS} to keep every person's pose."
+            ),
+        )),
+        Some(_) => Ok(entry),
+    }
+}
+
+/// The part of a target's catalog entry the worker reads: its id, name, adapter (which picks its
+/// exact counter), `image` prompt facts, and each download's repository, revision, files and
+/// co-requisite flag (where its tokenizer is installed). Job listings carry this, not the entry.
+pub(crate) fn fit_to_projection(entry: &Value) -> Value {
+    let downloads: Vec<Value> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|download| {
+            json!({
+                "repo": download.get("repo"),
+                "revision": download.get("revision"),
+                "files": download.get("files"),
+                "coRequisite": download.get("coRequisite"),
+            })
+        })
+        .collect();
+    json!({
+        "id": entry.get("id"),
+        "name": entry.get("name"),
+        "adapter": entry.get("adapter"),
+        "image": {
+            "maxPromptTokens": entry.get("image").and_then(|image| image.get("maxPromptTokens")),
+            "promptOverflow": entry.get("image").and_then(|image| image.get("promptOverflow")),
+        },
+        "downloads": downloads,
+    })
+}
+
+/// A condense-only or measure-only request's rows by item id (SW-7163), `None` for an ordinary
+/// describe request. Condensing needs a Fit to target and a describer that condenses (JoyCaption
+/// has no text step), takes its items from the rows (so `itemIds` is refused beside them), and
+/// accepts at most one row per item. Each field is one of the seven and no longer than a described
+/// field can be; a row holds at most `MAX_CONDENSE_ROW_CHARS` across its fields and is never all
+/// empty. A measure-only row must carry its edited `condensedText`.
+pub(crate) fn validate_condense_rows(
+    payload: &DatasetBatchDescribeJobRequest,
+    has_fit_to: bool,
+) -> Result<Option<std::collections::BTreeMap<String, crate::dto::CondenseRowRequest>>, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        describer_condenses, DESCRIBE_FIELDS, MAX_CONDENSE_ROW_CHARS, MAX_DESCRIBE_FIELD_CHARS,
+    };
+    if has_fit_to && !describer_condenses(payload.model.as_deref()) {
+        return Err(training_field_error(
+            "fitTo",
+            "Fit to needs a describer with a text step; JoyCaption rows are not condensed.",
+        ));
+    }
+    let Some(rows) = payload.condense_rows.as_ref() else {
+        if payload.measure_only {
+            return Err(training_field_error(
+                "condenseRows",
+                "measureOnly needs condenseRows.",
+            ));
+        }
+        return Ok(None);
+    };
+    let refuse = |detail: String| Err(training_field_error("condenseRows", detail));
+    if !has_fit_to {
+        return refuse("condenseRows needs a fitTo target.".to_owned());
+    }
+    if payload.item_ids.is_some() {
+        return refuse("Send condenseRows or itemIds, not both.".to_owned());
+    }
+    if rows.is_empty() {
+        return refuse("condenseRows must hold at least one row.".to_owned());
+    }
+    let mut by_id = std::collections::BTreeMap::new();
+    for row in rows {
+        let id = &row.item_id;
+        if let Some(name) = row
+            .fields
+            .keys()
+            .find(|name| !DESCRIBE_FIELDS.contains(&name.as_str()))
+        {
+            return refuse(format!("Row {id} has an unknown field {name:?}."));
+        }
+        if let Some((name, _)) = row
+            .fields
+            .iter()
+            .find(|(_, text)| text.chars().count() > MAX_DESCRIBE_FIELD_CHARS)
+        {
+            return refuse(format!(
+                "Row {id} field {name:?} is longer than {MAX_DESCRIBE_FIELD_CHARS} characters."
+            ));
+        }
+        let total: usize = row.fields.values().map(|text| text.chars().count()).sum();
+        if total > MAX_CONDENSE_ROW_CHARS {
+            return refuse(format!(
+                "Row {id} has {total} characters across its fields; at most \
+                 {MAX_CONDENSE_ROW_CHARS} can be condensed."
+            ));
+        }
+        if row.fields.values().all(|text| text.trim().is_empty()) {
+            return refuse(format!("Row {id} has no text in any field to condense."));
+        }
+        let text_len = |text: &Option<String>| text.as_deref().map_or(0, |t| t.chars().count());
+        if text_len(&row.notice) > MAX_DESCRIBE_FIELD_CHARS
+            || text_len(&row.condensed_text) > MAX_DESCRIBE_FIELD_CHARS
+        {
+            return refuse(format!(
+                "Row {id} notice or condensed prompt is longer than {MAX_DESCRIBE_FIELD_CHARS} \
+                 characters."
+            ));
+        }
+        if payload.measure_only
+            && row
+                .condensed_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return refuse(format!("Row {id} has no condensed prompt to measure."));
+        }
+        if by_id.insert(id.clone(), row.clone()).is_some() {
+            return refuse(format!("Row {id} appears twice."));
+        }
+    }
+    Ok(Some(by_id))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
 /// other accepted describer, anything else is refused. Shared by the describe job and the default
 /// describing prompt route so both accept exactly the same `model` values.
 pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
-    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use sceneworks_core::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     match model.map(str::trim) {
         None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
         Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(QWEN38_27B_DESCRIBER_REPO) => Ok(QWEN38_27B_DESCRIBER_REPO),
         Some(other) => Err(training_field_error(
             "model",
             format!(
                 "Unsupported describe model {other:?}. Use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ),
         )),
     }

@@ -572,6 +572,13 @@ manifest digest (rather than an attestation-bearing index), update
 and run `node scripts/check-runpod-prebuilt-inputs.mjs`. The release publication
 workflow runs that check again against the exact tag and refuses a stale base.
 
+For feature acceptance before the main merge, dispatch the same worker build
+manually on the reviewed `feature/` ref. After it succeeds, pin its immutable
+`linux/amd64` manifest digest on that ref and dispatch the manual combined-image
+publication there. The source guard still compares the worker inputs and Docker
+build stages with the worker image's source revision. Use the resulting manual
+image tag for the real pod check; release and `latest` tags remain unchanged.
+
 Record the source revision and registry digest and deploy that exact candidate
 with the normal token secret, `/workspace` network mount, and port `8010/http`.
 Do not overwrite the accepted template or a release/latest tag. Authentication
