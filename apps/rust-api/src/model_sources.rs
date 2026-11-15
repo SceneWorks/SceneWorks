@@ -345,6 +345,14 @@ pub(crate) async fn ensure_runtime_model_sources(
         // disconnected. The worker guard applies the identical exemption.
         return Ok(());
     }
+    if matches!(job_type, JobType::DatasetBatchDescribe)
+        && payload.get("measureOnly").and_then(Value::as_bool) == Some(true)
+    {
+        // SW-7163: measuring reads only the target image model's installed tokenizer (found in
+        // the local cache, never fetched) and runs no describer, so no describer source is
+        // attached, preflighted or bound. The worker guard applies the identical exemption.
+        return Ok(());
+    }
     if matches!(job_type, JobType::ModelConvert) {
         let repository = payload
             .get("sourceRepo")

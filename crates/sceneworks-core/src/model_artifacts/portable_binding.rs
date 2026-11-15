@@ -1498,6 +1498,10 @@ pub fn model_free_job(
             && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
         || matches!(job_type, JobType::PersonDetect | JobType::PersonTrack)
             && payload.get("preview").and_then(Value::as_bool) == Some(true)
+        // SW-7163: a measure-only describe job re-counts edited prompts with the target image
+        // model's installed tokenizer and loads, binds or downloads no describer.
+        || matches!(job_type, JobType::DatasetBatchDescribe)
+            && payload.get("measureOnly").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::CatalogAnalysis)
             && [
                 "structuredAnalysisEnabled",

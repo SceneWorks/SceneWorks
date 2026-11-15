@@ -154,10 +154,18 @@ impl RuntimeSourceGuard {
             ]
             .iter()
             .all(|key| payload.get(*key).and_then(serde_json::Value::as_bool) == Some(false));
+        // SW-7163: a measure-only describe job counts with the target's installed tokenizer and
+        // never loads a describer (the API's identical exemption sends no model carriers).
+        let model_free_measure_only = matches!(job_type, JobType::DatasetBatchDescribe)
+            && payload
+                .get("measureOnly")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
         if explicit_download
             || model_free_dry_run
             || model_free_trigger_only_caption
             || model_free_catalog_analysis
+            || model_free_measure_only
         {
             if binding.is_some() {
                 return Err(WorkerError::InvalidPayload(
@@ -10569,5 +10577,21 @@ mod tests {
         }
         // The exemption is keyed on the caption job type, not on the bare field.
         assert!(RuntimeSourceGuard::begin(&JobType::LoraTrain, &trigger_only, &settings).is_err());
+    }
+
+    // SW-7163: a measure-only describe job needs no describer source and refuses a binding; a
+    // condense-only one runs its describer and still needs its source.
+    #[test]
+    fn measure_only_describe_is_model_free_but_condense_only_is_not() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let measure = json!({ "measureOnly": true }).as_object().unwrap().clone();
+        RuntimeSourceGuard::begin(&JobType::DatasetBatchDescribe, &measure, &settings).unwrap();
+        let condense = json!({ "condenseOnly": true }).as_object().unwrap().clone();
+        assert!(
+            RuntimeSourceGuard::begin(&JobType::DatasetBatchDescribe, &condense, &settings)
+                .is_err()
+        );
+        assert!(RuntimeSourceGuard::begin(&JobType::PromptRefine, &measure, &settings).is_err());
     }
 }

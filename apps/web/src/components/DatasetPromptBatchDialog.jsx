@@ -109,6 +109,8 @@ function rowFromResultItem(item, model = null) {
     notice: typeof item.notice === "string" && item.notice ? item.notice : null,
     // SW-7163: the prompt condensed for a "Fit to" target; absent on items stored before it.
     condensed: item.condensed && typeof item.condensed === "object" ? { ...item.condensed } : null,
+    // Stored before its condensing step; final once the job replaces it.
+    provisional: Boolean(item.provisional),
   };
 }
 
@@ -290,7 +292,7 @@ export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
 // prompt made stale by a field edit, or the editable condensed prompt with its size against the
 // target's limit (with room for each variable value) and an over-limit warning. An edited prompt
 // shows its live character count, never its old token count or verdict, and offers to measure it.
-function CondensedPrompt({ row, target, busy, measureBlocked, onChange, onMeasure }) {
+function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange, onMeasure }) {
   if (row.failed) return null;
   if (!condensable(row)) {
     return (
@@ -301,10 +303,18 @@ function CondensedPrompt({ row, target, busy, measureBlocked, onChange, onMeasur
     );
   }
   const condensed = row.condensed?.target === target.id ? row.condensed : null;
+  if (!condensed && row.provisional && !running) {
+    return (
+      <p className="inline-warning" data-row-note="condense-interrupted">
+        Condensing failed for this image (the job stopped while condensing it), so its seven described fields are kept.
+        Condense it, or turn Fit to off.
+      </p>
+    );
+  }
   if (!condensed) {
     return (
       <p className="inline-warning" data-row-note="not-condensed">
-        Not condensed for {target.name} yet.
+        {row.provisional ? `Condensing for ${target.name}…` : `Not condensed for ${target.name} yet.`}
       </p>
     );
   }
@@ -566,11 +576,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       if (itemsRead.current.jobId === jobId && itemsRead.current.provisional.size) {
         await rereadProvisional(jobId, snapshot?.result?.model, signal);
       }
-      if (itemsRead.current.jobId === jobId && processed > itemsRead.current.count) {
-        itemsRead.current.count = await readItems(jobId, itemsRead.current.count, snapshot.result.model, signal);
+      const terminal = terminalStatuses.has(snapshot?.status);
+      // A finished job (completed, failed or canceled) is drained of every unread item: an image
+      // checkpointed before its condensing step is stored but never counted when the job stops
+      // while condensing it, so it is reachable only by reading past the published count.
+      if (itemsRead.current.jobId === jobId && (terminal || processed > itemsRead.current.count)) {
+        itemsRead.current.count = await readItems(jobId, itemsRead.current.count, snapshot?.result?.model, signal);
       }
       setJob(snapshot);
-      if (terminalStatuses.has(snapshot?.status)) {
+      if (terminal) {
         return snapshot;
       }
     }
@@ -1143,6 +1157,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     {fitTarget ? (
                       <CondensedPrompt
                         busy={busy}
+                        running={running}
                         measureBlocked={condenseBlocked}
                         onChange={updateCondensed}
                         onMeasure={measureRow}
