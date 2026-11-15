@@ -320,7 +320,8 @@ No two items share both a mechanism and a repo.
     `git grep` finds no copy of the old revision. SceneWorks's integration
     branch is then merged to main.
   - CI is green on both mains, with self-hosted jobs reading HOST-1's
-    copies through `DEV_HOST_ROOT`.
+    copies through `DEV_HOST_ROOT`, and a real-weights job passes on
+    `nax-macos-2` on its HOST-3 root.
 - **Inherits:** E1, E11
 - **Touches:** both repos' main branches; SceneWorks pin sites (root and
   crate `Cargo.toml`s, `Cargo.lock`, `config/*closures*/third-party-source.json`,
@@ -373,7 +374,8 @@ No two items share both a mechanism and a repo.
     the full budget config and the cleanup schedule.
   - The SceneWorks runner on it has HOST-1's wiring; the devworks-mac
     runners on the same machine are unchanged.
-  - A real-weights job passes on `nax-macos-2` after MERGE.
+  - An existing real-weights job still passes on `nax-macos-2` with the
+    wiring in place, before MERGE.
 - **Inherits:** E5, E9, E11
 - **Touches:** `nax-macos-2` filesystems and runner config
 - **Blocked by:** DW-2, DW-3, and the drive's arrival (about 2026-11-20;
