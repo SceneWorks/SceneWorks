@@ -1214,7 +1214,7 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/display_util.rs", "format_bytes"),
         ("crates/sceneworks-core/src/display_util.rs", "quote_path"),
         (
-            "crates/sceneworks-core/src/payload_util.rs",
+            "crates/sceneworks-options/src/payload_util.rs",
             "json_size_to_u64",
         ),
         ("crates/sceneworks-core/src/env_util.rs", "env_string"),
@@ -1225,8 +1225,11 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/env_util.rs", "env_path_or"),
         ("crates/sceneworks-core/src/time.rs", "utc_now"),
         ("crates/sceneworks-core/src/time.rs", "civil_from_days"),
-        ("crates/sceneworks-core/src/ids.rs", "is_safe_id"),
-        ("crates/sceneworks-core/src/ids.rs", "is_safe_id_with_max"),
+        ("crates/sceneworks-options/src/ids.rs", "is_safe_id"),
+        (
+            "crates/sceneworks-options/src/ids.rs",
+            "is_safe_id_with_max",
+        ),
         (
             "crates/sceneworks-core/src/safe_path.rs",
             "portable_relative_path_parts",
