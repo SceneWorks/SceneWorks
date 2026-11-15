@@ -259,6 +259,14 @@ impl StoreClockV1 {
 
 /// Filesystem stamp of one layer's source entry, captured at compile time. Cheap to re-take; any
 /// difference forces a full re-hash before the source may be used.
+///
+/// Where it holds: a same-size replacement that restores the modified time is detected on
+/// filesystems with real inode numbers and a change time the caller cannot set — APFS, ext4 and
+/// other native Unix filesystems (`ctime`), and NTFS (`ChangeTime`, non-zero). On filesystems that
+/// synthesize inode numbers or `ctime` (exFAT and FAT, some SMB mounts) such a replacement is NOT
+/// detected by the stamp. On Windows a zero change time marks such a volume and the stamp reports
+/// itself weak ([`Self::is_weak`]), so callers hash instead of trusting it; on Unix there is no
+/// equivalent signal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceStampV1 {
@@ -295,24 +303,32 @@ pub struct SourceStampV1 {
     pub file_index: u64,
 }
 
-/// The NTFS change time, volume serial number and file index of `path` (links followed), read
-/// through an attribute-only handle. The one place this crate allows `unsafe`: std exposes none of
-/// these on the pinned toolchain (`MetadataExt::change_time` is unstable).
+/// An attribute-only handle on `path` (links followed). Backup semantics so a directory (a
+/// linked component directory in a produced tree) opens too. Every field of a Windows stamp is
+/// read from this one handle, so a swap of the path between reads cannot mix two files.
 #[cfg(windows)]
-#[allow(unsafe_code)]
-fn windows_file_identity(path: &Path) -> std::io::Result<(i64, u64, u64)> {
+fn open_for_identity(path: &Path) -> std::io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt as _;
-    use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
-        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
     };
-    // Backup semantics so a directory (a linked component directory in a produced tree) opens too.
-    let file = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
+        .open(path)
+}
+
+/// The NTFS change time of the open `file`. The one place this crate allows `unsafe`: std does
+/// not expose it on the pinned toolchain (`MetadataExt::change_time` is unstable).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_change_time(file: &fs::File) -> std::io::Result<i64> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+    };
     let mut basic = FILE_BASIC_INFO {
         CreationTime: 0,
         LastAccessTime: 0,
@@ -322,7 +338,7 @@ fn windows_file_identity(path: &Path) -> std::io::Result<(i64, u64, u64)> {
     };
     let size =
         u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).expect("FILE_BASIC_INFO fits in u32");
-    // SAFETY: `file` owns an open handle for the whole call, so the handle is valid; `basic` is a
+    // SAFETY: `file` is borrowed for the whole call, so its handle is open and valid; `basic` is a
     // live, properly aligned `FILE_BASIC_INFO` and `size` is exactly its size, which is what the
     // `FileBasicInfo` class writes; the BOOL result is checked before `basic` is read.
     let succeeded = unsafe {
@@ -336,12 +352,7 @@ fn windows_file_identity(path: &Path) -> std::io::Result<(i64, u64, u64)> {
     if succeeded == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let information = winapi_util::file::information(&file)?;
-    Ok((
-        basic.ChangeTime,
-        information.volume_serial_number(),
-        information.file_index(),
-    ))
+    Ok(basic.ChangeTime)
 }
 
 impl SourceStampV1 {
@@ -353,9 +364,19 @@ impl SourceStampV1 {
         // Read the clock BEFORE the metadata: an observation must never be later than the state it
         // claims to describe, or a write racing this call could look older than it is.
         let observed_nanos = clock.now_nanos();
+        #[cfg(not(windows))]
         let metadata = fs::metadata(path)?;
         #[cfg(windows)]
-        let (change_time, volume_serial_number, file_index) = windows_file_identity(path)?;
+        let (metadata, change_time, volume_serial_number, file_index) = {
+            let file = open_for_identity(path)?;
+            let information = winapi_util::file::information(&file)?;
+            (
+                file.metadata()?,
+                windows_change_time(&file)?,
+                information.volume_serial_number(),
+                information.file_index(),
+            )
+        };
         Ok(Self {
             observed_nanos,
             size_bytes: metadata.len(),
@@ -393,6 +414,42 @@ impl SourceStampV1 {
         let mut compared = self.clone();
         compared.observed_nanos = other.observed_nanos;
         compared == *other
+    }
+
+    /// [`Self::identifies_same_entry`] ignoring only the change key (`ctime` on Unix, the NTFS
+    /// change time on Windows), which adding a hard link to the file moves.
+    pub(crate) fn identifies_same_entry_except_change_key(&self, other: &Self) -> bool {
+        let mut compared = self.clone();
+        compared.observed_nanos = other.observed_nanos;
+        #[cfg(unix)]
+        {
+            compared.changed_nanos = other.changed_nanos;
+        }
+        #[cfg(windows)]
+        {
+            compared.change_time = other.change_time;
+        }
+        compared == *other
+    }
+
+    /// Whether this stamp cannot detect a same-size rewrite that restores the modified time, so it
+    /// must never stand in for a hash: on Windows, a zero change time (FAT/exFAT and some network
+    /// volumes report none). Unix offers no such signal (see the type's documentation).
+    pub(crate) fn is_weak(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.change_time == 0
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Whether the file's modified time is later than this observation (a clock-skewed or
+    /// future-dated file), which keeps the stamp racy forever.
+    pub(crate) fn is_future_dated(&self) -> bool {
+        matches!((self.observed_nanos, self.modified_nanos), (Some(observed), Some(modified)) if modified > observed)
     }
 
     /// Git's racy-index rule. A stamp may stand in for a hash only when the file it names was last

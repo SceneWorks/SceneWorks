@@ -76,7 +76,7 @@ remove_dir_all = "=0.8.4"
 # cache uses volume + file index to distinguish atomic replacement.
 winapi-util = "0.1"
 # One Windows-only call reads a file's NTFS change time for source stamps
-# (`checkpoint_plan_store::windows_file_identity`, this crate's only allowed unsafe), through
+# (`checkpoint_plan_store::windows_change_time`, this crate's only allowed unsafe), through
 # the workspace windows-sys (already locked), so no new package enters the lock.
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 

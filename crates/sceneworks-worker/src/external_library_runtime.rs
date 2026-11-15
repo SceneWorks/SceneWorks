@@ -3915,7 +3915,7 @@ fn worker_catalog_member_path_at(
             };
             let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
             if crate::portable_source_claims::capture_registered_files_with_roots(
-                Some(&verified_source_cache(settings)),
+                &verified_source_cache(settings),
                 &normalized,
                 &roots,
             )
@@ -4771,7 +4771,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(None, &root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -4827,7 +4831,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(None, &root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let binding = PortableRouteBinding::new(
             "mlx",
             std::env::consts::OS,
@@ -4914,7 +4922,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(None, &root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let mut members = vec![PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -5163,9 +5175,11 @@ mod tests {
         .clone();
         let slot = "modelManifestEntry";
         let source = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
-        let primary_files =
-            crate::portable_source_claims::capture_registered_files(None, &imported.install_dir)
-                .unwrap();
+        let primary_files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &imported.install_dir,
+        )
+        .unwrap();
         assert_eq!(
             crate::paths::normalize_app_managed_model_entry_path(
                 &settings,
@@ -5174,7 +5188,11 @@ mod tests {
             )
             .ok()
             .and_then(
-                |path| crate::portable_source_claims::capture_registered_files(None, &path).ok()
+                |path| crate::portable_source_claims::capture_registered_files(
+                    &crate::portable_source_claims::test_store(),
+                    &path
+                )
+                .ok()
             ),
             Some(primary_files.clone()),
             "the worker catalog locator must resolve the admitted primary closure",
@@ -5214,8 +5232,11 @@ mod tests {
             let revision = download["revision"].as_str().unwrap();
             let variant = download["variant"].as_str().unwrap_or("default");
             let (_, snapshot) = source.discover_snapshot(repo, Some(revision)).unwrap();
-            let all =
-                crate::portable_source_claims::capture_registered_files(None, &snapshot).unwrap();
+            let all = crate::portable_source_claims::capture_registered_files(
+                &crate::portable_source_claims::test_store(),
+                &snapshot,
+            )
+            .unwrap();
             let files = all
                 .into_iter()
                 .filter(|file| {
@@ -5664,7 +5685,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(None, &right).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &right,
+        )
+        .unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -5715,8 +5740,11 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            let files =
-                crate::portable_source_claims::capture_registered_files(None, &selected).unwrap();
+            let files = crate::portable_source_claims::capture_registered_files(
+                &crate::portable_source_claims::test_store(),
+                &selected,
+            )
+            .unwrap();
             let member = PortableArtifactMember {
                 role: ArtifactMemberRole::Lora,
                 component_id: None,
@@ -7984,8 +8012,11 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let files =
-            crate::portable_source_claims::capture_registered_files(None, &selected).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &selected,
+        )
+        .unwrap();
         let digest = portable_closure_sha256(&files).unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,

@@ -220,26 +220,18 @@ pub fn write_produced_artifact_receipt(
     Ok(receipt)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Produced trees this thread actually read to fingerprint; a reused record reads none.
-    pub(crate) static FINGERPRINTED_PRODUCED_TREES: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-/// [`artifact_content_fingerprint`] through the host's per-tree record.
+/// [`artifact_content_fingerprint`] through the host's per-tree record. Only a fingerprint equal to
+/// the receipt's `expected` one is recorded, so a mismatch is never reused.
 fn produced_content_fingerprint(
     cache: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
     root: &Path,
+    expected: &str,
 ) -> WorkerResult<String> {
     let (fingerprint, _verification) = cache.tree_fingerprint(
         root,
         || artifact_files(root),
-        || {
-            #[cfg(test)]
-            FINGERPRINTED_PRODUCED_TREES.with(|count| count.set(count.get() + 1));
-            artifact_content_fingerprint(root)
-        },
+        || artifact_content_fingerprint(root),
+        |fingerprint| fingerprint == expected,
     )?;
     Ok(fingerprint)
 }
@@ -271,7 +263,7 @@ pub fn verify_produced_artifact_receipt(
         || receipt.output_model_id != output_model_id
         || !is_sha256_fingerprint(&receipt.content_sha256)
         || receipt.tree_stamp != artifact_tree_stamp(root)?
-        || receipt.content_sha256 != produced_content_fingerprint(cache, root)?
+        || receipt.content_sha256 != produced_content_fingerprint(cache, root, &receipt.content_sha256)?
     {
         return Err(WorkerError::InvalidPayload(format!(
             "produced artifact receipt does not match {}",
@@ -449,10 +441,6 @@ mod artifact_provenance_tests {
             .unwrap();
     }
 
-    fn fingerprinted_trees() -> usize {
-        FINGERPRINTED_PRODUCED_TREES.with(std::cell::Cell::get)
-    }
-
     #[test]
     fn an_unchanged_produced_tree_is_fingerprinted_once_per_host() {
         let root = tempfile::tempdir().unwrap();
@@ -465,6 +453,9 @@ mod artifact_provenance_tests {
         let verify = |cache: &VerifiedSourceCache| {
             verify_produced_artifact_receipt(cache, root.path(), "job-7", "base", "out")
         };
+        let real_root = std::fs::canonicalize(root.path()).unwrap();
+        let fingerprinted_trees =
+            || sceneworks_core::verified_source_cache::read_counts::of(&real_root);
         let start = fingerprinted_trees();
         verify(&VerifiedSourceCache::for_data_dir(data.path())).unwrap();
         assert_eq!(fingerprinted_trees(), start + 1);

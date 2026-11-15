@@ -4284,8 +4284,8 @@ fn publish_rename(staging: &Path, bundle: &Path) -> Result<(), ResolvedCacheErro
 /// `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` holds are retried with a bounded backoff
 /// before failing closed with the operation and both paths named. Durability of the rename
 /// record itself relies on journaled NTFS metadata: Windows has no POSIX directory fsync, std
-/// `fs::rename` does not expose `MOVEFILE_WRITE_THROUGH`, and this workspace forbids the direct
-/// `unsafe` FFI that reaching it would need.
+/// `fs::rename` does not expose `MOVEFILE_WRITE_THROUGH`, and this workspace denies the direct
+/// `unsafe` FFI that reaching it would need (its one exception is the source-stamp change time).
 #[cfg(windows)]
 fn publish_rename(staging: &Path, bundle: &Path) -> Result<(), ResolvedCacheError> {
     const ERROR_ACCESS_DENIED: i32 = 5;

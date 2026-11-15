@@ -605,10 +605,10 @@ fn partial_download_path(target: &Path) -> PathBuf {
 }
 
 #[cfg(all(test, native_lane))]
-thread_local! {
-    /// Cache-hit checks that actually read the file; a reused record reads none.
-    static CACHED_FILE_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+/// Cache-hit checks that actually read each file (by the path hashed), process-wide; a reused
+/// record reads none.
+static CACHED_FILE_HASHES: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[cfg(native_lane)]
 async fn cached_file_matches_expected(
@@ -644,9 +644,17 @@ async fn cached_file_matches_expected(
         }
         _ => None,
     };
+    // Hash the very path that was stamped (see `verify_file_sha256`).
+    let hashed = real.as_deref().unwrap_or(path);
     #[cfg(test)]
-    CACHED_FILE_HASHES.with(|count| count.set(count.get() + 1));
-    let actual = sha256_file(context.api, context.settings, context.job_id, path).await?;
+    {
+        *CACHED_FILE_HASHES
+            .lock()
+            .unwrap()
+            .entry(hashed.to_path_buf())
+            .or_default() += 1;
+    }
+    let actual = sha256_file(context.api, context.settings, context.job_id, hashed).await?;
     if actual != expected_sha256 {
         return Ok(false);
     }
@@ -1101,7 +1109,13 @@ pub(crate) async fn verify_file_sha256(
             .ok()
     })
     .flatten();
-    let actual = sha256_file(api, settings, job_id, path).await?;
+    // Hash the very path that was stamped, so a link retargeted in between cannot attach one
+    // file's digest to another.
+    let hashed = observed.as_ref().map_or(
+        path,
+        sceneworks_core::verified_source_cache::ObservedSource::path,
+    );
+    let actual = sha256_file(api, settings, job_id, hashed).await?;
     if actual != expected {
         let _ = tokio::fs::remove_file(path).await;
         return Err(WorkerError::InvalidPayload(format!(
@@ -1606,7 +1620,9 @@ pub(crate) async fn download_snapshot_into_cache(
         }
         rel_target.push("blobs");
         rel_target.push(etag);
-        if !link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
+        if link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
+            carry_verdict_to_snapshot_entry(context.settings, &blobs_dir.join(etag), &link);
+        } else {
             // Copy fallback (a Windows hardlink failure across the blob/snapshot pair): a multi-GB
             // blob copy can outlast the stale-worker timeout just like the hash above, so keep the
             // worker heartbeating through it rather than letting the finalize phase get swept
@@ -1679,6 +1695,26 @@ fn blob_fallback_name(path: &str) -> String {
         "path-{}",
         sceneworks_core::hashing::sha256_bytes(path.as_bytes())
     )
+}
+
+/// When the snapshot entry is a hard link (Windows), carry the downloader's verdict for the blob to
+/// the entry's own path, which is the path admission and the worker resolve: creating the link
+/// moved the file's change time, so the blob's record alone would not be reused. A symlinked
+/// entry (Unix) resolves to the blob itself and needs nothing. Best-effort.
+pub(crate) fn carry_verdict_to_snapshot_entry(
+    settings: &Settings,
+    blob: &Path,
+    entry: &Path,
+) -> bool {
+    let (Ok(blob), Ok(entry)) = (std::fs::canonicalize(blob), std::fs::canonicalize(entry)) else {
+        return false;
+    };
+    blob != entry
+        && settings.data_dir.is_absolute()
+        && sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &settings.data_dir,
+        )
+        .carry_to_hard_link(&blob, &entry)
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it
@@ -3237,7 +3273,15 @@ mod atomic_cache_publication_tests {
                 Some(&expected),
             )
         };
-        let hashes = || CACHED_FILE_HASHES.with(std::cell::Cell::get);
+        let real = std::fs::canonicalize(&target).unwrap();
+        let hashes = || {
+            CACHED_FILE_HASHES
+                .lock()
+                .unwrap()
+                .get(&real)
+                .copied()
+                .unwrap_or(0)
+        };
         let start = hashes();
         assert!(check().await.unwrap());
         assert_eq!(hashes(), start + 1, "the first check reads the file");

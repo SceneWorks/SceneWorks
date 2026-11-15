@@ -21,7 +21,7 @@ use sceneworks_core::model_artifacts::portable_binding::{
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
 };
-use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+use sceneworks_core::verified_source_cache::VerifiedSourceCache;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -268,21 +268,6 @@ async fn blocking_source_capture<T: Send + 'static>(
 /// This host's hash-once verdict store, the same one the worker opens.
 fn verified_source_cache(state: &AppState) -> VerifiedSourceCache {
     VerifiedSourceCache::for_data_dir(&state.settings.data_dir)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Files this thread actually read to verify; a reused verdict reads none.
-    static HASHED_SOURCE_FILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-fn note_source_verification(verification: SourceVerification) {
-    #[cfg(test)]
-    if verification == SourceVerification::Hashed {
-        HASHED_SOURCE_FILES.with(|count| count.set(count.get() + 1));
-    }
-    #[cfg(not(test))]
-    let _ = verification;
 }
 
 /// Admission never cancels a hash midway.
@@ -3290,12 +3275,8 @@ fn capture_receipted_local_files(
             .find(|file| file.relative_path == Path::new(&relative));
         let sha256 = match expected {
             Some(expected) => match cache.verify(&path, &expected.sha256, &no_cancellation) {
-                Ok(verification) => {
-                    note_source_verification(verification);
-                    expected.sha256.clone()
-                }
+                Ok(_) => expected.sha256.clone(),
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                    note_source_verification(SourceVerification::Hashed);
                     return Err(incomplete(format!(
                         "installed {repo}@{revision} files differ from the pinned source"
                     )));
@@ -3304,10 +3285,10 @@ fn capture_receipted_local_files(
             },
             // A file the ledger does not name fails the caller's comparison; hash it as before.
             None => {
-                let (sha256, verification) =
-                    cache.sha256(&path, &no_cancellation).map_err(cannot_hash)?;
-                note_source_verification(verification);
-                sha256
+                cache
+                    .sha256(&path, &no_cancellation)
+                    .map_err(cannot_hash)?
+                    .0
             }
         };
         files.push(PortableArtifactFile {
@@ -3729,10 +3710,9 @@ fn collect_source_files(
     }
     let size_bytes = metadata.len();
     // Hashed once per host while the file's stamp is unchanged (shared with the worker's check).
-    let (sha256, verification) = cache
+    let (sha256, _) = cache
         .sha256(&canonical, &no_cancellation)
         .map_err(|error| incomplete(format!("local model file cannot be hashed: {error}")))?;
-    note_source_verification(verification);
     selected.push(PortableArtifactFile {
         relative_path,
         size_bytes,
@@ -4234,8 +4214,12 @@ mod tests {
             .unwrap();
     }
 
-    fn hashed_source_files() -> usize {
-        HASHED_SOURCE_FILES.with(std::cell::Cell::get)
+    /// Every read of `path` (by its real path) this process made to hash it, from any thread or
+    /// blocking task.
+    fn reads(path: &Path) -> usize {
+        sceneworks_core::verified_source_cache::read_counts::of(
+            &std::fs::canonicalize(path).unwrap(),
+        )
     }
 
     /// One receipted install of `owner/hash-once` whose pinned ledger names `bytes`.
@@ -4299,22 +4283,18 @@ mod tests {
         let (path, pinned, download) = receipted_install(&state, b"trusted");
         let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
         settle_mtime(&path, settled);
-        let start = hashed_source_files();
+        let start = reads(&path);
+        assert_eq!(
+            capture_receipted(&state, &pinned).unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(reads(&path), start + 1, "the first check reads the file");
         assert_eq!(
             capture_receipted(&state, &pinned).unwrap(),
             Some(pinned.clone())
         );
         assert_eq!(
-            hashed_source_files(),
-            start + 1,
-            "the first check reads the file"
-        );
-        assert_eq!(
-            capture_receipted(&state, &pinned).unwrap(),
-            Some(pinned.clone())
-        );
-        assert_eq!(
-            hashed_source_files(),
+            reads(&path),
             start + 1,
             "a second job creation reads no bytes of the unchanged install"
         );
@@ -4326,19 +4306,24 @@ mod tests {
             .await
             .expect("the unchanged install is admitted");
         assert_eq!(member.files, pinned);
+        assert_eq!(
+            reads(&path),
+            start + 1,
+            "job creation (on a blocking task) reads no bytes either"
+        );
 
         // Same size and the same mtime, different bytes: the ctime/inode move, so the file is
         // hashed again and refused with the existing message (the NTFS change time on Windows).
         std::fs::write(&path, b"changed").unwrap();
         settle_mtime(&path, settled);
-        let before = hashed_source_files();
+        let before = reads(&path);
         let error = capture_receipted(&state, &pinned).expect_err("substitution is refused");
         assert!(
             error.detail.contains("files differ from the pinned source"),
             "{}",
             error.detail
         );
-        assert_eq!(hashed_source_files(), before + 1);
+        assert_eq!(reads(&path), before + 1);
         let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
             .await
             .expect_err("substitution is refused at admission");
@@ -4365,15 +4350,11 @@ mod tests {
                     &no_cancellation
                 )
                 .unwrap(),
-            SourceVerification::Hashed
+            sceneworks_core::verified_source_cache::SourceVerification::Hashed
         );
-        let start = hashed_source_files();
+        let start = reads(&path);
         assert_eq!(capture_receipted(&state, &pinned).unwrap(), Some(pinned));
-        assert_eq!(
-            hashed_source_files(),
-            start,
-            "admission reused the worker's verdict"
-        );
+        assert_eq!(reads(&path), start, "admission reused the worker's verdict");
     }
 
     #[tokio::test]
@@ -4392,19 +4373,19 @@ mod tests {
             .observe(&std::fs::canonicalize(&path).unwrap())
             .unwrap();
         assert!(cache.record_hashed(observed, &pinned[0].sha256).unwrap());
-        let start = hashed_source_files();
+        let start = reads(&path);
         assert_eq!(
             capture_receipted(&state, &pinned).unwrap(),
             Some(pinned.clone())
         );
-        assert_eq!(hashed_source_files(), start, "the first job reads no bytes");
+        assert_eq!(reads(&path), start, "the first job reads no bytes");
         // Modified after the download (same size, mtime restored): ctime on Unix, the NTFS change
         // time on Windows, moves, so it is hashed again and refused.
         std::fs::write(&path, b"changed").unwrap();
         settle_mtime(&path, settled);
         let error = capture_receipted(&state, &pinned).expect_err("modified install is refused");
         assert!(error.detail.contains("files differ from the pinned source"));
-        assert_eq!(hashed_source_files(), start + 1);
+        assert_eq!(reads(&path), start + 1);
     }
 
     #[test]
@@ -4418,18 +4399,18 @@ mod tests {
         let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
         settle_mtime(&weights, settled);
         let roots = [root.path().to_path_buf()];
-        let start = hashed_source_files();
+        let start = reads(&weights);
         let first = capture_local_source_files(&cache, &model, &roots).unwrap();
-        assert_eq!(hashed_source_files(), start + 1);
+        assert_eq!(reads(&weights), start + 1);
         assert_eq!(
             capture_local_source_files(&cache, &model, &roots).unwrap(),
             first
         );
-        assert_eq!(hashed_source_files(), start + 1, "no bytes are read again");
+        assert_eq!(reads(&weights), start + 1, "no bytes are read again");
         std::fs::write(&weights, b"WEIGHTS").unwrap();
         settle_mtime(&weights, settled);
         let changed = capture_local_source_files(&cache, &model, &roots).unwrap();
-        assert_eq!(hashed_source_files(), start + 2);
+        assert_eq!(reads(&weights), start + 2);
         assert_ne!(changed, first, "the substituted bytes get their own digest");
     }
 

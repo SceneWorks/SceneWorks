@@ -164,7 +164,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 
 [workspace.lints.rust]
 # `deny`, not `forbid`, only so sceneworks-core can allow unsafe on its one Windows FFI function
-# (`checkpoint_plan_store::windows_file_identity`); every other use is still an error.
+# (`checkpoint_plan_store::windows_change_time`); every other use is still an error.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

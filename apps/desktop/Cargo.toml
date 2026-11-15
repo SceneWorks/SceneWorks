@@ -97,8 +97,9 @@ windows-core = "0.61"
 
 [lints.rust]
 # Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,
-# so the workspace-wide forbid(unsafe_code) is relaxed for this GUI shell crate
-# only. All other crates keep the forbid.
+# so the workspace-wide deny(unsafe_code) is relaxed for this GUI shell crate.
+# The crates that use the workspace lints keep it; sceneworks-core allows unsafe
+# only on its one Windows FFI function (checkpoint_plan_store::windows_change_time).
 unsafe_code = "allow"
 
 [lints.clippy]

@@ -1067,12 +1067,6 @@ struct PortableGemmaFile {
     sha256: String,
 }
 
-#[cfg(all(test, target_os = "macos"))]
-thread_local! {
-    /// Gemma members this thread actually read to verify; a reused record reads none.
-    static GEMMA_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Publish a copy of the frozen Gemma closure outside the evictable portable attempt cache.
 #[cfg(target_os = "macos")]
 fn install_portable_gemma(
@@ -1103,26 +1097,17 @@ fn install_portable_gemma(
         if let Some(store) = store {
             let real = std::fs::canonicalize(path)
                 .map_err(|error| WorkerError::Engine(error.to_string()))?;
-            let verification =
-                store
-                    .verify(&real, &expected.sha256, &|| Ok(()))
-                    .map_err(|error| {
-                        WorkerError::Engine(if error.kind() == std::io::ErrorKind::InvalidData {
-                            format!("frozen Gemma file {} has different bytes", path.display())
-                        } else {
-                            error.to_string()
-                        })
-                    })?;
-            #[cfg(test)]
-            if verification == sceneworks_core::verified_source_cache::SourceVerification::Hashed {
-                GEMMA_FILE_READS.with(|count| count.set(count.get() + 1));
-            }
-            #[cfg(not(test))]
-            let _ = verification;
+            store
+                .verify(&real, &expected.sha256, &|| Ok(()))
+                .map_err(|error| {
+                    WorkerError::Engine(if error.kind() == std::io::ErrorKind::InvalidData {
+                        format!("frozen Gemma file {} has different bytes", path.display())
+                    } else {
+                        error.to_string()
+                    })
+                })?;
             return Ok(());
         }
-        #[cfg(test)]
-        GEMMA_FILE_READS.with(|count| count.set(count.get() + 1));
         let mut input =
             std::fs::File::open(path).map_err(|error| WorkerError::Engine(error.to_string()))?;
         let mut hasher = Sha256::new();
@@ -1400,7 +1385,16 @@ mod portable_gemma_tests {
                 .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
                 .unwrap();
         }
-        let reads = || GEMMA_FILE_READS.with(std::cell::Cell::get);
+        let reads = || {
+            sources
+                .iter()
+                .map(|(name, _)| {
+                    sceneworks_core::verified_source_cache::read_counts::of(
+                        &std::fs::canonicalize(target.join(name)).unwrap(),
+                    )
+                })
+                .sum::<usize>()
+        };
         let start = reads();
         install_portable_gemma(&source, &data, &files).unwrap();
         assert_eq!(reads(), start + sources.len());
