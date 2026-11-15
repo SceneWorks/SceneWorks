@@ -13115,6 +13115,35 @@ fn instantid_angle_set_keeps_its_default_after_manifest_resolution() {
     assert_eq!(instantid_controlnet_scale(&request, true), 1.2);
 }
 
+#[cfg(native_lane)]
+#[test]
+fn ideogram_edit_strength_keeps_mode_defaults_after_manifest_resolution() {
+    use super::conditioning::ideogram_edit_strength;
+
+    for model in ["ideogram_4", "ideogram_4_turbo"] {
+        let authored = json!({"projectId":"p","model":model,"mode":"edit_image","advanced":{}});
+        let effective = json!({"projectId":"p","model":model,"mode":"edit_image",
+            "advanced":{"strength":0.5}});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ideogram_edit_strength(&request, false, false), 0.6);
+        assert_eq!(ideogram_edit_strength(&request, false, true), 0.85);
+        assert_eq!(ideogram_edit_strength(&request, true, false), 0.85);
+
+        let authored = json!({"projectId":"p","model":model,"mode":"edit_image",
+            "advanced":{"strength":0.4}});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            authored.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ideogram_edit_strength(&request, true, true), 0.4);
+    }
+}
+
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
 // `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
 // into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the

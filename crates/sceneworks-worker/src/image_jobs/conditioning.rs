@@ -732,6 +732,23 @@ const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 #[cfg(native_lane)]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
 
+#[cfg(native_lane)]
+pub(super) fn ideogram_edit_strength(
+    request: &ImageRequest,
+    is_outpaint: bool,
+    has_user_mask: bool,
+) -> f32 {
+    request
+        .authored_advanced_f64("strength")
+        .map(|value| value as f32)
+        .unwrap_or(if is_outpaint || has_user_mask {
+            IDEOGRAM_INPAINT_STRENGTH
+        } else {
+            IDEOGRAM_EDIT_STRENGTH
+        })
+        .clamp(0.05, 1.0)
+}
+
 /// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
 /// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
 /// references can be packed into one edit (e.g. subject-from-A composed into scene-from-B); a plural
@@ -1337,16 +1354,7 @@ pub(super) fn resolve_ideogram_edit(
     )?;
     let is_outpaint = request.fit_mode == "outpaint";
     let has_user_mask = non_empty(&request.mask_asset_id);
-    let strength = super::sampling::resolved_f32_clamped(
-        request,
-        "strength",
-        if is_outpaint || has_user_mask {
-            IDEOGRAM_INPAINT_STRENGTH
-        } else {
-            IDEOGRAM_EDIT_STRENGTH
-        },
-        0.05..=1.0,
-    );
+    let strength = ideogram_edit_strength(request, is_outpaint, has_user_mask);
 
     if is_outpaint {
         // Pad the source onto the target canvas (contain) and regenerate the border. The border mask
