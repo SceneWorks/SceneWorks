@@ -38,6 +38,7 @@ import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
+  dimensionConstraintMessage,
   evaluateModelDimensions,
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
@@ -338,6 +339,7 @@ export function SimpleImageStudio() {
     widthOverride: nativeControls ? widthOverride : "",
     heightOverride: nativeControls ? heightOverride : "",
   });
+  const dimensionAdvice = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
   // sc-24215: the same native-size and prompt-token statements Image Studio shows.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
@@ -434,6 +436,7 @@ export function SimpleImageStudio() {
     (Boolean(prompt.trim()) || (mossEdit && Boolean(mossImageAdvanced.positive))) &&
     Boolean(model) &&
     Boolean(resolution) &&
+    !dimensionEval.invalid &&
     !busy &&
     !needsSource &&
     // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
@@ -930,7 +933,7 @@ export function SimpleImageStudio() {
         {busy ? <span aria-hidden="true" className="su-spinner" /> : null}
         {busy ? "Generating…" : `Generate ${variations} image${variations > 1 ? "s" : ""}`}
       </button>
-      {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
+      {dimensionAdvice || portableRefusal ? <p className="su-error" role="alert">{dimensionAdvice ?? portableRefusal.detail}</p> : null}
       {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
