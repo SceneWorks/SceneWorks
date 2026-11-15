@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
@@ -33,6 +34,9 @@ import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { AudioTrackBadge, assetHasAudioTrack } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
 import { depthAssetDetails, isDepthAsset } from "../depthJobs.js";
@@ -574,12 +578,18 @@ const VQA_LENGTHS = [
   { value: 1024, label: "Long (1024)" },
 ];
 
-function VqaPanel({ asset, entries, pending, onAsk }) {
+export function VqaPanel({ asset, entries, pending, onAsk, project, requestedGpu }) {
   const [question, setQuestion] = React.useState("");
   const [maxNewTokens, setMaxNewTokens] = React.useState(256);
   const trimmed = question.trim();
+  const draft = project && asset ? {
+    projectId: project.id, projectName: project.name, sourceAssetId: asset.id,
+    question: trimmed, maxNewTokens, requestedGpu,
+  } : null;
+  const feedback = usePortableFeedback("vqa", draft, null, Boolean(trimmed));
+  const refusal = feedback?.state === "invalid" ? feedback.refusal : null;
   const submit = () => {
-    if (!trimmed) {
+    if (!trimmed || pending || portableFeedbackBlocks(feedback)) {
       return;
     }
     onAsk(asset, trimmed, maxNewTokens);
@@ -611,10 +621,12 @@ function VqaPanel({ asset, entries, pending, onAsk }) {
             ))}
           </select>
         </label>
-        <button disabled={!trimmed || pending} onClick={submit} type="button">
+        <button disabled={!trimmed || pending || portableFeedbackBlocks(feedback)} onClick={submit} type="button">
           {pending ? "Asking…" : "Ask"}
         </button>
       </div>
+      {portableFeedbackStatus(feedback) ? <p role="status">{portableFeedbackStatus(feedback)}</p> : null}
+      <ValidationSummary issues={refusal ? [issue.error(refusal.field, refusal.detail)] : []} label="Image question errors" />
       {entries.length ? (
         <ul className="vqa-history">
           {entries.map((entry) => (
@@ -645,6 +657,8 @@ export function AssetDetail({
   vqaEnabled = false,
   vqaEntries = [],
   vqaPending = false,
+  vqaProject = null,
+  vqaRequestedGpu,
   createVqaJob,
   audioModels = [],
   audioPlayer = null,
@@ -753,7 +767,7 @@ export function AssetDetail({
         ))}
       </dl>
       {vqaEnabled && asset.type === "image" ? (
-        <VqaPanel asset={asset} entries={vqaEntries} pending={vqaPending} onAsk={createVqaJob} />
+        <VqaPanel asset={asset} entries={vqaEntries} pending={vqaPending} onAsk={createVqaJob} project={vqaProject} requestedGpu={vqaRequestedGpu} />
       ) : null}
     </aside>
   );

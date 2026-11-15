@@ -3,6 +3,7 @@
   "service": "sceneworks-api",
   "runtime": "rust",
   "version": "<version>",
+  "optionsValidatorSchemaVersion": 1,
   "authRequired": false,
   "directories": {
     "data": "<data>",

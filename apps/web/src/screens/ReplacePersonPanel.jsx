@@ -1,4 +1,6 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { projectFileUrl } from "../api/media.js";
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
@@ -483,16 +485,27 @@ export function ReplacePersonPanel({
   const selectedTrackSourceClip = selectedTrack
     ? videoAssets.find((asset) => asset.id === selectedTrack.sourceAssetId) ?? null
     : null;
+  const detectionFeedback = usePortableFeedback(
+    "personDetect", { sourceAssetId: sourceClipAssetId }, null, Boolean(sourceClipAssetId),
+  );
+  const trackingFeedback = usePortableFeedback(
+    "personTrack", { sourceAssetId: sourceClipAssetId, representativeFrameAssetId: representativeFrame?.id,
+      detection: selectedDetection, trackName }, null,
+    Boolean(sourceClipAssetId && representativeFrame && selectedDetection),
+  );
+  const detectionRefusal = detectionFeedback?.state === "invalid" ? detectionFeedback.refusal : null;
+  const trackingRefusal = trackingFeedback?.state === "invalid" ? trackingFeedback.refusal : null;
 
   function analyzeSource() {
-    if (!sourceClipAssetId) {
+    if (!sourceClipAssetId || !detectReady || portableFeedbackBlocks(detectionFeedback)) {
       return;
     }
     createPersonDetectionJob({ sourceAssetId: sourceClipAssetId }, { navigateToQueue: false });
   }
 
   function createTrack() {
-    if (!sourceClipAssetId || !representativeFrame || !selectedDetection) {
+    if (!sourceClipAssetId || !representativeFrame || !selectedDetection
+      || !trackReady || portableFeedbackBlocks(trackingFeedback)) {
       return;
     }
     createPersonTrackJob(
@@ -533,11 +546,13 @@ export function ReplacePersonPanel({
       ) : null}
 
       <div className="replace-actions">
-        <button disabled={!sourceClipAssetId || !detectReady} onClick={analyzeSource} type="button">
+        <button disabled={!sourceClipAssetId || !detectReady || portableFeedbackBlocks(detectionFeedback)} onClick={analyzeSource} type="button">
           Analyze Source
         </button>
         <span>{detectionResult ? `${detectionResult.detections?.length ?? 0} candidates` : "No analysis yet"}</span>
       </div>
+      {detectionRefusal ? <p role="alert">{detectionRefusal.detail}</p> : null}
+      {portableFeedbackStatus(detectionFeedback) ? <p role="status">{portableFeedbackStatus(detectionFeedback)}</p> : null}
 
       {representativeFrame ? (
         <div className="person-selection-frame">
@@ -569,10 +584,12 @@ export function ReplacePersonPanel({
           Track name
           <input onChange={(event) => setTrackName(event.target.value)} value={trackName} />
         </label>
-        <button disabled={!representativeFrame || !selectedDetection || !trackReady} onClick={createTrack} type="button">
+        <button disabled={!representativeFrame || !selectedDetection || !trackReady || portableFeedbackBlocks(trackingFeedback)} onClick={createTrack} type="button">
           Save Track
         </button>
       </div>
+      {trackingRefusal ? <p role="alert">{trackingRefusal.detail}</p> : null}
+      {portableFeedbackStatus(trackingFeedback) ? <p role="status">{portableFeedbackStatus(trackingFeedback)}</p> : null}
 
       <label>
         Person track

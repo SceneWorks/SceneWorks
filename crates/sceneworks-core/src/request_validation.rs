@@ -1,7 +1,8 @@
 //! Native job-kind adapter for the portable static option policy.
 pub mod shape;
 pub use sceneworks_options::request_validation::{
-    resolve, resolve_request, validate, validate_shape, ResolvedRequest, ValidationRefusal,
+    model_id_for_request, resolve, resolve_request, validate, validate_shape, ResolvedRequest,
+    ValidationRefusal, VALIDATOR_SCHEMA_VERSION,
 };
 pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str> {
     use crate::contracts::JobType::*;

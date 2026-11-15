@@ -31,22 +31,25 @@ import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleTextForId } from "../data/styleCatalog.js";
 import { composeStyledPrompt } from "../styleComposer.js";
 
-import { finiteNumberOrUndefined, loraLooksLikeIcLora, composePreset } from "../presetUtils.js";
+import { finiteNumberOrUndefined, composePreset } from "../presetUtils.js";
 import { PresetStackPreview, useGenerationStudio } from "../components/generationStudio.jsx";
 
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
-import { DEFAULT_MAC_CAPABILITIES, ltxIcLoraRequired, wanLightningAvailable } from "../modelEligibility.js";
+import { DEFAULT_MAC_CAPABILITIES, wanLightningAvailable } from "../modelEligibility.js";
 
 import { loadStudioSettings } from "../hooks/useStudioSettings.js";
 
 import { stepsMenuFromModel } from "../samplerOptions.js";
-import { minStepsForModel, referenceCaps, referenceLimitError } from "../videoModelLimits.js";
+import { minStepsForModel, referenceCaps } from "../videoModelLimits.js";
 
 import { restoreVedaSettings, vedaControlError } from "../vedaControls.js";
 
@@ -345,8 +348,6 @@ export function VideoStudio() {
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
-  const capabilities = selectedModel?.capabilities ?? [];
-  const supportsMode = capabilities.includes(mode);
   // GGUF quantization variants the torch adapter can load (sc-1982). Declared in
   // the model manifest's `quantization.variants`; "auto" defers to the worker's
   // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
@@ -562,8 +563,6 @@ export function VideoStudio() {
 
   const { samplerOptions, schedulerOptions, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
 
-  const requiresLtxIcLora = ltxIcLoraRequired(selectedModel, mode);
-  const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
   const {
     lastI2vAssetIdRef
@@ -906,27 +905,6 @@ export function VideoStudio() {
   // Before this the payload sent the raw state, so a selection made on Ref2VA rode along into a
   // job for a model that declares no audio cap at all.
   const outgoingReferenceAudioAssetIds = refCaps.audio > 0 ? referenceAudioAssetIds : [];
-  const referenceLimitMessage = referenceLimitError({
-    modelName: selectedModel?.name,
-    caps: refCaps,
-    images: outgoingReferenceAssetIds.length,
-    clips: outgoingSourceClipAssetIds.length,
-    // The count the visible PICKER can change, not the raw state. `referenceAudioAssetIds` outlives
-    // the picker — it is persisted per project and restored on mount — so counting it raw meant
-    // selecting one audio reference on Ref2VA and then switching mode or model disabled Generate
-    // with "…but 1 are selected. Remove them", while the only control that could remove them had
-    // just unmounted. That refusal was unclearable, and it survived a restart. A cap the form on
-    // screen cannot violate must not be able to refuse.
-    audio: showAudioReferences ? referenceAudioAssetIds.length : 0,
-  });
-  // sc-19574 — the audio-only Ref2VA shape, named so the Generate gate can SAY why rather than
-  // leaving the user to infer it from an empty image zone next to a full audio one. Counted off the
-  // outgoing lists so a stale audio selection on a model that declares no audio cap can't raise it.
-  const audioOnlyReferenceSet =
-    mode === "reference_to_video" &&
-    outgoingReferenceAudioAssetIds.length > 0 &&
-    referenceAssetIds.length === 0 &&
-    outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && (sourceAssetId || (acceptsLastOnly && lastFrameAssetId))) ||
@@ -959,10 +937,7 @@ export function VideoStudio() {
     // SCAIL-2 character animation (sc-5449): a driving video + a reference character image.
     // Once the paired multi-reference descriptor is live, its source-position table admits 1–6
     // ordered character images. Keep all seven in state to show a rejection; never truncate one.
-    (mode === "animate_character" &&
-      sourceClipAssetId &&
-      referenceAssetIds.length > 0 &&
-      (!scail2MultiReferenceEnabled || referenceAssetIds.length <= MAX_SCAIL2_REFERENCE_CHARACTERS));
+    (mode === "animate_character" && sourceClipAssetId && referenceAssetIds.length > 0);
   const scail2ReferenceOverflow =
     mode === "animate_character" &&
     scail2MultiReferenceEnabled &&
@@ -1034,15 +1009,9 @@ export function VideoStudio() {
       // submitted, so the readout and the blocking Generate error can never disagree.
       styleActive: styleApplied,
       composedPrompt: composedStylePrompt ?? "",
-      supportsMode,
       implementedMode,
       hasInputs,
-      requiresLtxIcLora,
-      hasLtxIcLora,
       replaceReady,
-      scail2ReferenceOverflow,
-      referenceLimitMessage,
-      audioOnlyReferenceSet,
       executionTierBlockMessage,
       vedaBlockMessage,
       modelName: selectedModel?.name,
@@ -1056,15 +1025,9 @@ export function VideoStudio() {
       prompt,
       styleApplied,
       composedStylePrompt,
-      supportsMode,
       implementedMode,
       hasInputs,
-      requiresLtxIcLora,
-      hasLtxIcLora,
       replaceReady,
-      scail2ReferenceOverflow,
-      referenceLimitMessage,
-      audioOnlyReferenceSet,
       executionTierBlockMessage,
       vedaBlockMessage,
       selectedModel,
@@ -1088,7 +1051,8 @@ export function VideoStudio() {
   };
 
   const {
-    submit
+    submit,
+    draft: portableDraft,
   } = useVideoSubmission({
     submitting,
   executionTierBlockMessage,
@@ -1181,7 +1145,10 @@ export function VideoStudio() {
   onLocalJobCreated
   });
 
-  const generateDisabled = submitting || !videoValidity.ready;
+  // The request has already been built; form readiness must not hide an option refusal.
+  const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+  const generateDisabled = submitting || !videoValidity.ready || portableFeedbackBlocks(portableFeedback);
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
   return (
@@ -1476,7 +1443,10 @@ export function VideoStudio() {
           {/* Every reason Generate is dead — mode/preset/LoRA/worker problems — in one chip
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
-          <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          <ValidationSummary issues={portableRefusal
+            ? [...videoValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+            : videoValidity.surfaced} label="Generate errors" />
+          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
           <VedaOutcome
             label="Recorded recipe attention"
             raw={launchRequest?.recipe?.rawAdapterSettings}

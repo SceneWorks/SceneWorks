@@ -49,7 +49,12 @@ on:
   push:
     branches: [main]
     paths: &candle_paths
-      - "crates/**"
+      - "crates/sceneworks-core/**"
+      - "crates/sceneworks-image-quality/**"
+      - "crates/sceneworks-mcp/**"
+      - "crates/sceneworks-options/**"
+      - "crates/sceneworks-memory-adapter/**"
+      - "crates/sceneworks-worker/**"
       # NO apps/rust-worker/** here, deliberately — do not re-symmetrise with
       # macos-mlx.yml's anchor (sc-17703). That package (`sceneworks-rust-worker`)
       # is a 4-line binary wrapper over sceneworks-worker with no [features] block

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { writeLicenseAck } from "../../licenseAcknowledgment.js";
 import { buildYue2JobRequest, yue2RequestProblems } from "../../yue2Lab.js";
 import { submitYue2Jobs } from "../../api/yue2.js";
+import { validatePortableRequestNow } from "../../portableValidation.js";
 
 // Extracted from Yue2SongLab along its existing concern boundary.
 export function useYue2Submission({
@@ -37,6 +38,11 @@ export function useYue2Submission({
     setSubmitError(null);
     try {
       const body = buildYue2JobRequest(kind, settings, target, requestedGpu);
+      const portable = validatePortableRequestNow({ kind: "yue2", payload: body });
+      if (portable.state === "invalid") {
+        setSubmitError({ ...portable.refusal, message: portable.refusal.detail });
+        return;
+      }
       const response = await submitYue2Jobs(projectId, body, token);
       const created = Array.isArray(response?.jobs) ? response.jobs : [];
       setSubmitted((current) => [...created, ...current]);

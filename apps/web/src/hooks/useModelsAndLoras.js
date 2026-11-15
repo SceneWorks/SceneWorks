@@ -76,6 +76,9 @@ export function useModelsAndLoras({
       }
       setModels(items);
       setModelCatalogStatus("ready");
+      void import("../portableModelFacts.js")
+        .then(({ rememberModelCatalog }) => rememberModelCatalog(items))
+        .catch(() => {});
       setError("");
       return refreshSuccess(items);
     } catch (err) {

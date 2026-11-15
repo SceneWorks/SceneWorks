@@ -95,6 +95,7 @@ use uuid::Uuid;
 mod auth;
 mod file_serving;
 mod job_redaction;
+mod options_preview;
 mod portable_routes;
 mod project_files;
 mod router;
@@ -506,25 +507,21 @@ where
         let Json(mut value) = Json::<Value>::from_request(request, state)
             .await
             .map_err(json_rejection_response)?;
+        let generation_kind = generation_wire_kind::<T>();
         if value.is_object() {
             let carrier = if std::any::TypeId::of::<T>()
                 == std::any::TypeId::of::<JobCreateRequest>()
             {
-                let interleave = value
+                let kind = value
                     .get("type")
                     .cloned()
                     .and_then(|value| serde_json::from_value::<JobType>(value).ok())
-                    == Some(JobType::ImageInterleave);
-                sceneworks_core::options::upgrade::job_carrier(if interleave {
-                    "interleave"
-                } else {
-                    ""
-                })
-            } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<InterleaveJobRequest>()
-            {
-                sceneworks_core::options::upgrade::Carrier::InterleaveRequest
+                    .and_then(|job_type| {
+                        sceneworks_core::request_validation::kind_for_job(&job_type)
+                    });
+                sceneworks_core::options::upgrade::job_carrier(kind.unwrap_or(""))
             } else {
-                sceneworks_core::options::upgrade::Carrier::Request
+                sceneworks_core::options::upgrade::request_carrier(generation_kind.unwrap_or(""))
             };
             value =
                 sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(|error| {
@@ -537,13 +534,13 @@ where
                     .into_response()
                 })?;
         }
-        if let Some(kind) = generation_wire_kind::<T>() {
+        if let Some(kind) = generation_kind {
             let payload = value.as_object().ok_or_else(|| {
                 ApiError::bad_request("Generation request must be an object").into_response()
             })?;
             sceneworks_core::request_validation::validate_shape(kind, payload)
                 .map_err(|error| ApiError::from(error).into_response())?;
-            // The upgrader checked this envelope field; strict DTOs only own options.
+            // The canonical upgrader has checked this envelope field. Strict DTOs only own options.
             value
                 .as_object_mut()
                 .expect("request object")
@@ -1644,6 +1641,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         service: "sceneworks-api",
         runtime: "rust".to_owned(),
         version: state.settings.app_version.clone(),
+        options_validator_schema_version:
+            sceneworks_core::options::request_validation::VALIDATOR_SCHEMA_VERSION,
         auth_required: token_configured,
         // When a token is configured the endpoint is public but the deployment expects
         // auth, so don't leak absolute host paths to unauthenticated LAN callers.

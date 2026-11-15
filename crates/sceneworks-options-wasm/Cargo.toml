@@ -1,0 +1,17 @@
+[package]
+name = "sceneworks-options-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sceneworks-options = { path = "../sceneworks-options" }
+serde_json.workspace = true
+wasm-bindgen = "=0.2.121"
+
+[lints]
+workspace = true

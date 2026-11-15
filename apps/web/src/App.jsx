@@ -18,6 +18,7 @@ import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError } from "./api.js";
 import { recordStartupMark } from "./startupTiming.js";
+import { setServerValidatorVersion } from "./portableValidationState.js";
 
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
@@ -1194,6 +1195,7 @@ export function App() {
     return systemApi.health("", { signal: controller.signal })
       .then((nextHealth) => {
         if (healthRequestRef.current === controller) {
+          setServerValidatorVersion(nextHealth.optionsValidatorSchemaVersion);
           setHealth(nextHealth);
         }
       })

@@ -721,10 +721,14 @@ describe("ConfigureJobPanel — Iris", () => {
     expect(submitButton().disabled).toBe(false);
   });
 
-  it("outlines a micro-step field that is not a multiple of the accumulation", () => {
-    mount(<ConfigureJobPanel {...irisProps({}, { gradientAccumulation: "4", sampleEvery: "250", saveEvery: "200" })} />);
+  it("outlines a typed portable micro-step refusal on the authored field", () => {
+    mount(<ConfigureJobPanel
+      {...irisProps({}, { gradientAccumulation: "4", sampleEvery: "250", saveEvery: "200" })}
+      trainingRefusal={{ code: "invalid_training_option", field: "config.advanced.sampleEvery", detail: "Sample cadence must match accumulation" }}
+    />);
     expect(labelled("Sample cadence", "input").getAttribute("aria-invalid")).toBe("true");
     expect(labelled("Checkpoint cadence", "input").getAttribute("aria-invalid")).toBeNull();
+    expect(chips()).toContain("Sample cadence must match accumulation");
     expect(submitButton().disabled).toBe(true);
   });
 });
@@ -2016,4 +2020,17 @@ describe("ConfigureJobPanel host-blocked targets", () => {
     const free = [...container.querySelectorAll("option")].find((node) => node.value === "t1");
     expect(free.disabled).toBe(false);
   });
+});
+
+it.each(["pending", "server-required"])("blocks training and explains %s feedback", (state) => {
+  const submitTrainingJob = vi.fn();
+  mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state } })} />);
+  expect(submitButton().disabled).toBe(true);
+  expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : "Reconnect to continue");
+  act(() => submitButton().click());
+  expect(submitTrainingJob).not.toHaveBeenCalled();
+  mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state: "valid" } })} />);
+  expect(submitButton().disabled).toBe(false);
+  act(() => submitButton().click());
+  expect(submitTrainingJob).toHaveBeenCalledTimes(1);
 });

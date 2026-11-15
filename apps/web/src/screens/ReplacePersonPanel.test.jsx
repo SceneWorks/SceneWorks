@@ -1,6 +1,8 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: () => null }));
+vi.mock("../portableValidation.js", () => ({ validatePortableRequest: vi.fn(), validatePortableRequestNow: vi.fn() }));
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { buttonInside, changeField, field, settle } from "../main.testSupport.jsx";
 

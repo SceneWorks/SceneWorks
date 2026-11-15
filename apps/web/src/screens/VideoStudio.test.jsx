@@ -16,6 +16,19 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+// The Rust rule owner returns typed refusals; the studio must render and honor them.
+vi.mock("../hooks/usePortableFeedback.js", () => ({
+  usePortableFeedback: vi.fn((kind, payload, modelEntry) => {
+    if (modelEntry?.id === "ltx_2_3" && payload?.mode === "reference_to_video") {
+      return { state: "invalid", refusal: { code: "invalid_generation_option", field: "mode", detail: "LTX 2.3 does not support this mode." } };
+    }
+    if (modelEntry?.id === "scail2_14b" && payload?.mode === "animate_character" && payload.referenceAssetIds?.length > 6) {
+      return { state: "invalid", refusal: { code: "invalid_generation_option", field: "referenceAssetIds", detail: "SCAIL-2 Animate Character supports at most 6 reference characters." } };
+    }
+    return { state: "valid" };
+  }),
+}));
+
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 import { servedGuidance } from "../testUtils/servedCatalogFacts.js";
@@ -159,6 +172,33 @@ describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
       "Balanced",
       "Final",
     ]);
+  });
+
+  it("submits image-only SVD with no authored prompt", async () => {
+    const manifestPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../config/manifests/builtin.models.jsonc");
+    const shippedSvd = JSON5.parse(readFileSync(manifestPath, "utf8")).models.find((entry) => entry.id === "svd");
+    expect(shippedSvd?.promptless).toBe(true);
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "image_to_video", model: "svd", prompt: "", sourceAssetId: "still",
+    }));
+    const context = baseContext({ videoModels: [{ ...shippedSvd, installState: "installed", usable: true }], assets: [
+      { id: "still", projectId: "project_1", type: "image", displayName: "Start frame", status: {} },
+    ] });
+    await render(context);
+    const renderClip = buttonWithText(container, "Render clip");
+    expect(renderClip.disabled).toBe(false);
+    await click(renderClip);
+    expect(context.createVideoJob).toHaveBeenCalledWith(expect.objectContaining({
+      model: "svd", mode: "image_to_video", prompt: "", sourceAssetId: "still",
+    }));
+  });
+
+  it("keeps an ordinary blank text video request blocked", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "text_to_video", model: "ltx_2_3", prompt: "",
+    }));
+    await render(baseContext({ videoModels: [LTX] }));
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
   });
 
   it("hides Quality for an adapter that never reads the key", async () => {
@@ -756,7 +796,7 @@ describe("VideoStudio Bernini task modes", () => {
     await click(modeButton("Reference → Video"));
 
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
-    expect(container.textContent).toContain("does not support this mode");
+    await vi.waitFor(() => expect(container.textContent).toContain("does not support this mode"));
   });
 });
 
@@ -907,7 +947,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     // All seven remain visible/selectable so the user can correct the choice; the studio must not
     // silently trim one before serialization, and the explicit validation blocks submission.
     expect(container.textContent).toContain("SCAIL-2 supports at most 6 reference characters");
-    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+    await vi.waitFor(() => expect(buttonWithText(container, "Render clip").disabled).toBe(true));
   });
 
   it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {

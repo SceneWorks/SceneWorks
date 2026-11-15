@@ -187,6 +187,32 @@ pub fn resolve_request(
     resolve(kind, payload, entry).map(ResolvedRequest)
 }
 
+/// The model whose authoritative catalog facts a validation request needs. The same
+/// wire defaults used by native request decoding apply when an older caller omits it.
+pub fn model_id_for_request(kind: &str, payload: &JsonObject) -> Option<String> {
+    let model = payload.get("model").and_then(Value::as_str);
+    if kind == "imageDetail" {
+        return model
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+    }
+    if kind == "utility" {
+        return model
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                payload
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            })
+            .map(str::to_owned);
+    }
+    model.map(str::to_owned).or_else(|| default_model_for(kind))
+}
+
 /// Resolve omitted scalar values using the same model defaults the native readers use. The
 /// returned object is a preview/execution view; the authored payload and omission intent survive.
 pub fn resolve(

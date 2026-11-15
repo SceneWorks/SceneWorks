@@ -797,9 +797,9 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/components/CharacterAdvancedOptions.jsx` | `buildAdvanced` | The character lane's shared tuning block. |
 | `apps/web/src/screens/characterPanels.jsx` | `useAngleController` | The Angle Set form's extras. |
 | `apps/web/src/screens/characterPanels.jsx` | `usePoseController` | The Pose Library form's extras. |
-| `apps/web/src/screens/DocumentStudio.jsx` | `submit` | The interleaved-document lane. |
+| `apps/web/src/screens/DocumentStudio.jsx` | `buildInterleaveAdvanced` | The interleaved-document lane. |
 | `apps/web/src/imageJobs.js` | `buildUpscaleJobBody` | The standalone upscale job. Registered as emitting **no** `advanced` map, so the day it grows a knob the lint demands a classification. |
-| `apps/web/src/screens/videoStudio/useVideoSubmission.js` | `submit` | The Video Studio's ~20-knob builder. |
+| `apps/web/src/screens/videoStudio/useVideoSubmission.js` | `buildRequest` | The Video Studio's ~20-knob builder. |
 | `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | The timeline editor's shared video payload. |
 | `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Timeline extend. |
 | `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
@@ -963,14 +963,13 @@ what is left.
 
 The back-check that every `ADVANCED_BUILDERS` entry is named by some embedding seam means the two
 halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on their own
-would leave `videoStudio/useVideoSubmission.js::submit` registered with no seam behind it, which fails. Move the
+would leave `videoStudio/useVideoSubmission.js::buildRequest` registered with no seam behind it, which fails. Move the
 builder up and add the `WORKFLOW_WRITE_SEAMS` entry in the same change.
 
-And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `videoStudio/useVideoSubmission.js::submit`
-as its deferred example, so promoting that builder turns that mutation proof into a "did not panic
-as expected" failure. Re-point it at whatever is still deferred; the proof is that *some* deferred
-builder is refused, not that one particular one is. Both surprises are loud rather than silent,
-which is why they are documented rather than designed away.
+The deferred-builder mutation proof now points at `training/trainingConfig.js::trainingConfigSnapshot`.
+If that builder is promoted, re-point the proof at a remaining deferred builder. The proof is that
+*some* deferred builder is refused, not that one particular one is. Both surprises are loud rather
+than silent, which is why they are documented rather than designed away.
 
 ## The setting
 

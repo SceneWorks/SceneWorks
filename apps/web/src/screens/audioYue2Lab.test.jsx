@@ -1,3 +1,5 @@
+const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
+vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
 import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -279,6 +281,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   let mediaDevicesDescriptor;
 
   beforeEach(() => {
+    feedbackState.value = { state: "valid" };
     mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
@@ -323,6 +326,28 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab(), "the lab opens").toBeTruthy();
     expect(container.querySelector('[data-testid="yue2-gate"]')).toBeNull();
   }
+
+  it.each(["pending", "server-required", "invalid"])("blocks Song Lab compose, cover, render and decode while feedback is %s", async (state) => {
+    feedbackState.value = { state, refusal: { code: "invalid_option", field: "steps", detail: "Fix the authored steps" } };
+    await openEnabledLab(context({ jobs: [TRUNCATED], assets: [SONG_ASSET] }));
+    await typeLyrics("[verse]\nhello");
+    await typeText(byLabel(lab(), "Style"), "acoustic");
+    const assertBlocked = async (button) => {
+      expect(button.disabled).toBe(true);
+      await click(button);
+      expect(calls("/yue2/jobs")).toHaveLength(0);
+    };
+    await assertBlocked(buttonWithText(lab(), "Generate song"));
+    expect(lab().textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
+    await assertBlocked(buttonWithText(container.querySelector('[data-testid="yue2-run-card"]'), "Decode again"));
+    await click(buttonWithText(lab(), "Cover"));
+    await choose(byLabel(lab(), "Cover score version"), "ver_1");
+    await assertBlocked(buttonWithText(lab(), "Generate cover"));
+    await click(buttonWithText(lab(), "Scores"));
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle({ microtasks: 10 });
+    await assertBlocked(buttonWithText(lab(), "Render this version"));
+  });
 
   it("ignores late history responses from the previous project", async () => {
     let resolveVersions;
@@ -453,6 +478,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await act(async () => root.unmount());
     ({ container, root } = mountRoot());
     seedLab({ optIn: true, lyrics: "restored lyrics", style: "lofi", tier: "q8", advancedOpen: false });
+    feedbackState.value = { state: "invalid", refusal: { field: "computeDtype", detail: "Choose a supported compute precision" } };
     await render(context());
     // Untagged saved lyrics stay one untagged section — the editor adds no tag of its own.
     expect(byLabel(lab(), "Section 1 label").value).toBe("");
@@ -604,7 +630,11 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(lab(), "Supply an ABC score"));
     // A supplied score cannot be planned with planning off.
     expect(buttonWithText(lab(), "Off (no score)").disabled).toBe(true);
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+    await click(buttonWithText(lab(), "Generate song"));
+    expect(calls("/yue2/jobs")).toHaveLength(0);
     await typeText(byLabel(lab(), "Supplied ABC score"), "X:1\nK:C\nC4|");
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(false);
     await click(buttonWithText(lab(), "Preview score"));
     await settle({ microtasks: 10 });
     expect(JSON.parse(calls("/yue2/score/inspect").at(-1)[2].body)).toEqual({ abc: "X:1\nK:C\nC4|" });
@@ -690,6 +720,22 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(calls("/yue2/jobs").length).toBe(0);
   });
 
+  it("keeps transcription disabled until a recording is selected", async () => {
+    const entry = yue2Entry({
+      conditionalComponents: [
+        { componentId: "yue2_sheetsage2", requiredFor: ["cover"], installState: "installed" },
+        { componentId: "yue2_mert_v2_fullsong", requiredFor: ["cover"], installState: "installed" },
+      ],
+      conditionalPurposes: { cover: { installState: "installed" } },
+    });
+    await openEnabledLab(context({ models: [...STANDARD, YUE1, entry] }));
+    await click(buttonWithText(lab(), "Cover"));
+    const button = buttonStarting(lab(), "Transcribe the recording");
+    expect(button.disabled).toBe(true);
+    await click(button);
+    expect(calls("/yue2/jobs")).toHaveLength(0);
+  });
+
   it("transcribes a selected recording, reviews both modes, edits the full score and covers both modes", async () => {
     const transcription = {
       id: "yue2t_take", createdAt: "2026-09-27T12:00:00Z", sourceAudioAssetId: "asset_take",
@@ -736,6 +782,17 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(review.textContent).toContain("Review the vocal octave");
     expect(review.querySelector('[data-testid="yue2-octave-evidence"]').textContent).toContain("1 of 4");
     expect(review.querySelector('[data-testid="yue2-readiness-full"]').textContent).toContain("Ready for a full cover");
+    for (const state of ["pending", "server-required", "invalid"]) {
+      feedbackState.value = { state, refusal: { field: "lookAheadSecs", detail: "Fix the transcription options" } };
+      await render(context({ models: [...STANDARD, YUE1, entry], assets: [{ id: "asset_take", type: "audio", displayName: "take.wav" }] }));
+      expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(true);
+      expect(lab().textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the transcription options");
+      await click(buttonStarting(lab(), "Transcribe the recording"));
+      expect(calls("/yue2/jobs")).toHaveLength(0);
+    }
+    feedbackState.value = { state: "valid" };
+    await render(context({ models: [...STANDARD, YUE1, entry], assets: [{ id: "asset_take", type: "audio", displayName: "take.wav" }] }));
+    expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(false);
     await click(buttonStarting(lab(), "Transcribe the recording"));
     expect(lastJobBody()).toMatchObject({ kind: "transcribe", sourceAudioAssetId: "asset_take" });
     await click(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-melody"]'), "Use for the cover"));
