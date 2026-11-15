@@ -48263,6 +48263,7 @@
     "supra2_img:candle": {
       "entryPoints": [
         "crates/contracts/gen-core-checkpoint/src/supra2.rs",
+        "crates/contracts/gen-core-supra2-policy/src/lib.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/model.rs"
       ],
@@ -48677,6 +48678,7 @@
     "supra2_img:mlx": {
       "entryPoints": [
         "crates/contracts/gen-core-checkpoint/src/supra2.rs",
+        "crates/contracts/gen-core-supra2-policy/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-supra2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-supra2/src/model.rs"
       ],
