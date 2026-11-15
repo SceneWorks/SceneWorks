@@ -1138,6 +1138,7 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[cfg(native_lane)]
 fn bound_request(value: Value) -> ImageRequest {
     let payload = value.as_object().expect("fixture request object");
     ImageRequest::from_resolved(payload, payload).expect("fixture options bind")

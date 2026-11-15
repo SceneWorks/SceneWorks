@@ -11,6 +11,7 @@ use super::INT8_CONVROT_TIER;
 #[cfg(target_os = "macos")]
 use crate::emit_event;
 use crate::quant_int;
+#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
 use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;

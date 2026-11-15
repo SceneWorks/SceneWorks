@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use sceneworks_core::contracts::JsonObject;
+#[cfg(native_lane)]
 use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 use serde_json::Value;
 
 /// Only the verified dispatch clone carries this private map. The worker guard removes every
@@ -46,7 +47,7 @@ pub(crate) fn selected_krea_control_override(
 }
 
 /// Select from the verified attempt context without re-reading the dispatch JSON.
-#[cfg(any(test, native_lane))]
+#[cfg(native_lane)]
 pub(crate) fn selected_krea_control_override_typed(
     bindings: &PortableAuxBindings,
     env_override: Option<&str>,
@@ -69,7 +70,7 @@ pub(crate) fn selected_krea_control_override_typed(
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 pub(crate) fn bound_pulid_weights(
     advanced: &JsonObject,
 ) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
@@ -127,6 +128,8 @@ pub(crate) fn resolve_selected_aux_source_typed(
     tile_control_net_repo: Option<&str>,
     plan_base_model_path: Option<&str>,
 ) -> Option<(PathBuf, bool)> {
+    #[cfg(not(native_lane))]
+    let _ = plan_base_model_path;
     let snapshot = |repo| crate::model_jobs::huggingface_snapshot_dir(data_dir, repo);
     match source_id {
         "instantid_mlx" => {

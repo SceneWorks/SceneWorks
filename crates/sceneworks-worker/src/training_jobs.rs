@@ -39,7 +39,7 @@ use sceneworks_core::training::{
     ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, RESOLUTION_BUCKETS_KEY,
     SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
 };
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 use sceneworks_core::training::{
     GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
 };
@@ -1797,31 +1797,31 @@ fn validate_new_family_request(
     .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 fn preflight_string(advanced: &JsonObject, key: &str, default: &str) -> WorkerResult<String> {
     sceneworks_core::training::preflight_string(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 fn preflight_bool(advanced: &JsonObject, key: &str, default: bool) -> WorkerResult<bool> {
     sceneworks_core::training::preflight_bool(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult<u32> {
     sceneworks_core::training::preflight_u32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 fn preflight_f32(advanced: &JsonObject, key: &str, default: f32) -> WorkerResult<f32> {
     sceneworks_core::training::preflight_f32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
-#[cfg(test)]
+#[cfg(all(test, native_lane))]
 fn preflight_i32(advanced: &JsonObject, key: &str, default: i32) -> WorkerResult<i32> {
     sceneworks_core::training::preflight_i32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))

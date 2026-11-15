@@ -33,6 +33,7 @@ pub(crate) struct PromptEnhance {
 }
 
 impl PromptEnhance {
+    #[cfg(native_lane)]
     pub(crate) fn from_resolved(request: &ImageRequest) -> WorkerResult<Self> {
         let (enabled, temperature, max_tokens) =
             super::resolved_prompt_enhancement_fields(request)?;

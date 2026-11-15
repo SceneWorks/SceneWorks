@@ -25,8 +25,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -640,8 +640,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.timestep_type=\"uniform\".into();}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.timestep_type=\"uniform\".into();}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -655,8 +655,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.trigger_word=None;}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.trigger_word=None;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -670,8 +670,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.network_type=NetworkType::Lora;}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.network_type=NetworkType::Lora;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -685,8 +685,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.rank=1;}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.rank=1;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -700,8 +700,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.alpha=1.;}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.alpha=1.;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -715,8 +715,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.lora_target_modules=vec![\"q\".into()];}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.lora_target_modules=vec![\"q\".into()];}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -730,8 +730,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"vae_posterior\".into(),json!(\"sample\"));}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"vae_posterior\".into(),json!(\"sample\"));}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -745,8 +745,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"foreign\".into(),json!(true));}\n        config\n",
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"foreign\".into(),json!(true));}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -954,8 +954,8 @@
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
           "anchor": "fn finalize_training_config(",
-          "old": "\n        config\n",
-          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" { config.train_dtype = \"bf16\".to_owned(); }\n        config\n"
+          "old": "\n        let _ = plan;\n        config\n",
+          "new": "\n        let _ = plan;\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" { config.train_dtype = \"bf16\".to_owned(); }\n        config\n"
         }
       ]
     },
