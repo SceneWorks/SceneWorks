@@ -1460,6 +1460,54 @@ describe("DatasetPromptBatchDialog", () => {
     expect(body.condenseRows[0]).toMatchObject({ itemId: "item_a", condensedText: "woman_1 by the window, edited." });
   });
 
+  // Restored rows on the krea target: item_a condensed (its prompt is then edited), item_b not.
+  async function restoreFittedRun(models, result) {
+    context.models = models;
+    serveHistory([{ id: "job_fit", status: "completed", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 2, itemCount: 2, ...result } }]);
+    serveStoredRuns({
+      job_fit: [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }), described("item_b", 400, 300)],
+    });
+    await render();
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window, edited."));
+  }
+
+  it("measures an edited prompt with no describer installed, while Condense stays blocked", async () => {
+    await restoreFittedRun(
+      [{ id: "vision_caption_qwen3vl_8b", name: "Vision Captioner (Qwen3-VL-8B)", installState: "missing" }, KREA],
+      { model: VISION_CAPTION_MODEL_REPO },
+    );
+    expect(button("Condense for Krea 2 Turbo (1)").disabled).toBe(true);
+    expect(button("Measure").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body);
+    expect(body).toMatchObject({ model: VISION_CAPTION_MODEL_REPO, measureOnly: true, fitTo: "krea_2_turbo" });
+    expect(body.condenseRows.map((row) => row.itemId)).toEqual(["item_a"]);
+  });
+
+  it("measures a 27B row whose tier was uninstalled, while Condense for it stays blocked", async () => {
+    await restoreFittedRun([...context.models, KREA, describerWithTiers("q4")], {
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+    });
+    const condense = button("Condense for Krea 2 Turbo (1)");
+    expect(condense.disabled).toBe(true);
+    expect(condense.title).toBe("Vision Describer (Qwen3.8-27B) q8 (32 GB) is not installed, so its rows cannot be condensed.");
+    expect(button("Measure").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body);
+    // The tier only names how the row was described; a measure-only job loads nothing.
+    expect(body).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+      requestedGpu: "auto",
+      fitTo: "krea_2_turbo",
+      condenseRows: [expect.objectContaining({ itemId: "item_a", condensedText: "woman_1 by the window, edited." })],
+      measureOnly: true,
+    });
+  });
+
   it("remembers a cleared Fit to for the dataset even though the newest run had a target", async () => {
     context.models = [...context.models, KREA];
     window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");

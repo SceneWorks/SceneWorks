@@ -976,7 +976,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     setSavedBatch(null);
     setFitTo(id);
     if (dataset?.id) storeFitTo(dataset.id, id);
-    if (id && !condenseBlocked) condenseRows(id);
+    if (id && !condenseBlocked && !condenseRowsIssue(rowsToCondense(rows, id))) condenseRows(id);
   }
 
   // Images with no successful result yet: never described (e.g. after a cancel) or flagged.
@@ -1092,6 +1092,25 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Condensing runs on each row's own describer, which must be installed.
   const condenseBlocked =
     busy || restoring || dirty || !DESCRIBE_MODELS.some((entry) => entry.condenses && modelAvailable(entry.id));
+  // Why the pending rows cannot condense yet: each condenses on its own describer and tier, so a
+  // row whose model or tier is not installed (a 27B tier since uninstalled) holds the step. "" when
+  // every pending row can.
+  const condenseRowsIssue = (pending) => {
+    for (const row of pending) {
+      const { entry, tier: rowTier, unknownTier } = rowDescriber(row);
+      if (unknownTier) return `${entry.label} has no tier “${rowTier}”, the tier that described a row.`;
+      if (!modelAvailable(entry.id, rowTier)) {
+        const name = rowTier ? `${entry.label} ${entry.tiers.find(([key]) => key === rowTier)[1]}` : entry.label;
+        return `${name} is not installed, so its rows cannot be condensed.`;
+      }
+    }
+    return "";
+  };
+  const pendingCondenseIssue = condenseRowsIssue(pendingCondense);
+  // Measuring re-counts an edited condensed prompt with the target's tokenizer and loads no
+  // describer (the job is model-free), so it never waits on a describer or tier being installed.
+  // A target whose tokenizer is missing answers "not measured" on the row.
+  const measureBlocked = busy || restoring || dirty;
   // The block each row will be saved as (its condensed prompt when Fit to applies to it).
   const fitToId = activeFitTo;
 
@@ -1316,7 +1335,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                       <CondensedPrompt
                         busy={busy}
                         running={running}
-                        measureBlocked={condenseBlocked}
+                        measureBlocked={measureBlocked}
                         onChange={updateCondensed}
                         onMeasure={measureRow}
                         row={row}
@@ -1421,7 +1440,13 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               </button>
             )}
             {pendingCondense.length ? (
-              <button className="secondary-action" disabled={condenseBlocked} onClick={() => condenseRows()} type="button">
+              <button
+                className="secondary-action"
+                disabled={condenseBlocked || Boolean(pendingCondenseIssue)}
+                onClick={() => condenseRows()}
+                title={pendingCondenseIssue || undefined}
+                type="button"
+              >
                 Condense for {fitTarget.name} ({pendingCondense.length})
               </button>
             ) : null}
