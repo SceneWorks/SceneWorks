@@ -25,6 +25,12 @@
 # CI_IMPACT: manual only, two real renders, 60 minutes each; 180-minute job ceiling includes
 # the existing native CUDA build. Normal CI adds only a small pure metadata test.
 #
+# The SW-7033 tier2-ab profile calls tier2-ab.yml: one job per `backend` checks out the base and
+# head SHAs named in moss_options_json, builds both release API/workers and compares the same fixed
+# requests through the production API/worker path (base#1, head, base#2 only if head differs).
+# preflight_only defaults to true. It writes an evidence artifact only: no branch, commit or PR.
+# CI_IMPACT: manual only; normal CI adds only scripts/tier2-ab.test.mjs (no build, model or GPU).
+#
 # WHAT IT PRODUCES. A NEW branch `story/<campaign>-<backend>-campaign-<run_id>` carrying one commit
 # per measured anchor, pushed as the walk proceeds (never only at the end), plus a work-dir artifact
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
@@ -92,6 +98,7 @@ on:
           - supra2-mlx-real-weights
           - sdxl-cuda-endpoints
           - sdxl-cuda-admitted-replay
+          - tier2-ab
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -320,6 +327,7 @@ jobs:
           const emit = (key, value) => appendFileSync(process.env.GITHUB_OUTPUT, key + '=' + value + '\n');
           // The existing options input is profile-specific; keep all 25 registered inputs.
           if (i.profile === 'load-progress-acceptance') { emit('enabled','false'); process.exit(0); }
+          if (i.profile === 'tier2-ab') { emit('enabled','false'); process.exit(0); }
           let m;
           try { m = JSON.parse(i.moss_options_json || '{}'); } catch { throw new Error('moss_options_json must be a JSON object'); }
           if (m === null || typeof m !== 'object' || Array.isArray(m)) throw new Error('moss_options_json must be a JSON object');
@@ -485,6 +493,54 @@ jobs:
       hf_hub_cache: ${{ fromJSON(needs.load-progress-selector.outputs.options).hf_hub_cache }}
       build_only: ${{ fromJSON(needs.load-progress-selector.outputs.options).build_only }}
       mac_go: ${{ fromJSON(needs.load-progress-selector.outputs.options).mac_go }}
+  tier2-ab-selector:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' }}
+    needs: moss-selector-preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      options: ${{ steps.select.outputs.options }}
+    steps:
+      # Full history of every branch, commits only (treeless), so the trusted-ref rule can ask
+      # `git merge-base --is-ancestor` without downloading trees or blobs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          filter: tree:0
+          persist-credentials: false
+      - name: Validate the SW-7033 Tier 2 A/B selector and require trusted base/head SHAs
+        id: select
+        env:
+          SELECTORS: ${{ toJSON(inputs) }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module <<'JS'
+          import {appendFileSync} from 'node:fs';
+          import {assertTrustedShas,dispatchOptions} from './scripts/tier2-ab.mjs';
+          const options=dispatchOptions(JSON.parse(process.env.SELECTORS),process.env.DISPATCH_SHA);
+          console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
+          appendFileSync(process.env.GITHUB_OUTPUT,'options='+JSON.stringify(options)+'\n');
+          JS
+  tier2-ab:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' }}
+    needs: [moss-selector-preflight, tier2-ab-selector]
+    permissions:
+      contents: read
+    # SW-7033: base/head A/B over the production API/worker path. options come from
+    # moss_options_json ({"base_sha","head_sha","routes","hubs","preflight_only"}; preflight_only
+    # defaults to true). No catalog walk, measurement publication, branch, push or PR.
+    # Passes no credentials: the compared builds come from operator-chosen commits and need none.
+    uses: ./.github/workflows/tier2-ab.yml
+    with:
+      base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
+      head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}
+      backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).backend }}
+      routes: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).routes }}
+      hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).hubs }}
+      inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).inference_sha }}
+      preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).preflight_only }}
   qwen-app-lifecycle:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     needs: moss-selector-preflight

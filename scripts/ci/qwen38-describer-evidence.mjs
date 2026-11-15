@@ -1,20 +1,23 @@
 // Validates and stages the bounded evidence of the dispatch-only Qwen3.8 27B describer CUDA run
 // (SW-7120). Runs no model: it reads the result the guarded worker smoke wrote and the CUDA guard's
-// resource receipt, and fails unless the described fields are filled and the guard completed. `camera`
-// may be an empty string: the output contract allows it when the image shows no camera character.
+// resource receipt, and fails unless the described fields are filled and the guard completed. `pose` and
+// `camera` may be empty strings: the output contract allows them when the image shows no people or
+// no camera character.
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const FIELDS = Object.freeze(['description', 'style', 'camera', 'composition', 'lighting', 'environment']);
+export const FIELDS = Object.freeze(['description', 'pose', 'style', 'camera', 'composition', 'lighting', 'environment']);
+// Fields the output contract allows to be empty.
+export const MAY_BE_EMPTY = Object.freeze(['pose', 'camera']);
 export const TIERS = Object.freeze(['q4', 'q8']);
 export const REPO = 'SceneWorks/qwen3.8-27b-abliterated-candle';
 export const TEST_NAME = 'qwen38_describer_describes_a_synthetic_scene_on_cuda';
 export const GUARD_ACTOR = 'qwen38-describer';
 // The workflow's `image_side` input and the scene size the smoke draws for it.
 export const IMAGE_SIZES = Object.freeze({ default: [512, 384], 1536: [1536, 1536] });
-// The worker caps one field at 16,000 characters; six of them, JSON-escaped, stay far below this.
+// The worker caps one field at 16,000 characters; seven of them, JSON-escaped, stay far below this.
 const MAX_INPUT_BYTES = 1024 * 1024;
 
 export function validateResult(result, tier, imageSide = 'default') {
@@ -29,7 +32,7 @@ export function validateResult(result, tier, imageSide = 'default') {
   assert.deepEqual([result.image?.width, result.image?.height], IMAGE_SIZES[imageSide],
     'result image size differs from the requested image side');
   const empty = FIELDS.filter((name) => typeof result.fields?.[name] !== 'string'
-    || (name !== 'camera' && !result.fields[name].trim()));
+    || (!MAY_BE_EMPTY.includes(name) && !result.fields[name].trim()));
   assert.deepEqual(empty, [], `described fields are empty: ${empty.join(', ')}`);
   assert(Number.isFinite(result.wall_seconds) && result.wall_seconds > 0, 'wall time is missing');
   const memory = result.gpu_memory;

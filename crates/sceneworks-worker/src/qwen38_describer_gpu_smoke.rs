@@ -5,7 +5,9 @@
 //! It resolves a pre-quantised Candle tier through the production path
 //! (`qwen38_describer_weights_dir`), describes one synthetic scene generated here with the production
 //! describer (`VisionCaptionerDescriber`, the same one a `dataset_batch_describe` job runs), and
-//! requires all six described fields to be filled. A sampler thread polls `nvidia-smi memory.used`
+//! requires the described fields to be filled (`pose` and `camera` may be empty: the scene has no
+//! people and no camera character) from a complete reply: a reply cut off at the reply budget fails
+//! the run instead of being recovered. A sampler thread polls `nvidia-smi memory.used`
 //! on the job's card every 100 ms for the peak; the guard holds that card exclusively and verified
 //! it idle first, so the card-wide high-water is this run's peak (a transient shorter than the poll
 //! interval can be missed).
@@ -191,14 +193,22 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         .expect("the describer generates");
     eprintln!("raw reply:\n{raw}");
     assert!(!raw.contains("<think>"), "thinking must be off: {raw}");
+    // The strict parse, never `recover`: a reply cut off at the reply budget fails here rather than
+    // passing as a partial description with a notice.
     let parsed = describer
         .parse(&raw)
-        .expect("the reply is the six-field JSON");
+        .expect("the reply is the complete description JSON");
+    assert!(
+        parsed.notice.is_none(),
+        "a complete reply carries no cut-off notice: {:?}",
+        parsed.notice
+    );
     let empty: Vec<&str> = DESCRIBE_FIELDS
         .iter()
         .zip(&parsed.fields)
-        // The output contract lets `camera` be empty when the image shows no camera character.
-        .filter(|(name, text)| **name != "camera" && text.is_empty())
+        // The output contract lets `camera` be empty when the image shows no camera character, and
+        // `pose` when it shows no people (the synthetic scene has none).
+        .filter(|(name, text)| !matches!(**name, "camera" | "pose") && text.is_empty())
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");

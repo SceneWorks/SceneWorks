@@ -69,9 +69,12 @@ pub fn resolve_describe_tier(
     }
 }
 
-/// The six description fields every described image carries, in output-contract order.
-pub const DESCRIBE_FIELDS: [&str; 6] = [
+/// The seven description fields every described image carries, in output-contract order. Each is
+/// stored as text: the worker flattens the Vision Captioner's structured `pose` (named slots per
+/// person) into one line per person. A result stored before `pose` existed has only the other six.
+pub const DESCRIBE_FIELDS: [&str; 7] = [
     "description",
+    "pose",
     "style",
     "camera",
     "composition",
@@ -80,7 +83,7 @@ pub const DESCRIBE_FIELDS: [&str; 6] = [
 ];
 
 /// Longest describing instruction a Vision Captioner request may carry, in characters. The default
-/// instruction is about 4,800 characters; this leaves room for a much longer edit without letting
+/// instruction is about 9,500 characters; this leaves room for a much longer edit without letting
 /// a request push an unbounded system prompt at the model.
 pub const MAX_DESCRIBE_PROMPT_CHARS: usize = 32_000;
 
@@ -252,5 +255,21 @@ mod tests {
                 assert_eq!(closure["downloads"][0]["variant"], tier, "{platform}");
             }
         }
+    }
+
+    #[test]
+    fn pose_follows_description_and_the_other_six_keep_their_order() {
+        assert_eq!(
+            DESCRIBE_FIELDS,
+            [
+                "description",
+                "pose",
+                "style",
+                "camera",
+                "composition",
+                "lighting",
+                "environment"
+            ]
+        );
     }
 }
