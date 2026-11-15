@@ -1624,7 +1624,11 @@ fn production_execution_has_no_raw_advanced_reads() {
                 ) | (
                     "crates/sceneworks-core/src/workflow_share.rs",
                     "build_share_of_kind",
-                    "mossImageAdvanced" | "mossImageEditExecutionReport"
+                    "mossImageAdvanced" | "mossImageEditExecutionReport" | "lowResStart"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_share.rs",
+                    "parse_workflow_share" | "reduce_workflow_share",
+                    "lowResStart"
                 )
             )
     };
@@ -1710,6 +1714,11 @@ fn production_execution_has_no_raw_advanced_reads() {
             !portable_owner_module(file)
                 && !authored_receipt_clone(file, function, expression)
                 && !resize_mode_authoring_stamp(file, function, expression)
+                // Versioned share parsing rejects unknown authored recipe keys before it
+                // constructs a new request; this is envelope validation, not execution.
+                && !(file == "crates/sceneworks-core/src/workflow_share.rs"
+                    && function == "parse_workflow_share"
+                    && expression == "whole advanced map: keys")
                 && !(file == "crates/sceneworks-core/src/resolved_options.rs"
                     && matches!(
                         function.as_str(),
@@ -1844,6 +1853,13 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "crates/sceneworks-options/src/sensenova_validation.rs",
             "materialize_interleave",
             "computed expression",
+        ),
+        // Fresh-generation authoring removes the finite machine-decision fields before
+        // persistence; exact replay follows its separate verified receipt path.
+        (
+            "crates/sceneworks-options/src/upgrade.rs",
+            "strip_machine_decisions",
+            "key",
         ),
         (
             "crates/sceneworks-worker/src/external_library_runtime.rs",

@@ -75,6 +75,7 @@ pub(crate) fn route_option_facts(
 fn expected_image_provider(
     job_type: &JobType,
     payload: &JsonObject,
+    route_options: &RouteOptionFacts,
     entries: &[(String, &Value)],
     backend: &str,
     sources: &[SelectedRouteSource],
@@ -90,6 +91,7 @@ fn expected_image_provider(
     let strict_control = sources
         .iter()
         .any(|source| source.model_slot == *slot && source.component_id == "strict_control");
+    let has_poses = matches!(route_options.poses, RouteField::Valid(count) if count > 0);
     let provider_id = if strict_control {
         if *job_type != JobType::ImageGenerate
             || payload.get("mode").and_then(Value::as_str) == Some("edit_image")
@@ -97,11 +99,19 @@ fn expected_image_provider(
             return None;
         }
         let trusted_entry = builtin.project(None);
-        sceneworks_core::control_weights::default_control_weight_for_request(
+        sceneworks_core::control_weights::default_control_weight_for_request_resolved(
             model_id,
             &trusted_entry,
             backend,
-            payload,
+            has_poses,
+            payload
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            match route_options.mlx_quantize {
+                RouteField::Valid(bits) => Some(bits),
+                _ => None,
+            },
         )?
         .engine_id
     } else {
@@ -127,11 +137,7 @@ fn expected_image_provider(
                         .get("referenceAssetIds")
                         .and_then(Value::as_array)
                         .is_some_and(|values| !values.is_empty())
-                    || payload
-                        .get("advanced")
-                        .and_then(|advanced| advanced.get("poses"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|poses| !poses.is_empty())
+                    || has_poses
                 {
                     return None;
                 }
@@ -1212,9 +1218,14 @@ pub(crate) async fn derive_vector_raster_child_binding(
         }
         let mut route = PortableRouteBinding::new(&backend, &platform, vec![model])
             .map_err(|error| incomplete(error.to_string()))?;
-        if let Some(expected) =
-            expected_image_provider(child_type, child_payload, &entries, &backend, &[])
-        {
+        if let Some(expected) = expected_image_provider(
+            child_type,
+            child_payload,
+            &route_options,
+            &entries,
+            &backend,
+            &[],
+        ) {
             route = route
                 .with_expected_provider(expected)
                 .map_err(|error| incomplete(error.to_string()))?;
@@ -1469,9 +1480,14 @@ async fn capture_portable_model_binding_inner(
             }
             let mut route = PortableRouteBinding::new(&backend, &platform, models)
                 .map_err(|error| incomplete(error.to_string()))?;
-            if let Some(expected) =
-                expected_image_provider(job_type, payload, &entries, &backend, &selected_sources)
-            {
+            if let Some(expected) = expected_image_provider(
+                job_type,
+                payload,
+                &route_options,
+                &entries,
+                &backend,
+                &selected_sources,
+            ) {
                 route = route
                     .with_expected_provider(expected)
                     .map_err(|error| incomplete(error.to_string()))?;
@@ -3899,6 +3915,23 @@ mod tests {
     use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
 
+    fn expected_image_provider(
+        job_type: &JobType,
+        payload: &JsonObject,
+        entries: &[(String, &Value)],
+        backend: &str,
+        sources: &[SelectedRouteSource],
+    ) -> Option<PortableExpectedProvider> {
+        super::expected_image_provider(
+            job_type,
+            payload,
+            &RouteOptionFacts::from_payload_syntax(payload),
+            entries,
+            backend,
+            sources,
+        )
+    }
+
     #[test]
     fn server_route_provider_pairs_ignore_authored_provider_strings() {
         for (model_id, backend, expected) in [
@@ -3975,6 +4008,29 @@ mod tests {
     }
 
     #[test]
+    fn expected_provider_uses_resolved_pose_facts() {
+        let entry = json!({"id":"realvisxl"});
+        let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+        let plain = json!({"model":"realvisxl","mode":"text_to_image"});
+        let posed = json!({"model":"realvisxl","mode":"text_to_image","advanced":{"poses":[{}]}});
+        for (payload, resolved, expected) in [(&plain, &posed, false), (&posed, &plain, true)] {
+            let facts = RouteOptionFacts::from_payload_syntax(resolved.as_object().unwrap());
+            assert_eq!(
+                super::expected_image_provider(
+                    &JobType::ImageGenerate,
+                    payload.as_object().unwrap(),
+                    &facts,
+                    &entries,
+                    "candle",
+                    &[],
+                )
+                .is_some(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn unknown_and_conditioned_routes_do_not_infer_a_primary_provider() {
         let entry = json!({"id":"realvisxl","providerId":"client_spoof"});
         let entries = vec![("modelManifestEntry".to_owned(), &entry)];
@@ -3982,6 +4038,7 @@ mod tests {
             json!({"model":"realvisxl","mode":"character_image","providerId":"sdxl"}),
             json!({"model":"realvisxl","mode":"text_to_image","referenceAssetId":"ref"}),
             json!({"model":"realvisxl","mode":"text_to_image","referenceAssetIds":["ref"]}),
+            json!({"model":"realvisxl","mode":"text_to_image","advanced":{"poses":[{}]}}),
         ] {
             assert!(expected_image_provider(
                 &JobType::ImageGenerate,
