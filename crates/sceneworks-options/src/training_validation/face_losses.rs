@@ -332,18 +332,27 @@ pub fn face_loss_combination_refusal(
     config: &TrainingConfig,
     label: &str,
 ) -> Option<String> {
-    if super::config_is_full_finetune(config) {
+    face_loss_combination_refusal_resolved(
+        base_model,
+        super::config_is_full_finetune(config),
+        config.advanced.get("ltxWorkflow").and_then(Value::as_str),
+        label,
+    )
+}
+
+pub fn face_loss_combination_refusal_resolved(
+    base_model: &str,
+    full_finetune: bool,
+    ltx_workflow: Option<&str>,
+    label: &str,
+) -> Option<String> {
+    if full_finetune {
         return Some(format!(
             "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
         ));
     }
     if base_model == "ltx_2_5" {
-        let workflow = config
-            .advanced
-            .get("ltxWorkflow")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
+        let workflow = ltx_workflow.map(str::trim).unwrap_or_default();
         if super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
             return Some(format!(
                 "{label} needs a generated video stream; the LTX-2.5 workflow '{workflow}' \

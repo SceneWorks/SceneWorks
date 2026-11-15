@@ -99,6 +99,7 @@ fn ident(pat: &Pat) -> Option<String> {
 #[derive(Default, Clone)]
 struct Bindings {
     maps: BTreeSet<String>,
+    descendants: BTreeSet<String>,
     strings: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -115,6 +116,10 @@ struct Coverage {
     reads: BTreeSet<Read>,
     dynamic: BTreeSet<(String, String, String)>,
     delegated: BTreeSet<(String, String, String)>,
+    whole_map_reads: BTreeSet<(String, String, String)>,
+    nested_reads: BTreeSet<(String, String, String)>,
+    mutations: BTreeSet<(String, String, String)>,
+    trusted_aux_constructor_calls: BTreeSet<(String, String)>,
     domains: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -166,6 +171,40 @@ fn helper_key(name: &str) -> Option<usize> {
     }
 }
 
+// Routing helpers accept a JSON object name and a child key. Their call sites are option
+// reads whenever the object name is `advanced`, even though the helper definition uses a
+// generic `object_key` parameter and never spells `advanced` itself.
+fn nested_helper_key(name: &str) -> Option<usize> {
+    match name {
+        "has_nonempty_nested_array"
+        | "has_nonempty_or_malformed_nested_array"
+        | "has_nonnull_or_malformed_nested_carrier"
+        | "has_malformed_optional_nested_number" => Some(2),
+        _ => None,
+    }
+}
+
+// These portable parsers return typed training techniques, but a native caller passing its raw
+// `config.advanced` still makes an execution decision outside the one-time training binder.
+fn training_technique_map_arg(name: &str) -> Option<usize> {
+    match name {
+        "subject_mask_loss_weights"
+        | "subject_mask_consumer"
+        | "depth_anchoring_settings"
+        | "body_loss_settings"
+        | "identity_loss_settings"
+        | "face_landmark_loss_settings"
+        | "training_adapter_model"
+        | "parse_training_bucket_config"
+        | "moss_model_options"
+        | "resolve_advanced"
+        | "resolve_advanced_for_kernel"
+        | "resolve_advanced_for_model" => Some(0),
+        "latent_loss_settings" => Some(1),
+        _ => None,
+    }
+}
+
 struct Scanner<'a> {
     file: &'a str,
     function: String,
@@ -175,6 +214,7 @@ struct Scanner<'a> {
     imports: BTreeMap<String, String>,
     delegated: BTreeSet<String>,
     closures: BTreeMap<String, usize>,
+    writing: bool,
     coverage: &'a mut Coverage,
 }
 
@@ -215,6 +255,44 @@ impl Scanner<'_> {
                                 | "clone"
                         ))
                         && self.map(&it.receiver)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// A JSON value reached by reading a child of `advanced`. Follow only source-visible
+    /// aliases and simple wrappers; typed domain structs are deliberately not aliases here.
+    fn descendant(&self, expr: &Expr) -> bool {
+        match unwrapped(expr) {
+            Expr::Path(_) => {
+                name(expr).is_some_and(|name| self.bindings.descendants.contains(&name))
+            }
+            Expr::Index(it) => self.map(&it.expr) || self.descendant(&it.expr),
+            Expr::MethodCall(it) => {
+                let method = it.method.to_string();
+                if matches!(method.as_str(), "get" | "get_mut") {
+                    self.map(&it.receiver) || self.descendant(&it.receiver)
+                } else {
+                    matches!(
+                        method.as_str(),
+                        "as_object"
+                            | "as_object_mut"
+                            | "as_array"
+                            | "as_array_mut"
+                            | "as_ref"
+                            | "as_mut"
+                            | "unwrap"
+                            | "expect"
+                            | "cloned"
+                            | "clone"
+                            | "iter"
+                            | "iter_mut"
+                            | "into_iter"
+                            | "filter"
+                            | "map"
+                            | "and_then"
+                    ) && self.descendant(&it.receiver)
                 }
             }
             _ => false,
@@ -301,6 +379,8 @@ impl Scanner<'_> {
                 "training_job_is_candle_eligible"
                     | "moss_training_plan_is_supported"
                     | "training_plan_is_lokr"
+                    | "from_plan_syntax"
+                    | "apply_training_retry_resume"
             )
         {
             self.location = "training.config.advanced";
@@ -374,6 +454,22 @@ fn describe(expr: &Expr) -> String {
 }
 
 impl<'ast> Visit<'ast> for Scanner<'_> {
+    fn visit_expr_block(&mut self, expr: &'ast syn::ExprBlock) {
+        if production(&expr.attrs) {
+            visit::visit_expr_block(self, expr);
+        }
+    }
+
+    fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
+        if !production(&expr.attrs) {
+            return;
+        }
+        let old = std::mem::replace(&mut self.writing, true);
+        self.visit_expr(&expr.left);
+        self.writing = old;
+        self.visit_expr(&expr.right);
+    }
+
     fn visit_file(&mut self, file: &'ast syn::File) {
         if production(&file.attrs) {
             visit::visit_file(self, file);
@@ -521,14 +617,19 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
             if let Some(key) = ident(&local.pat) {
                 let is_map = self.map(&init.expr);
+                let is_descendant = self.descendant(&init.expr);
                 let strings = self.strings(&init.expr);
                 self.bindings.maps.remove(&key);
+                self.bindings.descendants.remove(&key);
                 self.bindings.strings.remove(&key);
                 if let Some(strings) = strings {
                     self.bindings.strings.insert(key.clone(), strings);
                 }
                 if is_map {
-                    self.bindings.maps.insert(key);
+                    self.bindings.maps.insert(key.clone());
+                }
+                if is_descendant {
+                    self.bindings.descendants.insert(key);
                 }
             }
             self.bind_strings(&local.pat, &[&init.expr]);
@@ -539,8 +640,33 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+        // The legacy FLUX.3 authoring parser passes this finite inline key table into a
+        // delegated closure. Keep the dynamic closure read tied to its actual source keys.
+        if self.file.ends_with("/image_request/flux3.rs") && self.function == "parse_with_advanced"
+        {
+            if let Some(keys) = self.strings(&expr.expr) {
+                self.coverage
+                    .domains
+                    .entry(self.file.into())
+                    .or_default()
+                    .extend(keys.clone());
+                for key in keys {
+                    self.coverage.reads.insert(Read {
+                        file: self.file.into(),
+                        function: self.function.clone(),
+                        location: "advanced",
+                        key,
+                    });
+                }
+            }
+        }
         self.visit_expr(&expr.expr);
         let old = self.bindings.clone();
+        if self.descendant(&expr.expr) {
+            if let Some(key) = ident(&expr.pat) {
+                self.bindings.descendants.insert(key);
+            }
+        }
         if let Expr::Array(array) = unwrapped(&expr.expr) {
             self.bind_strings(&expr.pat, &array.elems.iter().collect::<Vec<_>>());
         } else {
@@ -554,22 +680,81 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !production(&expr.attrs) {
             return;
         }
-        if matches!(
-            expr.method.to_string().as_str(),
-            "get" | "get_mut" | "contains_key"
-        ) && self.map(&expr.receiver)
-        {
-            if let Some(key) = expr.args.first() {
-                self.read(key);
+        if matches!(expr.method.to_string().as_str(), "pointer" | "pointer_mut") {
+            if let Some(path) = expr.args.first().and_then(|arg| self.strings(arg)) {
+                for path in path {
+                    let parts: Vec<_> = path.split('/').collect();
+                    if let Some(index) = parts.iter().position(|part| *part == "advanced") {
+                        let Some(key) = parts.get(index + 1).filter(|key| !key.is_empty()) else {
+                            continue;
+                        };
+                        let location = if self.location == "training.config.advanced"
+                            || (index > 1 && parts[index - 1] == "config")
+                        {
+                            "training.config.advanced"
+                        } else {
+                            "advanced"
+                        };
+                        self.coverage.reads.insert(Read {
+                            file: self.file.into(),
+                            function: self.function.clone(),
+                            location,
+                            key: key.replace("~1", "/").replace("~0", "~"),
+                        });
+                    }
+                }
             }
+        }
+        if self.map(&expr.receiver) {
+            match expr.method.to_string().as_str() {
+                "get" | "get_mut" | "get_key_value" | "contains_key" => {
+                    if let Some(key) = expr.args.first() {
+                        self.read(key);
+                    }
+                }
+                "remove" | "entry" => {
+                    if let Some(key) = expr.args.first() {
+                        self.coverage.mutations.insert((
+                            self.file.into(),
+                            self.function.clone(),
+                            describe(key),
+                        ));
+                    }
+                }
+                "iter" | "iter_mut" | "keys" | "values" | "values_mut" | "into_iter" | "clone"
+                | "to_owned" => {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!("whole advanced map: {}", expr.method),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if self.descendant(&expr.receiver)
+            && matches!(
+                expr.method.to_string().as_str(),
+                "get" | "get_mut" | "contains_key" | "iter" | "iter_mut" | "values" | "keys"
+            )
+        {
+            self.coverage.nested_reads.insert((
+                self.file.into(),
+                self.function.clone(),
+                format!("nested advanced JSON: {}", expr.method),
+            ));
         }
         if let Some(Expr::Closure(closure)) = expr.args.first() {
             if matches!(expr.method.to_string().as_str(), "and_then" | "map")
-                && self.map(&expr.receiver)
+                && (self.map(&expr.receiver) || self.descendant(&expr.receiver))
             {
                 let old = self.bindings.clone();
                 if let Some(key) = closure.inputs.first().and_then(ident) {
-                    self.bindings.maps.insert(key);
+                    if self.map(&expr.receiver) {
+                        self.bindings.maps.insert(key);
+                    } else {
+                        self.bindings.descendants.insert(key);
+                    }
                 }
                 visit::visit_expr_method_call(self, expr);
                 self.bindings = old;
@@ -598,8 +783,14 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !production(&expr.attrs) {
             return;
         }
-        if self.map(&expr.expr) {
+        if !self.writing && self.map(&expr.expr) {
             self.read(&expr.index);
+        } else if !self.writing && self.descendant(&expr.expr) {
+            self.coverage.nested_reads.insert((
+                self.file.into(),
+                self.function.clone(),
+                "nested advanced JSON: index".into(),
+            ));
         }
         visit::visit_expr_index(self, expr);
     }
@@ -609,12 +800,74 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             return;
         }
         if let Some(called) = name(&expr.func) {
-            let called = self.imports.get(&called).unwrap_or(&called);
+            let called = self.imports.get(&called).cloned().unwrap_or(called);
+            if called == "from_trusted_dispatch" {
+                self.coverage
+                    .trusted_aux_constructor_calls
+                    .insert((self.file.into(), self.function.clone()));
+            }
+            if let Some(index) = training_technique_map_arg(&called) {
+                if expr.args.iter().nth(index).is_some_and(|arg| self.map(arg)) {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!("delegated training technique: {called}"),
+                    ));
+                }
+            }
+            // The typed route binder uses a small generic `field(advanced, key, decode)`
+            // parser. Track its literal key just like `advanced.get(key)`; otherwise moving a
+            // raw read into that parser would make the inventory silently shrink.
+            if called == "field" && expr.args.first().is_some_and(|arg| self.map(arg)) {
+                if let Some(key) = expr.args.iter().nth(1) {
+                    self.read(key);
+                }
+            }
+            if called == "has_bound_aux_paths" && expr.args.first().is_some_and(|arg| self.map(arg))
+            {
+                self.coverage.whole_map_reads.insert((
+                    self.file.into(),
+                    self.function.clone(),
+                    "delegated whole advanced map: has_bound_aux_paths".into(),
+                ));
+            }
+            if called == "requested_reference_image_resize_mode" {
+                self.coverage.whole_map_reads.insert((
+                    self.file.into(),
+                    self.function.clone(),
+                    "delegated advanced lookup: requested_reference_image_resize_mode".into(),
+                ));
+            }
+            if called == "bound_aux_path" && expr.args.first().is_some_and(|arg| self.map(arg)) {
+                if let Some(key) = expr.args.iter().nth(1) {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!(
+                            "delegated advanced lookup: bound_aux_path({})",
+                            describe(key)
+                        ),
+                    ));
+                }
+            }
+            if let Some(key_index) = nested_helper_key(&called) {
+                if expr
+                    .args
+                    .iter()
+                    .nth(1)
+                    .and_then(|arg| self.strings(arg))
+                    .is_some_and(|keys| keys == BTreeSet::from(["advanced".into()]))
+                {
+                    if let Some(key) = expr.args.iter().nth(key_index) {
+                        self.read(key);
+                    }
+                }
+            }
             if let Some(index) = self
                 .closures
-                .get(called)
+                .get(&called)
                 .copied()
-                .or_else(|| helper_key(called))
+                .or_else(|| helper_key(&called))
             {
                 let qualified_advanced = matches!(unwrapped(&expr.func), Expr::Path(it)
                     if it.path.segments.iter().any(|part| part.ident == "advanced"));
@@ -631,7 +884,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     );
                 if qualified_advanced
                     || request_helper
-                    || self.closures.contains_key(called)
+                    || self.closures.contains_key(&called)
                     || expr.args.first().is_some_and(|arg| self.map(arg))
                 {
                     if let Some(key) = expr.args.iter().nth(index) {
@@ -744,6 +997,7 @@ fn scan(sources: &[(String, syn::File)]) -> Coverage {
             bindings: Bindings::default(),
             delegated: BTreeSet::new(),
             closures: BTreeMap::new(),
+            writing: false,
             constants: &scoped_constants,
             imports,
             coverage: &mut coverage,
@@ -864,6 +1118,7 @@ fn missing(coverage: &Coverage) -> Vec<String> {
     coverage
         .reads
         .iter()
+        .filter(|read| !trusted_training_path_scrub(read))
         .filter(|read| sceneworks_options::by_wire(read.location, &read.key).is_none())
         .map(|read| {
             format!(
@@ -872,6 +1127,16 @@ fn missing(coverage: &Coverage) -> Vec<String> {
             )
         })
         .collect()
+}
+
+// The API removes server-derived Iris checkpoint paths from a cloned validation view.
+// This exact write-only function does not read an execution option or pass the view to
+// an engine; the original trusted plan remains available to the typed binder.
+fn trusted_training_path_scrub(read: &Read) -> bool {
+    read.file == "crates/sceneworks-core/src/request_validation.rs"
+        && read.function == "trusted_training_plan_validation_view"
+        && read.location == "advanced"
+        && matches!(read.key.as_str(), "iris" | "iris_restore")
 }
 
 fn fixture(source: &str) -> Coverage {
@@ -886,6 +1151,7 @@ fn valid_fixture_and_test_only_exclusion() {
             request
                 .advanced
                 .get("steps");
+            #[cfg(test)] { request.advanced.get("__unseen_test_block_key__"); }
             let knobs = &request.advanced;
             knobs.get_mut("guidanceScale");
             let other = knobs.clone();
@@ -912,6 +1178,9 @@ fn injecting_an_unseen_production_key_fails_coverage() {
         r#"advanced::f32(&request.advanced, "__unseen_production_option__", 0.0);"#,
         r#"let alias = &request.advanced; let alias = alias.clone(); alias.get("__unseen_production_option__");"#,
         r#"payload.get("advanced").and_then(Value::as_object).and_then(|knobs| knobs.get("__unseen_production_option__"));"#,
+        r#"has_nonempty_nested_array(payload, "advanced", "__unseen_production_option__");"#,
+        r#"has_nonnull_or_malformed_nested_carrier(payload, "advanced", "__unseen_production_option__");"#,
+        r#"payload.pointer("/advanced/__unseen_production_option__");"#,
     ] {
         let coverage = fixture(&format!(
             "fn production() {{ {body} }} #[cfg(test)] mod tests {{}}"
@@ -924,6 +1193,113 @@ fn injecting_an_unseen_production_key_fails_coverage() {
             .len(),
         1
     );
+    assert_eq!(
+        fixture("fn production() { let knobs = &request.advanced; for value in knobs.values() { consume(value); } }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { let settings = request.advanced.clone(); persist(settings); }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture(
+            "fn production() { portable_aux_sources::has_bound_aux_paths(&request.advanced); }"
+        )
+        .whole_map_reads
+        .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { requested_reference_image_resize_mode(advanced); }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { portable_aux_sources::bound_aux_path(&request.advanced, \"sft_cover\"); }")
+            .whole_map_reads
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn native_training_technique_calls_remain_visible_as_raw_map_reads() {
+    let coverage = fixture(
+        r#"fn worker(plan: Plan) {
+            subject_mask_loss_weights(&plan.config.advanced);
+            latent_loss_settings(&VAE_ANCHOR, &plan.config.advanced);
+            parse_training_bucket_config(&plan.config.advanced);
+        }"#,
+    );
+    assert_eq!(coverage.whole_map_reads.len(), 3);
+    assert!(coverage
+        .whole_map_reads
+        .iter()
+        .any(|(_, _, site)| site == "delegated training technique: latent_loss_settings"));
+}
+
+#[test]
+fn portable_owner_gate_requires_each_module_to_be_reviewed() {
+    assert!(portable_owner_module(
+        "crates/sceneworks-options/src/h3_veda.rs"
+    ));
+    assert!(!portable_owner_module(
+        "crates/sceneworks-options/src/new_execution_reader.rs"
+    ));
+    assert!(!portable_owner_module(
+        "crates/sceneworks-core/src/h3_veda.rs"
+    ));
+}
+
+#[test]
+fn advanced_index_writes_are_not_execution_reads() {
+    let coverage = fixture(
+        r#"fn production() {
+            body["advanced"]["filmHarness"]["seed"] = json!(7);
+            let value = body["advanced"]["steps"];
+        }"#,
+    );
+    assert_eq!(coverage.reads.len(), 1);
+    assert!(coverage.reads.iter().any(|read| read.key == "steps"));
+}
+
+#[test]
+fn nested_advanced_json_remains_visible_after_aliasing() {
+    let coverage = fixture(
+        r#"fn production() {
+            let poses = request.advanced.get("poses").and_then(Value::as_array).unwrap();
+            for pose in poses.iter() { pose.get("keypoints"); }
+            let phases = request.advanced["phases"].as_array().unwrap();
+            phases[0].get("steps");
+        }"#,
+    );
+    assert!(coverage.reads.iter().any(|read| read.key == "poses"));
+    assert!(coverage.reads.iter().any(|read| read.key == "phases"));
+    assert!(
+        coverage.nested_reads.len() >= 2,
+        "{:?}",
+        coverage.nested_reads
+    );
+}
+
+#[test]
+fn generic_typed_boundary_field_calls_remain_in_the_source_inventory() {
+    let coverage = fixture(
+        r#"fn from_payload_syntax(advanced: &JsonObject) {
+            field(advanced, "poses", count);
+            field(advanced, dynamic_key, count);
+        }"#,
+    );
+    assert!(coverage.reads.iter().any(|read| read.key == "poses"));
+    assert!(coverage
+        .dynamic
+        .iter()
+        .any(|(_, _, key)| key == "dynamic_key"));
 }
 
 #[test]
@@ -1025,6 +1401,44 @@ fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'stat
     }
 }
 
+// These are the reviewed portable owner modules that parse, validate, or lower authored options.
+// Declaration coverage above still checks every read in them. A new module must be reviewed and
+// added here explicitly before its reads can be excluded from the native execution-consumer gate.
+fn portable_owner_module(file: &str) -> bool {
+    matches!(
+        file,
+        "crates/sceneworks-options/src/h3_veda.rs"
+            | "crates/sceneworks-options/src/image_limits.rs"
+            | "crates/sceneworks-options/src/image_request.rs"
+            | "crates/sceneworks-options/src/image_request/flux3.rs"
+            | "crates/sceneworks-options/src/image_sampling_controls.rs"
+            | "crates/sceneworks-options/src/limits.rs"
+            | "crates/sceneworks-options/src/moss_advanced.rs"
+            | "crates/sceneworks-options/src/moss_validation.rs"
+            | "crates/sceneworks-options/src/payload_util.rs"
+            | "crates/sceneworks-options/src/prompt_enhancement.rs"
+            | "crates/sceneworks-options/src/request_validation.rs"
+            | "crates/sceneworks-options/src/request_validation/shape.rs"
+            | "crates/sceneworks-options/src/sensenova_validation.rs"
+            | "crates/sceneworks-options/src/supra2.rs"
+            | "crates/sceneworks-options/src/training_validation.rs"
+            | "crates/sceneworks-options/src/training_validation/body_losses.rs"
+            | "crates/sceneworks-options/src/training_validation/depth_anchoring.rs"
+            | "crates/sceneworks-options/src/training_validation/face_losses.rs"
+            | "crates/sceneworks-options/src/training_validation/flux3.rs"
+            | "crates/sceneworks-options/src/training_validation/iris.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/curricula.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/depth.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/restore.rs"
+            | "crates/sceneworks-options/src/training_validation/latent_perceptual.rs"
+            | "crates/sceneworks-options/src/training_validation/training_adapter.rs"
+            | "crates/sceneworks-options/src/utility_validation.rs"
+            | "crates/sceneworks-options/src/validate.rs"
+            | "crates/sceneworks-options/src/video_eligibility.rs"
+            | "crates/sceneworks-options/src/video_request.rs"
+    )
+}
+
 #[test]
 fn production_advanced_reads_resolve_to_option_specs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1060,6 +1474,458 @@ fn production_advanced_reads_resolve_to_option_specs() {
     }
     assert!(unresolved.is_empty(), "Dynamic reads require structural coverage or a documented narrow exception:\n{unresolved:#?}");
     assert!(!coverage.reads.is_empty());
+}
+
+#[test]
+#[ignore = "temporary SW-7038 inventory"]
+fn print_production_binding_inventory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    let mut by_file = BTreeMap::<&str, usize>::new();
+    for read in &coverage.reads {
+        *by_file.entry(&read.file).or_default() += 1;
+    }
+    eprintln!("TOTAL production advanced reads: {}", coverage.reads.len());
+    eprintln!("Unresolved dynamic reads: {}", coverage.dynamic.len());
+    eprintln!("Delegated dynamic reads: {}", coverage.delegated.len());
+    eprintln!("Whole-map reads: {}", coverage.whole_map_reads.len());
+    eprintln!(
+        "Nested structured JSON reads: {}",
+        coverage.nested_reads.len()
+    );
+    for site in &coverage.nested_reads {
+        eprintln!("nested read: {site:?}");
+    }
+    for site in &coverage.whole_map_reads {
+        eprintln!("whole-map read: {site:?}");
+    }
+    eprintln!("Raw-map mutations: {}", coverage.mutations.len());
+    for site in &coverage.mutations {
+        eprintln!("raw-map mutation: {site:?}");
+    }
+    for (file, count) in by_file {
+        eprintln!("{count:>3} {file}");
+    }
+    for read in &coverage.reads {
+        if read.file.ends_with("/film_compile.rs")
+            || read.file.starts_with("apps/rust-api/src/")
+            || read.file.ends_with("/image_jobs.rs")
+            || read.file.ends_with("/workflow_parameters.rs")
+            || read.file.ends_with("/workflow_resolution.rs")
+            || read.file.ends_with("/workflow_share.rs")
+        {
+            eprintln!(
+                "scoped read: {}::{} {}.{}",
+                read.file, read.function, read.location, read.key
+            );
+        }
+    }
+}
+
+// SW-7038 production gate. Keep this explicit zero assertion next to the live inventory.
+// Only the exact one-time typed binder functions,
+// authored persistence, and the historical upgrader may be excluded after site review.
+// No path, directory, option family, or dynamic-accessor blanket exemption is permitted.
+#[test]
+fn production_execution_has_no_raw_advanced_reads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    // These exact functions are the one-time typed parser boundary. Their registered keys stay
+    // in the inventory and declaration coverage above, but execution consumers must be empty.
+    let binding_boundary = |file: &str, function: &str| {
+        file == "crates/sceneworks-core/src/resolved_options.rs"
+            && matches!(function, "from_payload_syntax" | "from_plan_syntax")
+    };
+    let trusted_aux_parser = |read: &Read| {
+        read.file == "crates/sceneworks-core/src/portable_aux_bindings.rs"
+            && read.function == "from_trusted_dispatch"
+            && read.location == "advanced"
+            && matches!(
+                read.key.as_str(),
+                "__portableAuxPaths"
+                    | "__portableBoundTier"
+                    | "__portableFrozenSources"
+                    | "__portableGemmaFiles"
+            )
+    };
+    // These exact clones write authored options into asset receipts. The functions only add
+    // resolved telemetry and return the resulting settings object; no route or engine input reads
+    // the clone. Keep each site explicit so a new execution clone cannot inherit the exception.
+    let authored_receipt_clone = |file: &str, function: &str, expression: &str| {
+        expression == "whole advanced map: clone"
+            && matches!(
+                (file, function),
+                (
+                    "crates/sceneworks-worker/src/sensenova_jobs.rs",
+                    "write_interleaved_document"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+                    "bernini_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/candle.rs",
+                    "candle_video_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
+                    "krea_realtime_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+                    "ltx_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs",
+                    "minimax_h3_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/mochi.rs",
+                    "mochi_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+                    "scail2_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/svd.rs",
+                    "svd_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/vace.rs",
+                    "wan_vace_extend_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/vace.rs",
+                    "wan_vace_raw_settings"
+                ) | (
+                    "crates/sceneworks-worker/src/video_jobs/wan.rs",
+                    "wan_raw_settings"
+                )
+            )
+    };
+    // Creation/replay upgrades validate and stamp this authored field before persistence. The
+    // film controller and worker consume the stamped value through typed projections later.
+    let resize_mode_authoring_stamp = |file: &str, function: &str, expression: &str| {
+        file == "crates/sceneworks-core/src/video_request.rs"
+            && function == "stamp_reference_image_resize_mode"
+            && expression == "delegated advanced lookup: requested_reference_image_resize_mode"
+    };
+    // Workflow share and gallery rendering read the persisted authored envelope. These exact
+    // fields never feed a provider or route decision; replay construction resolves the share
+    // anew before execution.
+    let authored_workflow_read = |read: &Read| {
+        read.location == "advanced"
+            && matches!(
+                (
+                    read.file.as_str(),
+                    read.function.as_str(),
+                    read.key.as_str()
+                ),
+                (
+                    "crates/sceneworks-core/src/workflow_parameters.rs",
+                    "lora_weight_is_fixed",
+                    "phases"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_parameters.rs",
+                    "settings_line",
+                    "guidanceMethod" | "guidanceScale" | "phases" | "sampler" | "steps"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_resolution.rs",
+                    "build_resolution_report",
+                    "mossImageAdvanced"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_share.rs",
+                    "build_share_of_kind",
+                    "mossImageAdvanced" | "mossImageEditExecutionReport" | "lowResStart"
+                ) | (
+                    "crates/sceneworks-core/src/workflow_share.rs",
+                    "parse_workflow_share" | "reduce_workflow_share",
+                    "lowResStart"
+                )
+            )
+    };
+    // The film controller reads its persisted attempt key only to recover a job after a crash.
+    // This key is not a generation option and never reaches the film compiler's model plan.
+    let persisted_film_attempt_read = |read: &Read| {
+        read.file == "apps/rust-api/src/film_harness/transport.rs"
+            && read.function == "find_job_by_idempotency_key"
+            && read.location == "advanced"
+            && read.key == "filmHarness"
+    };
+    // The image worker reads these authored fields only while formatting a missing-reference
+    // error or a sanitized share/PNG metadata envelope after execution has chosen its options.
+    let authored_image_metadata_read = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/image_jobs.rs"
+            && read.location == "advanced"
+            && matches!(
+                (read.function.as_str(), read.key.as_str()),
+                ("explain_image_reference_error", "imageReference")
+                    | ("resolved_steps_for_share", "numInferenceSteps")
+                    | ("write_image_asset", "phases")
+            )
+    };
+    // Curriculum preset construction reads the authored nested Iris template to build a new
+    // saved plan. The worker resolves the resulting plan before any training execution.
+    let iris_preset_authoring_read = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/iris_curricula.rs"
+            && read.function == "iris_stage_presets"
+            && read.location == "training.config.advanced"
+            && read.key == "iris"
+    };
+    // The verified worker dispatch clone already has typed control-weight validity. This
+    // get_mut only finds the object to replace its private path with a confined source path;
+    // the exact rewrite site is pinned by raw_option_map_mutations_have_reviewed_sites.
+    let trusted_control_weights_write = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/external_library_runtime.rs"
+            && read.function == "rewrite_loader_locator"
+            && read.location == "advanced"
+            && read.key == "controlWeights"
+    };
+    // API authoring removes forged private authorization fields before it projects the same
+    // carrier into RouteOptionFacts for policy checks. The get_mut is only the scrub target.
+    let authored_control_weights_scrub = |read: &Read| {
+        read.file == "apps/rust-api/src/control_overlays.rs"
+            && read.function == "validate_raw_control_weights"
+            && read.location == "advanced"
+            && read.key == "controlWeights"
+    };
+    let direct = coverage
+        .reads
+        .iter()
+        .filter(|read| {
+            !portable_owner_module(&read.file)
+                && !binding_boundary(&read.file, &read.function)
+                && !authored_workflow_read(read)
+                && !persisted_film_attempt_read(read)
+                && !authored_image_metadata_read(read)
+                && !iris_preset_authoring_read(read)
+                && !trusted_control_weights_write(read)
+                && !authored_control_weights_scrub(read)
+                && !trusted_training_path_scrub(read)
+                && !trusted_aux_parser(read)
+        })
+        .map(|read| {
+            format!(
+                "{}::{} {}.{}",
+                read.file, read.function, read.location, read.key
+            )
+        });
+    let dynamic = coverage
+        .dynamic
+        .iter()
+        .filter(|(file, _, _)| !portable_owner_module(file))
+        .map(|(file, function, expr)| format!("{file}::{function} dynamic {expr}"));
+    let delegated = coverage
+        .delegated
+        .iter()
+        .filter(|(file, _, _)| !portable_owner_module(file))
+        .map(|(file, function, expr)| format!("{file}::{function} delegated {expr}"));
+    let whole_map = coverage
+        .whole_map_reads
+        .iter()
+        .filter(|(file, function, expression)| {
+            !portable_owner_module(file)
+                && !authored_receipt_clone(file, function, expression)
+                && !resize_mode_authoring_stamp(file, function, expression)
+                // Versioned share parsing rejects unknown authored recipe keys before it
+                // constructs a new request; this is envelope validation, not execution.
+                && !(file == "crates/sceneworks-core/src/workflow_share.rs"
+                    && function == "parse_workflow_share"
+                    && expression == "whole advanced map: keys")
+                && !(file == "crates/sceneworks-core/src/resolved_options.rs"
+                    && matches!(
+                        function.as_str(),
+                        "bind" | "bind_with_model" | "for_config" | "from_effective"
+                    )
+                    && (expression == "whole advanced map: clone"
+                        || expression.starts_with("delegated training technique: ")))
+        })
+        .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
+    let nested = coverage
+        .nested_reads
+        .iter()
+        .filter(|(file, function, expression)| {
+            !portable_owner_module(file)
+                && !(file == "crates/sceneworks-core/src/workflow_parameters.rs"
+                    && function == "settings_line"
+                    && expression == "nested advanced JSON: iter")
+        })
+        .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
+    let remaining: Vec<_> = direct
+        .chain(dynamic)
+        .chain(delegated)
+        .chain(whole_map)
+        .chain(nested)
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "Production execution still reads raw advanced options ({} sites):\n{}",
+        remaining.len(),
+        remaining.join("\n")
+    );
+}
+
+/// Writes into authored or verified dispatch envelopes are a separate review surface from
+/// execution reads. Pin the exact write sites so new rewrites require an explicit audit, while
+/// the read gate can accurately require zero execution decisions from the raw option map.
+#[test]
+fn raw_option_map_mutations_have_reviewed_sites() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    let expected: BTreeSet<(String, String, String)> = [
+        (
+            "apps/rust-api/src/control_overlays.rs",
+            "resolve_control_overlay_selection",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "apps/rust-api/src/generation.rs",
+            "apply_recipe_preset_to_image_payload",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "apps/rust-api/src/generation.rs",
+            "merge_preset_loras_into_payload",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-options/src/video_request.rs",
+            "normalize_ltx25_generation_controls",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/iris_training.rs",
+            "resolve_iris_run_sources",
+            "options_key",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "apply_training_retry_resume",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "canonicalize_image_detail_dense_tier",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "canonicalize_image_model_payload",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "EDIT_OPTIONS_KEY",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "KEY",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "computed expression",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "validate_and_canonicalize_merged_generation_payload",
+            "key",
+        ),
+        (
+            "apps/rust-api/src/training.rs",
+            "fresh_flux3_training_duplicate",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "EDIT_REPORT_KEY",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "REPORT_KEY",
+        ),
+        (
+            "crates/sceneworks-core/src/moss_image.rs",
+            "scrub_reports",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-options/src/video_request.rs",
+            "stamp_replayed_reference_image_resize_mode",
+            "REFERENCE_IMAGE_RESIZE_MODE_KEY",
+        ),
+        (
+            "crates/sceneworks-options/src/sensenova_validation.rs",
+            "materialize_interleave",
+            "computed expression",
+        ),
+        // Fresh-generation authoring removes the finite machine-decision fields before
+        // persistence; exact replay follows its separate verified receipt path.
+        (
+            "crates/sceneworks-options/src/upgrade.rs",
+            "strip_machine_decisions",
+            "key",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "begin_with_binding_cancelable",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "none",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "rewrite_loader_locator",
+            "computed expression.to_owned(...)",
+        ),
+        (
+            "crates/sceneworks-worker/src/iris_curricula.rs",
+            "iris_stage_presets",
+            "computed expression",
+        ),
+        (
+            "crates/sceneworks-worker/src/iris_training.rs",
+            "activation_checkpointing_hint",
+            "IRIS_OPTIONS_KEY.to_owned(...)",
+        ),
+        (
+            "crates/sceneworks-worker/src/sensenova_jobs.rs",
+            "write_interleaved_document",
+            "PREFIX_KV_CACHE_RESULT_KEY",
+        ),
+    ]
+    .into_iter()
+    .map(|(file, function, expression)| (file.into(), function.into(), expression.into()))
+    .collect();
+    assert_eq!(coverage.mutations, expected);
+}
+
+#[test]
+fn only_verified_worker_guard_constructs_portable_aux_bindings() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    assert_eq!(
+        coverage.trusted_aux_constructor_calls,
+        BTreeSet::from([(
+            "crates/sceneworks-worker/src/external_library_runtime.rs".to_owned(),
+            "begin_with_binding_cancelable".to_owned(),
+        )]),
+        "Only the verified RuntimeSourceGuard may lower private auxiliary route stamps"
+    );
 }
 
 // A small lexical guard keeps Rust-only CI independent of Node/npm. It recognizes
@@ -1490,38 +2356,39 @@ fn windows_source_paths_preserve_scoped_rules_and_reject_unknown_keys() {
     }
 }
 
-#[test]
-fn javascript_advanced_reads_resolve_to_option_specs() {
-    fn files(dir: &Path, sources: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if !matches!(
-                    path.file_name().and_then(|it| it.to_str()),
-                    Some("testUtils" | "__tests__")
-                ) {
-                    files(&path, sources);
-                }
-            } else {
-                let name = path.file_name().unwrap().to_string_lossy();
-                if matches!(
-                    path.extension().and_then(|it| it.to_str()),
-                    Some("js" | "jsx")
-                ) && !name.contains(".test.")
-                    && !name.contains(".spec.")
-                {
-                    sources.push(path);
-                }
+fn javascript_source_files(dir: &Path, sources: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if !matches!(
+                path.file_name().and_then(|it| it.to_str()),
+                Some("testUtils" | "__tests__")
+            ) {
+                javascript_source_files(&path, sources);
+            }
+        } else {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if matches!(
+                path.extension().and_then(|it| it.to_str()),
+                Some("js" | "jsx")
+            ) && !name.contains(".test.")
+                && !name.contains(".spec.")
+            {
+                sources.push(path);
             }
         }
     }
+}
+
+#[test]
+fn javascript_advanced_reads_resolve_to_option_specs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
     let mut sources = Vec::new();
-    files(&root.join("apps/web/src"), &mut sources);
+    javascript_source_files(&root.join("apps/web/src"), &mut sources);
     let mut absent = Vec::new();
     let mut dynamic = Vec::new();
     for path in sources {
@@ -1555,6 +2422,34 @@ fn javascript_advanced_reads_resolve_to_option_specs() {
         dynamic.is_empty(),
         "JavaScript computed accesses need explicit finite coverage:\n{dynamic:#?}"
     );
+}
+
+#[test]
+#[ignore = "temporary SW-7038 web authoring/read inventory"]
+fn print_javascript_binding_inventory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let mut sources = Vec::new();
+    javascript_source_files(&root.join("apps/web/src"), &mut sources);
+    let mut by_file = BTreeMap::new();
+    let mut total = 0;
+    let mut dynamic = 0;
+    for path in sources {
+        let file = source_path(path.strip_prefix(root).unwrap());
+        let coverage = js_coverage(&file, &std::fs::read_to_string(path).unwrap());
+        if !coverage.reads.is_empty() || !coverage.dynamic.is_empty() {
+            total += coverage.reads.len();
+            dynamic += coverage.dynamic.len();
+            by_file.insert(file, (coverage.reads.len(), coverage.dynamic.len()));
+        }
+    }
+    eprintln!("JavaScript advanced property sites: {total}, computed: {dynamic}");
+    for (file, (direct, computed)) in by_file {
+        eprintln!("{direct:>3} direct {computed:>2} computed {file}");
+    }
 }
 
 #[test]

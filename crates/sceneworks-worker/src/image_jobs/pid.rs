@@ -3,6 +3,7 @@ use super::WeightsSource;
 use crate::huggingface_snapshot_dir;
 use crate::safe_weight_filename;
 use crate::Path;
+#[cfg(all(test, target_os = "macos"))]
 use crate::Value;
 use crate::WorkerResult;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
@@ -97,12 +98,7 @@ const PID_DIM_MULTIPLE: u32 = 32;
 /// Resolve the requested PiD output tier from `advanced.pidTarget` (sc-10054). Default + any
 /// unrecognized value → `Res4k` (today's full-resolution behavior); only an explicit `"2k"` opts down.
 pub(crate) fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
-    match request
-        .advanced
-        .get("pidTarget")
-        .and_then(Value::as_str)
-        .map(str::trim)
-    {
+    match request.advanced_text("pidTarget").map(str::trim) {
         Some(tier) if tier.eq_ignore_ascii_case("2k") => PidOutputTier::Res2k,
         _ => PidOutputTier::Res4k,
     }
@@ -141,7 +137,7 @@ pub(crate) fn pid_effective_dims(
 /// like `mlxQuantize` / `schedulerShift` — no top-level `ImageRequest` field, so zero contract-snapshot
 /// drift). Accepts a JSON bool or the string `"true"`.
 pub(super) fn pid_requested(request: &ImageRequest) -> bool {
-    sceneworks_core::portable_sources::pid_requested(request.advanced.get("usePid"))
+    request.advanced_bool("usePid").unwrap_or(false)
 }
 
 /// The `res2k` (2K-tuned) student filename for a backbone that ships one — flux + flux2 (sc-10056).
@@ -235,31 +231,44 @@ pub(super) fn resolve_pid_weights(
     };
 
     let ckpt_cfg = request
-        .advanced
-        .get("pidCheckpoint")
-        .and_then(Value::as_object);
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .pid_checkpoint
+        .as_ref()
+        .map(|bound| &bound.value);
     let repo = ckpt_cfg
-        .and_then(|c| c.get("repo"))
-        .and_then(crate::payload::trimmed_value_str)
+        .and_then(|c| c.repo.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .unwrap_or(default_repo);
     // Validate a per-request filename override EARLY — before the cache check below — so a traversal /
     // non-plain-component filename is rejected with a field-pointed `InvalidPayload` rather than silently
     // ignored when the repo happens not to be cached (sc-8821 / F-019). `None` ⇒ use the tier default.
     let filename_override = ckpt_cfg
-        .and_then(|c| c.get("filename"))
-        .and_then(crate::payload::trimmed_value_str)
+        .and_then(|c| c.filename.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
         .transpose()?;
-    let gemma_repo =
-        crate::payload::trimmed_string(request.advanced.get("pidGemma")).unwrap_or(PID_GEMMA_REPO);
+    let gemma_repo = request
+        .advanced_text("pidGemma")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(PID_GEMMA_REPO);
 
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        let snapshot =
-            crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_checkpoint")
-                .ok_or_else(|| {
-                    crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
-                })?;
-        let gemma = crate::portable_aux_sources::bound_aux_path(&request.advanced, "pid_gemma")
+    if request.portable_aux.has_paths() {
+        let snapshot = request
+            .portable_aux
+            .path("pid_checkpoint")
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound PiD checkpoint".to_owned())
+            })?;
+        let gemma = request
+            .portable_aux
+            .path("pid_gemma")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 crate::WorkerError::InvalidPayload("missing bound PiD Gemma".to_owned())
             })?;
@@ -321,11 +330,29 @@ mod pid_tests {
     use serde_json::json;
 
     fn request(model: &str, advanced: Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": model, "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let payload = json!({ "model": model, "advanced": advanced });
+        let authored = payload.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some(value) = effective
+            .get_mut("advanced")
+            .and_then(Value::as_object_mut)
+            .and_then(|advanced| advanced.get_mut("usePid"))
+        {
+            *value = json!(sceneworks_core::options::legacy_image_flag(value));
+        }
+        let mut request = ImageRequest::from_resolved(authored, &effective).unwrap();
+        if let Some(paths) = advanced.get("__portableAuxPaths") {
+            let stamp = json!({"advanced":{
+                "__portableFrozenSources":true,
+                "__portableAuxPaths":paths,
+            }});
+            request.portable_aux =
+                sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                    stamp.as_object().unwrap(),
+                )
+                .unwrap();
+        }
+        request
     }
 
     #[test]

@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn persisted_film_job_view_keeps_unclaimed_resize_mode_absent() {
+    use sceneworks_core::video_request::ReferenceImageResizeMode;
+
+    let snapshot = |advanced: Value| json!({"status":"completed","payload":{"advanced":advanced}});
+    assert_eq!(
+        JobView::from_snapshot(&snapshot(json!({})))
+            .unwrap()
+            .reference_image_resize_mode,
+        None,
+        "an unstamped rendered job must retain its historical absence"
+    );
+    assert_eq!(
+        JobView::from_snapshot(&snapshot(json!({"referenceImageResizeMode":"diffusers"})))
+            .unwrap()
+            .reference_image_resize_mode,
+        Some(ReferenceImageResizeMode::Diffusers)
+    );
+    assert_eq!(
+        JobView::from_snapshot(&snapshot(json!({"referenceImageResizeMode":"invalid"})))
+            .unwrap()
+            .reference_image_resize_mode,
+        None
+    );
+}
+
+#[test]
 fn generated_asset_tags_keep_legacy_literals_and_bound_long_ids() {
     assert_eq!(harness_asset_tag("role", "courier"), "role:courier");
     assert_eq!(

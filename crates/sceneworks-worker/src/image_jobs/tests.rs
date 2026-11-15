@@ -659,8 +659,6 @@ use super::resolved_steps_for_share;
 use super::routing::imported_base_snapshot_companions;
 #[cfg(native_lane)]
 use super::routing::imported_generate_request_has_unsupported_shape;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::routing::prepare_candle_image_route;
 #[cfg(target_os = "macos")]
 use super::routing::prepare_image_route;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -686,14 +684,6 @@ use super::sampling::recover_ideogram_placeholder;
 #[cfg(native_lane)]
 use super::sampling::recover_ideogram_placeholder_with;
 #[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_f32;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_f32_with;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_u32;
-#[cfg(native_lane)]
-use super::sampling::resolve_advanced_or_manifest_u32_with;
-#[cfg(native_lane)]
 use super::sampling::resolve_guidance;
 #[cfg(native_lane)]
 use super::sampling::resolve_negative_prompt;
@@ -701,6 +691,14 @@ use super::sampling::resolve_negative_prompt;
 use super::sampling::resolve_steps;
 #[cfg(target_os = "macos")]
 use super::sampling::resolve_true_cfg;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_f32;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_f32_with;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_u32;
+#[cfg(native_lane)]
+use super::sampling::resolved_option_or_manifest_u32_with;
 #[cfg(target_os = "macos")]
 use super::sampling::uses_true_cfg;
 #[cfg(target_os = "macos")]
@@ -1137,7 +1135,69 @@ fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_
 use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
-    ImageRequest::from_payload(&value.as_object().cloned().unwrap())
+    let authored = value.as_object().expect("fixture request object");
+    let mut effective = authored.clone();
+    if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+        advanced.retain(|key, value| {
+            !value.is_null()
+                || key == "mlxQuantize"
+                || sceneworks_core::options::by_wire("advanced", key).is_none()
+        });
+        for (key, value) in advanced {
+            if let Some(spec) = sceneworks_core::options::by_wire("advanced", key) {
+                let lowered = match spec.shape {
+                    sceneworks_core::options::Shape::Integer => {
+                        sceneworks_core::options::legacy_integer(value)
+                    }
+                    sceneworks_core::options::Shape::Number => {
+                        sceneworks_core::options::legacy_number(value).map(Value::from)
+                    }
+                    _ => None,
+                };
+                if let Some(lowered) = lowered {
+                    *value = lowered;
+                }
+            }
+        }
+    }
+    ImageRequest::from_resolved(authored, &effective).expect("fixture options bind")
+}
+
+#[cfg(native_lane)]
+fn assert_invalid_effective_options(value: Value) {
+    let authored = value.as_object().expect("fixture request object");
+    assert!(ImageRequest::from_resolved(authored, authored).is_err());
+}
+
+#[cfg(native_lane)]
+fn bound_request(value: Value) -> ImageRequest {
+    let payload = value.as_object().expect("fixture request object");
+    ImageRequest::from_resolved(payload, payload).expect("fixture options bind")
+}
+
+// Routing fixtures keep their authored request fields, then bind the same advanced map
+// the worker hands to the typed execution context before selecting a provider.
+#[cfg(native_lane)]
+fn execution(request: &ImageRequest) -> super::conditioning::ResolvedImageExecution {
+    let payload = json!({ "advanced": request.advanced });
+    let map = payload.as_object().unwrap();
+    let mut bound = request.clone();
+    bound.resolved_advanced = Some(
+        sceneworks_core::image_request::ImageAdvanced::bind(
+            &sceneworks_core::resolved_options::BindingInput::new(map, map),
+        )
+        .expect("fixture advanced options bind"),
+    );
+    super::conditioning::ResolvedImageExecution::new(&bound)
+        .expect("fixture execution context resolves")
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn prepare_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<super::routing::PreparedCandleImageRoute>> {
+    super::routing::prepare_candle_image_route(&execution(request), settings)
 }
 
 /// Execute the actual production dispatch/fallback seam, not a copy of its classification.
@@ -3641,7 +3701,7 @@ fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not()
     .as_object()
     .cloned()
     .unwrap();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let mut plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
     assert_eq!(
         plan.model_hash, None,
@@ -3760,7 +3820,7 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
     let settings = settings_with_config_dir(&config_dir);
 
     let payload = embed_payload();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     // No preference file at all — embedding is ON by default, which is the shape a fresh install has.
     let mut plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     // The default-platform test uses the procedural writer rather than an inference backend, so
@@ -3865,7 +3925,7 @@ fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires(
         payload["advanced"].get("steps").is_none(),
         "the regression must begin with the same missing request field as the uploaded image"
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     let raw_settings = json!({
         "realModelInference": true,
@@ -4005,7 +4065,7 @@ fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
     .as_object()
     .cloned()
     .unwrap();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
     let raw_settings = json!({
         "resolvedSampler": "euler",
@@ -4067,7 +4127,7 @@ fn embedding_off_writes_the_bytes_sceneworks_writes_today() {
     let settings = settings_with_config_dir(&config_dir);
 
     let payload = embed_payload();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let source = workflow_source(&settings, &payload);
     assert!(
         source.is_none(),
@@ -4170,7 +4230,7 @@ fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
         "upscale".to_owned(),
         json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let base_fact = json!({
         "assetId": "asset_base", "seed": 101, "width": 320, "height": 256, "index": 0
     })
@@ -4232,7 +4292,7 @@ fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
         "upscale".to_owned(),
         json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     let base_fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
 
@@ -4344,7 +4404,7 @@ fn the_embedded_chunk_costs_only_the_chunk_on_a_representative_batch() {
         let mut payload = embed_payload();
         payload.insert("width".to_owned(), json!(width));
         payload.insert("height".to_owned(), json!(height));
-        let req = ImageRequest::from_payload(&payload);
+        let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let seed = resolve_seed(&req, 0);
 
         let embedded = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
@@ -4614,7 +4674,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let candle_route_wiring = &run_job[route_binding..route_binding + dispatch_use];
     assert!(
         candle_route_wiring.contains(
-            "route.as_ref().map_or(request.count, |route| {\n            route.kind().image_count(&request, settings)\n        })",
+            "route.as_ref().map_or(request.count, |route| {\n            route.kind().image_count_resolved(&execution, settings)\n        })",
         ),
         "the prepared candle route must supply the effective image count"
     );
@@ -4731,7 +4791,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         candle_stream.contains("memory_strategy_context.as_ref()")
             && candle_stream.contains("generate_one_with_hires_on_surface(")
             && render_source.contains("render_on_surface(")
-            && render_surface.contains("crate::memory_strategy::generate_with_scope_report(")
+            && render_surface
+                .contains("crate::memory_strategy::generate_with_scope_execution_report(")
             && render_surface
                 .contains("            memory_strategy_context,\n            on_progress,"),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
@@ -4783,7 +4844,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     assert!(
         qwen_stream.contains("QwenEdit::load_with_memory_context(")
             && qwen_stream.contains("&provider_load_spec,")
-            && qwen_stream.contains("model.generate_with_memory_context("),
+            && qwen_stream.contains("model.generate_with_memory_context_with_execution_report("),
         "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
     );
     let qwen_adapter_setup = between(
@@ -4894,13 +4955,13 @@ fn steps_default_is_family_default_and_clamps() {
 // (sc-8825). Gated identically to the resolvers themselves so they compile on the macOS AND
 // backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
 // advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
-// advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
+// advanced-or-manifest value is clamped to the caller's range; malformed values fail binding.
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
+fn resolved_option_or_manifest_u32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
             "steps",
             30,
@@ -4909,7 +4970,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
         12
     );
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
             "steps",
             30,
@@ -4918,7 +4979,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
         80
     );
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": 0 } })),
             "steps",
             30,
@@ -4928,7 +4989,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     );
     // A numeric string parses just like a JSON int.
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "advanced": { "steps": "24" } })),
             "steps",
             30,
@@ -4938,7 +4999,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     );
     // advanced absent → manifest fallback (also clamped).
     assert_eq!(
-        resolve_advanced_or_manifest_u32(
+        resolved_option_or_manifest_u32(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 200 } })),
             "steps",
             30,
@@ -4949,28 +5010,19 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     // Both absent → the default, returned UNCLAMPED (the distilled 4-step default survives a 1..=50
     // range — clamping the default here would be a behavior change).
     assert_eq!(
-        resolve_advanced_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
+        resolved_option_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
         4
     );
-    // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
-    // garbage advanced value fails the parse and the closure moves on to manifest, then default).
-    assert_eq!(
-        resolve_advanced_or_manifest_u32(
-            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
-            "steps",
-            30,
-            1..=80,
-        ),
-        30
-    );
+    // The shared binder refuses malformed advanced values before execution.
+    assert_invalid_effective_options(json!({ "projectId": "p", "advanced": { "steps": "abc" } }));
 }
 
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
+fn resolved_option_or_manifest_f32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 7.5 } })),
             "guidanceScale",
             5.0,
@@ -4979,7 +5031,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
         7.5
     );
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             5.0,
@@ -4989,7 +5041,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // A numeric string parses just like a JSON float.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "2.5" } })),
             "guidanceScale",
             5.0,
@@ -4999,7 +5051,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // advanced absent → manifest fallback (also clamped).
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             5.0,
@@ -5009,7 +5061,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     );
     // Both absent → the per-lane default.
     assert_eq!(
-        resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_f32(
             &request(json!({ "projectId": "p" })),
             "guidanceScale",
             4.0,
@@ -5017,16 +5069,8 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
         ),
         4.0
     );
-    // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
-    // default 5.0), then clamps — matching the historical `f32_clamped` call.
-    assert_eq!(
-        resolve_advanced_or_manifest_f32(
-            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
-            "guidanceScale",
-            5.0,
-            0.0..=30.0,
-        ),
-        5.0
+    assert_invalid_effective_options(
+        json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } }),
     );
 }
 
@@ -5036,13 +5080,13 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
 // advanced and manifest are absent (a present advanced/manifest value must short-circuit it).
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
+fn resolved_option_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
 
     // advanced present wins, clamped — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
             "steps",
             || {
@@ -5061,7 +5105,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     // manifest fallback wins, clamped — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 0 } })),
             "steps",
             || {
@@ -5080,7 +5124,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     // Both absent → default_fn IS invoked, its value returned UNCLAMPED (distilled 4 survives 1..=50).
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
+        resolved_option_or_manifest_u32_with(
             &request(json!({ "projectId": "p" })),
             "steps",
             || {
@@ -5096,26 +5140,12 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
         "default_fn must fire when advanced and manifest are both absent"
     );
 
-    // Un-parseable advanced → falls through to the (here absent) manifest, then default_fn.
-    let called = Cell::new(false);
-    assert_eq!(
-        resolve_advanced_or_manifest_u32_with(
-            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
-            "steps",
-            || {
-                called.set(true);
-                30
-            },
-            1..=80,
-        ),
-        30
-    );
-    assert!(called.get(), "garbage advanced falls through to default_fn");
+    assert_invalid_effective_options(json!({ "projectId": "p", "advanced": { "steps": "abc" } }));
 }
 
 #[cfg(native_lane)]
 #[test]
-fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
+fn resolved_option_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
 
     // NOTE: the f32 variant's `default_fn` supplies the MANIFEST fallback (which `f32_clamped` then
@@ -5128,7 +5158,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             || {
@@ -5147,7 +5177,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // manifest supplies the effective default — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
             "guidanceScale",
             || {
@@ -5166,7 +5196,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // Both absent → default_fn IS invoked (variant default), then f32_clamped applies.
     let called = Cell::new(false);
     assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
+        resolved_option_or_manifest_f32_with(
             &request(json!({ "projectId": "p" })),
             "guidanceScale",
             || {
@@ -5182,21 +5212,9 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
         "default_fn must fire when advanced and manifest are both absent"
     );
 
-    // Un-parseable advanced → the f32 reader falls back to the (default_fn) fallback, then clamps.
-    let called = Cell::new(false);
-    assert_eq!(
-        resolve_advanced_or_manifest_f32_with(
-            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
-            "guidanceScale",
-            || {
-                called.set(true);
-                3.5
-            },
-            0.0..=30.0,
-        ),
-        3.5
+    assert_invalid_effective_options(
+        json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } }),
     );
-    assert!(called.get(), "garbage advanced falls through to default_fn");
 }
 
 #[cfg(target_os = "macos")]
@@ -5310,34 +5328,55 @@ fn mlx_model_table_maps_known_families() {
 #[cfg(target_os = "macos")]
 #[test]
 fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
+    let authored = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "imageGuidanceScale": 2.5 }
+    });
+    let effective = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 1.5, "imageGuidanceScale": 2.5 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_sensenova_img_cfg(&resolved), 2.5);
+    let omitted = json!({ "projectId": "p", "mode": "edit_image" });
+    let resolved =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), effective.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_sensenova_img_cfg(&resolved), 1.0);
     // Image guidance (true_cfg): edit default 1.0, character default 1.5, override via
     // imageGuidanceScale, floored at 1.0.
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({ "projectId": "p", "mode": "edit_image" }))),
+        resolve_sensenova_img_cfg(&bound_request(
+            json!({ "projectId": "p", "mode": "edit_image" })
+        )),
         1.0
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(
+        resolve_sensenova_img_cfg(&bound_request(
             json!({ "projectId": "p", "mode": "character_image" })
         )),
         1.5
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "character_image",
             "advanced": { "trueCfgScale": 3.0, "imageGuidanceScale": 2.5 }
         }))),
         3.0
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "character_image",
             "advanced": { "imageGuidanceScale": 2.5 }
         }))),
         2.5
     );
     assert_eq!(
-        resolve_sensenova_img_cfg(&request(json!({
+        resolve_sensenova_img_cfg(&bound_request(json!({
             "projectId": "p", "mode": "edit_image",
             "advanced": { "imageGuidanceScale": 0.2 }
         }))),
@@ -5347,23 +5386,23 @@ fn sensenova_dual_cfg_and_shift_resolve_per_mode() {
     // Timestep shift: default 3.0, schedulerShift (or legacy timestepShift) overrides,
     // non-positive falls back to 3.0.
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({ "projectId": "p" }))),
+        resolve_sensenova_timestep_shift(&bound_request(json!({ "projectId": "p" }))),
         3.0
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "schedulerShift": 4.5 }
         }))),
         4.5
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "timestepShift": 2.0 }
         }))),
         2.0
     );
     assert_eq!(
-        resolve_sensenova_timestep_shift(&request(json!({
+        resolve_sensenova_timestep_shift(&bound_request(json!({
             "projectId": "p", "advanced": { "schedulerShift": 0.0 }
         }))),
         3.0
@@ -5424,7 +5463,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = sensenova_edit_generate_one(
+    let (w, h, pixels, _) = sensenova_edit_generate_one(
         generator.as_ref(),
         "make it a watercolor painting",
         512,
@@ -5514,7 +5553,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
     mlx_rs::memory::reset_peak_memory();
 
     // Image 0 — succeeds today (the bug was image 1).
-    let (w0, h0, px0) = gen_one(42);
+    let (w0, h0, px0, _) = gen_one(42);
     assert_eq!((w0, h0), (dim, dim));
     assert_eq!(px0.len() as u32, dim * dim * 3);
 
@@ -5550,7 +5589,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
 
     // Image 1 — the image that OOM-killed the worker pre-fix. Completing proves the
     // count=2 batch path is sound once the cache is released between images.
-    let (w1, h1, px1) = gen_one(43);
+    let (w1, h1, px1, _) = gen_one(43);
     assert_eq!((w1, h1), (dim, dim));
     assert_eq!(px1.len() as u32, dim * dim * 3);
     assert!(px1.windows(2).any(|w| w[0] != w[1]));
@@ -8268,7 +8307,7 @@ fn sc3031_ab_dump_pose() {
     let generator = zimage_control_load(weights, control_weights, quant, adapters).expect("load");
     let cancel = CancelFlag::new();
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-    let (ow, oh, pixels) = zimage_control_generate_one(
+    let (ow, oh, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         &req.prompt,
@@ -8495,7 +8534,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = zimage_control_generate_one(
+    let (w, h, pixels, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -8557,7 +8596,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let conditioning = build_control_conditioning(control_map, kind.clone(), 0.9, None);
         let cancel = gen_core::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let (ow, oh, pixels) = zimage_base_control_generate_one(
+        let (ow, oh, pixels, _) = zimage_base_control_generate_one(
             generator.as_ref(),
             &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
@@ -8646,7 +8685,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels) = qwen_control_generate_one(
+    let (w, h, pixels, _) = qwen_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -8953,12 +8992,9 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error = parse_prompt_enhancement_fields(
-            "flux2_dev",
-            &request(json!({ "advanced": advanced })).advanced,
-        )
-        .expect_err("invalid settings reject")
-        .to_string();
+        let error = parse_prompt_enhancement_fields("flux2_dev", advanced.as_object().unwrap())
+            .expect_err("invalid settings reject")
+            .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
@@ -9717,7 +9753,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
             "modelPath": lexical.display().to_string()
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("imported route selected");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -9852,7 +9888,7 @@ fn prepared_krea_imported_control_route_owns_overlay_and_adapter_tokens() {
             "modelPath": dit.display().to_string()
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("imported control route selected");
     assert_eq!(prepared.kind(), ImageRoute::KreaImportedControl);
@@ -10279,9 +10315,23 @@ fn flux2_edit_image_guidance_lever() {
 #[test]
 fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
     let model = mlx_model("flux2_dev").unwrap();
+    let authored = serde_json::json!({
+        "model": "flux2_dev", "mode": "edit_image",
+        "advanced": { "guidanceScale": 2.0 }
+    });
+    let effective = serde_json::json!({
+        "model": "flux2_dev", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 4.0, "guidanceScale": 2.0 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(flux2_edit_text_guidance(&resolved, &model), Some(2.0));
     assert_eq!(
         flux2_edit_text_guidance(
-            &request(serde_json::json!({
+            &bound_request(serde_json::json!({
                 "model": "flux2_dev", "mode": "character_image",
                 "advanced": { "trueCfgScale": 7.0, "guidanceScale": 2.0 }
             })),
@@ -10291,7 +10341,7 @@ fn flux2_edit_text_guidance_prefers_studio_true_cfg() {
     );
     assert_eq!(
         flux2_edit_text_guidance(
-            &request(serde_json::json!({
+            &bound_request(serde_json::json!({
                 "model": "flux2_dev", "mode": "edit_image",
                 "advanced": { "guidanceScale": 2.0 }
             })),
@@ -11701,24 +11751,24 @@ fn augment_prompt_for_pose_appends_cue() {
 #[test]
 fn edit_grouping_poses_over_angles_over_plain() {
     // Pose set wins even when angleSet is also set.
-    let poses = request(json!({
+    let poses = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
     assert!(matches!(edit_grouping(&poses), EditGrouping::Poses(2)));
     // angleSet without poses → the 11-angle set.
-    let angles = request(json!({
+    let angles = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true }
     }));
     assert!(matches!(edit_grouping(&angles), EditGrouping::Angles));
     // character_image with neither → plain.
-    let plain = request(json!({
+    let plain = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
     }));
     assert!(matches!(edit_grouping(&plain), EditGrouping::Plain));
     // edit_image never groups, even with angleSet (mode gate).
-    let edit = request(json!({
+    let edit = bound_request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
         "advanced": { "angleSet": true }
     }));
@@ -11741,11 +11791,16 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     };
 
     // Angles: 11 shared seeds, per-angle prompts, no pose inputs, angleSet stamped, scored.
-    let angles = request(json!({
+    let angles = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "seed": 7 }
     }));
-    let batch = plan_edit_batch(&angles, &edit_grouping(&angles), base_settings());
+    let batch = plan_edit_batch(
+        &angles,
+        &execution(&angles),
+        &edit_grouping(&angles),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert_eq!(batch.prompts.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
@@ -11756,11 +11811,16 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Pose set: n shared seeds, pose inputs present, poseLibrary stamped, scored.
-    let poses = request(json!({
+    let poses = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "seed": 7, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
-    let batch = plan_edit_batch(&poses, &edit_grouping(&poses), base_settings());
+    let batch = plan_edit_batch(
+        &poses,
+        &execution(&poses),
+        &edit_grouping(&poses),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 2);
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
     assert_eq!(batch.pose_inputs.as_ref().map(Vec::len), Some(2));
@@ -11772,10 +11832,15 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Plain character_image: per-image seeds, no stamp, scored (sc-4411 plain With-Character).
-    let plain_char = request(json!({
+    let plain_char = bound_request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref", "count": 3
     }));
-    let batch = plan_edit_batch(&plain_char, &edit_grouping(&plain_char), base_settings());
+    let batch = plan_edit_batch(
+        &plain_char,
+        &execution(&plain_char),
+        &edit_grouping(&plain_char),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 3);
     assert!(batch.pose_inputs.is_none());
     assert!(batch.raw_settings.get("angleSet").is_none());
@@ -11783,10 +11848,15 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     assert!(batch.score_likeness);
 
     // Plain edit_image: per-image seeds, NOT scored (Plain grouping without an identity reference).
-    let plain_edit = request(json!({
+    let plain_edit = bound_request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "count": 2
     }));
-    let batch = plan_edit_batch(&plain_edit, &edit_grouping(&plain_edit), base_settings());
+    let batch = plan_edit_batch(
+        &plain_edit,
+        &execution(&plain_edit),
+        &edit_grouping(&plain_edit),
+        base_settings(),
+    );
     assert_eq!(batch.seeds.len(), 2);
     assert!(!batch.score_likeness);
 }
@@ -12032,7 +12102,7 @@ fn inline_iris_restore_of_a_budget_downscaled_render_is_not_named_4x() {
     use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "iris_3b", "prompt": "Mist over hills",
         "count": 1, "width": 2048, "height": 1536, "seed": 7,
     }));
@@ -12291,6 +12361,25 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
         vec!["first".to_owned(), "second".to_owned()]
     );
     assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
+    let authored = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "imageGuidanceScale": 2.5 }
+    });
+    let effective = json!({
+        "projectId": "p", "mode": "edit_image",
+        "advanced": { "trueCfgScale": 1.5, "imageGuidanceScale": 2.5 }
+    });
+    let resolved = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_sensenova_candle_true_cfg(&resolved), 2.5);
+    let omitted = json!({ "projectId": "p", "mode": "edit_image" });
+    let resolved =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), effective.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_sensenova_candle_true_cfg(&resolved), 1.0);
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (derived wired MLX pose family) whose control
@@ -12464,17 +12553,17 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
             "projectId": "p", "model": "realvisxl", "referenceAssetId": "reference",
             "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
         }),
-        json!({
-            "projectId": "p", "model": "sdxl",
-            "advanced": { "modelPath": model_path.clone(), "poses": "malformed" }
-        }),
     ] {
         assert_eq!(
             resolve_image_route(&request(conflict), &settings),
             Some(ImageRoute::SdxlControl),
-            "material pose conflicts and malformed carriers must remain in the rejecting control lane",
+            "material pose conflicts must remain in the rejecting control lane",
         );
     }
+    assert_invalid_effective_options(json!({
+        "projectId": "p", "model": "sdxl",
+        "advanced": { "modelPath": model_path.clone(), "poses": "malformed" }
+    }));
 
     // Guard: the same job WITHOUT poses is unaffected — it routes to generic MLX txt2img.
     let sdxl_t2i = request(json!({
@@ -12792,8 +12881,11 @@ fn multiphase_parse_rejects_malformed_lists() {
     };
     let err = |req: &ImageRequest| parse_multiphase_specs(req).unwrap_err().to_string();
 
-    // Non-array phases.
-    assert!(err(&with_two_loras(json!({ "steps": 8 }))).contains("must be an array"));
+    // The typed boundary refuses a non-array phase carrier before this parser runs.
+    assert_invalid_effective_options(json!({
+        "model": "krea_2_raw",
+        "advanced": { "phases": { "steps": 8 } }
+    }));
     // Empty phase list.
     assert!(err(&with_two_loras(json!([]))).contains("at least one phase"));
     // A phase that is not an object.
@@ -12835,14 +12927,14 @@ fn multiphase_parse_rejects_malformed_lists() {
 fn multiphase_job_shape_rejects_non_t2i_conditioning() {
     // A plain t2i job passes the shape guard.
     let ok = request(json!({ "model": "krea_2_raw", "advanced": { "phases": [{ "steps": 8 }] } }));
-    assert!(ensure_multiphase_job_shape(&ok).is_ok());
+    assert!(ensure_multiphase_job_shape(&execution(&ok)).is_ok());
 
     // Edit mode.
     let edit = request(json!({
         "model": "krea_2_raw", "mode": "edit_image",
         "advanced": { "phases": [{ "steps": 8 }] }
     }));
-    assert!(ensure_multiphase_job_shape(&edit)
+    assert!(ensure_multiphase_job_shape(&execution(&edit))
         .unwrap_err()
         .to_string()
         .contains("edit mode"));
@@ -12852,7 +12944,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "model": "krea_2_raw",
         "advanced": { "phases": [{ "steps": 8 }], "poses": [{ "keypoints": [] }] }
     }));
-    assert!(ensure_multiphase_job_shape(&pose)
+    assert!(ensure_multiphase_job_shape(&execution(&pose))
         .unwrap_err()
         .to_string()
         .contains("strict-pose"));
@@ -12864,7 +12956,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "referenceAssetId": "asset-1",
         "advanced": { "phases": [{ "steps": 8 }] }
     }));
-    assert!(ensure_multiphase_job_shape(&img2img)
+    assert!(ensure_multiphase_job_shape(&execution(&img2img))
         .unwrap_err()
         .to_string()
         .contains("img2img reference"));
@@ -12874,7 +12966,7 @@ fn multiphase_job_shape_rejects_non_t2i_conditioning() {
         "model": "krea_2_raw",
         "advanced": { "phases": [{ "steps": 8 }], "usePid": true }
     }));
-    assert!(ensure_multiphase_job_shape(&pid)
+    assert!(ensure_multiphase_job_shape(&execution(&pid))
         .unwrap_err()
         .to_string()
         .contains("PiD"));
@@ -13006,6 +13098,102 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         8,
         "the lane resolves the turbo 8-step regime against the KREA_TURBO_ENGINE_ID descriptor",
     );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn krea_turbo_on_raw_keeps_turbo_recipe_after_raw_defaults_materialize() {
+    use super::krea_turbo_raw::{krea_turbo_on_raw_guidance, krea_turbo_on_raw_raw_settings};
+    use super::sampling::resolve_authored_steps;
+    let turbo = mlx_model(KREA_TURBO_ENGINE_ID).unwrap();
+    let authored = json!({"projectId":"p","model":"krea_2_raw","advanced":{}});
+    let effective = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":52,"guidanceScale":1.0}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    let steps = resolve_authored_steps(&request, &turbo);
+    let guidance = krea_turbo_on_raw_guidance(&request);
+    assert_eq!(steps, 8);
+    assert_eq!(guidance, None);
+    let facts = krea_turbo_on_raw_raw_settings(&request, "raw", steps, guidance, None);
+    assert_eq!(facts["steps"], 8);
+    assert_eq!(facts["guidanceScale"], Value::Null);
+
+    let authored = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":null,"guidanceScale":null}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_authored_steps(&request, &turbo), 8);
+    assert_eq!(krea_turbo_on_raw_guidance(&request), None);
+
+    let authored = json!({"projectId":"p","model":"krea_2_raw",
+        "advanced":{"steps":12,"guidanceScale":0.5}});
+    let request =
+        ImageRequest::from_resolved(authored.as_object().unwrap(), authored.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_authored_steps(&request, &turbo), 12);
+    assert_eq!(krea_turbo_on_raw_guidance(&request), Some(0.5));
+    let facts = krea_turbo_on_raw_raw_settings(&request, "raw", 12, Some(0.5), None);
+    assert_eq!(facts["steps"], 12);
+    assert_eq!(facts["guidanceScale"], 0.5);
+}
+
+#[cfg(native_lane)]
+#[test]
+fn instantid_angle_set_keeps_its_default_after_manifest_resolution() {
+    use super::instantid::instantid_controlnet_scale;
+    let authored = json!({"projectId":"p","model":"instantid_realvisxl","advanced":{}});
+    let effective = json!({"projectId":"p","model":"instantid_realvisxl",
+        "advanced":{"controlnetConditioningScale":0.8}});
+    let request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(instantid_controlnet_scale(&request, true), 0.65);
+    assert_eq!(instantid_controlnet_scale(&request, false), 0.8);
+
+    let authored = json!({"projectId":"p","model":"instantid_realvisxl",
+        "advanced":{"controlnetConditioningScale":1.2}});
+    let request =
+        ImageRequest::from_resolved(authored.as_object().unwrap(), authored.as_object().unwrap())
+            .unwrap();
+    assert_eq!(instantid_controlnet_scale(&request, true), 1.2);
+}
+
+#[cfg(native_lane)]
+#[test]
+fn ideogram_edit_strength_keeps_mode_defaults_after_manifest_resolution() {
+    use super::conditioning::ideogram_edit_strength;
+
+    for model in ["ideogram_4", "ideogram_4_turbo"] {
+        let authored = json!({"projectId":"p","model":model,"mode":"edit_image","advanced":{}});
+        let effective = json!({"projectId":"p","model":model,"mode":"edit_image",
+            "advanced":{"strength":0.5}});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ideogram_edit_strength(&request, false, false), 0.6);
+        assert_eq!(ideogram_edit_strength(&request, false, true), 0.85);
+        assert_eq!(ideogram_edit_strength(&request, true, false), 0.85);
+
+        let authored = json!({"projectId":"p","model":model,"mode":"edit_image",
+            "advanced":{"strength":0.4}});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            authored.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ideogram_edit_strength(&request, true, true), 0.4);
+    }
 }
 
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
@@ -13414,7 +13602,7 @@ fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
          diverted to a pose lane",
     );
     // The shared shape guard then rejects it loudly before the load (backend-neutral, exercised on both).
-    assert!(ensure_multiphase_job_shape(&phases_and_pose)
+    assert!(ensure_multiphase_job_shape(&execution(&phases_and_pose))
         .unwrap_err()
         .to_string()
         .contains("strict-pose"));
@@ -15349,10 +15537,33 @@ fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
 #[test]
 fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     let model = mlx_model("qwen_image_edit_2511").unwrap();
+    let authored = json!({
+        "projectId":"p", "model":"qwen_image_edit_2511", "mode":"character_image",
+        "advanced":{"trueCfgScale":6.0}
+    });
+    let effective = json!({
+        "projectId":"p", "model":"qwen_image_edit_2511", "mode":"character_image",
+        "advanced":{"trueCfgScale":6.0,"guidanceScale":1.0}
+    });
+    let resolved_request = ImageRequest::from_resolved(
+        authored.as_object().unwrap(),
+        effective.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolve_qwen_edit_guidance(&resolved_request, &model), 6.0);
+    let omitted = json!({"projectId":"p","model":"qwen_image_edit_2511","mode":"edit_image"});
+    let defaulted = json!({
+        "projectId":"p","model":"qwen_image_edit_2511","mode":"edit_image",
+        "advanced":{"guidanceScale":1.0}
+    });
+    let resolved_request =
+        ImageRequest::from_resolved(omitted.as_object().unwrap(), defaulted.as_object().unwrap())
+            .unwrap();
+    assert_eq!(resolve_qwen_edit_guidance(&resolved_request, &model), 4.0);
     // Default is the family true-CFG default (4.0).
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({ "projectId": "p", "mode": "edit_image" })),
+            &bound_request(json!({ "projectId": "p", "mode": "edit_image" })),
             &model
         ),
         4.0
@@ -15360,7 +15571,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // The Advanced guidance control names true CFG on Qwen edit.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "guidanceScale": 1.5, "trueCfgScale": 4.0 }
             })),
@@ -15371,7 +15582,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // trueCfgScale remains an alias.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 6.0 }
             })),
@@ -15381,7 +15592,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "imageGuidanceScale": 2.5 }
             })),
@@ -15393,7 +15604,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // Recommendation ranges do not cap explicit CFG.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 50.0 }
             })),
@@ -15403,7 +15614,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "character_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),
@@ -15414,7 +15625,7 @@ fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     // Inverse guidance remains explicit on edit requests too.
     assert_eq!(
         resolve_qwen_edit_guidance(
-            &request(json!({
+            &bound_request(json!({
                 "projectId": "p", "mode": "edit_image",
                 "advanced": { "trueCfgScale": 0.5 }
             })),
@@ -15450,7 +15661,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15517,7 +15728,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = qwen_edit_generate_one(
+    let (w, h, pixels, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15924,12 +16135,15 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
             seed: i64,
             _preview: &gen_core::PreviewSink,
             _cancel: &CancelFlag,
-        ) -> WorkerResult<Vec<u8>> {
+        ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
             self.calls
                 .lock()
                 .expect("recording lock")
                 .push((eng_w, eng_h, seed));
-            Ok(tile.pixels)
+            Ok((
+                tile.pixels,
+                gen_core::generator::ExecutionIdentity::provider_default(),
+            ))
         }
     }
 
@@ -15950,7 +16164,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     };
     let mut progress = Vec::new();
     let preview = gen_core::PreviewSink::default();
-    let (output, total) = refine_tiled_detail(
+    let (output, total, reports) = refine_tiled_detail(
         &refiner,
         &source,
         &params,
@@ -15961,6 +16175,7 @@ fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     .expect("provider-neutral detail refinement");
 
     assert_eq!(total, 4);
+    assert_eq!(reports.len(), 4);
     assert_eq!(progress, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
     assert_eq!(
         *refiner.calls.lock().expect("recording lock"),
@@ -18218,7 +18433,7 @@ fn matrix_zimage_turbo_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_control_generate_one(
+    let (_, _, pixels, _) = zimage_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18358,7 +18573,7 @@ fn matrix_zimage_base_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = zimage_base_control_generate_one(
+    let (_, _, pixels, _) = zimage_base_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18500,7 +18715,7 @@ fn matrix_qwen_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = qwen_control_generate_one(
+    let (_, _, pixels, _) = qwen_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -22302,7 +22517,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
             "paths": { "model": checkpoint.display().to_string() }
         }
     }));
-    let prepared = prepare_image_route(&selected, &settings)
+    let prepared = prepare_image_route(&execution(&selected), &settings)
         .expect("route preparation succeeds")
         .expect("Mage fine-tuned route selected");
     assert_eq!(prepared.kind(), ImageRoute::MageFinetuned);
@@ -23958,7 +24173,7 @@ impl CheckpointPlanFixture {
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     }
 
     /// Install the pose ControlNet overlay into the isolated hub at the pinned revision the lane
@@ -24196,7 +24411,7 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     // the guard is live code rather than a comment (`cargo test` cannot link the candle cfg here).
     let zimage_source = include_str!("zimage_comfyui_candle.rs");
     let start = zimage_source
-        .find("pub(super) fn prepare_zimage_comfyui_sources(")
+        .find("fn prepare_zimage_comfyui_sources_with_preflight(")
         .expect("the shared ComfyUI Z-Image source preparation must exist");
     let prepare = &zimage_source[start..start + 1200.min(zimage_source.len() - start)];
     assert!(
@@ -24433,7 +24648,7 @@ fn a_bespoke_plan_source_declines_another_familys_request_and_still_refuses_a_mi
     );
 
     // End to end through the PRODUCTION seam: the reproduced case is served, not fatal.
-    let prepared = prepare_image_route(&krea_entry, &fx.settings)
+    let prepared = prepare_image_route(&execution(&krea_entry), &fx.settings)
         .expect("the reproduced case must not die in route preparation")
         .expect("a plan-backed Hires.fix request is served by the family's own lane");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -24553,7 +24768,7 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
         // the fatal cross-family `family-mismatch` hid behind a green conformance test (review
         // blocker 1), so the assertion now runs where the error can reach it.
         assert!(
-            prepare_image_route(request, &fx.settings)
+            prepare_image_route(&execution(request), &fx.settings)
                 .unwrap_or_else(|error| panic!(
                     "{label}: route preparation must not fail for a plan-backed request: {error}"
                 ))
@@ -24567,7 +24782,7 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
     // above.
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        prepare_image_route(request, &fx.settings)
+        prepare_image_route(&execution(request), &fx.settings)
             .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
             .map(|prepared| prepared.kind())
     };
@@ -25126,7 +25341,7 @@ fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
     );
 
     // End to end: the job is served by the lane that owns it, not killed in route preparation.
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .expect("route preparation must not fail: this is the reviewer's reproduced crash")
         .expect("a plan-backed Hires.fix request is served by the Krea lane");
     assert_eq!(prepared.kind(), ImageRoute::KreaImported);
@@ -25257,7 +25472,7 @@ fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
     let source = include_str!("mage_finetuned.rs");
     for symbol in [
         "fn resolve_mage_finetuned_transformer(",
-        "if request_is_checkpoint_plan_backed(request) {",
+        "request_is_checkpoint_plan_backed(request),",
         "checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)",
         "is_mage_flow_transformer_dir(&path)",
     ] {
@@ -25366,7 +25581,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     };
 
     // The plan route's own availability, and the SDXL lane's two halves (shape gate + a resolvable
@@ -25418,7 +25633,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
         // `*_available` probes `resolve_image_route` consults turn a production error into
         // `false`, so a request that KILLS the job would read here as "declined" (review major 4).
         assert!(
-            prepare_image_route(request, &fx.settings)
+            prepare_image_route(&execution(request), &fx.settings)
                 .unwrap_or_else(|error| panic!(
                     "{label}: route preparation must not fail for a plan-backed request: {error}"
                 ))
@@ -25428,7 +25643,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
     }
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        prepare_image_route(request, &fx.settings)
+        prepare_image_route(&execution(request), &fx.settings)
             .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
             .map(|prepared| prepared.kind())
     };
@@ -26082,16 +26297,20 @@ fn prepare_image_route_on_this_lane(
 ) -> WorkerResult<Option<RoutedImageLane>> {
     #[cfg(target_os = "macos")]
     {
-        Ok(prepare_image_route(request, settings)?.map(|route| {
-            let label = format!("{:?}", route.kind());
-            match route {
-                PreparedImageRoute::CheckpointPlan(sources) => {
-                    RoutedImageLane::CheckpointPlan(sources)
+        Ok(
+            prepare_image_route(&execution(request), settings)?.map(|route| {
+                let label = format!("{:?}", route.kind());
+                match route {
+                    PreparedImageRoute::CheckpointPlan(sources) => {
+                        RoutedImageLane::CheckpointPlan(sources)
+                    }
+                    PreparedImageRoute::KreaImported(sources) => {
+                        RoutedImageLane::KreaImported(sources)
+                    }
+                    _ => RoutedImageLane::Other(label),
                 }
-                PreparedImageRoute::KreaImported(sources) => RoutedImageLane::KreaImported(sources),
-                _ => RoutedImageLane::Other(label),
-            }
-        }))
+            }),
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -26224,7 +26443,7 @@ fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_
         );
     }
 
-    let request = request(json!({
+    let request = bound_request(json!({
         "projectId": "p",
         "model": "linked_communityxl",
         "prompt": "a fox",
@@ -26366,7 +26585,7 @@ fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_
         );
     }
 
-    let request = request(json!({
+    let request = bound_request(json!({
         "projectId": "p",
         "model": "managed_communityxl",
         "prompt": "a fox",
@@ -26986,7 +27205,7 @@ fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_di
         &krea_native_entries(),
         0x5a,
     );
-    let legacy = request(json!({
+    let legacy = bound_request(json!({
         "projectId": "p",
         "model": "imported_kreamania",
         "prompt": "a fox",
@@ -27003,7 +27222,7 @@ fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_di
         "fixture check: this is the pre-epic entry shape — no importPlan key at all"
     );
 
-    let prepared = prepare_image_route(&legacy, &fx.settings)
+    let prepared = prepare_image_route(&execution(&legacy), &fx.settings)
         .expect("a pre-epic entry must not be refused by the plan route")
         .expect("a pre-epic entry still has a route");
     assert_eq!(
@@ -28377,7 +28596,7 @@ fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_st
     payload["modelManifestEntry"] = Value::Object(entry);
     let request = request(payload);
 
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .expect("route preparation succeeds")
         .expect("a plan-backed entry is claimed by a route");
     assert_eq!(
@@ -28429,7 +28648,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
     payload["modelManifestEntry"] = Value::Object(entry);
     let request = request(payload);
     assert_eq!(
-        prepare_image_route(&request, &fx.settings)
+        prepare_image_route(&execution(&request), &fx.settings)
             .unwrap()
             .map(|route| route.kind()),
         Some(ImageRoute::CheckpointPlan)
@@ -28450,7 +28669,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
 
     // Now the route refuses LOUDLY with the plan store's typed diagnostic rather than silently
     // falling through to another lane or the stub.
-    let error = match prepare_image_route(&request, &fx.settings) {
+    let error = match prepare_image_route(&execution(&request), &fx.settings) {
         Err(error) => error.to_string(),
         Ok(route) => panic!(
             "a plan-backed entry whose source is gone is a refusal, not a route miss (got {:?})",
@@ -28472,7 +28691,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
     // Relink the SAME root id at the library's new home: selectable again, same entry, no
     // recompile, and the plan's layer now resolves under the new directory.
     fx.store.relink_root(&fx.root_id, &moved_dir).unwrap();
-    let prepared = prepare_image_route(&request, &fx.settings)
+    let prepared = prepare_image_route(&execution(&request), &fx.settings)
         .unwrap()
         .expect("the relinked checkpoint is selectable again");
     assert_eq!(prepared.kind(), ImageRoute::CheckpointPlan);
@@ -28616,7 +28835,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
                 payload[key] = value.clone();
             }
         }
-        request(payload)
+        bound_request(payload)
     };
 
     // Plain text-to-image: the plan route owns it, and the bespoke lane declines.
@@ -28760,7 +28979,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
             ("context_refiner.0.attention.qkv.weight", "BF16"),
         ],
     );
-    let zimage_managed = request(json!({
+    let zimage_managed = bound_request(json!({
         "projectId": "p",
         "model": "managed_zimage",
         "prompt": "a fox",
@@ -28793,7 +29012,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
         !krea_imported_available(&zimage_managed, &fx.settings),
         "premise: the krea lane must not claim a z-image entry"
     );
-    let message = match prepare_image_route(&zimage_managed, &fx.settings) {
+    let message = match prepare_image_route(&execution(&zimage_managed), &fx.settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
         Err(other) => panic!("expected InvalidPayload, got {other:?}"),
         Ok(None) => panic!(
@@ -30191,7 +30410,7 @@ mod qwen_image_2_1_tiers {
         if let Some(bits) = bits {
             payload.insert("advanced".to_owned(), json!({ "mlxQuantize": bits }));
         }
-        ImageRequest::from_payload(&payload)
+        ImageRequest::from_resolved(&payload, &payload).unwrap()
     }
 
     fn settings(data_dir: &Path) -> Settings {
@@ -30218,7 +30437,15 @@ mod qwen_image_2_1_tiers {
                 Value::Object(entry.clone()),
             );
             payload.insert("advanced".to_owned(), advanced);
-            ImageRequest::from_payload(&payload)
+            let mut request = ImageRequest::from_resolved(&payload, &payload)?;
+            request.portable_aux =
+                sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                    json!({"advanced":{"__portableFrozenSources":true,"__portableBoundTier":"q4"}})
+                        .as_object()
+                        .unwrap(),
+                )
+                .unwrap();
+            Ok::<_, sceneworks_core::resolved_options::BindingError>(request)
         };
         assert_eq!(
             resolved_with_tier(data.path(), &entry, None).map(|(_, tier)| tier),
@@ -30227,21 +30454,20 @@ mod qwen_image_2_1_tiers {
         );
         let bound = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
             &settings(data.path()),
-            &with_advanced(json!({"__portableBoundTier": "q4"})),
+            &with_advanced(json!({})).unwrap(),
         )
         .expect("the bound tier resolves");
         assert_eq!(bound.map(|(_, tier)| tier), Some("q4"));
-        let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
-            &settings(data.path()),
-            &with_advanced(json!({"mlxQuantize": "four", "__portableBoundTier": "q4"})),
-        )
-        .expect_err("a malformed explicit value is refused, not replaced by the bound tier")
-        .to_string();
-        assert!(error.contains("must be an integer bit count"), "{error}");
+        let error = with_advanced(json!({"mlxQuantize": "four"}))
+            .expect_err("a malformed explicit value is refused before tier selection");
+        assert!(
+            error.to_string().contains("advanced.mlxQuantize"),
+            "{error}"
+        );
         // A present null has always meant "no tier named": the manifest default, not the bound tier.
         let null = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
             &settings(data.path()),
-            &with_advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"})),
+            &with_advanced(json!({"mlxQuantize": null})).unwrap(),
         )
         .expect("an explicit null resolves the default");
         assert_eq!(null.map(|(_, tier)| tier), Some("q8"));
@@ -30778,7 +31004,7 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
     );
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 320, "height": 256, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
@@ -30818,13 +31044,30 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
         &project_path,
         "mlx",
         &mut asset_writes,
-        iris::stub_loader,
+        iris::reporting_stub_loader,
     )
     .await
     .expect("inline restore completes");
 
     assert_eq!(asset_writes.len(), 2, "one restored variant per base image");
     let restored = asset_writes[1].as_object().unwrap();
+    assert_eq!(restored["workerChildExecutionReport"]["state"], "resolved");
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["provider_id"],
+        "iris_3b_restore"
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["backend"],
+        "stub"
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["output_units"],
+        1
+    );
+    assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["deterministic_replay"]["kind"],
+        "non_deterministic"
+    );
     // 320x256 at 1.5x, original input → 480x384.
     assert_eq!(restored["width"], json!(480));
     assert_eq!(restored["height"], json!(384));
@@ -30873,7 +31116,7 @@ async fn inline_iris_restore_with_a_trained_model_records_the_trained_model() {
     iris::stage_trained_restore(&data_dir, "finetune_restore1");
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 64, "height": 48, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1, "irisModel": "finetune_restore1" },
@@ -30939,7 +31182,7 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
     );
     let project_path = dir.path().join("project");
     std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
-    let req = request(json!({
+    let req = bound_request(json!({
         "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
         "count": 1, "width": 320, "height": 256, "seed": 7,
         "upscale": { "enabled": true, "engine": "iris", "scale": 1.5, "inputSizing": "original", "colorFix": false },
@@ -30977,7 +31220,7 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
         &project_path,
         "mlx",
         &mut asset_writes,
-        iris::stub_loader,
+        iris::reporting_stub_loader,
     )
     .await
     .unwrap_err();

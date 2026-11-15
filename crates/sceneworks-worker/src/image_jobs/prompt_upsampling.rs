@@ -3,6 +3,7 @@
 
 #[cfg(all(test, native_lane))]
 use super::events::consume_gen_events;
+#[cfg(test)]
 use super::parse_prompt_enhancement_fields;
 #[cfg(all(test, native_lane))]
 use super::stream::GenEvent;
@@ -32,9 +33,21 @@ pub(crate) struct PromptEnhance {
 }
 
 impl PromptEnhance {
+    #[cfg(native_lane)]
+    pub(crate) fn from_resolved(request: &ImageRequest) -> WorkerResult<Self> {
+        let (enabled, temperature, max_tokens) =
+            super::resolved_prompt_enhancement_fields(request)?;
+        Ok(Self {
+            enabled,
+            temperature,
+            max_tokens,
+        })
+    }
+
     /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
     /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
     /// the API and inference providers.
+    #[cfg(test)]
     pub(crate) fn from_advanced(
         model_id: &str,
         advanced: &serde_json::Map<String, Value>,
@@ -75,7 +88,7 @@ pub(super) fn attach_prompt_upsampler(
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
     if !matches!(engine_id, "flux3_klein" | "flux3_klein_base")
-        || !parse_prompt_enhancement_fields(engine_id, &request.advanced)?.0
+        || !request.advanced_bool("enhancePrompt").unwrap_or(false)
     {
         return Ok(spec);
     }
@@ -101,8 +114,11 @@ pub(super) fn attach_prompt_upsampler(
             "FLUX 3 enhancement requires the pinned optional {UPSAMPLER_COMPONENT} component: {UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}; refresh the model catalog"
         )));
     }
-    let dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, UPSAMPLER_COMPONENT)
+    let dir = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path(UPSAMPLER_COMPONENT)
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable FLUX 3 prompt upsampler is not bound".to_owned(),
@@ -277,14 +293,16 @@ mod tests {
     }
 
     fn request(enabled: bool) -> ImageRequest {
-        ImageRequest::from_payload(json!({
+        let payload = json!({
             "model": "flux3_klein", "mode": "text_to_image", "prompt": "a fox",
             "advanced": { "enhancePrompt": enabled },
             "modelManifestEntry": { "downloads": [{
                 "provider": "huggingface", "repo": UPSAMPLER_REPO, "revision": UPSAMPLER_REVISION,
                 "coRequisite": true, "componentId": UPSAMPLER_COMPONENT, "required": "soft", "files": []
             }] }
-        }).as_object().unwrap())
+        });
+        let authored = payload.as_object().unwrap();
+        ImageRequest::from_resolved(authored, authored).unwrap()
     }
 
     fn spec() -> LoadSpec {
@@ -855,7 +873,11 @@ mod tests {
                 let payload = json!({"projectId":"p", "model":model, "mode":"text_to_image",
                     "prompt":"a fox", "width":64, "height":64, "seed":17,
                     "advanced":{"enhancePrompt":true, "promptEnhancement":{"effectivePrompt":"forged"}}});
-                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let request = ImageRequest::from_resolved(
+                    payload.as_object().unwrap(),
+                    payload.as_object().unwrap(),
+                )
+                .unwrap();
                 let plan = ImagePlan::with_count(&request, 1, None);
                 let (url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
                 let mut settings = crate::tests::test_settings(url.clone(), None);
@@ -990,7 +1012,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"edit_image",
                 "prompt":input.prompt, "advanced":{"enhancePrompt":true}});
-            let request = ImageRequest::from_payload(payload.as_object().unwrap());
+            let request = ImageRequest::from_resolved(
+                payload.as_object().unwrap(),
+                payload.as_object().unwrap(),
+            )
+            .unwrap();
             let plan = ImagePlan::with_count(&request, 1, None);
             let (url, _) = crate::tests::spawn_no_user_cancel_capture_stub().await;
             let mut settings = crate::tests::test_settings(url.clone(), None);
@@ -1077,7 +1103,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"text_to_image",
             "prompt":"a fox", "advanced":{"enhancePrompt":true}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         let plan = ImagePlan::with_count(&request, 1, None);
         let (url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
         let mut settings = crate::tests::test_settings(url.clone(), None);

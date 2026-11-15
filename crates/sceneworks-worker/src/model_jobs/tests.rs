@@ -379,6 +379,7 @@ mod supra2_convert_tests {
             &supra2_job(source_file),
             checkpoint_dir,
             None,
+            &Default::default(),
         )
         .await
         .expect("resolver runs without an infra error")
@@ -797,7 +798,7 @@ mod convert_registry_tests {
 
         for &converter in NATIVE_CONVERTERS {
             let job = convert_job(converter);
-            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None)
+            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None, &Default::default())
                 .await
                 .expect("resolver runs without an infra error");
             if let Err(err) = &resolved {
@@ -812,7 +813,7 @@ mod convert_registry_tests {
         // A converter NOT in the registry is rejected as unknown — proving the check above is
         // meaningful and that the fallback still fires.
         let bogus = convert_job("definitely_not_a_real_converter");
-        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None)
+        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None, &Default::default())
             .await
             .expect("resolver runs without an infra error");
         match resolved {
@@ -838,7 +839,7 @@ mod convert_registry_tests {
         );
 
         assert!(!data_dir.exists(), "fixture starts without app model state");
-        let error = run_model_convert_job(&api, &settings, &job)
+        let error = run_model_convert_job(&api, &settings, &job, &Default::default())
             .await
             .expect_err("invalid output must fail before any API or download access");
 

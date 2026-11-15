@@ -1,12 +1,13 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_policy::apply_candle_image_load_shape;
 use super::load_spec::candle_artifact_path_matches;
 use super::load_spec::candle_certified_artifact_path;
 use super::load_spec::candle_pinned_hf_artifact_path;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::control_kind_label;
 use super::strict_control::requested_control_kind;
@@ -20,7 +21,6 @@ use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
@@ -114,10 +114,15 @@ fn resolve_flux1_control_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX.1 control modelPath")
@@ -137,21 +142,40 @@ fn resolve_flux1_control_base(
 /// `jobs_store::flux1_control_candle_eligible` so the worker and router agree. Control-weights presence is
 /// NOT part of the gate: they are fetched on first use in the stream.
 pub(super) fn flux1_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux1_control_candle_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux1_control_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux1_control_candle_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn flux1_control_candle_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_flux1_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_flux1_control_base(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (25).
 fn flux1_control_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", FLUX1_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
+    resolved_option_or_manifest_u32(request, "steps", FLUX1_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
 }
 
 /// Resolve embedded guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (3.5),
 /// clamped. dev rides this scalar on the transformer's guidance embedder (no true-CFG).
 fn flux1_control_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         FLUX1_CONTROL_CANDLE_DEFAULT_GUIDANCE,
@@ -165,19 +189,15 @@ fn flux1_control_candle_guidance(request: &ImageRequest) -> f32 {
 pub(super) fn flux1_control_candle_repo_file(
     request: &ImageRequest,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
-    let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
-    };
-    let repo = pick("repo", FLUX1_CONTROL_CANDLE_REPO);
+    let control = super::strict_control::resolved_control_weights(request);
+    let repo = control
+        .and_then(|fields| fields.repo.valid_trimmed())
+        .unwrap_or(FLUX1_CONTROL_CANDLE_REPO)
+        .to_owned();
     let file = safe_weight_filename(
-        &pick("filename", FLUX1_CONTROL_CANDLE_FILE),
+        control
+            .and_then(|fields| fields.filename.valid_trimmed())
+            .unwrap_or(FLUX1_CONTROL_CANDLE_FILE),
         "advanced.controlWeights.filename",
     )?;
     trusted_control_weight_revision(request, FLUX1_CONTROL_CANDLE_ENGINE_ID, &repo, &file)?;
@@ -209,8 +229,11 @@ async fn ensure_flux1_control_candle_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -265,7 +288,7 @@ fn flux1_control_candle_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -380,7 +403,7 @@ impl CandleStrictControl for Flux1StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = Flux1ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
@@ -401,11 +424,14 @@ impl CandleStrictControl for Flux1StrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!(
-                "FLUX.1-dev strict-control generation failed: {error}"
-            ))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!(
+                    "FLUX.1-dev strict-control generation failed: {error}"
+                ))
+            })?;
+        completed_control_image(completed)
     }
 }
 
@@ -415,11 +441,13 @@ impl CandleStrictControl for Flux1StrictControl {
 /// the shared [`run_candle_strict_control`] driver (validation against `flux1_dev_control`'s
 /// `supported_kinds`, per-pose preprocessing, scoring). dev loads dense bf16 (no quant) and keeps its
 /// embedded guidance (no CFG). The pose path is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_flux1_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -432,8 +460,8 @@ pub(super) async fn generate_candle_flux1_control_stream(
 
     let steps = flux1_control_candle_steps(request);
     let guidance = flux1_control_candle_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         FLUX1_CONTROL_CANDLE_DEFAULT_SCALE,
         0.0..=2.0,
@@ -450,7 +478,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         })
         .to_owned();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     let mut raw_settings = flux1_control_candle_raw_settings(
         request,
         &repo,
@@ -564,6 +592,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

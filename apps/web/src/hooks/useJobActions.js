@@ -25,6 +25,7 @@ export function useJobActions({
         setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
       } catch (err) {
+        if (action === "exact-replay" && err.code === "replay_unavailable") return err;
         setError(err.message);
       }
     },

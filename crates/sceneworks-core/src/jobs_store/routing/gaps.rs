@@ -5,7 +5,6 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
-use crate::image_request::image_quant_tier_refusal;
 use crate::jobs_store::routing::candle::{
     candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
     image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
@@ -1020,10 +1019,11 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             &format!(
                 "{reason}. Candle refuses rather than silently rendering at a precision the \
                  request did not name.{also}",
-                reason = payload
-                    .get("advanced")
-                    .and_then(Value::as_object)
-                    .and_then(|advanced| image_quant_tier_refusal(model, advanced))
+                reason = crate::jobs_store::routing::probe_image_precision_options(payload)
+                    .ok()
+                    .and_then(|options| {
+                        crate::image_request::image_quant_tier_refusal_resolved(model, &options)
+                    })
                     .unwrap_or_else(|| "advanced.quantTier \"fp8r\" is not loadable here".to_owned()),
             ),
             Some("sc-26241"),
@@ -1201,12 +1201,10 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             None,
         ),
         model if SENSENOVA_MODEL_IDS.contains(&model) => {
-            let has_poses = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty());
+            let has_poses = matches!(
+                crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).poses,
+                crate::resolved_options::RouteField::Valid(count) if count > 0
+            );
             if has_poses {
                 UnsupportedReason::new(
                     Some(model),

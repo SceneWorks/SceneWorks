@@ -170,30 +170,27 @@ pub(crate) fn validate_selected_decoder_for_manifest(
     job_payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
-    let Some(raw) = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("decoder"))
-    else {
-        return Ok(());
-    };
-    let decoder_id = match raw {
-        Value::Null => return Ok(()),
-        Value::String(value) if value.trim().is_empty() || value == "native" => return Ok(()),
-        Value::String(value) => value.as_str(),
-        _ => {
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let decoder_id = match &route_options.decoder {
+        sceneworks_core::resolved_options::RouteField::Absent
+        | sceneworks_core::resolved_options::RouteField::Null => return Ok(()),
+        sceneworks_core::resolved_options::RouteField::Valid(value)
+            if value.trim().is_empty() || value == "native" =>
+        {
+            return Ok(());
+        }
+        sceneworks_core::resolved_options::RouteField::Valid(value) => value.as_str(),
+        sceneworks_core::resolved_options::RouteField::Invalid => {
             return Err(ApiError::bad_request(
                 "advanced.decoder must be a decoder id string (or 'native')",
             ))
         }
     };
-    if job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("usePid"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
+    if matches!(
+        route_options.use_pid,
+        sceneworks_core::resolved_options::RouteField::Valid(true)
+    ) {
         return Err(ApiError::bad_request(
             "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder",
         ));
@@ -383,11 +380,19 @@ pub(crate) async fn create_image_job(
         // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
         // a POST for a model that should refuse it returned 201 and failed later (or rendered
         // without the pass). Judged against the FINAL payload (post-preset, with the resolved
-        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
-        // and the worker parse the request exactly the same way. Read after the width/height/count
-        // defaults because the 4096-target check needs the resolved geometry.
+        // dimensions above) and the server-owned manifest entry. Bind the same effective typed
+        // options the worker consumes after shared validation; the authored payload stays intact
+        // for persistence. Read after the width/height/count defaults because the 4096-target
+        // check needs the resolved geometry.
         {
-            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let resolved =
+                sceneworks_core::request_validation::resolve_request("image", &job_payload, entry)
+                    .map_err(ApiError::from)?;
+            let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                &job_payload,
+                resolved.as_payload(),
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
             let family = entry
                 .get("family")
                 .and_then(Value::as_str)
@@ -2010,10 +2015,18 @@ pub(crate) fn validate_imported_submission(
     {
         return Ok(());
     }
-    let has_material_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let has_material_control =
+        sceneworks_core::jobs_store::imported_control_intent_is_material_with_facts(&route_options);
+    let poses_present = matches!(
+        route_options.poses,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
+    let phases_present = matches!(
+        route_options.phases,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
     let backend = enqueue_backend(state);
     let candle_required = backend == "candle";
     let family = entry
@@ -2027,30 +2040,11 @@ pub(crate) fn validate_imported_submission(
     ) {
         return Ok(());
     }
-    let feature = if has_material_control
-        && !payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("poses"))
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    {
+    let feature = if has_material_control && !poses_present {
         "control image/mode without a supported Pose request"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if poses_present {
         "strict-pose control"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("phases"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if phases_present {
         "multi-phase denoise"
     } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         "image edit"
@@ -2223,12 +2217,16 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
     // MOSS's model-specific controls survive headless preset expansion. Presence wins, including
     // explicit OFF; never inherit an enabled preset over a caller's deliberate ordinary request.
     if let Some(moss) = preset.get("defaults").and_then(|d| d.get("mossImage")) {
+        let authored =
+            sceneworks_core::resolved_options::AppearanceAuthoredInputs::from_payload_syntax(
+                job_payload,
+            );
         let advanced = job_payload
             .entry("advanced".to_owned())
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
-        if !advanced.contains_key("mossImage") {
+        if !authored.moss_image_present {
             advanced.insert("mossImage".to_owned(), moss.clone());
             if moss
                 .get("acceleration")
@@ -2711,9 +2709,8 @@ pub(crate) async fn create_video_job(
             }
         }
     }
-    sceneworks_core::video_request::VideoRequest::from_payload(&job_payload)
-        .h3_veda_settings()
-        .map_err(ApiError::bad_request)?;
+    // The portable validator above checks Veda using the selected H3 recipe. The worker
+    // resolves the same bound wire against its final step schedule before model load.
     // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
     // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
     // three gates around it bound how long the clip is and how much conditioning media it carries,

@@ -1,9 +1,7 @@
 use super::adapters::resolve_adapters;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
-use super::conditioning::edit_grouping;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
@@ -50,6 +48,7 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
@@ -67,7 +66,6 @@ use crate::DownloadProgress;
 use crate::HuggingFaceSnapshot;
 use crate::JobSnapshot;
 use crate::JsonObject;
-use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
 use crate::Value;
@@ -90,9 +88,24 @@ pub(super) const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// is ignored for parity with the Python torch `QwenImageControlNetPipeline` path; identity comes
 /// from character LoRA adapters on the base transformer.
 pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    qwen_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn qwen_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    qwen_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn qwen_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == "qwen_image"
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -107,17 +120,10 @@ pub(super) fn resolve_qwen_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    let control = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
-    let override_field = |key: &str| -> Option<String> {
-        control
-            .and_then(|control| control.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .map(str::to_owned)
-    };
-    let repo = override_field("repo")
+    let control = super::strict_control::resolved_control_weights(request);
+    let repo = control
+        .and_then(|fields| fields.repo.valid_trimmed())
+        .map(str::to_owned)
         .unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
     let default_revision =
         (repo == strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)).then(|| {
@@ -131,7 +137,10 @@ pub(super) fn resolve_qwen_control_weights(
     // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize` — whose DEFAULT tier is
     // clamped to the installed overlay (`snapshot`) so a plain default job never forces a new fetch
     // (sc-10726).
-    let rel = match override_field("filename") {
+    let rel = match control
+        .and_then(|fields| fields.filename.valid_trimmed())
+        .map(str::to_owned)
+    {
         Some(name)
             if sceneworks_core::control_weights::shipped_control_weight(
                 QWEN_CONTROL_ENGINE_ID,
@@ -209,7 +218,7 @@ pub(super) fn qwen_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -228,15 +237,17 @@ pub(super) fn qwen_control_generate_one(
         scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Qwen strict-pose generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "Qwen strict-pose generator returned non-image output".to_owned(),
@@ -273,10 +284,14 @@ pub(super) async fn generate_qwen_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
-    project_path: &Path,
-    backend: &str,
+    execution: &super::conditioning::ResolvedImageExecution,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling = super::sampling::explicit_sampling_request(request);
     let qwen = mlx_model("qwen_image")
@@ -311,11 +326,11 @@ pub(super) async fn generate_qwen_control_stream(
     // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
     // first depth job (sc-8242).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = qwen_control_raw_settings(
         request,
@@ -339,6 +354,7 @@ pub(super) async fn generate_qwen_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
@@ -391,54 +407,68 @@ pub(super) async fn generate_qwen_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
-                // qwen ignores a reference (identity comes from character LoRA on the base transformer),
-                // so no identity-init `Reference` — pose-only `Control` conditioning, byte-identical.
-                let conditioning =
-                    build_control_conditioning(control, control_kind.clone(), control_scale, None);
-                let (out_w, out_h, pixels) = qwen_control_generate_one(
-                    generator,
-                    &sampling,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    conditioning,
-                    use_pid,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished pose against the cached source embedding (sc-4410). The strict-
-                // control lane produces the FINAL image directly (no face-restore pass), so this scores
-                // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
-                // with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let control = preprocess_control_entry(
+                        &control_kind,
+                        user_control,
+                        Some(&pose),
+                        control_source,
+                        width,
+                        height,
+                        stickwidth,
+                        depth_weights_dir,
+                    )?;
+                    // qwen ignores a reference (identity comes from character LoRA on the base transformer),
+                    // so no identity-init `Reference` — pose-only `Control` conditioning, byte-identical.
+                    let conditioning = build_control_conditioning(
+                        control,
+                        control_kind.clone(),
+                        control_scale,
+                        None,
+                    );
+                    let (out_w, out_h, pixels, execution) = qwen_control_generate_one(
+                        generator,
+                        &sampling,
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        conditioning,
+                        use_pid,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                    // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                    // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
+                    // with no reliable frontal face → honest detected:false N/A.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 
@@ -647,15 +677,9 @@ pub(super) fn qwen_edit_available(request: &ImageRequest, settings: &Settings) -
 /// Advanced guidance overrides the prompt-strength default; legacy aliases remain supported.
 pub(super) fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> f32 {
     request
-        .advanced
-        .get("guidanceScale")
-        .or_else(|| request.advanced.get("trueCfgScale"))
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .authored_advanced_f64("guidanceScale")
+        .or_else(|| request.authored_advanced_f64("trueCfgScale"))
+        .or_else(|| request.authored_advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance())
 }
@@ -669,7 +693,7 @@ fn qwen_edit_raw_settings(
     guidance: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -708,7 +732,7 @@ pub(super) fn qwen_edit_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -730,15 +754,15 @@ pub(super) fn qwen_edit_generate_one(
         scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, on_progress)
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
         .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("edit generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "edit generator returned non-image output".to_owned(),
@@ -757,10 +781,14 @@ pub(super) async fn generate_qwen_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
-    project_path: &Path,
-    backend: &str,
+    execution: &super::conditioning::ResolvedImageExecution,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
@@ -835,7 +863,7 @@ pub(super) async fn generate_qwen_edit_stream(
     // sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character) is generator-agnostic — Qwen-Edit
     // produces the FINAL image directly (no face-restore pass), so scoring the generated image scores
     // what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     let EditBatch {
         seeds,
         prompts,
@@ -844,6 +872,7 @@ pub(super) async fn generate_qwen_edit_stream(
         score_likeness,
     } = plan_edit_batch(
         request,
+        execution,
         &grouping,
         qwen_edit_raw_settings(
             request,
@@ -878,6 +907,7 @@ pub(super) async fn generate_qwen_edit_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -917,7 +947,7 @@ pub(super) async fn generate_qwen_edit_stream(
                 _ => None,
             };
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 seeds.into_iter().zip(prompts),
                 move |index, (seed, prompt), preview, on_progress| {
                     // Pose tier: pair the reference with this pose's DWPose whole-body skeleton
@@ -951,7 +981,7 @@ pub(super) async fn generate_qwen_edit_stream(
                         }
                         None => build_edit_conditioning(&references),
                     };
-                    let (out_w, out_h, pixels) = qwen_edit_generate_one(
+                    let (out_w, out_h, pixels, execution) = qwen_edit_generate_one(
                         generator,
                         &sampling,
                         &prompt,
@@ -968,6 +998,12 @@ pub(super) async fn generate_qwen_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4409 angles /
                     // sc-4410 poses / sc-4411 plain With-Character). The Image build + pixel clone is paid
                     // ONLY when a scorer exists (a character_image generation) — a plain `edit_image` job
@@ -1027,13 +1063,25 @@ pub(super) async fn generate_qwen_edit_stream(
 mod qwen_control_tier_tests {
     use super::*;
     use serde_json::json;
+    use std::path::Path;
 
     fn request(advanced: serde_json::Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "qwen_image", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let value = json!({ "model": "qwen_image", "advanced": advanced });
+        let authored = value.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some("0") = effective
+            .get("advanced")
+            .and_then(|value| value.get("mlxQuantize"))
+            .and_then(serde_json::Value::as_str)
+        {
+            effective
+                .get_mut("advanced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("mlxQuantize".to_owned(), json!(0));
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// Write a present `<tier>/model.safetensors` overlay so [`qwen_control_tier_subdir`]'s clamp sees

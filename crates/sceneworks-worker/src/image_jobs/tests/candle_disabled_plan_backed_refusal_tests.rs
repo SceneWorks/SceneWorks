@@ -1,21 +1,21 @@
+use super::super::conditioning::ResolvedImageExecution;
 use super::super::ImageRequest;
 use super::prepare_candle_image_route;
 use crate::Settings;
 use crate::WorkerError;
 use serde_json::json;
 
-fn request(entry: serde_json::Value) -> ImageRequest {
-    ImageRequest::from_payload(
-        json!({
-            "projectId": "project-1",
-            "model": "imported_krea_abc123",
-            "mode": "text_to_image",
-            "prompt": "a fox",
-            "modelManifestEntry": entry
-        })
-        .as_object()
-        .expect("payload object"),
-    )
+fn request(entry: serde_json::Value) -> ResolvedImageExecution {
+    let payload = json!({
+        "projectId": "project-1",
+        "model": "imported_krea_abc123",
+        "mode": "text_to_image",
+        "prompt": "a fox",
+        "modelManifestEntry": entry
+    });
+    let map = payload.as_object().expect("payload object");
+    let bound = ImageRequest::from_resolved(map, map).expect("fixture options bind");
+    ResolvedImageExecution::new(&bound).expect("fixture execution context resolves")
 }
 
 fn candle_disabled_settings() -> Settings {

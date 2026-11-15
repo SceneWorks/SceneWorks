@@ -35,11 +35,23 @@ use crate::Value;
 use serde_json::json;
 
 fn request(advanced: serde_json::Value) -> ImageRequest {
-    ImageRequest::from_payload(
-        json!({ "model": "sd3_5_large", "advanced": advanced })
-            .as_object()
-            .unwrap(),
-    )
+    let payload = json!({ "model": "sd3_5_large", "advanced": advanced });
+    let authored = payload.as_object().unwrap();
+    let mut effective = authored.clone();
+    if let Some(value) = effective
+        .get_mut("advanced")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|advanced| advanced.get_mut("mlxQuantize"))
+    {
+        if let Some(lowered) = sceneworks_core::options::legacy_integer(value) {
+            *value = lowered;
+        }
+    }
+    ImageRequest::from_resolved(authored, &effective).unwrap()
+}
+
+fn resolved_request(payload: &serde_json::Map<String, serde_json::Value>) -> ImageRequest {
+    ImageRequest::from_resolved(payload, payload).unwrap()
 }
 
 /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
@@ -49,7 +61,7 @@ fn request(advanced: serde_json::Value) -> ImageRequest {
 #[test]
 fn model_supports_img2img_reads_the_ui_manifest_flag() {
     let entry = |manifest: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "m", "modelManifestEntry": manifest })
                 .as_object()
                 .unwrap(),
@@ -74,7 +86,7 @@ fn model_supports_img2img_reads_the_ui_manifest_flag() {
 #[test]
 fn sana_variants_use_the_generic_img2img_worker_gate() {
     let request = |model: &str, mode: &str, manifest_flag: bool| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": model,
                 "mode": mode,
@@ -109,7 +121,7 @@ fn sana_variants_use_the_generic_img2img_worker_gate() {
 #[test]
 fn zimage_generic_img2img_yields_to_identity_reference() {
     let req = |advanced: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": "z_image_turbo",
                 "modelManifestEntry": { "ui": { "img2img": true } },
@@ -139,7 +151,7 @@ fn zimage_generic_img2img_yields_to_identity_reference() {
         false
     ));
     // Model without the ui.img2img flag → never the generic path.
-    let no_flag = ImageRequest::from_payload(
+    let no_flag = resolved_request(
         json!({ "model": "z_image_turbo", "modelManifestEntry": { "ui": {} }, "advanced": {} })
             .as_object()
             .unwrap(),
@@ -161,7 +173,7 @@ fn zimage_generic_img2img_yields_to_identity_reference() {
 #[test]
 fn ideogram_img2img_routes_by_mode() {
     let req = |model: &str, mode: &str| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": model,
                 "mode": mode,
@@ -283,8 +295,9 @@ fn default_tier_is_q8_not_q4_regression() {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
         }
-        let anima_default =
-            ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+        let anima_payload = json!({ "model": "anima_base" });
+        let anima_map = anima_payload.as_object().unwrap();
+        let anima_default = ImageRequest::from_resolved(anima_map, anima_map).unwrap();
         assert_eq!(
             anima_tier_subdir(anima_root.path(), &anima_default),
             anima_root.path().join("q8"),
@@ -390,7 +403,7 @@ fn resolves_flat_unified_backbone_tiers() {
 #[test]
 fn sensenova_tier_selection_skips_a_torn_tier_for_a_complete_sibling() {
     let sensenova_request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "sensenova_u1_8b", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -448,7 +461,7 @@ fn sensenova_tier_selection_skips_a_torn_tier_for_a_complete_sibling() {
 #[test]
 fn anima_tier_subdir_selects_and_falls_back() {
     let anima_request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "anima_base", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -515,7 +528,7 @@ fn anima_tier_subdir_selects_and_falls_back() {
     // sc-10731 — the per-model quality FLOOR now DRIVES the anima default (was a hardcode).
     // A floored request carries `advanced.mlxQuantize` AND the forwarded manifest floor.
     let floored_request = |bits: serde_json::Value, floor: &str| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": "anima_base",
                 "advanced": { "mlxQuantize": bits },
@@ -647,8 +660,11 @@ fn nvfp4_requested_reads_only_the_explicit_quant_tier_label() {
     assert!(!nvfp4_requested(&request(
         json!({ "quantTier": "int8-convrot" })
     )));
-    assert!(!nvfp4_requested(&request(json!({ "quantTier": 4 }))));
-    assert!(!nvfp4_requested(&request(json!({ "quantTier": true }))));
+    for invalid in [json!(4), json!(true)] {
+        let payload = json!({ "model": "sd3_5_large", "advanced": { "quantTier": invalid } });
+        let map = payload.as_object().unwrap();
+        assert!(ImageRequest::from_resolved(map, map).is_err());
+    }
     for bits in [0, 4, 8] {
         assert!(
                 !nvfp4_requested(&request(json!({ "mlxQuantize": bits }))),
@@ -819,7 +835,7 @@ fn the_nvfp4_arm_never_short_circuits_the_dense_te_carve_out() {
     // The declared dense-TE turnkey (sc-15799: the manifest flag is the only form) and a novel
     // manifest-flag model, with EVERY gate for the NVFP4 arm satisfied: explicit pick, Blackwell
     // host, and the `nvfp4/` tier resolved.
-    let by_id = ImageRequest::from_payload(
+    let by_id = resolved_request(
         json!({
             "model": "flux2_klein_9b",
             "advanced": { "quantTier": "nvfp4" },
@@ -828,7 +844,7 @@ fn the_nvfp4_arm_never_short_circuits_the_dense_te_carve_out() {
         .as_object()
         .unwrap(),
     );
-    let by_manifest = ImageRequest::from_payload(
+    let by_manifest = resolved_request(
         json!({
             "model": "some_matrix_model",
             "advanced": { "quantTier": "nvfp4" },
@@ -929,7 +945,7 @@ fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
 #[cfg(native_lane)]
 #[test]
 fn mage_q4_label_includes_every_descriptor_declared_component_floor() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "mage_flow", "advanced": { "mlxQuantize": 4 } })
             .as_object()
             .unwrap(),
@@ -1069,7 +1085,7 @@ fn krea_model_subdir_wires_nvfp4_without_changing_its_existing_tiers() {
 #[test]
 fn min_quality_floor_reads_valid_manifest_values_only() {
     let with_floor = |mlx: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "anima_base", "modelManifestEntry": { "mlx": mlx } })
                 .as_object()
                 .unwrap(),
@@ -1101,7 +1117,7 @@ fn standard_tier_subdir_clamps_default_to_the_floor() {
             Some(b) => json!({ "mlxQuantize": b }),
             None => json!({}),
         };
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": "some_matrix_model",
                 "advanced": advanced,
@@ -1167,8 +1183,7 @@ fn anima_default_tier_with_adapter_builds_loadable_spec() {
     use gen_core::{AdapterKind, AdapterSpec, Quant};
 
     // 1. A default Anima request IS quantized — the premise that made the guard fire everywhere.
-    let base_default =
-        ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+    let base_default = resolved_request(json!({ "model": "anima_base" }).as_object().unwrap());
     assert_eq!(
         resolve_quant(&base_default, None),
         (Some(Quant::Q8), Some(8)),
@@ -1176,14 +1191,14 @@ fn anima_default_tier_with_adapter_builds_loadable_spec() {
              fail at load on the DEFAULT tier"
     );
     // aesthetic/turbo ship manifest `mlx.quantize: 4`; still quantized, so still hit the guard.
-    let aesthetic = ImageRequest::from_payload(
+    let aesthetic = resolved_request(
         json!({ "model": "anima_aesthetic", "modelManifestEntry": { "mlx": { "quantize": 4 } } })
             .as_object()
             .unwrap(),
     );
     assert_eq!(resolve_quant(&aesthetic, None), (Some(Quant::Q4), Some(4)));
     // Only an explicit bf16 opt-out escaped the bug.
-    let bf16 = ImageRequest::from_payload(
+    let bf16 = resolved_request(
         json!({ "model": "anima_base", "advanced": { "mlxQuantize": 0 } })
             .as_object()
             .unwrap(),
@@ -1272,7 +1287,7 @@ fn sensenova_candle_tier_follows_the_request_not_a_forced_dense_tier() {
         std::fs::write(root.join(tier).join("model.safetensors"), "weights").unwrap();
     }
     let req = |model: &str, advanced: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({
                 "model": model,
                 "advanced": advanced,
@@ -1331,7 +1346,7 @@ fn sdxl_realvisxl_q4_tier_mlx_smoke() {
     // The worker resolution: a default `realvisxl` request (no mlxQuantize) prefers the q8 default
     // (sc-10726) but CLAMPS to installed — only the q4 tier was downloaded here (`--include "q4/*"`),
     // so it lands on q4/.
-    let req = ImageRequest::from_payload(
+    let req = resolved_request(
         json!({ "model": "realvisxl", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1395,7 +1410,7 @@ fn sdxl_realvisxl_q4_tier_mlx_smoke() {
 /// can be exercised without editing the compiled builtin registry.
 #[cfg(native_lane)]
 fn manifest_request(model: &str, mlx: serde_json::Value) -> ImageRequest {
-    ImageRequest::from_payload(
+    resolved_request(
         json!({ "model": model, "modelManifestEntry": { "mlx": mlx } })
             .as_object()
             .unwrap(),
@@ -1545,7 +1560,7 @@ fn dense_tier_subdir_descends_into_turnkeys_and_passes_flat_snapshots_through() 
 #[test]
 fn krea_model_subdir_selects_tier_and_falls_back_to_downloaded() {
     let krea_request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -1640,7 +1655,7 @@ const KREA_COMPONENTS: &[&str] = &[
 #[test]
 fn krea_tier_probe_skips_a_torn_tier_for_a_complete_sibling() {
     let krea_request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -1680,7 +1695,7 @@ fn krea_tier_probe_skips_a_torn_tier_for_a_complete_sibling() {
 /// loadable tier), never a silent no-op, and the resolver logs which tier is short.
 #[test]
 fn krea_tier_probe_still_returns_a_torn_tier_when_it_is_all_there_is() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "krea_2_raw", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1778,7 +1793,7 @@ fn seed_sana_tier(root: &Path, tier: &str, complete: bool) {
 #[test]
 fn sana_torn_tier_falls_through_to_a_complete_sibling() {
     let request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "sana_1600m", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -1804,7 +1819,7 @@ fn sana_torn_tier_falls_through_to_a_complete_sibling() {
 /// from before — the user gets the same loader error they would have, never a silent no-op.
 #[test]
 fn sana_torn_tier_is_returned_when_it_is_all_there_is() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "sana_1600m", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1822,7 +1837,7 @@ fn sana_torn_tier_is_returned_when_it_is_all_there_is() {
 /// their completeness stays `tier_components_present` — the added SANA branch never touches them.
 #[test]
 fn non_sana_standard_turnkey_ignores_the_sana_completeness_branch() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "flux_dev", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1859,7 +1874,7 @@ fn seed_boogu_tier(root: &Path, folder: &str, complete: bool) {
 /// complete sibling rather than crash the loader on the first-read `mllm/tokenizer.json`.
 #[test]
 fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "boogu_image", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1881,7 +1896,7 @@ fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resolved_tier_is_complete_flags_a_torn_sana_tier() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "sana_1600m", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1901,7 +1916,7 @@ fn resolved_tier_is_complete_flags_a_torn_sana_tier() {
 #[test]
 fn resolved_tier_is_complete_flags_a_torn_sensenova_tier_and_a_fast_tier_missing_its_marker() {
     let sensenova = |model: &str| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": model, "advanced": {} })
                 .as_object()
                 .unwrap(),
@@ -1957,7 +1972,7 @@ fn seed_anima_tier(root: &Path, tier: &str, complete: bool) {
 #[cfg(native_lane)]
 #[test]
 fn anima_torn_tier_falls_through_to_a_complete_sibling() {
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "anima_base", "advanced": {} })
             .as_object()
             .unwrap(),
@@ -1996,7 +2011,7 @@ fn krea_default_tier_clamps_to_the_floor() {
                 "advanced": { "mlxQuantize": bits },
             }),
         };
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        resolved_request(payload.as_object().unwrap())
     };
     // Krea turnkey carries packed q4/q8 + dense sharded bf16.
     let tmp = tempfile::tempdir().unwrap();
@@ -2045,7 +2060,7 @@ fn krea_default_tier_clamps_to_the_floor() {
 #[test]
 fn candle_lens_resolves_packed_turnkey_tier_subdir() {
     let lens_request = |bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": "lens", "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -2090,7 +2105,7 @@ fn candle_lens_resolves_packed_turnkey_tier_subdir() {
 #[test]
 fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
     let model_request = |model: &str, bits: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
             json!({ "model": model, "advanced": { "mlxQuantize": bits } })
                 .as_object()
                 .unwrap(),
@@ -2169,7 +2184,7 @@ fn ideogram_boogu_default_tier_clamps_to_the_floor() {
                 "advanced": { "mlxQuantize": bits },
             }),
         };
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        resolved_request(payload.as_object().unwrap())
     };
 
     // --- Boogu: a bf16 floor RAISES the picker-less default above the packed Q8 (the meaningful case,

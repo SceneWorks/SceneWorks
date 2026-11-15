@@ -38,7 +38,8 @@ async fn image_edit_job_dispatches_to_image_generate_handler() {
     }))
     .expect("image_edit job snapshot deserializes");
 
-    let error = super::image_jobs::run_image_generate_job(&api, &settings, &job)
+    let error =
+        super::image_jobs::run_image_generate_job(&api, &settings, &job, &Default::default())
         .await
         .expect_err("missing projectId is rejected by the image handler");
     assert!(

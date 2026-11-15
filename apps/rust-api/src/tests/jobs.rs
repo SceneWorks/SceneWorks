@@ -2946,7 +2946,8 @@ async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources(
     let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let payload = json!({
-        "model":"instantid_realvisxl", "mode":"character_image",
+        "projectId":"project-1", "model":"instantid_realvisxl", "mode":"character_image",
+        "prompt":"portrait",
         "referenceAssetId":"reference-asset",
         "modelManifestEntry":{
             "id":"instantid_realvisxl", "type":"image", "family":"sdxl",
@@ -3334,7 +3335,7 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3422,7 +3423,7 @@ async fn stalled_historical_metadata_never_delays_a_claim_past_its_deadline() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3511,7 +3512,7 @@ async fn historical_audio_carrier_refuses_same_id_catalog_replacement() {
             job_type: crate::JobType::AudioGenerate,
             project_id: None,
             project_name: None,
-            payload: json!({"model":"custom_tts","text":"hello","modelManifestEntry":original})
+            payload: json!({"projectId":"project-1","model":"custom_tts","prompt":"hello","modelManifestEntry":original})
                 .as_object()
                 .unwrap()
                 .clone(),
@@ -14988,6 +14989,25 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     assert_eq!(body["payload"]["hiresFix"]["steps"], 12);
     assert_eq!(body["payload"]["hiresFix"]["denoisingStrength"], 0.6);
     assert_eq!(body["payload"]["hiresFix"]["upscaleBy"], 1.5);
+    // The created job must also bind through the worker's resolved execution view. The endpoint
+    // stores authored JSON; this checks that the enabled second pass survives typed lowering.
+    let stored = body["payload"]
+        .as_object()
+        .expect("created payload")
+        .clone();
+    let facts = sceneworks_core::request_validation::facts_for_job(
+        &sceneworks_core::contracts::JobType::ImageGenerate,
+        &stored,
+    );
+    let effective = sceneworks_core::request_validation::resolve_request("image", &stored, &facts)
+        .expect("created image options resolve");
+    let bound = sceneworks_core::image_request::ImageRequest::from_resolved(
+        &stored,
+        effective.as_payload(),
+    )
+    .expect("created image options bind");
+    assert!(bound.hires_fix.enabled);
+    assert_eq!(bound.hires_fix.steps, 12);
     assert!(
         body["payload"]["hiresFix"].get("cfgScale").is_none(),
         "an omitted optional control is not minted: {body}"

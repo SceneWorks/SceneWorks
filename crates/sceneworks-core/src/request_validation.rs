@@ -29,6 +29,33 @@ pub use sceneworks_options::prompt_enhancement;
 
 pub use sceneworks_options::utility_validation;
 
+/// A server-created training plan carries checkpoint paths derived from previously validated
+/// job ids. Revalidate its client controls without presenting those server-owned paths as new
+/// client input. Call only after the plan has crossed the typed API admission boundary; keep the
+/// original plan for engine execution.
+pub fn trusted_training_plan_validation_view(
+    payload: &crate::contracts::JsonObject,
+) -> crate::contracts::JsonObject {
+    let mut view = payload.clone();
+    if let Some(advanced) = view
+        .get_mut("plan")
+        .and_then(|plan| plan.get_mut("config"))
+        .and_then(|config| config.get_mut("advanced"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in ["iris", "iris_restore"] {
+            if let Some(options) = advanced
+                .get_mut(key)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                options.remove("resume_from");
+                options.remove("load_from");
+            }
+        }
+    }
+    view
+}
+
 /// Authoritative catalog facts for training jobs are native metadata; callers never trust a
 /// submitted plan's limit declarations. Generation keeps its already-resolved ModelSpec entry.
 pub fn facts_for_job(

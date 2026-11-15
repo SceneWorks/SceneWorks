@@ -200,7 +200,7 @@ mod ideogram;
 mod jobs;
 use jobs::{
     append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
-    create_job, duplicate_job, get_job, get_job_metrics,
+    create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job, get_job_metrics,
     invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
     prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };

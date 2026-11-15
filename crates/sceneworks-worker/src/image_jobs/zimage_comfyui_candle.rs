@@ -5,7 +5,7 @@ use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::ColdLoadAdmission;
@@ -148,12 +148,26 @@ pub(super) fn zimage_comfyui_available(request: &ImageRequest, settings: &Settin
     )
 }
 
-/// Resolve and pin the complete source bundle for a production dispatch. Unlike the boolean routing
-/// probe, the caller keeps this value alive across the async job preamble and moves it into the
-/// handler, so the lexical component entries cannot be re-selected after admission.
+/// Exercise the legacy source selector in tests; production dispatch uses the resolved route below.
+#[cfg(test)]
 pub(super) fn prepare_zimage_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    prepare_zimage_comfyui_sources_with_preflight(request, settings, None)
+}
+
+pub(super) fn prepare_zimage_comfyui_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    prepare_zimage_comfyui_sources_with_preflight(execution, settings, Some(execution))
+}
+
+fn prepare_zimage_comfyui_sources_with_preflight(
+    request: &ImageRequest,
+    settings: &Settings,
+    execution: Option<&super::conditioning::ResolvedImageExecution>,
 ) -> WorkerResult<Option<ComfyuiZImagePaths>> {
     // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
     // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
@@ -161,11 +175,19 @@ pub(super) fn prepare_zimage_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::routing::imported_generate_request_supported(
-        request,
-        "z-image",
-        gen_core::ImportedModelSource::ComfyUiTree,
-    );
+    let descriptor = if let Some(execution) = execution {
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "z-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    } else {
+        super::routing::imported_generate_request_supported(
+            request,
+            "z-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    };
     if descriptor.as_ref().is_none_or(|descriptor| {
         super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
     }) {
@@ -242,7 +264,7 @@ fn zimage_comfyui_raw_settings(
     steps: u32,
     adapter_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
@@ -346,7 +368,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
 
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
+        resolved_option_or_manifest_u32(request, "steps", ZIMAGE_COMFYUI_DEFAULT_STEPS, 1..=50);
     let raw_settings = zimage_comfyui_raw_settings(request, steps, adapter_count);
     let conditioning =
         super::conditioning::resolve_img2img_init_generic(request, settings, project_path)?
@@ -384,9 +406,9 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         ),
         move |model, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt, conditioning), preview, on_progress| {
+                move |index, (seed, prompt, conditioning), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -402,20 +424,31 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                         cancel: cancel.clone(),
                         ..sampling_controls.clone()
                     };
-                    let output = match model.generate(&request, &mut *on_progress) {
-                        Ok(output) => output,
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "ComfyUI Z-Image generation failed: {error}"
-                            )));
-                        }
-                    };
-                    match output {
-                        GenerationOutput::Images(mut images) => {
+                    let completed =
+                        match model.generate_with_execution_report(&request, &mut *on_progress) {
+                            Ok(completed) => completed,
+                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(error) => {
+                                return Err(WorkerError::Engine(format!(
+                                    "ComfyUI Z-Image generation failed: {error}"
+                                )));
+                            }
+                        };
+                    match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                             let image = images.pop().ok_or_else(|| {
                                 WorkerError::Engine("ComfyUI Z-Image produced no image".to_owned())
                             })?;
+                            let mut facts = crate::JsonObject::new();
+                            facts.insert(
+                                "workerExecutionReport".into(),
+                                serde_json::to_value(completed.execution)
+                                    .map_err(WorkerError::Json)?,
+                            );
+                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
+                                index,
+                                facts,
+                            });
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

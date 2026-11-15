@@ -597,12 +597,23 @@ pub fn resolve_image_text_encoder_selection(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 fn selected_id(advanced: &serde_json::Map<String, Value>) -> WorkerResult<Option<&str>> {
     match advanced.get("textEncoderModel") {
-        None => Ok(None),
-        Some(Value::String(id)) if id == DEFAULT_SELECTION_ID => Ok(None),
-        Some(Value::String(id)) if !id.trim().is_empty() => Ok(Some(id)),
+        None => selected_id_value(None),
+        Some(Value::String(id)) => selected_id_value(Some(id)),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.textEncoderModel must be a non-empty string option id returned by GET /api/v1/models"
+                .to_owned(),
+        )),
+    }
+}
+
+#[cfg(native_lane)]
+fn selected_id_value(selection_id: Option<&str>) -> WorkerResult<Option<&str>> {
+    match selection_id {
+        None | Some(DEFAULT_SELECTION_ID) => Ok(None),
+        Some(id) if !id.trim().is_empty() => Ok(Some(id)),
         Some(_) => Err(WorkerError::InvalidPayload(
             "advanced.textEncoderModel must be a non-empty string option id returned by GET /api/v1/models"
                 .to_owned(),
@@ -626,15 +637,33 @@ fn base_snapshot_root(spec: &LoadSpec) -> WorkerResult<&Path> {
 
 /// Validate and prepare the selected encoder before any memory fit/planner/provider load sees the
 /// spec. The same returned spec must be reused for the eventual load.
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 pub(crate) fn prepare_selected_text_encoder(
-    mut spec: LoadSpec,
+    spec: LoadSpec,
     engine_id: &str,
     advanced: &serde_json::Map<String, Value>,
     manifest_entry: &serde_json::Map<String, Value>,
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
-    let Some(selection_id) = selected_id(advanced)? else {
+    prepare_selected_text_encoder_id(
+        spec,
+        engine_id,
+        selected_id(advanced)?,
+        manifest_entry,
+        settings,
+    )
+}
+
+/// Consume the request binder's selected encoder ID without consulting authored advanced JSON.
+#[cfg(native_lane)]
+pub(crate) fn prepare_selected_text_encoder_id(
+    mut spec: LoadSpec,
+    engine_id: &str,
+    selection_id: Option<&str>,
+    manifest_entry: &serde_json::Map<String, Value>,
+    settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    let Some(selection_id) = selected_id_value(selection_id)? else {
         return Ok(spec);
     };
     let contract =

@@ -20,9 +20,13 @@ use sceneworks_options::video_request::{
 };
 use serde_json::Value;
 
-pub use crate::h3_veda::{requested_h3_veda, H3VedaBudget, H3VedaSettings};
+pub use crate::h3_veda::{
+    requested_h3_veda, requested_h3_veda_wire, H3VedaBudget, H3VedaSettings, H3VedaWire,
+};
 
 use crate::contracts::JsonObject;
+use crate::portable_aux_bindings::PortableAuxBindings;
+use crate::resolved_options::{BindingError, BindingInput, Bound, Origin};
 // Compatibility exports preserve established callers while canonical image/neutral
 // request code imports its own owner. No image implementation remains in this module.
 pub use crate::image_limits::{
@@ -41,6 +45,168 @@ use crate::payload_util::{
     array_or_empty, clamped_u32, nonempty_string_or, object_or_empty, optional_i64, optional_id,
     string_list,
 };
+
+// These are effective controls, lowered once after the portable validator resolves the
+// request. None of the reads below supplies a fallback or interprets an authored spelling.
+// A missing provider/model default stays absent for the native route to resolve from its
+// typed model facts. `Bound` retains whether the value was authored or resolved.
+macro_rules! video_option_fields {
+    ($($field:ident: $ty:ty => $read:ident($key:literal),)+) => {
+        #[derive(Debug, Clone, PartialEq, Default)]
+        pub struct VideoOptions {
+            $(pub $field: Option<Bound<$ty>>,)+
+        }
+
+        impl VideoOptions {
+            pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+                Ok(Self {
+                    $($field: input.$read("advanced", $key)?,)+
+                })
+            }
+        }
+    };
+}
+
+video_option_fields! {
+    steps: i64 => integer("steps"),
+    guidance_scale: f64 => number("guidanceScale"),
+    scheduler_shift: f64 => number("schedulerShift"),
+    sampler: String => text("sampler"),
+    scheduler: String => text("scheduler"),
+    mlx_quantize: Option<i64> => nullable_integer("mlxQuantize"),
+    text_encoder_model: String => text("textEncoderModel"),
+    motion: String => text("motion"),
+    ltx_pipeline: String => text("ltxPipeline"),
+    distilled_variant: String => text("distilledVariant"),
+    precision: String => text("precision"),
+    quantization: String => text("quantization"),
+    transformer_variant: String => text("transformerVariant"),
+    vae_decoder: String => text("vaeDecoder"),
+    auto_duration: bool => boolean("autoDuration"),
+    auto_duration_min_seconds: f64 => number("autoDurationMinSeconds"),
+    auto_duration_max_seconds: f64 => number("autoDurationMaxSeconds"),
+    temporal_upsample_rounds: i64 => integer("temporalUpsampleRounds"),
+    use_distill_lora: bool => boolean("useDistillLora"),
+    distill_stage1_strength: f64 => number("distillStage1Strength"),
+    distill_stage2_strength: f64 => number("distillStage2Strength"),
+    use_uncensored_enhancer: bool => boolean("useUncensoredEnhancer"),
+    no_audio: bool => boolean("noAudio"),
+    lightning: bool => boolean("lightning"),
+    video_cfg_guidance_scale: f64 => number("videoCfgGuidanceScale"),
+    video_stg_guidance_scale: f64 => number("videoStgGuidanceScale"),
+    video_rescale_scale: f64 => number("videoRescaleScale"),
+    video_conditioning_strength: f64 => number("videoConditioningStrength"),
+    bridge_right_video_conditioning_strength: f64 => number("bridgeRightVideoConditioningStrength"),
+    image_conditioning_strength: f64 => number("imageConditioningStrength"),
+    last_frame_conditioning_strength: f64 => number("lastFrameConditioningStrength"),
+    image_frame_index: i64 => integer("imageFrameIndex"),
+    masking_strength: f64 => number("maskingStrength"),
+    conditioning_scale: f64 => number("conditioningScale"),
+    motion_anchor_frames: i64 => integer("motionAnchorFrames"),
+    veda: H3VedaWire => structured("veda"),
+    reference_image_short_edge: i64 => integer("referenceImageShortEdge"),
+    reference_image_resize_mode: String => text("referenceImageResizeMode"),
+    conditioning_fps: i64 => integer("conditioningFps"),
+    num_frames: i64 => integer("numFrames"),
+    motion_bucket_id: i64 => integer("motionBucketId"),
+    noise_aug_strength: f64 => number("noiseAugStrength"),
+    decode_chunk_size: i64 => integer("decodeChunkSize"),
+    enhance_prompt: bool => boolean("enhancePrompt"),
+    enhance_max_tokens: i64 => integer("enhanceMaxTokens"),
+    enhance_temperature: f64 => number("enhanceTemperature"),
+    timeline_action: String => text("timelineAction"),
+    timeline_context: JsonObject => structured("timelineContext"),
+}
+
+impl VideoOptions {
+    pub fn ltx25_vae_decoder(&self) -> Result<&str, String> {
+        let decoder = self
+            .vae_decoder
+            .as_ref()
+            .map(|bound| bound.value.as_str())
+            .unwrap_or(LTX25_VAE_DECODER_CONV);
+        match decoder {
+            LTX25_VAE_DECODER_CONV | LTX25_VAE_DECODER_DIFFUSION => Ok(decoder),
+            _ => {
+                Err("advanced.vaeDecoder must be \"conv\" or \"diffusion\" when present".to_owned())
+            }
+        }
+    }
+
+    pub fn temporal_upsample_rounds(&self) -> Result<u32, String> {
+        let rounds = self
+            .temporal_upsample_rounds
+            .as_ref()
+            .map(|bound| bound.value)
+            .unwrap_or(0);
+        u32::try_from(rounds)
+            .ok()
+            .filter(|rounds| *rounds <= LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS)
+            .ok_or_else(|| format!("advanced.temporalUpsampleRounds must be from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}, got {rounds}"))
+    }
+
+    pub fn auto_duration_range(&self) -> Result<Option<VideoAutoDurationRange>, String> {
+        if !self.auto_duration.as_ref().is_some_and(|bound| bound.value) {
+            return Ok(None);
+        }
+        let number = |key: &str, bound: &Option<Bound<f64>>| {
+            bound
+                .as_ref()
+                .map(|bound| bound.value as f32)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    format!("advanced.{key} must be a finite number when auto-duration is enabled")
+                })
+        };
+        let min_seconds = number("autoDurationMinSeconds", &self.auto_duration_min_seconds)?;
+        let max_seconds = number("autoDurationMaxSeconds", &self.auto_duration_max_seconds)?;
+        if min_seconds <= 0.0 || max_seconds <= 0.0 {
+            return Err("advanced auto-duration min/max seconds must both be positive".to_owned());
+        }
+        if min_seconds > max_seconds {
+            return Err(format!("advanced.autoDurationMinSeconds {min_seconds} exceeds advanced.autoDurationMaxSeconds {max_seconds}"));
+        }
+        Ok(Some(VideoAutoDurationRange {
+            min_seconds,
+            max_seconds,
+        }))
+    }
+
+    pub fn requested_reference_image_short_edge(&self) -> Result<Option<u32>, String> {
+        let Some(edge) = self.reference_image_short_edge.as_ref() else {
+            return Ok(None);
+        };
+        if !matches!(edge.origin, Origin::Authored { .. }) {
+            return Ok(None);
+        }
+        u32::try_from(edge.value)
+            .ok()
+            .filter(|edge| (REFERENCE_IMAGE_SHORT_EDGE_MIN..=REFERENCE_IMAGE_SHORT_EDGE_MAX).contains(edge))
+            .map(Some)
+            .ok_or_else(|| format!("advanced.referenceImageShortEdge must be from {REFERENCE_IMAGE_SHORT_EDGE_MIN} to {REFERENCE_IMAGE_SHORT_EDGE_MAX}, got {}", edge.value))
+    }
+
+    pub fn reference_image_resize_mode(&self) -> Result<ReferenceImageResizeMode, String> {
+        match self.reference_image_resize_mode.as_ref().map(|bound| bound.value.as_str()) {
+            None | Some("match") => Ok(ReferenceImageResizeMode::Match),
+            Some("max") => Ok(ReferenceImageResizeMode::Max),
+            Some("diffusers") => Ok(ReferenceImageResizeMode::Diffusers),
+            Some(_) => Err("advanced.referenceImageResizeMode must be one of \"match\", \"max\" or \"diffusers\"".to_owned()),
+        }
+    }
+
+    pub fn h3_veda_settings(
+        &self,
+        model: &str,
+        effective_steps: u32,
+    ) -> Result<Option<H3VedaSettings>, String> {
+        requested_h3_veda_wire(
+            model,
+            self.veda.as_ref().map(|bound| &bound.value),
+            effective_steps,
+        )
+    }
+}
 
 /// Every wire mode the video enqueue API admits. Model/backend eligibility is
 /// checked separately; MCP reachability compares its emitted modes to this contract.
@@ -174,6 +340,11 @@ pub struct VideoRequest {
     /// carries any is refused at enqueue unless the model declares
     /// `limits.maxReferenceAudioAssets`.
     pub reference_audio_asset_ids: Vec<String>,
+    /// Bound only by the worker after the source guard verifies its private dispatch clone.
+    pub portable_aux: PortableAuxBindings,
+    /// Effective advanced controls from the shared static resolver. The legacy parser leaves
+    /// this absent; execution must construct the request with `from_resolved`.
+    pub options: Option<VideoOptions>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -182,10 +353,35 @@ pub struct VideoRequest {
 }
 
 impl VideoRequest {
+    pub fn from_resolved(
+        authored: &JsonObject,
+        effective: &JsonObject,
+    ) -> Result<Self, BindingError> {
+        let mut request = Self::from_payload(effective);
+        request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
+        request.advanced = object_or_empty(authored, "advanced");
+        request.duration_was_explicit = parse_safe_float(authored.get("duration")).is_some();
+        Ok(request)
+    }
+
+    pub fn options(&self) -> &VideoOptions {
+        self.options
+            .as_ref()
+            .expect("video execution requires resolved advanced options")
+    }
+
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
         crate::payload_util::request_quant_bits(&self.advanced)
+    }
+
+    /// Execution tier selection from effective controls and the worker's verified source guard.
+    pub fn resolved_quant_bits(&self) -> Option<i64> {
+        crate::payload_util::request_quant_bits_typed(
+            self.options().mlx_quantize.as_ref(),
+            self.portable_aux.bound_tier(),
+        )
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
@@ -231,6 +427,8 @@ impl VideoRequest {
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
             reference_audio_asset_ids: string_list(payload, "referenceAudioAssetIds"),
+            portable_aux: PortableAuxBindings::default(),
+            options: None,
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }
@@ -238,14 +436,20 @@ impl VideoRequest {
 
     /// Shared API/worker controls, bounded by the actual selected H3 schedule.
     pub fn h3_veda_settings(&self) -> Result<Option<H3VedaSettings>, String> {
-        if !self.advanced.contains_key("veda") {
+        let options = self.options();
+        if options.veda.is_none() {
             return Ok(None);
         }
         let recipe = crate::minimax_h3_turbo::resolve_turbo_recipe(&self.model, &self.loras)?;
-        let steps = requested_steps(&self.advanced)
+        let steps = options
+            .steps
+            .as_ref()
+            .filter(|steps| matches!(steps.origin, Origin::Authored { .. }))
+            .and_then(|steps| u64::try_from(steps.value).ok())
+            .map(|steps| steps as u32)
             .or_else(|| recipe.map(|r| r.steps))
             .unwrap_or(50);
-        requested_h3_veda(&self.model, &self.advanced, steps)
+        options.h3_veda_settings(&self.model, steps)
     }
 
     /// Raw frame count from `duration * fps` (Python `round(duration * fps)`), at
@@ -1242,6 +1446,151 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn video_options_bind_canonical_values_with_authored_origin() {
+        let authored = payload(json!({"advanced": {
+            "steps": "8", "guidanceScale": "3.5", "noAudio": true
+        }}));
+        let effective = payload(json!({"advanced": {
+            "steps": 8, "guidanceScale": 3.5, "noAudio": true,
+            "referenceImageResizeMode": "match"
+        }}));
+        let options = VideoOptions::bind(&BindingInput::new(&authored, &effective)).unwrap();
+        assert_eq!(options.steps.unwrap().value, 8);
+        assert_eq!(options.guidance_scale.unwrap().value, 3.5);
+        assert!(options.no_audio.unwrap().value);
+        assert_eq!(options.reference_image_resize_mode.unwrap().value, "match");
+        assert!(options.vae_decoder.is_none());
+
+        let unresolved = VideoOptions::bind(&BindingInput::new(&authored, &authored));
+        assert!(matches!(
+            unresolved,
+            Err(BindingError::InvalidEffectiveValue {
+                id: "advanced.steps",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn h3_veda_schedule_uses_authored_steps_before_turbo_recipe() {
+        let payload = payload(json!({
+            "model":"minimax_h3",
+            "loras":[{"id":"minimax_h3_turbo_4step_768p"}],
+            "advanced":{"veda":{"enabled":true,"fullAttentionSteps":"3"}}
+        }));
+        let mut request = VideoRequest::from_payload(&payload);
+        let wire = serde_json::from_value(json!({
+            "enabled":true,"fullAttentionSteps":"3"
+        }))
+        .unwrap();
+        let mut options = VideoOptions {
+            veda: Some(Bound {
+                value: wire,
+                origin: Origin::Authored { spelling: "veda" },
+            }),
+            steps: Some(Bound {
+                value: 2,
+                origin: Origin::Default(sceneworks_options::DefaultRule::Absent),
+            }),
+            ..VideoOptions::default()
+        };
+        request.options = Some(options.clone());
+        assert!(
+            request.h3_veda_settings().is_ok(),
+            "turbo recipe has four steps"
+        );
+        options.steps.as_mut().unwrap().origin = Origin::Authored { spelling: "steps" };
+        request.options = Some(options);
+        assert!(
+            request.h3_veda_settings().is_err(),
+            "authored two steps exclude index three"
+        );
+    }
+
+    #[test]
+    fn explicit_null_quantization_stays_distinct_from_absence() {
+        let authored = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let bound = VideoOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
+        assert_eq!(bound.mlx_quantize.unwrap().value, None);
+        let absent = payload(json!({"advanced": {}}));
+        let bound = VideoOptions::bind(&BindingInput::new(&absent, &absent)).unwrap();
+        assert!(bound.mlx_quantize.is_none());
+    }
+
+    #[test]
+    fn typed_ltx_and_h3_controls_match_effective_values() {
+        let effective = payload(json!({"advanced": {
+            "vaeDecoder": "diffusion", "temporalUpsampleRounds": 2,
+            "autoDuration": true, "autoDurationMinSeconds": 3.0,
+            "autoDurationMaxSeconds": 7.0,
+            "referenceImageShortEdge": 1536,
+            "referenceImageResizeMode": "max"
+        }}));
+        let options = VideoOptions::bind(&BindingInput::new(&effective, &effective)).unwrap();
+        assert_eq!(options.ltx25_vae_decoder().unwrap(), "diffusion");
+        assert_eq!(options.temporal_upsample_rounds().unwrap(), 2);
+        assert_eq!(
+            options.auto_duration_range().unwrap(),
+            Some(VideoAutoDurationRange {
+                min_seconds: 3.0,
+                max_seconds: 7.0,
+            })
+        );
+        assert_eq!(
+            options.requested_reference_image_short_edge().unwrap(),
+            Some(1536)
+        );
+        assert_eq!(
+            options.reference_image_resize_mode().unwrap(),
+            ReferenceImageResizeMode::Max
+        );
+    }
+
+    #[test]
+    fn resolved_video_quantization_uses_only_verified_tier_when_key_absent() {
+        let bound_dispatch = payload(json!({"advanced": {
+            "__portableFrozenSources": true, "__portableBoundTier": "q4"
+        }}));
+        let portable_aux = PortableAuxBindings::from_trusted_dispatch(&bound_dispatch).unwrap();
+        let absent = payload(json!({"advanced": {}}));
+        let mut request = VideoRequest::from_resolved(&absent, &absent).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.resolved_quant_bits(), Some(4));
+
+        let explicit_null = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let mut request = VideoRequest::from_resolved(&explicit_null, &explicit_null).unwrap();
+        request.portable_aux = portable_aux;
+        assert_eq!(request.resolved_quant_bits(), None);
+    }
+
+    #[test]
+    fn resolved_video_preserves_authored_advanced_for_provenance() {
+        let authored = payload(json!({"advanced": {"steps": "8"}}));
+        let effective = payload(json!({"advanced": {"steps": 8}}));
+        let request = VideoRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.advanced.get("steps"), Some(&json!("8")));
+        assert_eq!(
+            request.options().steps.as_ref().map(|bound| bound.value),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn resolved_video_keeps_authored_duration_presence() {
+        let effective = payload(json!({"model":"ltx_2_5", "duration":6.0}));
+        let absent = payload(json!({"model":"ltx_2_5"}));
+        let automatic = VideoRequest::from_resolved(&absent, &effective).unwrap();
+        assert_eq!(automatic.duration, 6.0);
+        assert!(!automatic.duration_was_explicit);
+
+        let authored = payload(json!({"model":"ltx_2_5", "duration":"7.5"}));
+        let effective = payload(json!({"model":"ltx_2_5", "duration":7.5}));
+        let fixed = VideoRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(fixed.duration, 7.5);
+        assert!(fixed.duration_was_explicit);
     }
 
     // ----------------------------------------------------------------------------------------

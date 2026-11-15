@@ -920,10 +920,18 @@ mod stub_fallback_gate {
         value.as_object().expect("object").clone()
     }
 
+    fn image_request(payload: &Map<String, serde_json::Value>) -> ImageRequest {
+        ImageRequest::from_resolved(payload, payload).expect("resolved image request")
+    }
+
+    fn video_request(payload: &Map<String, serde_json::Value>) -> VideoRequest {
+        VideoRequest::from_resolved(payload, payload).expect("resolved video request")
+    }
+
     #[test]
     fn image_engine_model_without_weights_is_a_precise_error_not_a_stub() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = ImageRequest::from_payload(&object(json!({ "model": "z_image_turbo" })));
+        let request = image_request(&object(json!({ "model": "z_image_turbo" })));
         let gap = mlx_weights_gap(&request, &settings).expect("missing weights flagged");
         assert!(gap.contains("z_image_turbo"), "{gap}");
         assert!(gap.contains("Re-download"), "{gap}");
@@ -932,14 +940,14 @@ mod stub_fallback_gate {
     #[test]
     fn image_non_engine_model_keeps_the_stub_path() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = ImageRequest::from_payload(&object(json!({ "model": "base-model" })));
+        let request = image_request(&object(json!({ "model": "base-model" })));
         assert_eq!(mlx_weights_gap(&request, &settings), None);
     }
 
     #[test]
     fn image_explicit_model_path_resolves_and_passes_the_gate() {
         let (dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = ImageRequest::from_payload(&object(json!({
+        let request = image_request(&object(json!({
             "model": "z_image_turbo",
             "advanced": { "modelPath": dir.path().to_string_lossy() },
         })));
@@ -950,7 +958,7 @@ mod stub_fallback_gate {
     fn image_explicit_model_path_outside_data_dir_is_rejected() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let outside = tempdir().expect("outside tempdir");
-        let request = ImageRequest::from_payload(&object(json!({
+        let request = image_request(&object(json!({
             "model": "z_image_turbo",
             "advanced": { "modelPath": outside.path().to_string_lossy() },
         })));
@@ -962,7 +970,7 @@ mod stub_fallback_gate {
     #[test]
     fn video_engine_model_without_weights_is_a_precise_error_not_a_stub() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = VideoRequest::from_payload(&object(json!({ "model": "wan_2_2_i2v_14b" })));
+        let request = video_request(&object(json!({ "model": "wan_2_2_i2v_14b" })));
         let error = ensure_video_engine_weights(&request, &settings)
             .expect_err("missing Wan weights flagged");
         assert!(
@@ -974,7 +982,7 @@ mod stub_fallback_gate {
     #[test]
     fn video_svd_without_source_asset_is_an_invalid_payload_error() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = VideoRequest::from_payload(&object(json!({ "model": "svd" })));
+        let request = video_request(&object(json!({ "model": "svd" })));
         let error = ensure_video_engine_weights(&request, &settings)
             .expect_err("svd without a source image flagged");
         assert!(error.to_string().contains("source image"), "{error}");
@@ -983,7 +991,7 @@ mod stub_fallback_gate {
     #[test]
     fn video_non_engine_model_keeps_the_stub_path() {
         let (_dir, settings, _environment) = settings_with_empty_data_dir();
-        let request = VideoRequest::from_payload(&object(json!({ "model": "stub-model" })));
+        let request = video_request(&object(json!({ "model": "stub-model" })));
         ensure_video_engine_weights(&request, &settings).expect("non-engine model passes");
     }
 }

@@ -9,7 +9,7 @@
 use super::memory::gate_with_evict_reclaim;
 use super::nvfp4_host_eligible;
 use super::nvfp4_selected;
-use super::quantization::gate_tier_key;
+use super::quantization::gate_tier_key_resolved;
 use super::ImageRequest;
 use super::LoadSpec;
 #[cfg(test)]
@@ -160,11 +160,10 @@ pub(super) async fn admit_candle_base(
         CandleBaseEvidence::Catalog => (&request.model_manifest_entry, None),
         CandleBaseEvidence::Ungateable(reason) => (&request.model_manifest_entry, Some(reason)),
     };
-    let tier = gate_tier_key(
+    let tier = gate_tier_key_resolved(
         false,
         resolved_dir,
-        &request.advanced,
-        &request.model_manifest_entry,
+        request,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(resolved_dir)),
     );
     if !has_candle_tier_peak_row(evidence_entry, tier) {

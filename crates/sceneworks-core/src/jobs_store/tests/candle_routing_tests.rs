@@ -1243,7 +1243,7 @@ fn sana_absent_reference_carrier_routes_plain_txt2img_to_candle() {
     // lands in that arm, and `null` is exactly how the API normalizes every unset optional asset
     // carrier before the job is stored. So the normal absent-carrier encoding was classified as a
     // malformed conditioning shape and the job never reached the txt2img lane. The gate now shares
-    // `has_nonempty_or_malformed_string` with `sana_has_unsupported_carrier`, which is the same fix
+    // `has_nonempty_or_malformed_string` with the Candle SANA carrier gate, which is the same fix
     // the MLX twin already carries (sc-19712 F-1) and the same convention the worker uses (a blank
     // asset id is treated as absent).
     for model in ["sana_1600m", "sana_sprint_1600m"] {
@@ -5804,7 +5804,7 @@ fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
 
 /// sc-25680: Iris-3B routes to the generic Candle txt2img lane for plain text-to-image and refuses
 /// EXACTLY the list the MLX arm refuses (`iris_routes_plain_text_to_image_only` in the MLX tests) —
-/// the candle gate delegates to `iris_mlx_eligible`, and this pins both the delegation and the claim.
+/// the candle gate delegates to the resolved-facts Iris predicate, and this pins the claim.
 #[test]
 fn iris_routes_to_candle_for_plain_text_to_image_only() {
     use crate::jobs_store::routing::gaps::classify_candle_image_gap;
@@ -6170,7 +6170,7 @@ fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carrier
 
 /// sc-24214: Supra2-IMG routes to the generic Candle txt2img lane for plain 256x256 text-to-image and
 /// refuses EXACTLY the list the MLX arm refuses (`supra2_routes_plain_text_to_image_only` in the MLX
-/// tests) — the candle gate delegates to `supra2_mlx_eligible`, and this pins both the delegation and
+/// tests) — the candle gate delegates to the resolved-facts Supra2 predicate, and this pins the delegation and
 /// the claim. Same engine id on both lanes, so the off-Mac worker claims the very request a Mac does.
 #[test]
 fn supra2_routes_to_candle_for_plain_text_to_image_only() {

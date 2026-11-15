@@ -580,7 +580,12 @@ pub(crate) async fn run_vqa_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("vqa", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -602,9 +607,14 @@ pub(crate) async fn run_vqa_job(
 
     // VQA latency ~ output tokens + input vision tokens; both default low and are tunable per
     // request (top-level payload, mirroring the Python adapter — NOT under `advanced`).
-    let controls = sceneworks_core::options::sensenova_validation::resolve_vqa(&job.payload);
-    let max_new_tokens = controls.max_new_tokens as usize;
-    let max_image_pixels = controls.max_image_pixels;
+    let max_new_tokens = payload_int(&job.payload, "maxNewTokens", 256, 16, 2048) as usize;
+    let max_image_pixels = payload_int(
+        &job.payload,
+        "maxImagePixels",
+        768 * 768,
+        256 * 256,
+        2048 * 2048,
+    );
 
     let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
@@ -665,7 +675,7 @@ pub(crate) async fn run_vqa_job(
     // (sc-9123, the sc-8804 F-003 residual).
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
-    let answer = run_blocking_with_heartbeat(
+    let (answer, execution) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -673,43 +683,49 @@ pub(crate) async fn run_vqa_job(
         VQA_CANCEL_MESSAGE,
         "VQA task join",
         crate::no_cancel_ack(),
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
-            vqa_generate(
-                &weights_dir,
-                &source,
-                &question_for_vqa,
-                max_new_tokens,
-                max_image_pixels,
-                &job_id,
-                &task_cancel,
-                direct_admission,
-                || {
-                    if task_cancel.is_cancelled() {
-                        return Err(WorkerError::Canceled(VQA_CANCEL_MESSAGE.to_owned()));
-                    }
-                    runtime_handle.block_on(async {
-                        update_job(
-                            &ready_api,
-                            &job_id,
-                            image_progress(
-                                JobStatus::Running,
-                                ProgressStage::Generating,
-                                0.6,
-                                "Analyzing image.",
-                                None,
-                                &ready_backend,
-                            ),
-                        )
-                        .await
-                        .map(|_| ())
-                    })
-                },
-            )
-        }),
+        crate::load_progress::spawn_blocking(
+            move || -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
+                vqa_generate(
+                    &weights_dir,
+                    &source,
+                    &question_for_vqa,
+                    max_new_tokens,
+                    max_image_pixels,
+                    &job_id,
+                    &task_cancel,
+                    direct_admission,
+                    || {
+                        if task_cancel.is_cancelled() {
+                            return Err(WorkerError::Canceled(VQA_CANCEL_MESSAGE.to_owned()));
+                        }
+                        runtime_handle.block_on(async {
+                            update_job(
+                                &ready_api,
+                                &job_id,
+                                image_progress(
+                                    JobStatus::Running,
+                                    ProgressStage::Generating,
+                                    0.6,
+                                    "Analyzing image.",
+                                    None,
+                                    &ready_backend,
+                                ),
+                            )
+                            .await
+                            .map(|_| ())
+                        })
+                    },
+                )
+            },
+        ),
     )
     .await?;
 
-    let result = vqa_result_json(&answer, &question, &source_asset_id, &model_id);
+    let mut result = vqa_result_json(&answer, &question, &source_asset_id, &model_id);
+    result.insert(
+        "workerExecutionReport".into(),
+        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+    );
 
     update_job(
         api,
@@ -743,7 +759,7 @@ fn vqa_generate(
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
     on_loaded: impl FnOnce() -> WorkerResult<()>,
-) -> WorkerResult<String> {
+) -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
     })?;
@@ -788,8 +804,8 @@ fn vqa_generate(
         }],
         ..Default::default()
     };
-    let answer = runtime
-        .run_vqa_with_progress(
+    let (answer, execution) = runtime
+        .run_vqa_with_execution_report(
             &context,
             request,
             question,
@@ -803,7 +819,7 @@ fn vqa_generate(
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
         })?;
-    Ok(strip_reasoning(&answer))
+    Ok((strip_reasoning(&answer), execution))
 }
 
 /// Candle (Windows/CUDA) VQA seam — the off-Mac sibling of [`vqa_generate`] (sc-5501). Builds the
@@ -822,7 +838,7 @@ fn vqa_generate(
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
     on_loaded: impl FnOnce() -> WorkerResult<()>,
-) -> WorkerResult<String> {
+) -> WorkerResult<(String, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
@@ -864,8 +880,8 @@ fn vqa_generate(
         }],
         ..Default::default()
     };
-    let answer = runtime
-        .run_vqa_with_progress(
+    let (answer, execution) = runtime
+        .run_vqa_with_execution_report(
             &context,
             request,
             question,
@@ -879,7 +895,7 @@ fn vqa_generate(
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
         })?;
-    Ok(strip_reasoning(&answer))
+    Ok((strip_reasoning(&answer), execution))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
@@ -931,20 +947,35 @@ struct InterleaveParams {
 /// values and it can be unit-tested without weights or a device (sc-8839).
 #[cfg(native_lane)]
 fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> InterleaveParams {
-    let controls = sceneworks_core::options::sensenova_validation::resolve_interleave(payload);
-    let (width, height) = interleave_resolution_snap(controls.width, controls.height);
+    // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
+    // the Python `interleave_resolution_for`. Defaults 2048×1152 (16:9), clamped 256..4096.
+    let req_width = payload_int(payload, "width", 2048, 256, 4096);
+    let req_height = payload_int(payload, "height", 1152, 256, 4096);
+    let (width, height) = interleave_resolution_snap(req_width, req_height);
     InterleaveParams {
         width,
         height,
-        steps: controls.steps as usize,
-        cfg_scale: controls.guidance_scale as f32,
-        img_cfg_scale: controls.image_guidance_scale as f32,
-        timestep_shift: controls.timestep_shift as f32,
-        max_new_tokens: controls.max_new_tokens as usize,
-        max_images: controls.max_images as usize,
-        think_mode: controls.think_mode,
-        system_message: controls
-            .system_message
+        // Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
+        steps: advanced_int(request, "numInferenceSteps", 50, 1, 100) as usize,
+        cfg_scale: advanced_float(request, "guidanceScale", 4.0),
+        img_cfg_scale: advanced_float(request, "imageGuidanceScale", 1.0),
+        timestep_shift: request
+            .resolved_advanced
+            .as_ref()
+            .expect("interleave options must be resolved")
+            .interleave_timestep_shift
+            .as_ref()
+            .map(|bound| bound.value as f32)
+            .unwrap_or(3.0),
+        max_new_tokens: advanced_int(request, "maxNewTokens", 2048, 64, 8192) as usize,
+        max_images: advanced_int(request, "maxImages", 6, 1, 10) as usize,
+        // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.
+        think_mode: request.advanced_bool("thinkMode").unwrap_or(false),
+        system_message: request
+            .advanced_text("systemMessage")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
     }
@@ -966,7 +997,12 @@ pub(crate) async fn run_interleave_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("interleave", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -1094,8 +1130,8 @@ pub(crate) async fn run_interleave_job(
     );
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
-    let interleave_task =
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
+    let interleave_task = crate::load_progress::spawn_blocking(
+        move || -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
             interleave_generate(
                 &weights_dir,
                 &input_images,
@@ -1105,12 +1141,13 @@ pub(crate) async fn run_interleave_job(
                 &task_cancel,
                 direct_admission,
             )
-        });
+        },
+    );
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
     // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
     // is never falsely marked `interrupted` (sc-8390). Cancelable mid-rollout via the threaded
     // flag (sc-9123).
-    let (generated_text, images) = run_blocking_with_heartbeat(
+    let (generated_text, images, execution) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1168,7 +1205,7 @@ pub(crate) async fn run_interleave_job(
             images,
         )
     });
-    let result = run_blocking_with_heartbeat(
+    let mut result = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1179,6 +1216,14 @@ pub(crate) async fn run_interleave_job(
         write_task,
     )
     .await?;
+    let report = serde_json::to_value(execution).map_err(WorkerError::Json)?;
+    if let Some(writes) = result.get_mut("assetWrites").and_then(Value::as_array_mut) {
+        for write in writes {
+            if let Some(fact) = write.as_object_mut() {
+                fact.insert("workerExecutionReport".into(), report.clone());
+            }
+        }
+    }
 
     update_job(
         api,
@@ -1211,7 +1256,7 @@ fn interleave_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
-) -> WorkerResult<(String, Vec<Image>)> {
+) -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
     })?;
@@ -1273,8 +1318,8 @@ fn interleave_generate(
             .collect(),
         ..Default::default()
     };
-    let out = runtime
-        .run_interleave(
+    let (out, execution) = runtime
+        .run_interleave_with_execution_report(
             &context,
             request,
             prompt,
@@ -1304,7 +1349,7 @@ fn interleave_generate(
             WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
         })?);
     }
-    Ok((out.text, decoded))
+    Ok((out.text, decoded, execution))
 }
 
 /// Candle (Windows/CUDA) interleave seam — the off-Mac sibling of [`interleave_generate`] (sc-5501).
@@ -1320,7 +1365,7 @@ fn interleave_generate(
     job_id: &str,
     cancel: &gen_core::CancelFlag,
     direct_admission: Option<SenseNovaDirectAdmission>,
-) -> WorkerResult<(String, Vec<Image>)> {
+) -> WorkerResult<(String, Vec<Image>, gen_core::core_llm::ExecutionIdentity)> {
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
@@ -1380,8 +1425,8 @@ fn interleave_generate(
             .collect(),
         ..Default::default()
     };
-    let out = runtime
-        .run_interleave_with_progress(
+    let (out, execution) = runtime
+        .run_interleave_with_execution_report(
             &context,
             request,
             prompt,
@@ -1409,7 +1454,7 @@ fn interleave_generate(
             WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
         })?);
     }
-    Ok((out.text, decoded))
+    Ok((out.text, decoded, execution))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; the capability is not
@@ -1741,6 +1786,40 @@ fn strip_reasoning(text: &str) -> String {
         .to_owned()
 }
 
+/// `safe_int` over a top-level payload field: parse (int / float / numeric string) else `default`,
+/// then clamp to `[lo, hi]`. Used by the macOS handlers; also unit-tested cross-platform.
+#[cfg(any(test, native_lane))]
+fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
+    payload
+        .get(key)
+        .and_then(json_to_i64)
+        .unwrap_or(default)
+        .clamp(lo, hi)
+}
+
+/// `safe_int` over an `advanced` field (same parse/clamp as [`payload_int`]).
+#[cfg(native_lane)]
+fn advanced_int(request: &ImageRequest, key: &'static str, default: i64, lo: i64, hi: i64) -> i64 {
+    request.advanced_i64(key).unwrap_or(default).clamp(lo, hi)
+}
+
+/// `_advanced_float`: parse an `advanced` field as f32 else `default`.
+#[cfg(native_lane)]
+fn advanced_float(request: &ImageRequest, key: &'static str, default: f32) -> f32 {
+    request
+        .advanced_f64(key)
+        .map(|value| value as f32)
+        .unwrap_or(default)
+}
+
+#[cfg(any(test, native_lane))]
+fn json_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|float| float as i64))
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1814,6 +1893,32 @@ mod tests {
         assert_eq!(strip_reasoning("  plain answer  "), "plain answer");
     }
 
+    #[test]
+    fn payload_int_parses_clamps_and_defaults() {
+        let map = json!({ "a": 500, "b": "1024", "c": 3.0, "d": "bad" })
+            .as_object()
+            .cloned()
+            .unwrap();
+        assert_eq!(payload_int(&map, "a", 256, 16, 2048), 500);
+        assert_eq!(payload_int(&map, "b", 256, 16, 2048), 1024);
+        assert_eq!(
+            payload_int(&map, "c", 256, 16, 2048),
+            16,
+            "3 clamps up to lo"
+        );
+        assert_eq!(
+            payload_int(&map, "d", 256, 16, 2048),
+            256,
+            "unparseable → default"
+        );
+        assert_eq!(payload_int(&map, "missing", 768, 16, 2048), 768);
+        assert_eq!(
+            payload_int(&map, "a", 256, 16, 400),
+            400,
+            "500 clamps to hi"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn interleave_resolution_snaps_to_aspect_bucket() {
@@ -1882,7 +1987,7 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
-        let request = ImageRequest::from_payload(&payload);
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let params = resolve_interleave_params(&request, &payload);
         assert_eq!(
             params,
@@ -1913,7 +2018,7 @@ mod tests {
             .as_object()
             .cloned()
             .unwrap();
-        let request = ImageRequest::from_payload(&payload);
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let params = resolve_interleave_params(&request, &payload);
         assert_eq!(
             params,
@@ -2864,7 +2969,9 @@ mod tests {
             "prompt": "a fox",
             "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
         });
-        let request = ImageRequest::from_payload(payload.as_object().expect("payload object"));
+        let authored = payload.as_object().expect("payload object");
+        let request =
+            ImageRequest::from_resolved(authored, authored).expect("resolved image request");
         let job: JobSnapshot =
             serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
                 .expect("job snapshot deserializes");

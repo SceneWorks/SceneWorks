@@ -146,13 +146,15 @@ async fn seedvr2_upscale_real_weight_smoke() {
     }
     let faithful = run_seedvr2_upscale(dir.clone(), img.clone(), 2, 0.0, 7, CancelFlag::new())
         .await
-        .expect("seedvr2 upscale (softness 0)");
+        .expect("seedvr2 upscale (softness 0)")
+        .0;
     assert_eq!((faithful.width(), faithful.height()), (96, 64));
 
     // The softness request field must reach the engine: a heavily-softened run changes the result.
     let softened = run_seedvr2_upscale(dir, img, 2, 0.8, 7, CancelFlag::new())
         .await
-        .expect("seedvr2 upscale (softness 0.8)");
+        .expect("seedvr2 upscale (softness 0.8)")
+        .0;
     assert_eq!((softened.width(), softened.height()), (96, 64));
     assert_ne!(
         faithful.as_raw(),

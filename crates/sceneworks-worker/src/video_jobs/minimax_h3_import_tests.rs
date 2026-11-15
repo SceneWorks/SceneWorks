@@ -27,6 +27,23 @@ fn imported_minimax_h3_request(
     }))
 }
 
+fn imported_minimax_h3_request_with_quant(
+    model: &str,
+    entry: &serde_json::Map<String, Value>,
+    bits: u64,
+) -> VideoRequest {
+    request(json!({
+        "projectId": "p",
+        "model": model,
+        "mode": "text_to_video",
+        "prompt": "a courier crosses a rain-lit square",
+        "duration": 6.0,
+        "fps": 24,
+        "modelManifestEntry": entry,
+        "advanced": {"mlxQuantize": bits},
+    }))
+}
+
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
@@ -1767,10 +1784,10 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
         }
         let probe = ArmProbe::default();
         for explicit in [None, Some(if tier == "bf16" { 0 } else { 4 })] {
-            let mut request = imported_minimax_h3_request("bound_h3", &entry);
-            if let Some(bits) = explicit {
-                request.advanced.insert("mlxQuantize".into(), json!(bits));
-            }
+            let request = match explicit {
+                Some(bits) => imported_minimax_h3_request_with_quant("bound_h3", &entry, bits),
+                None => imported_minimax_h3_request("bound_h3", &entry),
+            };
             let raw = drive_bound_component_import(&settings,&request,&probe).unwrap_or_else(|error| panic!("tier={tier}, explicit={explicit:?}, main_complete={main_complete}: {error}"));
             let spec = probe.spec.lock().unwrap().clone().unwrap();
             assert!(
@@ -1798,8 +1815,7 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
                 entry["downloads"]
             );
         }
-        let mut different = imported_minimax_h3_request("bound_h3", &entry);
-        different.advanced.insert("mlxQuantize".into(), json!(8));
+        let different = imported_minimax_h3_request_with_quant("bound_h3", &entry, 8);
         let probe = ArmProbe::default();
         let error = drive_bound_component_import(&settings, &different, &probe).unwrap_err();
         assert!(

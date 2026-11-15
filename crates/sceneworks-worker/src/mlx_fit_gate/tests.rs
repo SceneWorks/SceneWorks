@@ -2395,8 +2395,11 @@ fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions()
         )
         .unwrap();
     let payload = serde_json::json!({"projectId":project.id,"model":"flux3_klein","mode":"edit_image","sourceAssetId":asset["id"],"width":1024,"height":1024,"count":1});
-    let authored =
-        sceneworks_core::image_request::ImageRequest::from_payload(payload.as_object().unwrap());
+    let authored = sceneworks_core::image_request::ImageRequest::from_resolved(
+        payload.as_object().unwrap(),
+        payload.as_object().unwrap(),
+    )
+    .unwrap();
     let references = crate::image_jobs::flux3_references::resolve_owned_references(
         &authored,
         data.path(),

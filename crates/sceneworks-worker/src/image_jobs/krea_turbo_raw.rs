@@ -14,7 +14,7 @@ use super::load_spec::load_spec;
 use super::mlx_model;
 use super::quantization::resolve_quant;
 use super::resolve_seed;
-use super::sampling::resolve_steps;
+use super::sampling::resolve_authored_steps;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream;
 use super::CancelFlag;
@@ -123,9 +123,24 @@ pub(super) fn request_carries_img2img_reference(request: &ImageRequest) -> bool 
 /// `mlx_available` arm so it wins over plain Raw t2i (which would run the 52-step true-CFG regime and
 /// never accelerate).
 pub(super) fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_turbo_on_raw_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn krea_turbo_on_raw_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_turbo_on_raw_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn krea_turbo_on_raw_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == KREA_RAW_MODEL_ID
         && request.mode != "edit_image"
-        && pose_entries(request).is_empty()
+        && pose_count == 0
         && !request_carries_img2img_reference(request)
         && request_has_accelerator_lora(request)
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -133,19 +148,20 @@ pub(super) fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Set
 
 /// Flat telemetry for a turbo-on-Raw generation (parity with [`mlx_raw_settings`] /
 /// [`krea_edit_raw_settings`]). Records the Raw repo/tier that actually loaded, the turbo step count,
-/// a null `guidanceScale` (CFG off), and a `samplingRegime` marker naming the engine the sampler ran.
-fn krea_turbo_on_raw_raw_settings(
+/// the applied guidance (null when CFG is off), and a `samplingRegime` marker naming the engine.
+pub(super) fn krea_turbo_on_raw_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
+    guidance: Option<f32>,
     quant_bits: Option<i64>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("steps".to_owned(), json!(steps));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    // CFG off: the turbo regime is a single conditional forward, so no guidance scale is forwarded.
-    raw.entry("guidanceScale".to_owned()).or_insert(Value::Null);
+    raw.insert("guidanceScale".to_owned(), json!(guidance));
     raw.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(|bits| json!(bits)).unwrap_or(Value::Null),
@@ -159,10 +175,15 @@ fn krea_turbo_on_raw_raw_settings(
     raw
 }
 
-/// Generate one turbo-on-Raw image (plain t2i, no reference/edit conditioning). CFG-free: no negative
-/// prompt and no guidance are forwarded — the `krea_2_turbo` generator runs a single conditional
-/// forward per step on the fixed-mu `turbo_schedule`. Mirrors [`krea_edit_generate_one`] minus the edit
-/// conditioning.
+pub(super) fn krea_turbo_on_raw_guidance(request: &ImageRequest) -> Option<f32> {
+    request
+        .authored_advanced_f64("guidanceScale")
+        .map(|value| value as f32)
+}
+
+/// Generate one turbo-on-Raw image (plain t2i, no reference/edit conditioning). By default
+/// the Turbo generator runs a single conditional forward per step on the fixed-mu schedule;
+/// authored guidance can request the existing experimental CFG path.
 #[allow(clippy::too_many_arguments)]
 fn krea_turbo_on_raw_generate_one(
     generator: &dyn Generator,
@@ -176,7 +197,7 @@ fn krea_turbo_on_raw_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         // CFG off — no negative branch (the distilled regime baked guidance into the weights).
@@ -196,15 +217,17 @@ fn krea_turbo_on_raw_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("Krea turbo-on-Raw generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("Krea turbo-on-Raw generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea turbo-on-Raw generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "Krea turbo-on-Raw generator returned non-image output".to_owned(),
@@ -240,16 +263,16 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     // Raw, so it loads the Raw weights + adapters unchanged; its stored descriptor id is what makes
     // the pinned engine run `render_turbo` (fixed mu 1.15, 8-step, single conditional forward) instead
     // of `render_base` (dynamic-mu, 52-step, true CFG). Resolving the regime knobs against this Turbo
-    // descriptor yields the whole regime for free: `resolve_steps` defaults to the distilled 8 (an
-    // explicit `advanced.steps` is still honored). Guidance / negative are left off unconditionally —
-    // the Turbo generator is single-forward and rejects both.
+    // descriptor yields the Turbo defaults only when the caller omitted those controls. An
+    // explicit step or guidance override still wins; Raw manifest defaults cannot cross regimes.
     let turbo = mlx_model(KREA_TURBO_ENGINE_ID).ok_or_else(|| {
         WorkerError::InvalidPayload("Krea 2 Turbo engine is not registered".to_owned())
     })?;
     let engine_id = turbo.engine_id();
 
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
-    let steps = resolve_steps(request, &turbo);
+    let steps = resolve_authored_steps(request, &turbo);
+    let guidance = krea_turbo_on_raw_guidance(request);
     let adapters = resolve_adapters(request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
@@ -278,7 +301,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
-    let raw_settings = krea_turbo_on_raw_raw_settings(request, &repo, steps, quant_bits);
+    let raw_settings = krea_turbo_on_raw_raw_settings(request, &repo, steps, guidance, quant_bits);
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
@@ -296,12 +319,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     let spec = spec.with_offload_policy(offload_policy);
 
     let (sampler, scheduler, scheduler_shift) =
-        super::sampling::read_advanced_sampling_knobs(&request.advanced);
-    let guidance = sceneworks_core::image_sampling_controls::effective_guidance(
-        &request.advanced,
-        &JsonObject::new(),
-    )
-    .map(|value| value as f32);
+        super::sampling::read_resolved_image_sampling_knobs(request);
     let sampling = GenerationRequest {
         sampler,
         scheduler,
@@ -320,13 +338,13 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let (out_w, out_h, pixels) = krea_turbo_on_raw_generate_one(
+                    let (out_w, out_h, pixels, execution) = krea_turbo_on_raw_generate_one(
                         generator,
                         &prompt,
                         width,
@@ -339,6 +357,12 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },
             )

@@ -88,7 +88,7 @@ fn worker_settings(api_url: String, api_settings: &crate::Settings) -> scenework
     worker
 }
 
-async fn claim_as_existing_worker(app: &axum::Router, job_id: &str) {
+async fn claim_as_existing_worker(app: &axum::Router, job_id: &str) -> Option<String> {
     let (status, claimed) = request(
         app.clone(),
         "POST",
@@ -98,6 +98,9 @@ async fn claim_as_existing_worker(app: &axum::Router, job_id: &str) {
     .await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
     assert_eq!(claimed["job"]["id"], job_id);
+    claimed["executionClaimCapability"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 struct FixtureSources {
@@ -226,6 +229,7 @@ fn fixture_bootstrap_rss_bytes() -> Result<u64, String> {
         .ok_or_else(|| "CPU API bootstrap RSS is zero or overflowed".to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_fixture_training(
     app: &axum::Router,
     worker: &sceneworks_worker::Settings,
@@ -234,6 +238,7 @@ async fn execute_fixture_training(
     variant: MossImageVariant,
     base: &str,
     sources: FixtureSources,
+    execution_claim_capability: Option<String>,
 ) -> sceneworks_worker::WorkerResult<()> {
     let (_, claimed) = request(
         app.clone(),
@@ -344,6 +349,10 @@ async fn execute_fixture_training(
                 "the API bootstrap plus conservative native header demand does not fit the admitted 2 GiB CPU validation contract",
             );
         },
+    );
+    let execution = sceneworks_worker::test_support::with_acceptance_execution_claim(
+        execution_claim_capability,
+        execution,
     );
     tokio::pin!(execution);
     match tokio::time::timeout(Duration::from_secs(120), &mut execution).await {
@@ -646,7 +655,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 assert!(job["payload"].get("subjectMaskPrepass").is_none(), "uploaded masks must not schedule SAM3 or another model job");
                 let original_job_id = job["id"].as_str().unwrap().to_owned();
                 let mut job_id = original_job_id.clone();
-                claim_as_existing_worker(&app, &job_id).await;
+                let execution_claim_capability = claim_as_existing_worker(&app, &job_id).await;
                 if exercise_resume {
                     *cancel_once.lock().unwrap() = Some(job_id.clone());
                 }
@@ -656,6 +665,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                             observed_cancel: Arc::clone(&observed_cancel),
                             probe: probe.clone(),
                         },
+                    execution_claim_capability,
                 ).await;
                 diagnostic["phase"] = json!("initial_training_returned");
                 if let Err(error) = capture_run_diagnostic(&app, &job_id, &mut diagnostic, probe.as_ref(), &run).await {
@@ -698,7 +708,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                     expected_plan["config"]["advanced"]["resume"] = json!(true);
                     assert_eq!(resumed["payload"]["plan"], expected_plan, "retry must preserve the original horizon, seed, dataset and numerical controls");
                     job_id = resumed["id"].as_str().unwrap().to_owned();
-                    claim_as_existing_worker(&app, &job_id).await;
+                    let execution_claim_capability = claim_as_existing_worker(&app, &job_id).await;
                     // A fresh real trainer on the SAME worker restores the existing bundle;
                     // no worker process, model loop or mock output is substituted.
                     let resumed_run = execute_fixture_training(
@@ -707,6 +717,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                             observed_cancel: Arc::clone(&observed_cancel),
                             probe: probe.clone(),
                         },
+                        execution_claim_capability,
                     ).await;
                     diagnostic["phase"] = json!("resumed_training_returned");
                     if let Err(error) = capture_run_diagnostic(&app, &job_id, &mut diagnostic, probe.as_ref(), &resumed_run).await {

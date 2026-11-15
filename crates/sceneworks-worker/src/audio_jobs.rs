@@ -48,6 +48,7 @@ fn classify_audio_synthesis_error(context: &str, error: gen_core::Error) -> Work
 /// has far fewer knobs than video, so it needs no shared-core struct). Infallible parse: missing
 /// fields fall back to sane defaults and `project_id` may be empty — the preflight rejects that.
 struct AudioRequest {
+    portable_aux: sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     project_id: String,
     model: String,
     model_provided: bool,
@@ -200,6 +201,7 @@ impl AudioRequest {
         let model = string("model");
         let base_model = string("baseModel");
         Self {
+            portable_aux: Default::default(),
             project_id: string("projectId").unwrap_or_default(),
             model_provided: model.is_some(),
             model: model.unwrap_or_else(|| "kokoro_82m".to_owned()),
@@ -962,12 +964,20 @@ pub(crate) async fn run_audio_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     // YuE2 (sc-22999): its own contract, eligibility, run directory and provenance.
     if crate::yue2_jobs::is_yue2_job(&job.payload) {
         return crate::yue2_jobs::run_yue2_job(api, settings, job).await;
     }
-    run_audio_generate_job_using(api, settings, job, crate::inference_runtime::load_audio).await
+    run_audio_generate_job_using(
+        api,
+        settings,
+        job,
+        portable_aux,
+        crate::inference_runtime::load_audio,
+    )
+    .await
 }
 
 /// [`run_audio_generate_job`] with the single-generator lane's loader injected (sc-19384) — the same
@@ -979,11 +989,13 @@ async fn run_audio_generate_job_using(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
 ) -> WorkerResult<()> {
-    let request = AudioRequest::from_payload(&job.payload);
+    let mut request = AudioRequest::from_payload(&job.payload);
+    request.portable_aux = portable_aux.clone();
     refuse_symbolic_song_without_block(&request)?;
     audio_preflight(&request)?;
     // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit before the
@@ -1102,16 +1114,30 @@ async fn run_audio_generate_job_using(
     // replay record omits the (unused) base-TTS model that only the conversion chain carries.
     let native_clone = matches!(synthesis, AudioSynthesis::NativeVoiceClone(_));
     let mut resolved_tier = None;
-    let track = match synthesis {
+    let (track, execution_report, execution_stages) = match synthesis {
         AudioSynthesis::Single(single) => {
             resolved_tier = single.tier.as_ref().map(|tier| tier.name.clone());
-            run_audio_synthesis_with(api, settings, job, &request, single, load_generator).await?
+            let (track, execution) = run_audio_synthesis_with_completed(
+                api,
+                settings,
+                job,
+                &request,
+                single,
+                load_generator,
+            )
+            .await?;
+            (track, Some(execution), Vec::new())
         }
         AudioSynthesis::VoiceClone(plan) => {
-            run_voice_clone_synthesis(api, settings, job, &request, plan).await?
+            let (track, stages) =
+                run_voice_clone_synthesis_completed(api, settings, job, &request, plan).await?;
+            (track, None, stages)
         }
         AudioSynthesis::NativeVoiceClone(plan) => {
-            run_native_voice_clone_synthesis(api, settings, job, &request, plan).await?
+            let (track, execution) =
+                run_native_voice_clone_synthesis_completed(api, settings, job, &request, plan)
+                    .await?;
+            (track, Some(execution), Vec::new())
         }
     };
 
@@ -1247,7 +1273,21 @@ async fn run_audio_generate_job_using(
         facts.push(stem_asset_fact(&fact, &plan, stem_plan, duration));
     }
     facts.insert(0, fact);
-    let result = audio_streaming_result(&plan, &request, facts);
+    if let Some(execution) = execution_report {
+        let report = serde_json::to_value(execution).map_err(WorkerError::Json)?;
+        for fact in &mut facts {
+            fact.as_object_mut()
+                .expect("audio fact is an object")
+                .insert("workerExecutionReport".into(), report.clone());
+        }
+    }
+    let mut result = audio_streaming_result(&plan, &request, facts);
+    if !execution_stages.is_empty() {
+        result.insert(
+            "workerExecutionStages".into(),
+            serde_json::to_value(execution_stages).map_err(WorkerError::Json)?,
+        );
+    }
     update_job(
         api,
         &job.id,
@@ -1514,6 +1554,7 @@ async fn run_audio_synthesis_using(
 /// shared engine [`CancelFlag`] that reaches [`GenerationRequest::cancel`] is tripped mid-generation
 /// (not only by the post-synthesis `check_cancel` after the whole clip has rendered). Returns the
 /// engine [`AudioTrack`] (`gen_core`'s, stems included) for the caller to write + register.
+#[cfg(test)]
 async fn run_audio_synthesis_with(
     api: &ApiClient,
     settings: &Settings,
@@ -1524,6 +1565,21 @@ async fn run_audio_synthesis_with(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_audio_synthesis_with_completed(api, settings, job, request, single, load_generator)
+        .await
+        .map(|(track, _)| track)
+}
+
+async fn run_audio_synthesis_with_completed(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    single: SinglePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
     let SinglePlan {
         model_dir,
         tier,
@@ -1611,13 +1667,11 @@ async fn run_audio_synthesis_with(
     // removed), so this attach is the sole offline Cover source. An absent snapshot stages nothing; the
     // engine then surfaces the actionable Cover-needs-`sft_cover` error on the request that needs it.
     if request.edit_mode.as_deref() == Some("cover") {
-        let bound = job
-            .payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .filter(|advanced| crate::portable_aux_sources::has_bound_aux_paths(advanced));
-        if let Some(advanced) = bound {
-            let path = crate::portable_aux_sources::bound_aux_path(advanced, "sft_cover")
+        if request.portable_aux.has_paths() {
+            let path = request
+                .portable_aux
+                .path("sft_cover")
+                .map(PathBuf::from)
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload("portable ACE Cover source is not bound".to_owned())
                 })?;
@@ -1662,7 +1716,7 @@ async fn run_audio_synthesis_with(
     };
     let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
             let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -1689,21 +1743,27 @@ async fn run_audio_synthesis_with(
             };
             // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
-            // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
-            // aggregate `GenerationOutput` as `generate`, so the written asset is identical either way.
-            let output = if generator.descriptor().capabilities.supports_streaming {
+            // exact one-shot path unchanged. The streaming report method must run the
+            // provider's incremental path once and return that attempt's aggregate and facts.
+            let completed = if generator.descriptor().capabilities.supports_streaming {
                 let mut on_chunk = |chunk: gen_core::AudioChunk| {
                     // The 1-based running chunk count.
                     let update = fold.borrow_mut().chunk(chunk.index.saturating_add(1));
                     publish(update);
                 };
-                generator.generate_streaming(&req, &mut on_chunk, &mut on_progress)
+                generator
+                    .generate_streaming_with_execution_report(&req, &mut on_chunk, &mut on_progress)
             } else {
-                generator.generate(&req, &mut on_progress)
+                generator.generate_with_execution_report(&req, &mut on_progress)
             }
             .map_err(|error| classify_audio_synthesis_error("audio generation failed", error))?;
+            let (output, execution) = completed
+                .generation
+                .output
+                .map(|output| (output, completed.execution))
+                .ok_or_else(|| WorkerError::Engine("audio model returned no output".into()))?;
             match output {
-                GenerationOutput::Audio(track) => Ok(track),
+                GenerationOutput::Audio(track) => Ok((track, execution)),
                 // Either channel count is the same defect: an audio job asked for a track and
                 // got pixels. `ImagesRgba` (sc-24111) is unreachable here — this request never
                 // sets `output_channels` — but the match must name it.
@@ -1883,14 +1943,17 @@ fn resolve_voice_clone_plan(
 /// product-layer orchestration of two backend calls — a single worker job so the library sees exactly
 /// one asset (the converted clip). Returns the converted `gen_core::AudioTrack` for the caller to write
 /// + register, exactly like [`run_audio_synthesis`].
-async fn run_voice_clone_synthesis(
+async fn run_voice_clone_synthesis_completed(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &AudioRequest,
     plan: VoiceClonePlan,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_voice_clone_synthesis_using(
+) -> WorkerResult<(
+    gen_core::AudioTrack,
+    Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>,
+)> {
+    run_voice_clone_synthesis_using_completed(
         api,
         settings,
         job,
@@ -1902,13 +1965,13 @@ async fn run_voice_clone_synthesis(
     .await
 }
 
-/// [`run_voice_clone_synthesis`] with the base-TTS + converter loaders injected (sc-13469). Both
+/// Base-TTS and converter loaders injected for the two-call clone path (sc-13469). Both
 /// backend calls run inside ONE blocking task under ONE shared engine [`CancelFlag`] threaded into
 /// BOTH the base [`GenerationRequest::cancel`] and the [`AudioTransformRequest::cancel`], so a cancel
 /// requested while EITHER call is in-flight trips promptly — the two-call trap (the converter request
 /// used to default `cancel` to a fresh, never-tripped flag via `..Default::default()`).
 #[allow(clippy::too_many_arguments)]
-async fn run_voice_clone_synthesis_using(
+async fn run_voice_clone_synthesis_using_completed(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -1918,7 +1981,10 @@ async fn run_voice_clone_synthesis_using(
     load_converter: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn AudioTransform>>
         + Send
         + 'static,
-) -> WorkerResult<gen_core::AudioTrack> {
+) -> WorkerResult<(
+    gen_core::AudioTrack,
+    Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>,
+)> {
     let VoiceClonePlan {
         base_model_dir,
         converter_dir,
@@ -1940,7 +2006,7 @@ async fn run_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>)> {
             // Call 1 — base TTS: synthesize the script in the requested base voice.
             let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
             let base_generator = load_base(&base_model, &base_spec).map_err(|error| {
@@ -1960,12 +2026,13 @@ async fn run_voice_clone_synthesis_using(
             let mut on_progress = |progress: Progress| {
                 crate::load_progress::generator_progress(&progress);
             };
-            let base_track = match base_generator
-                .generate(&base_req, &mut on_progress)
+            let base_completed = base_generator
+                .generate_with_execution_report(&base_req, &mut on_progress)
                 .map_err(|error| {
                     classify_audio_synthesis_error("voice-clone base TTS failed", error)
-                })? {
-                GenerationOutput::Audio(track) => track,
+                })?;
+            let base_track = match base_completed.generation.output {
+                Some(GenerationOutput::Audio(track)) => track,
                 _ => {
                     return Err(WorkerError::Engine(
                         "voice-clone base TTS returned non-audio output".to_owned(),
@@ -1989,12 +2056,25 @@ async fn run_voice_clone_synthesis_using(
                 cancel,
                 ..Default::default()
             };
-            transform
-                .apply(&transform_req, &mut on_progress)
-                .map_err(|error| classify_audio_synthesis_error("voice conversion failed", error))?
-                .into_iter()
+            let converted = transform
+                .apply_with_execution_report(&transform_req, &mut on_progress)
+                .map_err(|error| classify_audio_synthesis_error("voice conversion failed", error))?;
+            if converted.tracks.len() != 1 {
+                return Err(WorkerError::Engine(
+                    "voice conversion must produce exactly one final track".to_owned(),
+                ));
+            }
+            let track = converted.tracks.into_iter()
                 .next()
-                .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))
+                .ok_or_else(|| WorkerError::Engine("voice conversion produced no track".to_owned()))?;
+            let stages = [
+                ("base_tts", base_completed.execution),
+                ("voice_conversion", converted.execution),
+            ].into_iter().map(|(stage, execution)| Ok(sceneworks_core::execution_receipt::ExecutionStageBinding {
+                stage: stage.into(),
+                execution: serde_json::to_value(execution).map_err(WorkerError::Json)?,
+            })).collect::<WorkerResult<Vec<_>>>()?;
+            Ok((track, stages))
         })
     };
     run_blocking_with_heartbeat(
@@ -2054,14 +2134,14 @@ fn resolve_native_voice_clone_plan(
 /// x-vector, so this one call produces the full cloned WAV with no base-TTS + conversion pass. Returns
 /// the produced `gen_core::AudioTrack` for the caller to write + register, exactly like
 /// [`run_audio_synthesis`].
-async fn run_native_voice_clone_synthesis(
+async fn run_native_voice_clone_synthesis_completed(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &AudioRequest,
     plan: NativeVoiceClonePlan,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_native_voice_clone_synthesis_using(
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
+    run_native_voice_clone_synthesis_using_completed(
         api,
         settings,
         job,
@@ -2075,6 +2155,7 @@ async fn run_native_voice_clone_synthesis(
 /// [`run_native_voice_clone_synthesis`] with the clone-generator loader injected (sc-13469). The
 /// shared engine [`CancelFlag`] reaches [`GenerationRequest::cancel`] and is tripped mid-synthesis by
 /// the `run_blocking_with_heartbeat` watcher (see [`run_audio_synthesis_using`]).
+#[cfg(test)]
 async fn run_native_voice_clone_synthesis_using(
     api: &ApiClient,
     settings: &Settings,
@@ -2085,6 +2166,28 @@ async fn run_native_voice_clone_synthesis_using(
         + Send
         + 'static,
 ) -> WorkerResult<gen_core::AudioTrack> {
+    run_native_voice_clone_synthesis_using_completed(
+        api,
+        settings,
+        job,
+        request,
+        plan,
+        load_generator,
+    )
+    .await
+    .map(|(track, _)| track)
+}
+
+async fn run_native_voice_clone_synthesis_using_completed(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &AudioRequest,
+    plan: NativeVoiceClonePlan,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
     let NativeVoiceClonePlan {
         model_dir,
         reference,
@@ -2113,7 +2216,7 @@ async fn run_native_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(gen_core::AudioTrack, gen_core::generator::ExecutionIdentity)> {
             let spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -2139,20 +2242,22 @@ async fn run_native_voice_clone_synthesis_using(
             let mut on_progress = |progress: Progress| {
                 crate::load_progress::generator_progress(&progress);
             };
-            match generator
-                .generate(&req, &mut on_progress)
+            let completed = generator
+                .generate_with_execution_report(&req, &mut on_progress)
                 .map_err(|error| {
                     classify_audio_synthesis_error("clone-TTS generation failed", error)
-                })? {
-                GenerationOutput::Audio(track) => Ok(track),
-                GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
+                })?;
+            match completed.generation.output {
+                Some(GenerationOutput::Audio(track)) => Ok((track, completed.execution)),
+                Some(GenerationOutput::Images(_)) | Some(GenerationOutput::ImagesRgba(_)) => {
                     Err(WorkerError::Engine(
                         "clone-TTS model returned images, expected an audio track".to_owned(),
                     ))
                 }
-                GenerationOutput::Video { .. } => Err(WorkerError::Engine(
+                Some(GenerationOutput::Video { .. }) => Err(WorkerError::Engine(
                     "clone-TTS model returned video, expected an audio track".to_owned(),
                 )),
+                None => Err(WorkerError::Engine("clone-TTS model returned no output".to_owned())),
             }
         })
     };
@@ -3333,6 +3438,7 @@ mod tests {
         descriptor: gen_core::ModelDescriptor,
         chunks: usize,
         per_chunk: usize,
+        report_called: Arc<AtomicBool>,
     }
 
     impl StreamingStubGenerator {
@@ -3400,6 +3506,21 @@ mod tests {
                 stems: Vec::new(),
             }))
         }
+
+        fn generate_streaming_with_execution_report(
+            &self,
+            req: &GenerationRequest,
+            on_chunk: &mut dyn FnMut(gen_core::AudioChunk),
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+            self.report_called.store(true, Ordering::SeqCst);
+            let output = self.generate_streaming(req, on_chunk, on_progress)?;
+            gen_core::generator::CompletedGeneration::new(
+                gen_core::GenerationReport::from_output(output),
+                gen_core::generator::ExecutionIdentity::provider_default(),
+                &self.descriptor,
+            )
+        }
     }
 
     fn stub_transform_descriptor() -> gen_core::AudioTransformDescriptor {
@@ -3442,6 +3563,27 @@ mod tests {
             }
             self.observed_cancel.store(true, Ordering::SeqCst);
             Err(gen_core::Error::Canceled)
+        }
+    }
+
+    struct CompleteTransform(gen_core::AudioTransformDescriptor);
+
+    impl gen_core::AudioTransform for CompleteTransform {
+        fn descriptor(&self) -> &gen_core::AudioTransformDescriptor {
+            &self.0
+        }
+        fn validate(&self, _req: &AudioTransformRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn apply(
+            &self,
+            req: &AudioTransformRequest,
+            _progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<Vec<gen_core::AudioTrack>> {
+            if req.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            Ok(vec![req.audio.clone()])
         }
     }
 
@@ -4222,7 +4364,7 @@ mod tests {
             },
         };
 
-        let result = run_voice_clone_synthesis_using(
+        let result = run_voice_clone_synthesis_using_completed(
             &api,
             &settings,
             &job,
@@ -4247,6 +4389,63 @@ mod tests {
             posts.iter().any(|p| p["status"] == "canceled"),
             "the terminal Canceled must be posted, got {posts:?}"
         );
+    }
+
+    #[test]
+    fn voice_clone_reports_both_completed_stages_in_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (base_url, _) = spawn_audio_cancel_stub(false).await;
+            let data = tempfile::tempdir().unwrap();
+            let mut settings = cancel_test_settings(base_url);
+            settings.data_dir = data.path().to_path_buf();
+            let api = ApiClient::new(&settings);
+            let job = audio_test_job("audio-voice-stages");
+            let request = AudioRequest::from_payload(&payload(json!({})));
+            let base_load = stub_load(StubBehavior::CompleteOk, Arc::new(AtomicBool::new(false)));
+            let converter_load = |_id: &str, _spec: &LoadSpec| {
+                Ok(Box::new(CompleteTransform(stub_transform_descriptor()))
+                    as Box<dyn AudioTransform>)
+            };
+            let plan = VoiceClonePlan {
+                base_model_dir: PathBuf::from("unused-base"),
+                converter_dir: PathBuf::from("unused-converter"),
+                reference: gen_core::AudioTrack {
+                    samples: vec![0.05],
+                    sample_rate: 24_000,
+                    channels: 1,
+                    stems: Vec::new(),
+                },
+            };
+            let (track, stages) = run_voice_clone_synthesis_using_completed(
+                &api,
+                &settings,
+                &job,
+                &request,
+                plan,
+                base_load,
+                converter_load,
+            )
+            .await
+            .unwrap();
+            assert!(!track.samples.is_empty());
+            assert_eq!(
+                stages
+                    .iter()
+                    .map(|stage| stage.stage.as_str())
+                    .collect::<Vec<_>>(),
+                ["base_tts", "voice_conversion"]
+            );
+            assert!(stages
+                .iter()
+                .all(|stage| stage.execution["state"] == "unavailable"));
+        });
+        // The worker starts a background inventory while posting progress. The test
+        // proves the two completed stages without waiting for that unrelated scan.
+        runtime.shutdown_timeout(Duration::from_millis(50));
     }
 
     /// Native single-call clone-TTS path (`chatterbox_tts`): the shared flag reaches the one
@@ -4834,13 +5033,17 @@ mod tests {
             descriptor: streaming_stub_descriptor(),
             chunks: 5,
             per_chunk: 4,
+            report_called: Arc::new(AtomicBool::new(false)),
         }
         .aggregate();
+        let report_called = Arc::new(AtomicBool::new(false));
+        let report_observer = report_called.clone();
         let load = move |_id: &str, _spec: &LoadSpec| {
             Ok(Box::new(StreamingStubGenerator {
                 descriptor: streaming_stub_descriptor(),
                 chunks: 5,
                 per_chunk: 4,
+                report_called: report_observer.clone(),
             }) as Box<dyn Generator>)
         };
 
@@ -4863,6 +5066,10 @@ mod tests {
         );
         assert_eq!(track.sample_rate, 24_000);
         assert_eq!(track.channels, 1);
+        assert!(
+            report_called.load(Ordering::SeqCst),
+            "the streaming provider report method must drive the same incremental attempt"
+        );
 
         // The coalescing pump forwards a streaming update even when the five chunks arrive
         // within one 250 ms interval; a non-streaming generator posts none (see below).
@@ -5891,10 +6098,16 @@ mod yue_job_surface_tests {
         let job = job_snapshot("yue-long-clip", payload);
         let loaded = Arc::new(AtomicBool::new(false));
         let flag = loaded.clone();
-        let error = run_audio_generate_job_using(&api, &staged.settings, &job, move |_, _| {
-            flag.store(true, Ordering::SeqCst);
-            Err(gen_core::Error::Msg("the loader must not run".into()))
-        })
+        let error = run_audio_generate_job_using(
+            &api,
+            &staged.settings,
+            &job,
+            &Default::default(),
+            move |_, _| {
+                flag.store(true, Ordering::SeqCst);
+                Err(gen_core::Error::Msg("the loader must not run".into()))
+            },
+        )
         .await
         .expect_err("the decoded clip is too long for the capped budget");
         assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
@@ -6079,6 +6292,7 @@ mod yue_job_surface_tests {
             &api,
             &staged.settings,
             &job,
+            &Default::default(),
             stub_loader(
                 Behavior::Song,
                 seen.clone(),
@@ -6208,6 +6422,7 @@ mod yue_job_surface_tests {
             &api,
             &staged.settings,
             &job,
+            &Default::default(),
             stub_loader(
                 Behavior::WaitForCancel,
                 Arc::new(Mutex::new(Seen::default())),

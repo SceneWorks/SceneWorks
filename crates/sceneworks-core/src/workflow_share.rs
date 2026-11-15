@@ -1846,16 +1846,16 @@ fn describe_inputs(job_payload: &JsonObject, moss_edit: bool) -> Vec<WorkflowInp
             control_mode: None,
         });
     }
-    let advanced = job_payload.get("advanced").and_then(Value::as_object);
-    let control_image = advanced
-        .and_then(|advanced| advanced.get("controlImage"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
+    let route_options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let control_image = matches!(
+        &route_options.control_image,
+        crate::resolved_options::RouteField::Valid(value) if !value.trim().is_empty()
+    );
     if control_image {
-        let control_mode = advanced
-            .and_then(|advanced| advanced.get("controlMode"))
-            .and_then(Value::as_str)
-            .and_then(shareable_label);
+        let control_mode = match &route_options.control_mode {
+            crate::resolved_options::RouteField::Valid(value) => shareable_label(value),
+            _ => None,
+        };
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_CONTROL.to_owned(),
             count: 1,
