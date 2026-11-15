@@ -63,7 +63,7 @@ pub(crate) fn route_option_facts(
     };
     let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
     let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
-        .map_err(|error| incomplete(error.to_string()))?;
+        .map_err(ApiError::from)?;
     Ok((
         authored,
         RouteOptionFacts::from_payload_syntax(effective.as_payload()),
@@ -4161,10 +4161,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
             .expect("test API state");
-        let mut current = json!({"model":"z_image_turbo","mode":"text_to_image","prompt":"p"})
-            .as_object()
-            .unwrap()
-            .clone();
+        let mut current =
+            json!({"projectId":"p","model":"z_image_turbo","mode":"text_to_image","prompt":"p"})
+                .as_object()
+                .unwrap()
+                .clone();
         crate::jobs::canonicalize_image_model_payload(
             &state,
             &JobType::ImageGenerate,
