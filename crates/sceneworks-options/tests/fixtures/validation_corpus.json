@@ -6675,7 +6675,7 @@
         "refusal": {
           "code": "invalid_generation_option",
           "field": "referenceAssetIds",
-          "detail": "referenceAssetIds must contain nonblank string ids without surrounding whitespace",
+          "detail": "referenceAssetIds must contain only string ids",
           "context": {
             "kind": "image",
             "model": "flux_dev",
