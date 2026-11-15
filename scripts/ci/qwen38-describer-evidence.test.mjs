@@ -100,6 +100,22 @@ test('staging accepts a complete run and copies only the validated files', () =>
   const recorded = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
   assert.equal(recorded.result.fields.lighting, 'lighting text | with a pipe');
 }));
+test('a shared-card run is accepted without a guard receipt and says how it took the card', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'describer-result.json'), JSON.stringify(result()));
+  const evidence = await stage(output, path.join(directory, 'no-receipt.json'), 'q4', 'default', 'shared');
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.gpu_admission, 'shared');
+  assert.deepEqual(await fs.readdir(path.join(output, 'artifact')), ['evidence.json']);
+}));
+test('a shared-card run with no result is still a failure, and an unknown admission is refused', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  const evidence = await stage(output, path.join(directory, 'no-receipt.json'), 'q4', 'default', 'shared');
+  assert.equal(evidence.accepted, false);
+  await assert.rejects(stage(output, path.join(directory, 'no-receipt.json'), 'q4', 'default', 'anything'), /admission/);
+}));
 test('staging records a failure when the smoke wrote no result, keeping the receipt', () => scratch(async (directory) => {
   const output = path.join(directory, 'proof');
   await fs.mkdir(output);

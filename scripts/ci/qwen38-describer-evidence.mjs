@@ -64,6 +64,7 @@ async function readBoundedJson(file) {
 export function summary(evidence) {
   const lines = [`## Qwen3.8 27B describer CUDA validation`, '', `Accepted: **${evidence.accepted}**`, ''];
   if (evidence.error) lines.push(`Error: ${evidence.error}`, '');
+  if (evidence.gpu_admission === 'shared') lines.push('GPU admission: shared with the desktop on the display card (no idle guard); the peak is card-wide, above the smoke\'s own baseline.', '');
   const result = evidence.result;
   if (result) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
@@ -79,8 +80,14 @@ export function summary(evidence) {
 }
 
 // Stage only what was validated: evidence.json, plus a byte copy of the guard receipt.
-export async function stage(outputDir, receiptFile, tier, imageSide = 'default') {
-  const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide };
+// `admission` is how the run took the card: `idle` under the CUDA guard (its receipt must show a
+// completed lease), or `shared`, beside the desktop on the display card with no guard and so no
+// receipt. A shared run's peak is still measured above the smoke's own baseline, on a card other
+// programs also use.
+export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'idle') {
+  assert(['idle', 'shared'].includes(admission), `unsupported GPU admission ${admission}`);
+  const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
+    gpu_admission: admission };
   const artifact = path.join(outputDir, 'artifact');
   await fs.mkdir(artifact, { recursive: true });
   let failure = null;
@@ -91,7 +98,7 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default')
     failure = error;
   }
   // The receipt is staged even when the result is missing: it says why the guarded run failed.
-  try {
+  if (admission === 'idle') try {
     const receipt = await readBoundedJson(receiptFile);
     await fs.writeFile(path.join(artifact, 'resource-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
     evidence.resource_receipt = { actor: receipt.actor, resource_completed: receipt.resource_completed };
@@ -115,7 +122,8 @@ export async function main(env = process.env) {
   const receiptFile = path.join(env.RUNNER_TEMP,
     `sceneworks-cuda-execution-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${GUARD_ACTOR}`, 'resource-receipt.json');
   const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
-  const evidence = await stage(outputDir, receiptFile, tier, imageSide);
+  const admission = env.SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION?.trim() || 'idle';
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide, admission);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
   console.log(`Qwen3.8 27B describer validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
   if (!evidence.accepted) process.exitCode = 1;

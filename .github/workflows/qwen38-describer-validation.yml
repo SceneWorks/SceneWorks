@@ -20,6 +20,12 @@ on:
         type: choice
         options: [default, "1536"]
         default: default
+      gpu_admission:
+        description: idle waits for an idle card under the CUDA guard; shared runs beside the desktop on the display card
+        required: true
+        type: choice
+        options: [idle, shared]
+        default: idle
 
 permissions:
   contents: read
@@ -42,6 +48,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
       SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
+      SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION: ${{ inputs.gpu_admission }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,7 +91,9 @@ jobs:
           if exist "%MODEL_PROOF_OUTPUT_DIR%" exit /b 1
           mkdir "%MODEL_PROOF_OUTPUT_DIR%"
           nvidia-smi
-          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
+          rem shared: the display card is never idle for the guard, and a describe needs about a quarter of it.
+          rem The smoke still samples the card and reports the peak above its own baseline.
+          if "%SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION%"=="shared" (cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1) else (python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1)
           if errorlevel 1 exit /b 1
       # Runs even when the smoke failed, so the receipt and the reason are uploaded. An exact-filter
       # mismatch (zero tests run, exit 0) also fails here: only the completed smoke body writes the result.
@@ -97,6 +106,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qwen38-describer-proof-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: qwen38-describer-proof-${{ inputs.tier }}-${{ inputs.image_side }}-${{ inputs.gpu_admission }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error
