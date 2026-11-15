@@ -11,7 +11,7 @@ import { errorMessage } from "../errorMessage.js";
 import { JOY_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO, terminalStatuses } from "../constants.js";
 import { joyCaptionModel } from "../training/joyCaptionPrompts.js";
 import { missingRequiredModels, modelInstallComplete } from "../modelEligibility.js";
-import { condensedFor, condensedSizeText, fitToTargets, formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
+import { condenseChunks, condensedFor, condensedSizeText, fitToTargets, formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
 import { saveExportFile } from "../saveExportFile.js";
@@ -38,8 +38,9 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 export const DESCRIBE_MODELS = [
-  { id: VISION_CAPTION_MODEL_ID, repo: VISION_CAPTION_MODEL_REPO, label: "Vision Captioner (Qwen3-VL-8B)" },
-  { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one" },
+// `condenses`: the describer has a text-only step that "Fit to" condenses with (SW-7163).
+  { id: VISION_CAPTION_MODEL_ID, repo: VISION_CAPTION_MODEL_REPO, label: "Vision Captioner (Qwen3-VL-8B)", condenses: true },
+  { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one", condenses: false },
 ];
 
 // `pose` is one line per person; a result stored before it existed reads as an empty pose.
@@ -111,16 +112,66 @@ function rowFromResultItem(item, model = null) {
   };
 }
 
-// Whether a row can be condensed: described, and not by JoyCaption (it has no text step).
+// The dialog's remembered Fit to choice per dataset ("" for off), so clearing it sticks even
+// though the newest job's payload still names the old target. Browser storage may be unavailable.
+const fitToKey = (datasetId) => `sceneworks.datasetPromptBatch.fitTo.${datasetId}`;
+function storedFitTo(datasetId) {
+  try {
+    const value = window.localStorage.getItem(fitToKey(datasetId));
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+function storeFitTo(datasetId, value) {
+  try {
+    window.localStorage.setItem(fitToKey(datasetId), value);
+  } catch {
+    // A private window or blocked storage: the choice lasts for this dialog only.
+  }
+}
+
+// Whether the describer `repo` runs the "Fit to" condensing step (the `condenses` property of
+// DESCRIBE_MODELS; sceneworks-core `describer_condenses` decides the same on the server). A row
+// stored before describers were recorded was described by the default, the Vision Captioner.
+export function describerCondenses(repo) {
+  if (!repo) return true;
+  return DESCRIBE_MODELS.some((entry) => entry.repo === repo && entry.condenses);
+}
+
+// Whether a row can be condensed: described, by a describer with a text step.
 export function condensable(row) {
-  return Boolean(row) && !row.failed && row.model !== joyCaptionModel;
+  return Boolean(row) && !row.failed && describerCondenses(row.model);
 }
 
 // The condensable rows that need the condensing step for `fitTo`: no usable condensed prompt for
-// that target yet, or fields edited since it was condensed.
+// that target yet (never condensed, failed, or fields changed since).
 export function rowsToCondense(rows, fitTo) {
   if (!fitTo) return [];
-  return (rows ?? []).filter((row) => condensable(row) && (!condensedFor(row, fitTo) || row.fieldsEdited));
+  return (rows ?? []).filter((row) => condensable(row) && !condensedFor(row, fitTo));
+}
+
+// The condensable rows that would save without a condensed prompt for `fitTo` because it was
+// never made or the fields changed since: Save and Export wait for them. A row whose condensing
+// failed is reported on the row and saves its seven fields.
+export function rowsNotFitted(rows, fitTo) {
+  if (!fitTo) return [];
+  return (rows ?? []).filter(
+    (row) => condensable(row) && (row.condensed?.target !== fitTo || (row.fieldsEdited && !row.condensed?.failed)),
+  );
+}
+
+// What a condense-only or measure-only request carries for a row: its fields as edited, its size,
+// its cut-off notice, and for measuring its edited condensed prompt.
+export function condenseRequestRow(row, { measure = false } = {}) {
+  return {
+    itemId: row.itemId,
+    fields: row.fields,
+    width: row.width ?? null,
+    height: row.height ?? null,
+    notice: row.notice ?? null,
+    ...(measure ? { condensedText: row.condensed?.text ?? "" } : {}),
+  };
 }
 
 // Merge result items into the rows, replacing a row with the same item id and keeping dataset order.
@@ -230,46 +281,72 @@ export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
   };
 }
 
-// One row's "Fit to" state (SW-7163): why a row is not condensed, a failed condense's notice, or the
-// editable condensed prompt with its size against the target's limit and an over-limit warning.
-function CondensedPrompt({ row, target, busy, onChange }) {
+// One row's "Fit to" state (SW-7163): why a row is not condensed, a failed condense's notice, a
+// prompt made stale by a field edit, or the editable condensed prompt with its size against the
+// target's limit (with room for each variable value) and an over-limit warning. An edited prompt
+// shows its live character count, never its old token count or verdict, and offers to measure it.
+function CondensedPrompt({ row, target, busy, measureBlocked, onChange, onMeasure }) {
   if (row.failed) return null;
   if (!condensable(row)) {
     return (
       <p className="dataset-caption-mode-note" data-row-note="not-condensed">
-        Described by JoyCaption, so it is not condensed; the seven fields are saved.
+        Described by {DESCRIBE_MODELS.find((entry) => entry.repo === row.model)?.label ?? row.model}, which has no text step, so
+        it is not condensed; the seven fields are saved.
       </p>
     );
   }
   const condensed = row.condensed?.target === target.id ? row.condensed : null;
   if (!condensed) {
     return (
-      <p className="dataset-caption-mode-note" data-row-note="not-condensed">
-        Not condensed for {target.name} yet; the seven fields are saved until it is.
+      <p className="inline-warning" data-row-note="not-condensed">
+        Not condensed for {target.name} yet.
       </p>
     );
   }
-  if (!condensedFor(row, target.id)) {
+  if (condensed.failed) {
     return (
       <p className="inline-warning" data-row-note="condense-failed">
         {condensed.notice || "Condensing failed, so the seven fields are saved."}
       </p>
     );
   }
+  if (row.fieldsEdited) {
+    return (
+      <p className="inline-warning" data-row-note="condense-stale">
+        Fields changed since this was condensed, so this prompt is not used. Condense again.
+      </p>
+    );
+  }
+  const textarea = (
+    <label>
+      Condensed prompt
+      <textarea disabled={busy} onChange={(event) => onChange(row.itemId, event.target.value)} rows={4} value={condensed.text} />
+    </label>
+  );
+  if (condensed.edited) {
+    const chars = promptBudget(formatPromptBatch([row], { fitTo: target.id }).text);
+    return (
+      <>
+        {textarea}
+        <p className={chars.over ? "inline-warning" : "dataset-caption-mode-note"} data-row-note="condensed-size">
+          {chars.length.toLocaleString("en-US")} of {chars.max.toLocaleString("en-US")} characters; tokens not measured since your edit.{" "}
+          <button className="secondary-action" disabled={busy || measureBlocked} onClick={() => onMeasure(row)} type="button">
+            Measure
+          </button>
+        </p>
+      </>
+    );
+  }
   const size = condensedSizeText(condensed);
   const estimate = condensed.tokenCount !== "exact";
   return (
     <>
-      <label>
-        Condensed prompt
-        <textarea disabled={busy} onChange={(event) => onChange(row.itemId, event.target.value)} rows={4} value={condensed.text} />
-      </label>
+      {textarea}
       <p className={condensed.over ? "inline-warning" : "dataset-caption-mode-note"} data-row-note="condensed-size">
         {condensed.over ? "Over the limit: " : ""}
-        {size ?? "Size not measured"}
-        {estimate && condensed.estimateReason ? ` (estimated: ${condensed.estimateReason})` : estimate ? " (estimated)" : ""}
-        {condensed.edited ? ". Edited since it was measured; condense again to measure it." : "."}
-        {condensed.over && condensed.notice ? ` ${condensed.notice}` : ""}
+        {size ?? "Tokens not measured"}
+        {estimate && condensed.estimateReason ? ` (${size ? "estimated: " : ""}${condensed.estimateReason})` : estimate && size ? " (estimated)" : ""}
+        .{condensed.notice ? ` ${condensed.notice}` : ""}
       </p>
     </>
   );
@@ -299,6 +376,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [modelId, setModelId] = useState(VISION_CAPTION_MODEL_ID);
   // SW-7163: the "Fit to" target's catalog id, "" for off. Restored from the newest run.
   const [fitTo, setFitTo] = useState("");
+  // Which part of a multi-part condense is running ({ index, total }), or null.
+  const [condenseProgress, setCondenseProgress] = useState(null);
+  // The terminal status of the last monitored job, so multi-part condensing stops on a failure.
+  const lastFinished = useRef(null);
   // Each model's default instruction and limit, by repo: `{ prompt, maxChars }`.
   const [defaults, setDefaults] = useState({});
   const [prompt, setPrompt] = useState("");
@@ -452,6 +533,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   }, [readItems, token]);
 
   function reportFinished(finished) {
+    lastFinished.current = finished?.status ?? null;
     setRerunItemId(null);
     if (finished.status === "canceled") {
       const kept = finished.result?.processedCount ?? 0;
@@ -563,7 +645,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         const restored = restoreDescribeRows(runs, datasetItems);
         setRows(restored);
         // The dialog keeps the Fit to choice of its newest run.
-        const lastFitTo = jobsNewestFirst[0]?.payload?.fitTo;
+        const lastFitTo = storedFitTo(dataset.id) ?? jobsNewestFirst[0]?.payload?.fitTo;
         if (typeof lastFitTo === "string") setFitTo(lastFitTo);
         if (active) {
           itemsRead.current = { jobId: active.id, count: activeCount };
@@ -593,8 +675,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   // Start a describe job: every image (`itemIds` null), or exactly `itemIds`. `confirmFirst`, when
   // given, runs first and can decline. Ignored while a start is already in flight or a job runs.
-  // `condense` ({ fitTo, rows }) starts a condense-only job instead: the Vision Captioner condenses
-  // those already-described rows (their fields as edited here) for the target, describing nothing.
+  // `condense` ({ fitTo, model, rows, measure }) starts a condense-only job instead: the rows'
+  // own describer condenses those already-described rows (their fields as edited here) for the
+  // target, describing nothing; with `measure` it only re-counts their edited condensed prompts.
   async function submit(itemIds = null, confirmFirst = null, condense = null) {
     if (submittingRef.current || running || !dataset?.id || !projectId) return;
     submittingRef.current = true;
@@ -608,23 +691,19 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       let body;
       if (condense) {
         body = {
-          model: VISION_CAPTION_MODEL_REPO,
+          model: condense.model ?? VISION_CAPTION_MODEL_REPO,
           requestedGpu: "auto",
           fitTo: condense.fitTo,
-          condenseRows: condense.rows.map((row) => ({
-            itemId: row.itemId,
-            fields: row.fields,
-            width: row.width ?? null,
-            height: row.height ?? null,
-          })),
+          condenseRows: condense.rows,
+          ...(condense.measure ? { measureOnly: true } : {}),
         };
       } else {
         body = { model: model.repo, requestedGpu: "auto" };
         // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
         if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
         if (itemIds) body.itemIds = itemIds;
-        // JoyCaption has no text step, so its rows are never condensed.
-        if (fitTo && model.id === VISION_CAPTION_MODEL_ID) body.fitTo = fitTo;
+        // A describer without a text step (JoyCaption) never condenses.
+        if (fitTo && model.condenses) body.fitTo = fitTo;
       }
       pollAbort.current?.abort();
       const controller = new AbortController();
@@ -686,18 +765,38 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     );
   }
 
-  // Run only the condensing step for `target` on the rows that need it (never a describe).
+  // Run only the condensing step for `target` on `pending` rows (never a describe), as one job per
+  // part (each part one describer, bounded in size and rows), one after another; stop at a part
+  // that does not complete. `measure` re-counts edited condensed prompts instead.
+  async function runCondenseParts(target, pending, { measure = false } = {}) {
+    const parts = condenseChunks(pending, (row) => condenseRequestRow(row, { measure }));
+    for (let index = 0; index < parts.length; index += 1) {
+      setCondenseProgress(parts.length > 1 ? { index, total: parts.length } : null);
+      lastFinished.current = null;
+      await submit(null, null, { fitTo: target, model: parts[index].model, rows: parts[index].rows, measure });
+      if (lastFinished.current !== "completed") break;
+    }
+    setCondenseProgress(null);
+  }
+
   async function condenseRows(target = fitTo) {
     const pending = rowsToCondense(rows, target);
     if (!target || !pending.length) return;
-    await submit(null, null, { fitTo: target, rows: pending });
+    await runCondenseParts(target, pending);
+  }
+
+  // Re-count one edited condensed prompt with the target's tokenizer; nothing is generated.
+  async function measureRow(row) {
+    if (!fitTo) return;
+    await runCondenseParts(fitTo, [row], { measure: true });
   }
 
   // Changing the target condenses the rows already described for it; clearing it needs no job
-  // (the saved blocks go back to the seven fields).
+  // (the saved blocks go back to the seven fields). The choice is remembered for this dataset.
   function chooseFitTo(id) {
     setSavedBatch(null);
     setFitTo(id);
+    if (dataset?.id) storeFitTo(dataset.id, id);
     if (id && !condenseBlocked) condenseRows(id);
   }
 
@@ -721,14 +820,26 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     await submit(null, confirmFirst);
   }
 
-  const payload = () => promptBatchPayload({ rows, name: batchName, dataset, fitTo: fitTarget ? fitTo : null });
-  const usableCount = useMemo(() => rows.length - formatPromptBatch(rows).skipped.length, [rows]);
-  const pendingCondense = useMemo(() => (fitTarget ? rowsToCondense(rows, fitTo) : []), [fitTarget, rows, fitTo]);
+  const activeFitTo = fitTarget ? fitTo : null;
+  const payload = () => promptBatchPayload({ rows, name: batchName, dataset, fitTo: activeFitTo });
+  // Counted on the blocks that would be saved for the active target.
+  const usableCount = useMemo(
+    () => rows.length - formatPromptBatch(rows, { fitTo: activeFitTo }).skipped.length,
+    [rows, activeFitTo],
+  );
+  const pendingCondense = useMemo(() => rowsToCondense(rows, activeFitTo), [rows, activeFitTo]);
+  // Rows that would save without a condensed prompt matching their fields: Save/Export wait.
+  const unfitted = useMemo(() => rowsNotFitted(rows, activeFitTo), [rows, activeFitTo]);
+  // Saved with a condensed prompt edited since it was measured.
+  const unmeasured = useMemo(
+    () => (activeFitTo ? rows.filter((row) => condensedFor(row, activeFitTo)?.edited).length : 0),
+    [rows, activeFitTo],
+  );
 
   // Save the batch. A saved batch with the same name is replaced after a confirm, so saving again
   // (after describing more images) updates it instead of failing on the name.
   async function save() {
-    if (saving || !usableCount || !batchName.trim() || typeof createPromptBatch !== "function") return;
+    if (saving || !usableCount || unfitted.length || !batchName.trim() || typeof createPromptBatch !== "function") return;
     setSaving(true);
     setSaveError("");
     try {
@@ -772,6 +883,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   }
 
   async function exportJson() {
+    if (!savedBatch && unfitted.length) return;
     setSaveError("");
     const batch = savedBatch ?? payload();
     const slug = (batch.name || "prompt-batch").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -793,10 +905,11 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const busy = running || submitting;
   const runBlocked =
     busy || restoring || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
-  // Condensing runs on the Vision Captioner whichever describer is selected.
-  const condenseBlocked = busy || restoring || dirty || !modelAvailable(VISION_CAPTION_MODEL_ID);
+  // Condensing runs on each row's own describer, which must be installed.
+  const condenseBlocked =
+    busy || restoring || dirty || !DESCRIBE_MODELS.some((entry) => entry.condenses && modelAvailable(entry.id));
   // The block each row will be saved as (its condensed prompt when Fit to applies to it).
-  const fitToId = fitTarget ? fitTo : null;
+  const fitToId = activeFitTo;
 
   return (
     <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={requestClose}>
@@ -869,7 +982,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             Rewrites each described image into one prompt that fits this model's prompt limit. The seven fields are kept.
           </span>
         </label>
-        {fitTarget && model.id === JOY_CAPTION_MODEL_ID ? (
+        {fitTarget && !model.condenses ? (
           <p className="dataset-caption-mode-note" role="status">
             JoyCaption rows are not condensed: Fit to needs the Vision Captioner's text step.
           </p>
@@ -916,19 +1029,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           <div className="dataset-prompt-batch-progress" role="status">
             <progress aria-label="Describe progress" max={100} value={progressPercent} />
             <span>
-              {job.payload?.condenseOnly
-                ? running
-                  ? "Condensing"
-                  : job.status === "completed"
-                    ? "Condensed"
-                    : `Job ${job.status}`
-                : running
-                  ? "Describing"
-                  : job.status === "completed"
-                    ? "Described"
-                    : `Job ${job.status}`}
-              : {processedCount} of {itemCount}{" "}
-              {itemCount === 1 ? "image" : "images"}
+              {(() => {
+                const [doing, done] = job.payload?.measureOnly
+                  ? ["Measuring", "Measured"]
+                  : job.payload?.condenseOnly
+                    ? ["Condensing", "Condensed"]
+                    : ["Describing", "Described"];
+                return running ? doing : job.status === "completed" ? done : `Job ${job.status}`;
+              })()}
+              : {processedCount} of {itemCount} {itemCount === 1 ? "image" : "images"}
+              {condenseProgress ? ` (part ${condenseProgress.index + 1} of ${condenseProgress.total})` : ""}
             </span>
           </div>
         ) : null}
@@ -977,7 +1087,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     {!row.failed && row.notice ? (
                       <p className="dataset-caption-mode-note" data-row-note="cut-off" role="status">{row.notice}</p>
                     ) : null}
-                    {fitTarget ? <CondensedPrompt busy={busy} onChange={updateCondensed} row={row} target={fitTarget} /> : null}
+                    {fitTarget ? (
+                      <CondensedPrompt
+                        busy={busy}
+                        measureBlocked={condenseBlocked}
+                        onChange={updateCondensed}
+                        onMeasure={measureRow}
+                        row={row}
+                        target={fitTarget}
+                      />
+                    ) : null}
                     {(() => {
                       // Image generation refuses a prompt over PROMPT_MAX_CHARS; warn, never block.
                       // Measured on the block that will be saved (the condensed prompt when used).
@@ -1018,6 +1137,18 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               <input onChange={(event) => setBatchName(event.target.value)} value={batchName} />
             </label>
             {saveError ? <p className="inline-warning" role="alert">{saveError}</p> : null}
+            {unfitted.length ? (
+              <p className="inline-warning" data-save-note="not-fitted" role="status">
+                {unfitted.length} {unfitted.length === 1 ? "row is" : "rows are"} not condensed for {fitTarget.name} (never condensed,
+                or fields changed since). Condense {unfitted.length === 1 ? "it" : "them"}, or turn Fit to off to save the seven
+                fields.
+              </p>
+            ) : null}
+            {unmeasured ? (
+              <p className="dataset-caption-mode-note" data-save-note="unmeasured" role="status">
+                {unmeasured} condensed {unmeasured === 1 ? "prompt was" : "prompts were"} edited and not measured since.
+              </p>
+            ) : null}
             {savedBatch ? (
               <p className="dataset-caption-mode-note" role="status">
                 Saved “{savedBatch.name}” with {savedBatch.prompts?.length ?? 0} prompts.
@@ -1033,7 +1164,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                 Cancel
               </button>
             ) : null}
-            <button className="secondary-action" disabled={!usableCount || running} onClick={exportJson} type="button">
+            <button
+              className="secondary-action"
+              disabled={!usableCount || running || (!savedBatch && unfitted.length > 0)}
+              onClick={exportJson}
+              type="button"
+            >
               Export .json
             </button>
           </span>
@@ -1045,7 +1181,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             ) : (
               <button
                 className="secondary-action"
-                disabled={!usableCount || running || saving || !batchName.trim()}
+                disabled={!usableCount || running || saving || unfitted.length > 0 || !batchName.trim()}
                 onClick={save}
                 type="button"
               >

@@ -56,28 +56,60 @@ export function wrapLabels(text) {
 
 const PER_LINE_FIELDS = new Set(["pose"]);
 
-// SW-7163 "Fit to": the image models a describe run can condense for — catalog entries that
-// declare `image.maxPromptTokens` (installed or not; only their limit is needed).
+// SW-7163 "Fit to": the smallest prompt limit a target may declare (sceneworks-core
+// MIN_FIT_TO_PROMPT_TOKENS; the API refuses a smaller one). Below it the condensing instruction,
+// which keeps every limb of every person, cannot be met and most rows would end over the limit.
+export const MIN_FIT_TO_PROMPT_TOKENS = 512;
+
+// The image models a describe run can condense for — catalog entries that declare an
+// `image.maxPromptTokens` of at least MIN_FIT_TO_PROMPT_TOKENS (installed or not; only their
+// limit is needed).
 export function fitToTargets(models) {
   return (Array.isArray(models) ? models : [])
-    .filter((model) => Number.isInteger(model?.image?.maxPromptTokens) && model.image.maxPromptTokens > 0)
+    .filter((model) => Number.isInteger(model?.image?.maxPromptTokens) && model.image.maxPromptTokens >= MIN_FIT_TO_PROMPT_TOKENS)
     .map((model) => ({ id: model.id, name: model.name ?? model.id, limit: model.image.maxPromptTokens }));
 }
 
 // The row's condensed prompt for the selected target, or null: none is stored for that target,
-// condensing failed (the seven fields are used), or its text is empty.
+// condensing failed (the seven fields are used), its text is empty, or the row's fields changed
+// since it was condensed (it no longer describes them, so it is never saved).
 export function condensedFor(result, fitTo) {
   const condensed = result?.condensed;
-  if (!fitTo || !condensed || condensed.target !== fitTo || condensed.failed) return null;
+  if (!fitTo || !condensed || condensed.target !== fitTo || condensed.failed || result.fieldsEdited) return null;
   return typeof condensed.text === "string" && condensed.text.trim() ? condensed : null;
 }
 
-// "612 of 1,024 tokens", or "about 612 of 1,024 tokens" when the count is an estimate (counted
-// with the describer's tokenizer, not the target's). Null when no size was measured.
+// "612 of 1,024 tokens, leaving room for 8 variable values", with "about" when the count is an
+// estimate (counted with the describer's tokenizer, not the target's). Null when no size was
+// measured, or the prompt was edited since it was measured.
 export function condensedSizeText(condensed) {
-  if (!Number.isInteger(condensed?.tokens) || !Number.isInteger(condensed?.limitTokens)) return null;
+  if (condensed?.edited || !Number.isInteger(condensed?.tokens) || !Number.isInteger(condensed?.limitTokens)) return null;
   const about = condensed.tokenCount === "exact" ? "" : "about ";
-  return `${about}${condensed.tokens.toLocaleString("en-US")} of ${condensed.limitTokens.toLocaleString("en-US")} tokens`;
+  const mentions = Number.isInteger(condensed.labelMentions) ? condensed.labelMentions : 0;
+  const room = mentions ? `, leaving room for ${mentions} variable ${mentions === 1 ? "value" : "values"}` : "";
+  return `${about}${condensed.tokens.toLocaleString("en-US")} of ${condensed.limitTokens.toLocaleString("en-US")} tokens${room}`;
+}
+
+// A condense-only request per part of `rows`: each part holds rows of one describer (`model`) and
+// stays under `maxBytes` of serialized rows and `maxRows` rows, so a large dataset never reaches
+// the API's 10 MiB JSON body limit. `toRequestRow` maps a row to what the request carries.
+export function condenseChunks(rows, toRequestRow, { maxBytes = 2 * 1024 * 1024, maxRows = 200 } = {}) {
+  const chunks = [];
+  const open = new Map();
+  for (const row of rows ?? []) {
+    const request = toRequestRow(row);
+    const bytes = new TextEncoder().encode(JSON.stringify(request)).length + 1;
+    const model = row.model ?? null;
+    let chunk = open.get(model);
+    if (!chunk || chunk.rows.length >= maxRows || chunk.bytes + bytes > maxBytes) {
+      chunk = { model, rows: [], bytes: 0 };
+      chunks.push(chunk);
+      open.set(model, chunk);
+    }
+    chunk.rows.push(request);
+    chunk.bytes += bytes;
+  }
+  return chunks.map(({ model, rows: chunkRows }) => ({ model, rows: chunkRows }));
 }
 
 // Returns { text, skipped }. Failed results, ones without usable dimensions, and ones whose

@@ -1089,7 +1089,30 @@ struct DescribeItem {
     asset_id: Option<String>,
     /// A condense-only job's row as the dialog holds it: the seven fields (the user may have
     /// edited them) and the image's pixel size. The image itself is never opened.
-    given: Option<(DescribedFields, Option<(u32, u32)>)>,
+    given: Option<GivenRow>,
+}
+
+/// A condense-only or measure-only row as the dialog holds it.
+#[cfg(native_lane)]
+#[derive(Clone, Debug)]
+struct GivenRow {
+    /// The seven fields (the user may have edited them) and the row's cut-off notice, kept.
+    fields: DescribedFields,
+    size: Option<(u32, u32)>,
+    /// Measure-only: the user's edited condensed prompt to re-count.
+    edited_text: Option<String>,
+}
+
+/// What a job does with its items.
+#[cfg(native_lane)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunMode {
+    /// Describe each image (and condense it when the job has a target).
+    Describe,
+    /// Condense the given rows only: no image is opened and nothing is described.
+    CondenseOnly,
+    /// Re-count the given rows' edited condensed prompts: nothing is generated and no model loads.
+    MeasureOnly,
 }
 
 /// One item of the job result, in dataset order.
@@ -1204,17 +1227,18 @@ struct BatchDescribeRequest {
     items: Vec<DescribeItem>,
     /// The "Fit to" target, when the job has one.
     fit: Option<FitTarget>,
-    /// Condense the given rows only: no image is opened and nothing is described.
-    condense_only: bool,
+    mode: RunMode,
 }
 
-/// A condense-only item's given fields: a `fields` object of the seven text fields (a missing one
-/// is empty; an unknown name, a non-string or an over-long value is refused) and its `width` and
-/// `height`.
+/// A condense-only or measure-only item's given row: a `fields` object of the seven text fields (a
+/// missing one is empty; an unknown name, a non-string, an over-long value, an over-long row or a
+/// row with every field empty is refused), its cut-off `notice`, its `width` and `height`, and for
+/// measure-only its `condensedText`.
 #[cfg(native_lane)]
 fn given_row(
     item: &crate::analysis_jobs_common::DatasetItem<'_>,
-) -> WorkerResult<(DescribedFields, Option<(u32, u32)>)> {
+    mode: RunMode,
+) -> WorkerResult<GivenRow> {
     let invalid = |detail: String| {
         WorkerError::InvalidPayload(format!(
             "Dataset batch describe item {} {detail}",
@@ -1246,6 +1270,16 @@ fn given_row(
             }
         };
     }
+    let total: usize = fields.iter().map(|field| field.chars().count()).sum();
+    if total > sceneworks_core::dataset_batch_describe::MAX_CONDENSE_ROW_CHARS {
+        return Err(invalid(format!(
+            "has {total} characters across its fields, more than {}.",
+            sceneworks_core::dataset_batch_describe::MAX_CONDENSE_ROW_CHARS
+        )));
+    }
+    if fields.iter().all(String::is_empty) {
+        return Err(invalid("has no text in any field to condense.".to_owned()));
+    }
     let dimension = |key: &str| {
         item.object
             .get(key)
@@ -1253,14 +1287,25 @@ fn given_row(
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0)
     };
-    let size = dimension("width").zip(dimension("height"));
-    Ok((
-        DescribedFields {
+    let text = |key: &str| {
+        crate::payload::trimmed_string(item.object.get(key))
+            .map(|text| bounded_text(text, MAX_DESCRIBE_FIELD_CHARS))
+    };
+    let edited_text = match mode {
+        RunMode::MeasureOnly => Some(
+            text("condensedText")
+                .ok_or_else(|| invalid("has no condensed prompt to measure.".to_owned()))?,
+        ),
+        _ => None,
+    };
+    Ok(GivenRow {
+        fields: DescribedFields {
             fields,
-            notice: None,
+            notice: text("notice").map(|notice| bounded_error(&notice)),
         },
-        size,
-    ))
+        size: dimension("width").zip(dimension("height")),
+        edited_text,
+    })
 }
 
 #[cfg(native_lane)]
@@ -1287,10 +1332,23 @@ fn parse_batch_describe_request(
     };
     let (prompt, default_prompt) = DescribePrompt::for_instruction(model, instruction);
     let fit = condense::parse_fit_target(payload)?;
-    let condense_only = payload.get("condenseOnly").and_then(Value::as_bool) == Some(true);
-    if condense_only && (fit.is_none() || model == DescribeModel::JoyCaption) {
+    let flag = |key: &str| payload.get(key).and_then(Value::as_bool) == Some(true);
+    let mode = match (flag("condenseOnly"), flag("measureOnly")) {
+        (false, false) => RunMode::Describe,
+        (true, false) => RunMode::CondenseOnly,
+        (false, true) => RunMode::MeasureOnly,
+        (true, true) => {
+            return Err(WorkerError::InvalidPayload(
+                "Dataset batch describe is condenseOnly or measureOnly, not both.".to_owned(),
+            ))
+        }
+    };
+    let condenses =
+        sceneworks_core::dataset_batch_describe::describer_condenses(Some(model.repo()));
+    if mode != RunMode::Describe && (fit.is_none() || !condenses) {
         return Err(WorkerError::InvalidPayload(
-            "Dataset batch describe condenseOnly needs a fitTo target and the Vision Captioner."
+            "Dataset batch describe condenseOnly and measureOnly need a fitTo target and a \
+             describer that condenses."
                 .to_owned(),
         ));
     }
@@ -1311,10 +1369,10 @@ fn parse_batch_describe_request(
                     .to_owned(),
                 asset_id: crate::payload::trimmed_string(item.object.get("assetId"))
                     .map(str::to_owned),
-                given: if condense_only {
-                    Some(given_row(&item)?)
-                } else {
+                given: if mode == RunMode::Describe {
                     None
+                } else {
+                    Some(given_row(&item, mode)?)
                 },
             })
         },
@@ -1335,7 +1393,7 @@ fn parse_batch_describe_request(
             .unwrap_or(Value::Null),
         items,
         fit,
-        condense_only,
+        mode,
     })
 }
 
@@ -1373,7 +1431,14 @@ fn batch_describe_result(
         "fitTo".to_owned(),
         json!(request.fit.as_ref().map(|fit| fit.model_id.as_str())),
     );
-    result.insert("condenseOnly".to_owned(), json!(request.condense_only));
+    result.insert(
+        "condenseOnly".to_owned(),
+        json!(request.mode == RunMode::CondenseOnly),
+    );
+    result.insert(
+        "measureOnly".to_owned(),
+        json!(request.mode == RunMode::MeasureOnly),
+    );
     result
 }
 
@@ -1391,12 +1456,17 @@ pub(crate) async fn run_dataset_batch_describe_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let mut request = parse_batch_describe_request(settings, &job.payload)?;
-    let condenses = request.model == DescribeModel::VisionCaptioner;
+    let condenses =
+        sceneworks_core::dataset_batch_describe::describer_condenses(Some(request.model.repo()));
     if let Some(fit) = request.fit.as_mut().filter(|_| condenses) {
         match condense::exact_token_counter(settings, fit) {
             Ok(counter) => fit.counter = Some(counter),
             Err(reason) => fit.estimate_reason = Some(reason),
         }
+    }
+    if request.mode == RunMode::MeasureOnly {
+        // Counting needs only the target's tokenizer: no describer is resolved or loaded.
+        return run_batch_describe(api, settings, job, request, &NoDescriber).await;
     }
     let describer: Box<dyn BatchDescriber> = match request.model {
         DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber {
@@ -1415,6 +1485,22 @@ pub(crate) async fn run_dataset_batch_describe_job(
         )),
     };
     run_batch_describe(api, settings, job, request, describer.as_ref()).await
+}
+
+/// The describer of a measure-only job, which never describes or generates.
+#[cfg(native_lane)]
+struct NoDescriber;
+
+#[cfg(native_lane)]
+impl BatchDescriber for NoDescriber {
+    fn describe(
+        &self,
+        _: image::DynamicImage,
+        _: &DescribePrompt,
+        _: CancelFlag,
+    ) -> DescribeFuture {
+        Box::pin(async { Ok(Err("A measure-only job describes nothing.".to_owned())) })
+    }
 }
 
 /// The job loop, describer injected so a test drives the real progress/cancel/result path with a
@@ -1453,10 +1539,10 @@ async fn run_batch_describe(
             break;
         }
         let condensing = request.fit.as_ref().filter(|_| describer.condenses());
-        let verb = if request.condense_only {
-            "Condensing"
-        } else {
-            "Describing"
+        let verb = match request.mode {
+            RunMode::Describe => "Describing",
+            RunMode::CondenseOnly => "Condensing",
+            RunMode::MeasureOnly => "Measuring",
         };
         update_job(
             api,
@@ -1472,13 +1558,18 @@ async fn run_batch_describe(
         )
         .await?;
 
-        let mut outcome = if let Some((fields, size)) = &item.given {
-            // Condense-only: the row as the dialog holds it; the image is never opened.
+        let mut outcome = if let Some(given) = &item.given {
+            // Condense- or measure-only: the row as the dialog holds it; no image is opened.
             DescribedItem {
                 item: item.clone(),
-                size: *size,
-                outcome: Ok(fields.clone()),
-                condensed: None,
+                size: given.size,
+                outcome: Ok(given.fields.clone()),
+                condensed: match (&request.fit, &given.edited_text) {
+                    (Some(fit), Some(text)) => {
+                        Some(condense::measure_edited(fit, text, &given.fields.fields))
+                    }
+                    _ => None,
+                },
             }
         } else {
             let Some(outcome) = describe_item(
@@ -1497,8 +1588,13 @@ async fn run_batch_describe(
             };
             outcome
         };
-        if let (Some(fit), Ok(fields)) = (condensing, &outcome.outcome) {
-            if !request.condense_only {
+        let condense_now = request.mode != RunMode::MeasureOnly && outcome.outcome.is_ok();
+        if let (Some(fit), true) = (condensing, condense_now) {
+            if request.mode == RunMode::Describe {
+                // Store the description first: a model that fails while condensing (and so
+                // fails the job) must not lose the image just described. The condensed item
+                // replaces it below (the store keys items by id).
+                append_result_item(api, &job.id, described.len(), &outcome).await?;
                 update_job(
                     api,
                     &job.id,
@@ -1517,16 +1613,19 @@ async fn run_batch_describe(
                 )
                 .await?;
             }
-            let fields = fields.fields.clone();
+            let fields = outcome
+                .outcome
+                .as_ref()
+                .map(|fields| fields.fields.clone())
+                .unwrap_or_default();
             match condense_fields(api, settings, job, describer, fit, &fields, (index, total))
                 .await?
             {
                 Some(condensed) => outcome.condensed = Some(condensed),
                 None => {
-                    // Canceled while condensing: a newly described image keeps its fields; a
-                    // condense-only row is unchanged, so nothing is stored for it.
-                    if !request.condense_only {
-                        append_result_item(api, &job.id, described.len(), &outcome).await?;
+                    // Canceled while condensing: a newly described image is already stored
+                    // with its fields; a condense-only row is unchanged.
+                    if request.mode == RunMode::Describe {
                         described.push(outcome);
                     }
                     canceled = true;
@@ -1539,10 +1638,10 @@ async fn run_batch_describe(
         append_result_item(api, &job.id, described.len(), &outcome).await?;
         described.push(outcome);
         let done = described.len();
-        let finished = if request.condense_only {
-            "Condensed"
-        } else {
-            "Described"
+        let finished = match request.mode {
+            RunMode::Describe => "Described",
+            RunMode::CondenseOnly => "Condensed",
+            RunMode::MeasureOnly => "Measured",
         };
         update_job(
             api,
@@ -1580,8 +1679,10 @@ async fn run_batch_describe(
         .iter()
         .filter(|item| item.outcome.is_err())
         .count();
-    let message = if request.condense_only {
+    let message = if request.mode == RunMode::CondenseOnly {
         format!("Condensed {total} image(s).")
+    } else if request.mode == RunMode::MeasureOnly {
+        format!("Measured {total} image(s).")
     } else if failed == 0 {
         format!("Described {total} image(s).")
     } else {

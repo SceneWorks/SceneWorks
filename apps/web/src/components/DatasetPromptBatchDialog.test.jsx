@@ -1056,7 +1056,7 @@ describe("DatasetPromptBatchDialog", () => {
     await chooseFitTo("krea_2_turbo");
     expect(trainingApi.batchDescribeJobs).not.toHaveBeenCalled();
     expect(condensedBox("item_a").value).toBe("A woman, woman_1, stands by a window.");
-    expect(rowNote("item_b", "not-condensed").textContent).toContain("Described by JoyCaption, so it is not condensed");
+    expect(rowNote("item_b", "not-condensed").textContent).toContain("Described by JoyCaption beta-one, which has no text step");
 
     await chooseFitTo("krea_2_raw");
     const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body);
@@ -1069,6 +1069,7 @@ describe("DatasetPromptBatchDialog", () => {
           itemId: "item_a",
           width: 300,
           height: 400,
+          notice: null,
           fields: {
             description: "A woman, woman_1, stands (item_a).",
             pose: "",
@@ -1098,21 +1099,68 @@ describe("DatasetPromptBatchDialog", () => {
     expect(button("Describe all again")).toBeTruthy();
   });
 
-  it("edited fields can be condensed again; an edited prompt says its size predates the edit", async () => {
+  it("marks a condensed prompt stale after a field edit and holds Save and Export until it is condensed again", async () => {
     context.models = [...context.models, KREA];
     await render();
     await chooseFitTo("krea_2_turbo");
     await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })]);
     expect(button("Condense for Krea 2 Turbo (1)")).toBeUndefined();
-    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window, edited."));
-    expect(rowNote("item_a", "condensed-size").textContent).toBe(
-      "612 of 1,024 tokens. Edited since it was measured; condense again to measure it.",
-    );
     await act(async () => setText(textarea("Lighting"), "Hard noon light"));
+    expect(rowNote("item_a", "condense-stale").textContent).toContain("Fields changed since this was condensed");
+    expect(condensedBox("item_a")).toBeUndefined();
+    const note = document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ");
+    expect(note).toContain("1 row is not condensed for Krea 2 Turbo");
+    expect(note).toContain("Condense it, or turn Fit to off to save the seven fields.");
+    expect(button("Save prompt batch").disabled).toBe(true);
+    expect(button("Export .json").disabled).toBe(true);
     await click(button("Condense for Krea 2 Turbo (1)"));
     await settle();
     const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
     expect(body.condenseRows.map((row) => [row.itemId, row.fields.lighting])).toEqual([["item_a", "Hard noon light"]]);
+    expect(body.model).toBe(VISION_CAPTION_MODEL_REPO);
+    // Turning Fit to off is the other way out: the seven fields save.
+    await act(async () => nextPoll(snapshot("failed", [], { itemCount: 1 })));
+    await settle();
+    await chooseFitTo("");
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("shows an edited prompt's live characters, never its old size, and measures it without generating", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo", { labelMentions: 1 }) })]);
+    expect(rowNote("item_a", "condensed-size").textContent).toBe("612 of 1,024 tokens, leaving room for 1 variable value.");
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window, edited."));
+    const size = rowNote("item_a", "condensed-size").textContent;
+    expect(size).toContain("of 4,000 characters; tokens not measured since your edit.");
+    expect(size).not.toContain("612");
+    expect(document.body.querySelector('[data-save-note="unmeasured"]').textContent).toContain(
+      "1 condensed prompt was edited and not measured since.",
+    );
+    expect(button("Save prompt batch").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
+    expect(body).toMatchObject({ measureOnly: true, fitTo: "krea_2_turbo" });
+    expect(body.condenseRows[0]).toMatchObject({ itemId: "item_a", condensedText: "woman_1 by the window, edited." });
+  });
+
+  it("remembers a cleared Fit to for the dataset even though the newest run had a target", async () => {
+    context.models = [...context.models, KREA];
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+    serveHistory([
+      { id: "job_v", status: "completed", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 1, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({ job_v: [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })] });
+    await render();
+    expect(condensedBox("item_a")).toBeTruthy();
+    await chooseFitTo("");
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render();
+    expect(condensedBox("item_a")).toBeUndefined();
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
   });
 
   it("shows an estimate as about, a result still over the limit as over, and a failed condense plainly", async () => {

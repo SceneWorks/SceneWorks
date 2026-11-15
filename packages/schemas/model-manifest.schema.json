@@ -2096,7 +2096,7 @@
               "maxPromptTokens": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "The engine's prompt context in text-encoder tokens (the linked descriptor's `max_prompt_tokens`; Supra2-IMG's Flan-T5 context is 128, sc-24216; Krea 2's condition encoder reads 1,024 including its template prefix). What the engine does with a longer prompt is `promptOverflow`. The Model Manager states it among the model's supported limits, and the dataset describe dialog offers the model as a Fit to target. ABSENT MEANS UNDECLARED."
+                "description": "The engine's prompt context in text-encoder tokens (the linked descriptor's `max_prompt_tokens`; Supra2-IMG's Flan-T5 context is 128, sc-24216; Krea 2's condition encoder reads 1,024 including its template prefix). It is the TEXT-TO-IMAGE limit: a mode that encodes the prompt differently (Krea 2's image edit, which reads up to 8,192 tokens with its reference images) is not bound by it, and readers state it for text-to-image only. What the engine does with a longer prompt is `promptOverflow`. The Model Manager states it among the model's supported limits, and the dataset describe dialog offers the model as a Fit to target when it is at least 512. ABSENT MEANS UNDECLARED."
               },
               "promptOverflow": {
                 "type": "string",

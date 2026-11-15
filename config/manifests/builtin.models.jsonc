@@ -6491,9 +6491,11 @@
         "supportsNegativePrompt": true,
         "negativePromptRequiresGuidance": true,
         "guidanceOffValue": 0,
-        // SW-7163: the condition encoder's prompt context in tokens, its 34-token template prefix
-        // included (mlx-gen-krea / candle-gen-krea `MAX_TEXT_TOKENS`). The engine REFUSES a longer
-        // prompt (sc-9047) rather than truncating it, hence `promptOverflow`.
+        // SW-7163: the TEXT-TO-IMAGE condition encoder's prompt context in tokens, its 34-token
+        // template prefix included (mlx-gen-krea / candle-gen-krea `MAX_TEXT_TOKENS`). The engine
+        // REFUSES a longer prompt (sc-9047) rather than truncating it, hence `promptOverflow`. The
+        // `krea_2_turbo_edit` path encodes with its reference images up to `MAX_EDIT_TOKENS`
+        // (8,192), so this is not the edit limit.
         "maxPromptTokens": 1024,
         "promptOverflow": "refuse"
       },
@@ -6750,7 +6752,8 @@
         "supportsSchedulerShift": true,
         "negativePromptRequiresGuidance": true,
         "guidanceOffValue": 0,
-        // SW-7163: the same 1,024-token condition-encoder context as Krea 2 Turbo, refused above it.
+        // SW-7163: the same 1,024-token text-to-image condition-encoder context as Krea 2 Turbo,
+        // refused above it (its `krea_2_edit` path reads up to 8,192 with the references).
         "maxPromptTokens": 1024,
         "promptOverflow": "refuse"
       },

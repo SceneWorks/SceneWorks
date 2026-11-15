@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { extractKeys, parsePromptResolution, splitPromptLines } from "./promptBatch.js";
-import { condensedSizeText, fitToTargets, formatPromptBatch, snapRatio, wrapLabels } from "./promptBatchDescribe.js";
+import {
+  MIN_FIT_TO_PROMPT_TOKENS,
+  condenseChunks,
+  condensedSizeText,
+  fitToTargets,
+  formatPromptBatch,
+  snapRatio,
+  wrapLabels,
+} from "./promptBatchDescribe.js";
 
 const fields = (over = {}) => ({
   description: "man_1 walks past woman_1",
@@ -126,7 +134,7 @@ describe("Fit to (SW-7163)", () => {
   });
   const row = (over = {}) => ({ itemId: "a", width: 1500, height: 1000, fields: fields(), condensed: condensed(), ...over });
 
-  it("offers the catalog models that declare a prompt token limit", () => {
+  it("offers only catalog models whose prompt limit can hold the instruction (at least 512 tokens)", () => {
     expect(
       fitToTargets([
         { id: "krea_2_turbo", name: "Krea 2 Turbo", image: { maxPromptTokens: 1024 } },
@@ -136,8 +144,9 @@ describe("Fit to (SW-7163)", () => {
       ]),
     ).toEqual([
       { id: "krea_2_turbo", name: "Krea 2 Turbo", limit: 1024 },
-      { id: "supra2_img", name: "Supra2-IMG", limit: 128 },
     ]);
+    expect(MIN_FIT_TO_PROMPT_TOKENS).toBe(512);
+    expect(fitToTargets([{ id: "edge", name: "Edge", image: { maxPromptTokens: 512 } }])).toHaveLength(1);
     expect(fitToTargets(undefined)).toEqual([]);
   });
 
@@ -169,5 +178,39 @@ describe("Fit to (SW-7163)", () => {
     expect(condensedSizeText(condensed({ tokenCount: "estimate", tokens: 1100 }))).toBe("about 1,100 of 1,024 tokens");
     expect(condensedSizeText(condensed({ tokens: null }))).toBeNull();
     expect(condensedSizeText(null)).toBeNull();
+  });
+
+  it("never uses a condensed prompt the row's fields have changed since", () => {
+    const fieldsBlock = formatPromptBatch([row({ condensed: null })]).text;
+    expect(formatPromptBatch([row({ fieldsEdited: true })], { fitTo: "krea_2_turbo" }).text).toBe(fieldsBlock);
+  });
+
+  it("states the room kept for variable values and nothing once the prompt is edited", () => {
+    expect(condensedSizeText(condensed({ labelMentions: 8 }))).toBe("612 of 1,024 tokens, leaving room for 8 variable values");
+    expect(condensedSizeText(condensed({ labelMentions: 1 }))).toBe("612 of 1,024 tokens, leaving room for 1 variable value");
+    expect(condensedSizeText(condensed({ edited: true }))).toBeNull();
+  });
+
+  it("splits condense-only work into parts of one describer, bounded by size and row count", () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      itemId: `i${index}`,
+      model: index === 4 ? "other/describer" : "vision",
+      text: "x".repeat(100),
+    }));
+    const toRequest = (r) => ({ itemId: r.itemId, text: r.text });
+    const byRows = condenseChunks(rows, toRequest, { maxRows: 2 });
+    expect(byRows.map((part) => [part.model, part.rows.map((r) => r.itemId)])).toEqual([
+      ["vision", ["i0", "i1"]],
+      ["vision", ["i2", "i3"]],
+      ["other/describer", ["i4"]],
+    ]);
+    const oneRowBytes = new TextEncoder().encode(JSON.stringify(toRequest(rows[0]))).length + 1;
+    const bySize = condenseChunks(rows.slice(0, 4), toRequest, { maxBytes: oneRowBytes * 3 - 1 });
+    expect(bySize.map((part) => part.rows.length)).toEqual([2, 2]);
+    // The default part stays well under the API's 10 MiB JSON body limit.
+    const big = Array.from({ length: 2500 }, (_, index) => ({ itemId: `r${index}`, model: "vision", text: "y".repeat(4000) }));
+    const parts = condenseChunks(big, toRequest);
+    expect(parts.every((part) => new TextEncoder().encode(JSON.stringify(part.rows)).length < 10 * 1024 * 1024 / 4)).toBe(true);
+    expect(parts.flatMap((part) => part.rows)).toHaveLength(2500);
   });
 });

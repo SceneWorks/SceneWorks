@@ -299,6 +299,10 @@ describe("Supra2-IMG interface hints (sc-24215)", () => {
     expect(promptTokenLimitHint({ name: "Krea 2 Turbo", image: { maxPromptTokens: 1024, promptOverflow: "refuse" } })).toBe(
       "Krea 2 Turbo reads up to 1,024 prompt tokens; a longer prompt is refused.",
     );
+    // The declared limit is the text-to-image one; edit encodes with its own, larger limit.
+    expect(
+      promptTokenLimitHint({ name: "Krea 2 Turbo", image: { maxPromptTokens: 1024, promptOverflow: "refuse" } }, "edit_image"),
+    ).toBeNull();
   });
 });
 

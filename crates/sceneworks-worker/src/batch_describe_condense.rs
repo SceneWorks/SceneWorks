@@ -13,18 +13,25 @@
 //! included, the same ids the engine admits against its 1,024-token cap); otherwise the count is
 //! the describer's own token count of the reply, an estimate, held to
 //! `CONDENSE_ESTIMATE_PERCENT` of the limit. The prompt must also fit the route's
-//! character limit beside its `[W:H]` line, with each label wrapped as `{{label}}`.
+//! character limit beside its `[W:H]` line. Both bounds keep room for every person-label mention,
+//! which Image Studio replaces with the user's text before it sends the prompt
+//! (`VARIABLE_VALUE_TOKEN_RESERVE`, `VARIABLE_VALUE_CHAR_RESERVE` in sceneworks-core).
 //!
-//! **Retry.** A reply over either limit, cut off at its budget, or missing a person label is
-//! rewritten once with a stricter word target. A result still over is stored with `over: true` and
-//! a plain notice; one still missing a label is stored `failed` (the batch block then uses the seven
-//! fields). Text is never truncated to make it fit.
+//! **Retry.** A reply over either limit, cut off at its budget, not one plain prompt (a preamble,
+//! field names, headings or a list), or naming a different set of person labels than the fields
+//! (one left out, or one invented) is rewritten once with a stricter word target. A result still
+//! over is stored with `over: true` and a plain notice; one still malformed is stored `failed`
+//! (the batch block then uses the seven fields). Text is never truncated to make it fit.
+//!
+//! **Measure-only.** A user-edited condensed prompt is re-counted without generating: the exact
+//! count needs only the target's tokenizer, never the describer, so a measure-only job loads no
+//! model. Without the target's tokenizer the edited prompt stays unmeasured.
 
 use super::*;
 
 use sceneworks_core::dataset_batch_describe::{
     condense_char_bound, condense_token_bound, condense_word_target, CONDENSE_RETRY_PERCENT,
-    LABEL_WRAP_CHARS,
+    VARIABLE_VALUE_CHAR_RESERVE, VARIABLE_VALUE_TOKEN_RESERVE,
 };
 
 /// Reply budget of one condensing generation. The target is at most about 600 words (about 800
@@ -100,14 +107,18 @@ pub(crate) struct Condensed {
     pub(crate) target: String,
     pub(crate) limit: usize,
     pub(crate) text: String,
-    /// The measured size in tokens; `None` when no reply was produced.
+    /// The measured size in tokens; `None` when no reply was produced or the size could not be
+    /// counted (a measure-only request without the target's tokenizer).
     pub(crate) tokens: Option<usize>,
     pub(crate) exact: bool,
     pub(crate) estimate_reason: Option<String>,
     pub(crate) characters: usize,
+    /// Person-label mentions in the text: each keeps [`VARIABLE_VALUE_TOKEN_RESERVE`] tokens and
+    /// [`VARIABLE_VALUE_CHAR_RESERVE`] characters of room for its filled-in value.
+    pub(crate) mentions: usize,
     pub(crate) over: bool,
-    /// No usable prompt (a generation error, or a person label still missing after the retry):
-    /// the batch block uses the seven fields.
+    /// No usable prompt (a generation error, a reply that is not one plain prompt, or labels that
+    /// differ from the fields' after the retry): the batch block uses the seven fields.
     pub(crate) failed: bool,
     pub(crate) notice: Option<String>,
 }
@@ -122,6 +133,8 @@ impl Condensed {
             "tokenCount": if self.exact { "exact" } else { "estimate" },
             "estimateReason": self.estimate_reason,
             "characters": self.characters,
+            "labelMentions": self.mentions,
+            "reservedTokens": self.mentions * VARIABLE_VALUE_TOKEN_RESERVE,
             "over": self.over,
             "failed": self.failed,
             "notice": self.notice,
@@ -130,7 +143,8 @@ impl Condensed {
 }
 
 /// The person labels in `text`: every whole word (ASCII letters, digits, underscore) of the form
-/// `<lowercase letters>_<digits>` — the same rule the web formatter wraps as `{{label}}`.
+/// `<lowercase letters>_<digits>` — the same rule the web formatter wraps as `{{label}}`. A label
+/// inside a longer word (`xwoman_1`, `woman_1b`) is not one.
 pub(crate) fn person_labels(text: &str) -> Vec<&str> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|word| {
@@ -150,23 +164,25 @@ pub(crate) fn condense_system(max_words: usize) -> String {
         .replace("{max_words}", &max_words.to_string())
 }
 
+/// The names the condensing user turn gives the seven fields, in field order.
+const FIELD_NAMES: [&str; 7] = [
+    "Description",
+    "Pose",
+    "Style",
+    "Camera",
+    "Composition",
+    "Lighting",
+    "Environment",
+];
+
 /// The user turn: the seven fields as `Field: value` lines (one `Pose:` line per person); empty
 /// fields are left out.
 pub(crate) fn condense_user(fields: &[String; DESCRIBE_FIELDS.len()]) -> String {
-    const NAMES: [&str; 7] = [
-        "Description",
-        "Pose",
-        "Style",
-        "Camera",
-        "Composition",
-        "Lighting",
-        "Environment",
-    ];
     let mut lines = vec![
         "Rewrite these fields into one prompt.".to_owned(),
         String::new(),
     ];
-    for (name, text) in NAMES.iter().zip(fields) {
+    for (name, text) in FIELD_NAMES.iter().zip(fields) {
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             lines.push(format!("{name}: {line}"));
         }
@@ -174,57 +190,248 @@ pub(crate) fn condense_user(fields: &[String; DESCRIBE_FIELDS.len()]) -> String 
     lines.join("\n")
 }
 
-/// The measured size of one reply against the target's bounds.
-struct Measured {
+/// Why a reply is not one plain prompt, judged cheaply on its text before whitespace collapses:
+/// a preamble ("Here is the prompt:"), a field name used as a heading ("Pose:"), a markdown
+/// heading, or a list marker. `None` for a plain prompt.
+pub(crate) fn shape_problem(raw: &str) -> Option<&'static str> {
+    let text = crate::text_clean::strip_reasoning_and_fence(raw);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let first = lines
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ["here is", "here's", "sure", "certainly", "okay", "below is"]
+        .iter()
+        .any(|start| first.starts_with(start))
+        || (lines.len() > 1 && first.ends_with(':'))
+    {
+        return Some("it starts with a preamble");
+    }
+    if lines.iter().any(|line| line.starts_with('#')) {
+        return Some("it has a markdown heading");
+    }
+    let is_list_item = |line: &&str| {
+        line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.starts_with("• ")
+            || line.split_once(". ").is_some_and(|(number, _)| {
+                !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+            })
+    };
+    if lines.iter().any(is_list_item) {
+        return Some("it is a list");
+    }
+    let has_field_name = FIELD_NAMES.iter().any(|name| {
+        let needle = format!("{name}:");
+        text.match_indices(&needle).any(|(at, _)| {
+            text[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|before| !before.is_alphanumeric())
+        })
+    });
+    if has_field_name {
+        return Some("it repeats the field names");
+    }
+    None
+}
+
+/// One reply's measurement against the target's bounds.
+pub(crate) struct Measured {
     text: String,
-    tokens: usize,
+    /// `None` when it could not be counted.
+    tokens: Option<usize>,
     exact: bool,
+    /// The bound this reply is judged against: the limit for an exact count, the estimate share
+    /// of it otherwise (also when the exact counter failed on this reply).
+    token_bound: usize,
     characters: usize,
-    block_chars: usize,
+    mentions: usize,
     cut_off: bool,
     missing: Vec<String>,
+    extra: Vec<String>,
+    shape: Option<&'static str>,
 }
 
 impl Measured {
-    fn over(&self, token_bound: usize) -> bool {
-        self.cut_off || self.tokens > token_bound || self.block_chars > condense_char_bound()
+    fn tokens_over(&self) -> bool {
+        self.tokens.is_some_and(|tokens| {
+            tokens + self.mentions * VARIABLE_VALUE_TOKEN_RESERVE > self.token_bound
+        })
+    }
+
+    fn chars_over(&self) -> bool {
+        self.characters + self.mentions * VARIABLE_VALUE_CHAR_RESERVE > condense_char_bound()
+    }
+
+    fn over(&self) -> bool {
+        self.cut_off || self.tokens_over() || self.chars_over()
+    }
+
+    fn usable(&self) -> bool {
+        !self.text.is_empty()
+            && self.shape.is_none()
+            && self.missing.is_empty()
+            && self.extra.is_empty()
     }
 }
 
-fn measure(
+/// Measure `raw` for `fit`: the target's exact count when its counter runs, else
+/// `generated_tokens` (the describer's own count, an estimate), else unmeasured. `labels` are the
+/// fields' person labels: the text's set must equal them.
+pub(crate) fn measure(
     fit: &FitTarget,
-    reply: CondenseReply,
+    raw: &str,
+    generated_tokens: Option<usize>,
+    cut_off: bool,
     labels: &std::collections::BTreeSet<&str>,
 ) -> Measured {
-    let text = crate::text_clean::strip_reasoning_and_fence(&reply.text)
+    let shape = shape_problem(raw);
+    let text = crate::text_clean::strip_reasoning_and_fence(raw)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     let found = person_labels(&text);
-    let characters = text.chars().count();
-    let block_chars = characters + LABEL_WRAP_CHARS * found.len();
-    let missing = labels
-        .iter()
-        .filter(|label| !found.contains(label))
-        .map(|label| (*label).to_owned())
-        .collect();
+    let found_set: std::collections::BTreeSet<&str> = found.iter().copied().collect();
     let exact_count = fit
         .counter
         .as_ref()
         .and_then(|counter| counter.count(&text).ok());
     Measured {
-        tokens: exact_count.unwrap_or(reply.generated_tokens),
+        tokens: exact_count.or(generated_tokens),
         exact: exact_count.is_some(),
+        token_bound: condense_token_bound(fit.limit, exact_count.is_some()),
+        characters: text.chars().count(),
+        mentions: found.len(),
+        cut_off,
+        missing: labels
+            .difference(&found_set)
+            .map(|l| (*l).to_owned())
+            .collect(),
+        extra: found_set
+            .difference(labels)
+            .map(|l| (*l).to_owned())
+            .collect(),
+        shape,
         text,
-        characters,
-        block_chars,
-        cut_off: reply.cut_off,
-        missing,
     }
 }
 
-/// Condense one image's fields for `fit`: one generation, and one stricter retry when the reply is
-/// over a limit or misses a person label. Returns `None` when the job was canceled meanwhile.
+/// The stored result of a measurement, with the plain notice of whatever is wrong with it.
+/// `generated` is false for a user-edited prompt, whose label or shape problems are reported but
+/// never make it `failed` (it is the user's text).
+pub(crate) fn condensed_from(fit: &FitTarget, measured: Measured, generated: bool) -> Condensed {
+    let after = if generated {
+        " even after one retry"
+    } else {
+        ""
+    };
+    let fallback = if generated {
+        ", so the seven fields are used"
+    } else {
+        ""
+    };
+    let mut problems = Vec::new();
+    if measured.text.is_empty() {
+        problems.push("is empty".to_owned());
+    }
+    if let Some(shape) = measured.shape {
+        problems.push(format!("is not one plain prompt ({shape})"));
+    }
+    if !measured.missing.is_empty() {
+        problems.push(format!("leaves out {}", measured.missing.join(", ")));
+    }
+    if !measured.extra.is_empty() {
+        problems.push(format!(
+            "adds {}, which the fields do not have",
+            measured.extra.join(", ")
+        ));
+    }
+    let over = measured.over();
+    let notice = if !problems.is_empty() {
+        Some(format!(
+            "The condensed prompt {}{after}{fallback}.",
+            problems.join("; ")
+        ))
+    } else if over {
+        let mut reasons = Vec::new();
+        if measured.cut_off {
+            reasons.push("the reply was cut off at its length limit".to_owned());
+        }
+        if measured.tokens_over() {
+            reasons.push(format!(
+                "{}{} tokens plus room for {} variable values is over {}",
+                if measured.exact { "" } else { "about " },
+                measured.tokens.unwrap_or_default(),
+                measured.mentions,
+                measured.token_bound
+            ));
+        }
+        if measured.chars_over() {
+            reasons.push(format!(
+                "{} characters plus room for {} variable values is over {}",
+                measured.characters,
+                measured.mentions,
+                condense_char_bound()
+            ));
+        }
+        Some(format!(
+            "Still over the limit{after} ({}). Shorten it before generating.",
+            reasons.join("; ")
+        ))
+    } else {
+        None
+    };
+    Condensed {
+        target: fit.model_id.clone(),
+        limit: fit.limit,
+        tokens: measured.tokens,
+        exact: measured.exact,
+        estimate_reason: (!measured.exact).then(|| {
+            fit.estimate_reason
+                .clone()
+                .unwrap_or_else(|| format!("{} tokens could not be counted exactly", fit.name))
+        }),
+        characters: measured.characters,
+        mentions: measured.mentions,
+        failed: generated && !measured.usable(),
+        over,
+        notice,
+        text: super::bounded_text(&measured.text, super::MAX_DESCRIBE_FIELD_CHARS),
+    }
+}
+
+/// The fields' person labels.
+fn field_labels(fields: &[String; DESCRIBE_FIELDS.len()]) -> std::collections::BTreeSet<&str> {
+    fields
+        .iter()
+        .flat_map(|field| person_labels(field))
+        .collect()
+}
+
+/// Measure a user-edited condensed prompt without generating anything (a measure-only job): the
+/// exact count when the target's tokenizer is installed, otherwise unmeasured.
+pub(crate) fn measure_edited(
+    fit: &FitTarget,
+    text: &str,
+    fields: &[String; DESCRIBE_FIELDS.len()],
+) -> Condensed {
+    condensed_from(
+        fit,
+        measure(fit, text, None, false, &field_labels(fields)),
+        false,
+    )
+}
+
+/// Condense one image's fields for `fit`: one generation, and one stricter retry when the reply
+/// is over a limit (counting the variable-value reserve), is not one plain prompt, or names a
+/// different set of person labels than the fields. Returns `None` when the job was canceled
+/// meanwhile.
 pub(crate) async fn condense_fields(
     api: &ApiClient,
     settings: &Settings,
@@ -234,21 +441,24 @@ pub(crate) async fn condense_fields(
     fields: &[String; DESCRIBE_FIELDS.len()],
     (index, total): (usize, usize),
 ) -> WorkerResult<Option<Condensed>> {
-    let labels: std::collections::BTreeSet<&str> = fields
-        .iter()
-        .flat_map(|field| person_labels(field))
-        .collect();
+    let labels = field_labels(fields);
     let token_bound = condense_token_bound(fit.limit, fit.counter.is_some());
-    let mut words = condense_word_target(token_bound, condense_char_bound());
+    // Before any reply, expect about three mentions of each person.
+    let mut words = condense_word_target(token_bound, condense_char_bound(), labels.len() * 3);
     let user = condense_user(fields);
     let mut last: Option<Measured> = None;
     for attempt in 0..2 {
-        if attempt > 0 {
+        if let Some(previous) = &last {
             // Honour a cancel before spending the retry.
             if cancel_requested_peek(api, &job.id).await {
                 return Ok(None);
             }
-            words = words * CONDENSE_RETRY_PERCENT / 100;
+            let retry = condense_word_target(
+                previous.token_bound,
+                condense_char_bound(),
+                previous.mentions.max(labels.len() * 3),
+            );
+            words = retry.min(words) * CONDENSE_RETRY_PERCENT / 100;
             update_job(
                 api,
                 &job.id,
@@ -257,10 +467,11 @@ pub(crate) async fn condense_fields(
                     ProgressStage::Running,
                     super::image_progress(index, total),
                     &format!(
-                        "Condensing image {} of {total} for {} again (attempt 2): the first \
+                        "Condensing image {} of {total} for {} again (attempt {}): the first \
                          prompt did not fit.",
                         index + 1,
-                        fit.name
+                        fit.name,
+                        attempt + 1
                     ),
                     None,
                     backend_label(&settings.gpu_id),
@@ -288,6 +499,7 @@ pub(crate) async fn condense_fields(
                     exact: fit.counter.is_some(),
                     estimate_reason: fit.estimate_reason.clone(),
                     characters: 0,
+                    mentions: 0,
                     over: false,
                     failed: true,
                     notice: Some(super::bounded_error(&format!(
@@ -296,65 +508,24 @@ pub(crate) async fn condense_fields(
                 }))
             }
         };
-        let measured = measure(fit, reply, &labels);
-        let done = !measured.over(token_bound) && measured.missing.is_empty();
+        let measured = measure(
+            fit,
+            &reply.text,
+            Some(reply.generated_tokens),
+            reply.cut_off,
+            &labels,
+        );
+        let done = measured.usable() && !measured.over();
         last = Some(measured);
         if done {
             break;
         }
     }
-    let measured = last.expect("at least one attempt ran");
-    let over = measured.over(token_bound);
-    let failed = !measured.missing.is_empty() || measured.text.is_empty();
-    let notice = if !measured.missing.is_empty() {
-        Some(format!(
-            "The condensed prompt leaves out {} even after one retry, so the seven fields are used.",
-            measured.missing.join(", ")
-        ))
-    } else if measured.text.is_empty() {
-        Some("The condensed prompt came back empty, so the seven fields are used.".to_owned())
-    } else if over {
-        let mut reasons = Vec::new();
-        if measured.cut_off {
-            reasons.push("the reply was cut off at its length limit".to_owned());
-        }
-        if measured.tokens > token_bound {
-            reasons.push(format!(
-                "{}{} of {token_bound} tokens",
-                if measured.exact { "" } else { "about " },
-                measured.tokens
-            ));
-        }
-        if measured.block_chars > condense_char_bound() {
-            reasons.push(format!(
-                "{} of {} characters",
-                measured.block_chars,
-                condense_char_bound()
-            ));
-        }
-        Some(format!(
-            "Still over the limit after one retry ({}). Shorten it before generating.",
-            reasons.join("; ")
-        ))
-    } else {
-        None
-    };
-    Ok(Some(Condensed {
-        target: fit.model_id.clone(),
-        limit: fit.limit,
-        tokens: Some(measured.tokens),
-        exact: measured.exact,
-        estimate_reason: (!measured.exact).then(|| {
-            fit.estimate_reason
-                .clone()
-                .unwrap_or_else(|| format!("{} tokens could not be counted exactly", fit.name))
-        }),
-        characters: measured.characters,
-        text: super::bounded_text(&measured.text, super::MAX_DESCRIBE_FIELD_CHARS),
-        over,
-        failed,
-        notice,
-    }))
+    Ok(Some(condensed_from(
+        fit,
+        last.expect("at least one attempt ran"),
+        true,
+    )))
 }
 
 /// The exact counter for a target, keyed on its catalog entry's `adapter` (data, not a model id):

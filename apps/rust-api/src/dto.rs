@@ -655,6 +655,10 @@ pub(crate) struct DatasetBatchDescribeJobRequest {
     /// condensing step runs for them; no image is opened. Needs `fitTo`; excludes `itemIds`.
     #[serde(default)]
     pub(crate) condense_rows: Option<Vec<CondenseRowRequest>>,
+    /// Measure-only (SW-7163): re-count each `condenseRows` row's `condensedText` (a prompt the
+    /// user edited) against the target. Nothing is generated and no model loads.
+    #[serde(default)]
+    pub(crate) measure_only: bool,
 }
 
 /// One already-described row of a condense-only request: its seven fields (the user may have
@@ -669,6 +673,12 @@ pub(crate) struct CondenseRowRequest {
     pub(crate) width: Option<u32>,
     #[serde(default)]
     pub(crate) height: Option<u32>,
+    /// The row's cut-off notice from its describe run, kept on the condensed item.
+    #[serde(default)]
+    pub(crate) notice: Option<String>,
+    /// Measure-only: the edited condensed prompt to re-count.
+    #[serde(default)]
+    pub(crate) condensed_text: Option<String>,
 }
 
 /// `?model=<repo>` on the describing-prompt routes (SW-7085, SW-7086): which describer's default

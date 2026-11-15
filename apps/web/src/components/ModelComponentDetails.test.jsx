@@ -80,7 +80,7 @@ describe("ModelComponentDetails", () => {
 
   it("says a refusing engine refuses a longer prompt (SW-7163)", () => {
     expect(modelLimitLines({ image: { maxPromptTokens: 1024, promptOverflow: "refuse" } })).toEqual([
-      "Prompt: up to 1024 tokens (longer prompts are refused)",
+      "Text-to-image prompt: up to 1024 tokens (longer prompts are refused)",
     ]);
   });
 

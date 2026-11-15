@@ -45,9 +45,36 @@ pub const CONDENSE_ESTIMATE_PERCENT: usize = 85;
 /// How much stricter the one retry's word target is than the first attempt's, as a percentage.
 pub const CONDENSE_RETRY_PERCENT: usize = 85;
 
+/// The room a condensed prompt keeps for each person-label mention (`woman_1`): Image Studio
+/// replaces each `{{label}}` with the user's own text before it sends the prompt, so a prompt
+/// that only just fits with bare labels would be refused once they are filled in. A prompt fits
+/// only when `tokens + mentions × VARIABLE_VALUE_TOKEN_RESERVE <= limit` and `characters +
+/// mentions × VARIABLE_VALUE_CHAR_RESERVE <=` the character bound: each filled-in value may be up
+/// to about 8 tokens or 40 characters long ("a tall woman in a red coat").
+pub const VARIABLE_VALUE_TOKEN_RESERVE: usize = 8;
+/// The character room kept per label mention; see [`VARIABLE_VALUE_TOKEN_RESERVE`].
+pub const VARIABLE_VALUE_CHAR_RESERVE: usize = 40;
+
+/// The smallest prompt limit a "Fit to" target may declare. The condensing instruction must keep
+/// every limb of every person; below about 512 tokens (about 340 words with the variable reserve)
+/// that cannot be met for an ordinary image, so most rows would end over the limit.
+pub const MIN_FIT_TO_PROMPT_TOKENS: usize = 512;
+
+/// The most characters a condense-only row may carry across its seven fields (each field is
+/// also held to [`MAX_DESCRIBE_FIELD_CHARS`]).
+pub const MAX_CONDENSE_ROW_CHARS: usize = 32_000;
+
+/// Whether the describer `model` names runs the "Fit to" condensing step: every Vision
+/// Captioner-class describer has a text-only generation on its loaded model; JoyCaption (a
+/// one-shot captioner) has none. The one place this property is decided.
+pub fn describer_condenses(model: Option<&str>) -> bool {
+    !is_joycaption_model(model)
+}
+
 /// The prompt context, in text-encoder tokens, a catalog entry declares for its image model
-/// (`image.maxPromptTokens`); `None` when it declares none. The "Fit to" targets are exactly the
-/// entries for which this is `Some`.
+/// (`image.maxPromptTokens`); `None` when it declares none. For Krea 2 it is the text-to-image
+/// limit (its image edit encodes with a separate, far larger one). The "Fit to" targets are the
+/// entries for which this is at least [`MIN_FIT_TO_PROMPT_TOKENS`].
 pub fn prompt_token_limit(entry: &Value) -> Option<usize> {
     entry
         .get("image")?
@@ -74,14 +101,15 @@ pub fn condense_char_bound() -> usize {
     crate::MAX_PROMPT_CHARS - RATIO_LINE_CHARS
 }
 
-/// The word count the condensing rewrite is told to stay under for a token and character bound.
-/// English prose runs about 4 words to 3 tokens and about 6 characters a word with its space, so
-/// the target is the tighter of the two bounds expressed in words, less a 10% margin so a reply
-/// that overshoots its word count a little still fits.
-pub fn condense_word_target(token_bound: usize, char_bound: usize) -> usize {
-    let by_tokens = token_bound * 3 / 4;
-    let by_chars = char_bound / 6;
-    by_tokens.min(by_chars) * 9 / 10
+/// The word count the condensing rewrite is told to stay under for a token and character bound
+/// and the expected number of label `mentions` (whose variable-value reserve comes off both
+/// bounds first). English prose runs about 4 words to 3 tokens and about 6 characters a word with
+/// its space, so the target is the tighter of the two bounds expressed in words, less a 10% margin
+/// so a reply that overshoots its word count a little still fits.
+pub fn condense_word_target(token_bound: usize, char_bound: usize, mentions: usize) -> usize {
+    let tokens = token_bound.saturating_sub(mentions * VARIABLE_VALUE_TOKEN_RESERVE);
+    let chars = char_bound.saturating_sub(mentions * VARIABLE_VALUE_CHAR_RESERVE);
+    (tokens * 3 / 4).min(chars / 6) * 9 / 10
 }
 
 /// Longest describing instruction a Vision Captioner request may carry, in characters. The default
@@ -209,9 +237,14 @@ mod tests {
         assert_eq!(condense_token_bound(1024, false), 870);
         assert_eq!(condense_char_bound(), 3_992);
         // Krea 2: the 4,000-character route limit binds before 1,024 tokens of English.
-        assert_eq!(condense_word_target(1024, condense_char_bound()), 598);
+        assert_eq!(condense_word_target(1024, condense_char_bound(), 0), 598);
+        // Eight label mentions reserve 320 characters (and 64 tokens) for their filled-in values.
+        assert_eq!(condense_word_target(1024, condense_char_bound(), 8), 550);
         // A small token context binds before the character limit.
-        assert_eq!(condense_word_target(128, condense_char_bound()), 86);
+        assert_eq!(condense_word_target(128, condense_char_bound(), 0), 86);
+        assert!(describer_condenses(Some(VISION_CAPTIONER_REPO)));
+        assert!(describer_condenses(None));
+        assert!(!describer_condenses(Some(JOYCAPTION_REPO)));
     }
 
     #[test]
