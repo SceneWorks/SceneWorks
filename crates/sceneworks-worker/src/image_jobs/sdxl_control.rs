@@ -788,7 +788,15 @@ mod sdxl_control_tests {
 
     fn request(value: Value) -> ImageRequest {
         let payload = value.as_object().expect("payload");
-        ImageRequest::from_resolved(payload, payload).expect("resolved image request")
+        let mut effective = payload.clone();
+        if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+            if let Some(value) = advanced.get_mut("mlxQuantize") {
+                if let Some(lowered) = sceneworks_core::options::legacy_integer(value) {
+                    *value = lowered;
+                }
+            }
+        }
+        ImageRequest::from_resolved(payload, &effective).expect("resolved image request")
     }
 
     fn validate_request(request: &ImageRequest) -> WorkerResult<Vec<PoseInput>> {
@@ -816,6 +824,11 @@ mod sdxl_control_tests {
 
     #[test]
     fn exact_five_model_family_and_material_candidate_are_pinned() {
+        let candidate = |value: Value| {
+            let payload = value.as_object().unwrap();
+            ImageRequest::from_resolved(payload, payload)
+                .is_ok_and(|request| sdxl_control_candidate(&request))
+        };
         let models = [
             "sdxl",
             "realvisxl",
@@ -825,50 +838,56 @@ mod sdxl_control_tests {
         ];
         for model in models {
             assert!(is_sdxl_control_model(model));
-            assert!(sdxl_control_candidate(&request(json!({
+            assert!(candidate(json!({
                 "model": model,
                 "advanced": { "poses": [{ "keypoints": [] }] }
-            }))));
+            })));
         }
-        assert!(!sdxl_control_candidate(&request(json!({
+        assert!(!candidate(json!({
             "model": "instantid_realvisxl",
             "advanced": { "poses": [{ "keypoints": [] }] }
-        }))));
-        assert!(!sdxl_control_candidate(&request(json!({
+        })));
+        assert!(!candidate(json!({
             "model": "sdxl",
             "advanced": { "poses": [] }
-        }))));
+        })));
         for advanced in [
             json!({ "controlMode": "pose" }),
             json!({ "controlMode": "canny" }),
-            json!({ "controlMode": false }),
             json!({ "controlImage": "asset" }),
             json!({ "controlWeights": {} }),
         ] {
-            assert!(sdxl_control_candidate(&request(json!({
+            assert!(candidate(json!({
                 "model": "sdxl",
                 "advanced": advanced,
-            }))));
+            })));
         }
-        assert!(!sdxl_control_candidate(&request(json!({
+        assert!(!candidate(json!({
             "model": "sdxl",
             "advanced": { "controlMode": "  " }
-        }))));
+        })));
 
         for model in models {
             for advanced in [
-                json!({ "poses": "malformed" }),
                 json!({ "poses": [null] }),
                 json!({ "controlMode": "pose" }),
-                json!({ "controlMode": false }),
                 json!({ "controlImage": "asset" }),
                 json!({ "controlWeights": {} }),
             ] {
-                assert!(sdxl_control_candidate(&request(json!({
+                assert!(candidate(json!({
                     "model": model,
                     "advanced": advanced,
-                }))));
+                })));
             }
+        }
+        for advanced in [
+            json!({ "poses": "malformed" }),
+            json!({ "controlMode": false }),
+        ] {
+            assert!(
+                !candidate(json!({ "model": "sdxl", "advanced": advanced })),
+                "{advanced}"
+            );
         }
     }
 
@@ -1118,11 +1137,12 @@ mod sdxl_control_tests {
         let payload = malformed.as_object().unwrap();
         assert!(ImageRequest::from_resolved(payload, payload).is_err());
 
-        let overflowing_scale = request(json!({
+        let overflowing_scale = json!({
             "model": "sdxl",
             "advanced": { "poses": [{}], "controlScale": "1e100" }
-        }));
-        assert!(sdxl_control_scale(&overflowing_scale).is_err());
+        });
+        let payload = overflowing_scale.as_object().unwrap();
+        assert!(ImageRequest::from_resolved(payload, payload).is_err());
 
         let too_many = vec![json!({}); sceneworks_core::image_request::MAX_JOB_POSES + 1];
         let over_limit = request(json!({

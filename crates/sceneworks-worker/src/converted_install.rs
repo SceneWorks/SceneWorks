@@ -245,10 +245,11 @@ mod entry_point_tests {
             .expect("the unexplained body follows")
             .0;
         assert!(
-            body.contains("run_image_generate_job_unexplained(api, settings, job).await")
-                && body.contains(
-                    "crate::converted_install::explain_job_result(settings, &job.payload, result)"
-                ),
+            body.contains(
+                "run_image_generate_job_unexplained(api, settings, job, portable_aux).await"
+            ) && body.contains(
+                "crate::converted_install::explain_job_result(settings, &job.payload, result)"
+            ),
             "{body}"
         );
     }

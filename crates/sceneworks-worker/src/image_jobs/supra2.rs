@@ -255,9 +255,11 @@ mod tests {
             "height": 256,
             "modelManifestEntry": Value::Object(entry),
         });
-        let request = sceneworks_core::image_request::ImageRequest::from_payload(
+        let request = sceneworks_core::image_request::ImageRequest::from_resolved(
             payload.as_object().unwrap(),
-        );
+            payload.as_object().unwrap(),
+        )
+        .unwrap();
         let settings = settings_at(data.path());
         let error = super::super::resolve_weights_dir(&request, &settings)
             .expect_err("a damaged bundle never resolves");
@@ -458,9 +460,11 @@ mod tests {
                     "count": 1,
                     "modelManifestEntry": Value::Object(entry),
                 });
-                let request = sceneworks_core::image_request::ImageRequest::from_payload(
+                let request = sceneworks_core::image_request::ImageRequest::from_resolved(
                     payload.as_object().unwrap(),
-                );
+                    payload.as_object().unwrap(),
+                )
+                .unwrap();
                 let plan = super::super::super::ImagePlan::with_count(
                     &request,
                     request.image_count(),
@@ -534,9 +538,11 @@ mod tests {
                 "advanced": { "steps": steps },
                 "modelManifestEntry": Value::Object(entry.clone()),
             });
-            let request = sceneworks_core::image_request::ImageRequest::from_payload(
+            let request = sceneworks_core::image_request::ImageRequest::from_resolved(
                 payload.as_object().unwrap(),
-            );
+                payload.as_object().unwrap(),
+            )
+            .unwrap();
             let plan =
                 super::super::super::ImagePlan::with_count(&request, request.image_count(), None);
             let mut asset_writes = Vec::new();
@@ -1875,7 +1881,8 @@ mod tests {
             for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                 payload[key] = value;
             }
-            ImageRequest::from_payload(payload.as_object().unwrap())
+            let authored = payload.as_object().unwrap();
+            ImageRequest::from_resolved(authored, authored).unwrap()
         }
 
         fn model() -> crate::engines::ResolvedModel {
@@ -2410,7 +2417,11 @@ mod tests {
                     "advanced": { "steps": 12, "guidanceScale": 4.5 },
                     "modelManifestEntry": Value::Object(entry),
                 });
-                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let request = ImageRequest::from_resolved(
+                    payload.as_object().unwrap(),
+                    payload.as_object().unwrap(),
+                )
+                .unwrap();
                 let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
                 let loader_seen = Arc::clone(&seen);
                 let loader = move |_engine: &str, _spec: &gen_core::LoadSpec| {

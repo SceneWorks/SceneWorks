@@ -293,14 +293,16 @@ mod tests {
     }
 
     fn request(enabled: bool) -> ImageRequest {
-        ImageRequest::from_payload(json!({
+        let payload = json!({
             "model": "flux3_klein", "mode": "text_to_image", "prompt": "a fox",
             "advanced": { "enhancePrompt": enabled },
             "modelManifestEntry": { "downloads": [{
                 "provider": "huggingface", "repo": UPSAMPLER_REPO, "revision": UPSAMPLER_REVISION,
                 "coRequisite": true, "componentId": UPSAMPLER_COMPONENT, "required": "soft", "files": []
             }] }
-        }).as_object().unwrap())
+        });
+        let authored = payload.as_object().unwrap();
+        ImageRequest::from_resolved(authored, authored).unwrap()
     }
 
     fn spec() -> LoadSpec {
@@ -871,7 +873,11 @@ mod tests {
                 let payload = json!({"projectId":"p", "model":model, "mode":"text_to_image",
                     "prompt":"a fox", "width":64, "height":64, "seed":17,
                     "advanced":{"enhancePrompt":true, "promptEnhancement":{"effectivePrompt":"forged"}}});
-                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let request = ImageRequest::from_resolved(
+                    payload.as_object().unwrap(),
+                    payload.as_object().unwrap(),
+                )
+                .unwrap();
                 let plan = ImagePlan::with_count(&request, 1, None);
                 let (url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
                 let mut settings = crate::tests::test_settings(url.clone(), None);
@@ -1006,7 +1012,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"edit_image",
                 "prompt":input.prompt, "advanced":{"enhancePrompt":true}});
-            let request = ImageRequest::from_payload(payload.as_object().unwrap());
+            let request = ImageRequest::from_resolved(
+                payload.as_object().unwrap(),
+                payload.as_object().unwrap(),
+            )
+            .unwrap();
             let plan = ImagePlan::with_count(&request, 1, None);
             let (url, _) = crate::tests::spawn_no_user_cancel_capture_stub().await;
             let mut settings = crate::tests::test_settings(url.clone(), None);
@@ -1093,7 +1103,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"text_to_image",
             "prompt":"a fox", "advanced":{"enhancePrompt":true}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         let plan = ImagePlan::with_count(&request, 1, None);
         let (url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
         let mut settings = crate::tests::test_settings(url.clone(), None);

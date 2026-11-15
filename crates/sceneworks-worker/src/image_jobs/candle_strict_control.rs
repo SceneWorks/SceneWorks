@@ -447,9 +447,10 @@ mod report_tests {
             _control: &Image,
             seed: u64,
             cancel: &CancelFlag,
-            _preview: &gen_core::PreviewSink,
+            preview: &gen_core::PreviewSink,
             _on_progress: &mut dyn FnMut(Progress),
         ) -> WorkerResult<(Image, ExecutionIdentity)> {
+            let _ = preview;
             if seed == 2 {
                 return Err(WorkerError::Engine("fixture error".into()));
             }

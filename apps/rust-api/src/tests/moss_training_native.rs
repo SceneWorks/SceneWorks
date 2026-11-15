@@ -229,6 +229,7 @@ fn fixture_bootstrap_rss_bytes() -> Result<u64, String> {
         .ok_or_else(|| "CPU API bootstrap RSS is zero or overflowed".to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_fixture_training(
     app: &axum::Router,
     worker: &sceneworks_worker::Settings,

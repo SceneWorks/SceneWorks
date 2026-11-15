@@ -917,7 +917,10 @@ fn validate_advertised_numeric_limits(
         })?;
 
         match field.as_str() {
-            "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
+            "rank" if !(target.kernel == "mage_flow_lora" && config_is_full_finetune(config)) => {
+                validate_advertised_numeric_range(field, values, u64::from(config.rank))?
+            }
+            "rank" => {}
             // Legacy target limits intentionally describe integral alpha. MOSS has no
             // `alpha` numeric range so its finite fractional alpha passes through its
             // native f32 contract; another target must explicitly opt into fractions.
@@ -1242,7 +1245,9 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
             Ok(())
         }
     };
-    positive(config.rank, "rank")?;
+    if !config_is_full_finetune(config) {
+        positive(config.rank, "rank")?;
+    }
     training_alpha_f32(&config.alpha)?;
     positive(config.steps, "steps")?;
     positive(config.resolution, "resolution")?;

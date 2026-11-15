@@ -326,6 +326,9 @@ POST	/api/v1/jobs/events/ticket	token
 POST	/api/v1/files/ticket	token
 GET	/api/v1/jobs/:job_id	token
 HEAD	/api/v1/jobs/:job_id	token
+POST	/api/v1/jobs/:job_id/exact-replay	token
+GET	/api/v1/jobs/:job_id/execution-receipt	token
+HEAD	/api/v1/jobs/:job_id/execution-receipt	token
 POST	/api/v1/jobs/:job_id/cancel	token
 POST	/api/v1/jobs/:job_id/clear	token
 POST	/api/v1/jobs/:job_id/retry	token

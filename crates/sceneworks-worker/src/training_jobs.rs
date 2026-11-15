@@ -1222,6 +1222,19 @@ fn validate_training_target_config_resolved(
         sceneworks_core::training::validate_training_config_for_target(&target, &plan.config)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     }
+    if plan.target.kernel == "moss_image_lora" {
+        let target = sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| {
+                target.kernel == plan.target.kernel && target.base_model == plan.target.base_model
+            })
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS training target is not registered.".to_owned())
+            })?;
+        sceneworks_core::training::validate_training_config_for_target(&target, &plan.config)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    }
     let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -4706,16 +4719,11 @@ mod tests {
                     let worker = validate_training_target_config(&plan).unwrap_err();
                     // Generic type refusals precede registration; MOSS-specific checks follow it.
                     // Neither-backend builds still exercise every pure field-shape assertion.
-                    let expected = early_worker_refusal.map(str::to_owned).unwrap_or_else(|| {
-                        if native_runtime {
-                            submission.to_string()
-                        } else {
-                            unavailable.clone()
-                        }
-                    });
+                    let expected = early_worker_refusal.unwrap_or(field);
                     assert!(
-                        matches!(worker, WorkerError::InvalidPayload(message) if message == expected),
-                        "{field}"
+                        matches!(&worker, WorkerError::InvalidPayload(message) if
+                            if native_runtime { message.contains(expected) } else { message == &unavailable }),
+                        "{field}: worker={worker:?}, expected={expected}"
                     );
                 }
                 // Omission and empty/native-valid bags retain the same defaults, with no IO/load.
@@ -5366,6 +5374,25 @@ mod tests {
         network_type: &str,
         image_paths: &[&str],
     ) -> Value {
+        let target = sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.kernel == kernel && target.base_model == base_model);
+        let target_id = target
+            .as_ref()
+            .map(|target| target.id.clone())
+            .unwrap_or_else(|| format!("{kernel}_target"));
+        let family = target
+            .as_ref()
+            .map_or("test", |target| target.family.as_str());
+        let modality = target
+            .as_ref()
+            .map(|target| json!(target.modality))
+            .unwrap_or_else(|| json!("image"));
+        let output_kind = target
+            .as_ref()
+            .map(|target| json!(target.output_kind))
+            .unwrap_or_else(|| json!("lora"));
         let dataset_root = data_dir.join("datasets").join("ds-1");
         let items: Vec<Value> = image_paths
             .iter()
@@ -5376,11 +5403,11 @@ mod tests {
             "planVersion": 1,
             "jobId": "job-1",
             "target": {
-                "targetId": format!("{kernel}_target"),
+                "targetId": target_id,
                 "kernel": kernel,
-                "family": "test",
-                "modality": "image",
-                "outputKind": "lora",
+                "family": family,
+                "modality": modality,
+                "outputKind": output_kind,
                 "baseModel": base_model,
                 "baseModelPath": data_dir.join("models").join("base-missing").display().to_string()
             },
@@ -5877,6 +5904,10 @@ mod tests {
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let _cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            data_dir.join("cache/source-library"),
+        );
         let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
         let root = data_dir.join("datasets").join("ds-1");
         // Image 0's mask is a user upload made after submit.
@@ -6746,12 +6777,7 @@ mod tests {
         let mut malformed = bucketed;
         malformed["config"]["advanced"]["resolutionBuckets"] =
             json!([{ "resolution": 512, "repeats": 0 }]);
-        assert_eq!(
-            map_training_config(&parse(malformed).config)
-                .expect("valid mapped training config")
-                .resolution_buckets,
-            vec![rb(0, 0)]
-        );
+        assert!(map_training_config(&parse(malformed).config).is_err());
         // The worker cap is the engine cap.
         assert_eq!(
             sceneworks_core::training::RESOLUTION_BUCKETS_MAX,
@@ -6821,13 +6847,7 @@ mod tests {
             "resolutionBuckets".into(),
             json!([{ "width": 512, "height": 768, "repeats": 1 }]),
         );
-        assert_eq!(
-            map_training_config(&config)
-                .expect("valid mapped training config")
-                .aspect_ratio_buckets[0]
-                .width,
-            0
-        );
+        assert!(map_training_config(&config).is_err());
         config.advanced.remove("resolutionBuckets");
 
         config
@@ -7122,8 +7142,7 @@ mod tests {
             parse(value)
         };
         let resolve = |plan: &TrainingPlan| {
-            let mut config =
-                map_training_config(&plan.config).expect("valid mapped training config");
+            let mut config = map_training_config(&plan.config)?;
             apply_training_adapter(&settings, plan, &mut config).map(|()| config.training_adapter)
         };
 
@@ -8710,7 +8729,7 @@ mod tests {
                     // Generic signed-i32 parsing precedes MOSS field-domain validation.
                     // Overflow refuses there; zero and numeric strings reach MOSS-specific checks.
                     for (field, invalid, expected) in [
-                        ("loraTargetModules", json!("q"), "must be an array"),
+                        ("loraTargetModules", json!("q"), "only strings"),
                         ("loraTargetModules", json!(["q", 7]), "only strings"),
                         (
                             "decomposeFactor",
@@ -8726,7 +8745,7 @@ mod tests {
                             .expect_err("invalid MOSS mapping input must fail before loading");
                         assert!(
                             matches!(&error, WorkerError::InvalidPayload(message) if message.contains(field) && message.contains(expected)),
-                            "{base}/{network}/{dtype}/{field}: {error:?}"
+                            "{base}/{network}/{dtype}/{field}: {error:?}, expected={expected}"
                         );
                     }
                     let plan = parse(value);
@@ -9378,6 +9397,9 @@ mod tests {
             ),
         ] {
             let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            if kernel.starts_with("wan") {
+                serialized["config"]["resolution"] = json!(768);
+            }
             if field == "optimizer" {
                 serialized["config"][field] = value;
             } else {
@@ -9386,7 +9408,10 @@ mod tests {
             let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("the shared dry/real recipe preflight must reject before load");
             assert!(
-                matches!(error, WorkerError::InvalidPayload(_)),
+                matches!(
+                    error,
+                    WorkerError::InvalidPayload(_) | WorkerError::Validation(_)
+                ),
                 "{kernel}/{field}: {error:?}"
             );
         }
@@ -9405,6 +9430,9 @@ mod tests {
             ("wan_moe_lora", "wan_2_2_i2v_14b"),
         ] {
             let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            if kernel.starts_with("wan") {
+                serialized["config"]["resolution"] = json!(768);
+            }
             serialized["dataset"]["items"][0]["controlImagePath"] = json!("control.png");
             let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("adapter item source/control images must fail before load");

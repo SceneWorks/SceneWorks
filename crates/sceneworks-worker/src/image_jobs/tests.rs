@@ -1135,7 +1135,37 @@ fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_
 use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
-    ImageRequest::from_payload(&value.as_object().cloned().unwrap())
+    let authored = value.as_object().expect("fixture request object");
+    let mut effective = authored.clone();
+    if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+        advanced.retain(|key, value| {
+            !value.is_null()
+                || key == "mlxQuantize"
+                || sceneworks_core::options::by_wire("advanced", key).is_none()
+        });
+        for (key, value) in advanced {
+            if let Some(spec) = sceneworks_core::options::by_wire("advanced", key) {
+                let lowered = match spec.shape {
+                    sceneworks_core::options::Shape::Integer => {
+                        sceneworks_core::options::legacy_integer(value)
+                    }
+                    sceneworks_core::options::Shape::Number => {
+                        sceneworks_core::options::legacy_number(value).map(Value::from)
+                    }
+                    _ => None,
+                };
+                if let Some(lowered) = lowered {
+                    *value = lowered;
+                }
+            }
+        }
+    }
+    ImageRequest::from_resolved(authored, &effective).expect("fixture options bind")
+}
+
+fn assert_invalid_effective_options(value: Value) {
+    let authored = value.as_object().expect("fixture request object");
+    assert!(ImageRequest::from_resolved(authored, authored).is_err());
 }
 
 #[cfg(native_lane)]
@@ -3670,7 +3700,7 @@ fn worker_proven_model_hash_reaches_the_physical_png_but_client_input_does_not()
     .as_object()
     .cloned()
     .unwrap();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let mut plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
     assert_eq!(
         plan.model_hash, None,
@@ -3789,7 +3819,7 @@ fn a_generated_png_carries_the_sanitized_workflow_of_its_own_render() {
     let settings = settings_with_config_dir(&config_dir);
 
     let payload = embed_payload();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     // No preference file at all — embedding is ON by default, which is the shape a fresh install has.
     let mut plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     // The default-platform test uses the procedural writer rather than an inference backend, so
@@ -3894,7 +3924,7 @@ fn a_kreamania_generation_records_the_worker_resolved_settings_civitai_requires(
         payload["advanced"].get("steps").is_none(),
         "the regression must begin with the same missing request field as the uploaded image"
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     let raw_settings = json!({
         "realModelInference": true,
@@ -4034,7 +4064,7 @@ fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
     .as_object()
     .cloned()
     .unwrap();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
     let raw_settings = json!({
         "resolvedSampler": "euler",
@@ -4096,7 +4126,7 @@ fn embedding_off_writes_the_bytes_sceneworks_writes_today() {
     let settings = settings_with_config_dir(&config_dir);
 
     let payload = embed_payload();
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let source = workflow_source(&settings, &payload);
     assert!(
         source.is_none(),
@@ -4199,7 +4229,7 @@ fn the_upscaled_variant_describes_the_pass_that_actually_ran() {
         "upscale".to_owned(),
         json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let base_fact = json!({
         "assetId": "asset_base", "seed": 101, "width": 320, "height": 256, "index": 0
     })
@@ -4261,7 +4291,7 @@ fn the_base_image_of_an_inline_upscale_describes_no_upscale_pass() {
         "upscale".to_owned(),
         json!({ "enabled": true, "engine": "aura-sr", "factor": 3 }),
     );
-    let req = ImageRequest::from_payload(&payload);
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
     let base_fact = write_one(&plan, &req, resolve_seed(&req, 0), &project_path);
 
@@ -4373,7 +4403,7 @@ fn the_embedded_chunk_costs_only_the_chunk_on_a_representative_batch() {
         let mut payload = embed_payload();
         payload.insert("width".to_owned(), json!(width));
         payload.insert("height".to_owned(), json!(height));
-        let req = ImageRequest::from_payload(&payload);
+        let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let seed = resolve_seed(&req, 0);
 
         let embedded = ImagePlan::with_count(&req, 1, workflow_source(&settings, &payload));
@@ -4643,7 +4673,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let candle_route_wiring = &run_job[route_binding..route_binding + dispatch_use];
     assert!(
         candle_route_wiring.contains(
-            "route.as_ref().map_or(request.count, |route| {\n            route.kind().image_count(&request, settings)\n        })",
+            "route.as_ref().map_or(request.count, |route| {\n            route.kind().image_count_resolved(&execution, settings)\n        })",
         ),
         "the prepared candle route must supply the effective image count"
     );
@@ -4924,7 +4954,7 @@ fn steps_default_is_family_default_and_clamps() {
 // (sc-8825). Gated identically to the resolvers themselves so they compile on the macOS AND
 // backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
 // advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
-// advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
+// advanced-or-manifest value is clamped to the caller's range; malformed values fail binding.
 #[cfg(native_lane)]
 #[test]
 fn resolved_option_or_manifest_u32_precedence_and_clamp() {
@@ -4982,17 +5012,8 @@ fn resolved_option_or_manifest_u32_precedence_and_clamp() {
         resolved_option_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
         4
     );
-    // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
-    // garbage advanced value fails the parse and the closure moves on to manifest, then default).
-    assert_eq!(
-        resolved_option_or_manifest_u32(
-            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
-            "steps",
-            30,
-            1..=80,
-        ),
-        30
-    );
+    // The shared binder refuses malformed advanced values before execution.
+    assert_invalid_effective_options(json!({ "projectId": "p", "advanced": { "steps": "abc" } }));
 }
 
 #[cfg(native_lane)]
@@ -5047,16 +5068,8 @@ fn resolved_option_or_manifest_f32_precedence_and_clamp() {
         ),
         4.0
     );
-    // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
-    // default 5.0), then clamps — matching the historical `f32_clamped` call.
-    assert_eq!(
-        resolved_option_or_manifest_f32(
-            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
-            "guidanceScale",
-            5.0,
-            0.0..=30.0,
-        ),
-        5.0
+    assert_invalid_effective_options(
+        json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } }),
     );
 }
 
@@ -5126,21 +5139,7 @@ fn resolved_option_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
         "default_fn must fire when advanced and manifest are both absent"
     );
 
-    // Un-parseable advanced → falls through to the (here absent) manifest, then default_fn.
-    let called = Cell::new(false);
-    assert_eq!(
-        resolved_option_or_manifest_u32_with(
-            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
-            "steps",
-            || {
-                called.set(true);
-                30
-            },
-            1..=80,
-        ),
-        30
-    );
-    assert!(called.get(), "garbage advanced falls through to default_fn");
+    assert_invalid_effective_options(json!({ "projectId": "p", "advanced": { "steps": "abc" } }));
 }
 
 #[cfg(native_lane)]
@@ -5212,21 +5211,9 @@ fn resolved_option_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
         "default_fn must fire when advanced and manifest are both absent"
     );
 
-    // Un-parseable advanced → the f32 reader falls back to the (default_fn) fallback, then clamps.
-    let called = Cell::new(false);
-    assert_eq!(
-        resolved_option_or_manifest_f32_with(
-            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
-            "guidanceScale",
-            || {
-                called.set(true);
-                3.5
-            },
-            0.0..=30.0,
-        ),
-        3.5
+    assert_invalid_effective_options(
+        json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } }),
     );
-    assert!(called.get(), "garbage advanced falls through to default_fn");
 }
 
 #[cfg(target_os = "macos")]
@@ -9004,12 +8991,9 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error = parse_prompt_enhancement_fields(
-            "flux2_dev",
-            &request(json!({ "advanced": advanced })).advanced,
-        )
-        .expect_err("invalid settings reject")
-        .to_string();
+        let error = parse_prompt_enhancement_fields("flux2_dev", advanced.as_object().unwrap())
+            .expect_err("invalid settings reject")
+            .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
@@ -12568,17 +12552,17 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
             "projectId": "p", "model": "realvisxl", "referenceAssetId": "reference",
             "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
         }),
-        json!({
-            "projectId": "p", "model": "sdxl",
-            "advanced": { "modelPath": model_path.clone(), "poses": "malformed" }
-        }),
     ] {
         assert_eq!(
             resolve_image_route(&request(conflict), &settings),
             Some(ImageRoute::SdxlControl),
-            "material pose conflicts and malformed carriers must remain in the rejecting control lane",
+            "material pose conflicts must remain in the rejecting control lane",
         );
     }
+    assert_invalid_effective_options(json!({
+        "projectId": "p", "model": "sdxl",
+        "advanced": { "modelPath": model_path.clone(), "poses": "malformed" }
+    }));
 
     // Guard: the same job WITHOUT poses is unaffected — it routes to generic MLX txt2img.
     let sdxl_t2i = request(json!({
@@ -12896,8 +12880,11 @@ fn multiphase_parse_rejects_malformed_lists() {
     };
     let err = |req: &ImageRequest| parse_multiphase_specs(req).unwrap_err().to_string();
 
-    // Non-array phases.
-    assert!(err(&with_two_loras(json!({ "steps": 8 }))).contains("must be an array"));
+    // The typed boundary refuses a non-array phase carrier before this parser runs.
+    assert_invalid_effective_options(json!({
+        "model": "krea_2_raw",
+        "advanced": { "phases": { "steps": 8 } }
+    }));
     // Empty phase list.
     assert!(err(&with_two_loras(json!([]))).contains("at least one phase"));
     // A phase that is not an object.
@@ -24423,7 +24410,7 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     // the guard is live code rather than a comment (`cargo test` cannot link the candle cfg here).
     let zimage_source = include_str!("zimage_comfyui_candle.rs");
     let start = zimage_source
-        .find("pub(super) fn prepare_zimage_comfyui_sources(")
+        .find("fn prepare_zimage_comfyui_sources_with_preflight(")
         .expect("the shared ComfyUI Z-Image source preparation must exist");
     let prepare = &zimage_source[start..start + 1200.min(zimage_source.len() - start)];
     assert!(
@@ -25484,7 +25471,7 @@ fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
     let source = include_str!("mage_finetuned.rs");
     for symbol in [
         "fn resolve_mage_finetuned_transformer(",
-        "if request_is_checkpoint_plan_backed(request) {",
+        "request_is_checkpoint_plan_backed(request),",
         "checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)",
         "is_mage_flow_transformer_dir(&path)",
     ] {
@@ -30422,7 +30409,7 @@ mod qwen_image_2_1_tiers {
         if let Some(bits) = bits {
             payload.insert("advanced".to_owned(), json!({ "mlxQuantize": bits }));
         }
-        ImageRequest::from_payload(&payload)
+        ImageRequest::from_resolved(&payload, &payload).unwrap()
     }
 
     fn settings(data_dir: &Path) -> Settings {
@@ -30449,7 +30436,15 @@ mod qwen_image_2_1_tiers {
                 Value::Object(entry.clone()),
             );
             payload.insert("advanced".to_owned(), advanced);
-            ImageRequest::from_payload(&payload)
+            let mut request = ImageRequest::from_resolved(&payload, &payload)?;
+            request.portable_aux =
+                sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                    json!({"advanced":{"__portableFrozenSources":true,"__portableBoundTier":"q4"}})
+                        .as_object()
+                        .unwrap(),
+                )
+                .unwrap();
+            Ok::<_, sceneworks_core::resolved_options::BindingError>(request)
         };
         assert_eq!(
             resolved_with_tier(data.path(), &entry, None).map(|(_, tier)| tier),
@@ -30458,21 +30453,20 @@ mod qwen_image_2_1_tiers {
         );
         let bound = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
             &settings(data.path()),
-            &with_advanced(json!({"__portableBoundTier": "q4"})),
+            &with_advanced(json!({})).unwrap(),
         )
         .expect("the bound tier resolves");
         assert_eq!(bound.map(|(_, tier)| tier), Some("q4"));
-        let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
-            &settings(data.path()),
-            &with_advanced(json!({"mlxQuantize": "four", "__portableBoundTier": "q4"})),
-        )
-        .expect_err("a malformed explicit value is refused, not replaced by the bound tier")
-        .to_string();
-        assert!(error.contains("must be an integer bit count"), "{error}");
+        let error = with_advanced(json!({"mlxQuantize": "four"}))
+            .expect_err("a malformed explicit value is refused before tier selection");
+        assert!(
+            error.to_string().contains("advanced.mlxQuantize"),
+            "{error}"
+        );
         // A present null has always meant "no tier named": the manifest default, not the bound tier.
         let null = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
             &settings(data.path()),
-            &with_advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"})),
+            &with_advanced(json!({"mlxQuantize": null})).unwrap(),
         )
         .expect("an explicit null resolves the default");
         assert_eq!(null.map(|(_, tier)| tier), Some("q8"));

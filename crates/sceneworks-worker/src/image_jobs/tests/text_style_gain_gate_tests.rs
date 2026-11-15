@@ -10,7 +10,8 @@ fn request_with(manifest_entry: Value, advanced: Value) -> ImageRequest {
         "modelManifestEntry": manifest_entry,
         "advanced": advanced,
     });
-    ImageRequest::from_payload(payload.as_object().expect("payload is an object"))
+    let authored = payload.as_object().expect("payload is an object");
+    ImageRequest::from_resolved(authored, authored).unwrap()
 }
 
 #[test]

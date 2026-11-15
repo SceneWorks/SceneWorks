@@ -2969,7 +2969,9 @@ mod tests {
             "prompt": "a fox",
             "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
         });
-        let request = ImageRequest::from_payload(payload.as_object().expect("payload object"));
+        let authored = payload.as_object().expect("payload object");
+        let request =
+            ImageRequest::from_resolved(authored, authored).expect("resolved image request");
         let job: JobSnapshot =
             serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
                 .expect("job snapshot deserializes");

@@ -330,11 +330,29 @@ mod pid_tests {
     use serde_json::json;
 
     fn request(model: &str, advanced: Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": model, "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let payload = json!({ "model": model, "advanced": advanced });
+        let authored = payload.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some(value) = effective
+            .get_mut("advanced")
+            .and_then(Value::as_object_mut)
+            .and_then(|advanced| advanced.get_mut("usePid"))
+        {
+            *value = json!(sceneworks_core::options::legacy_image_flag(value));
+        }
+        let mut request = ImageRequest::from_resolved(authored, &effective).unwrap();
+        if let Some(paths) = advanced.get("__portableAuxPaths") {
+            let stamp = json!({"advanced":{
+                "__portableFrozenSources":true,
+                "__portableAuxPaths":paths,
+            }});
+            request.portable_aux =
+                sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                    stamp.as_object().unwrap(),
+                )
+                .unwrap();
+        }
+        request
     }
 
     #[test]

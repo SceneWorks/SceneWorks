@@ -116,6 +116,7 @@ apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_su
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::real_bounded_moss_trainer
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::register_real_acceptance_worker
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::run_training_execution_observing_request
+apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::with_acceptance_execution_claim
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::Settings
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::WorkerError::Canceled
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support
@@ -173,6 +174,7 @@ apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_supp
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support::request_acceptance_api_cancel
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support::run_acceptance_utility_job
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support::run_training_execution_observing_request
+apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support::with_acceptance_execution_claim
 apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker::WORKER_ENTRY_THREAD_NAME
 apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker::test_support
@@ -222,6 +224,7 @@ apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support:
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::generation_request
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::prepare_selected_adapters
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::run_training_execution_observing_request
+apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::with_acceptance_execution_claim
 apps/rust-api/src/tests/support.rs sceneworks_worker::Settings
 apps/rust-api/src/tests/support.rs sceneworks_worker::Settings::hermetic_for_test
 apps/rust-api/src/tests/training.rs sceneworks_worker::training_resume_stem

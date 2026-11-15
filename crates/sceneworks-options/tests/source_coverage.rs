@@ -1118,6 +1118,7 @@ fn missing(coverage: &Coverage) -> Vec<String> {
     coverage
         .reads
         .iter()
+        .filter(|read| !trusted_training_path_scrub(read))
         .filter(|read| sceneworks_options::by_wire(read.location, &read.key).is_none())
         .map(|read| {
             format!(
@@ -1126,6 +1127,16 @@ fn missing(coverage: &Coverage) -> Vec<String> {
             )
         })
         .collect()
+}
+
+// The API removes server-derived Iris checkpoint paths from a cloned validation view.
+// This exact write-only function does not read an execution option or pass the view to
+// an engine; the original trusted plan remains available to the typed binder.
+fn trusted_training_path_scrub(read: &Read) -> bool {
+    read.file == "crates/sceneworks-core/src/request_validation.rs"
+        && read.function == "trusted_training_plan_validation_view"
+        && read.location == "advanced"
+        && matches!(read.key.as_str(), "iris" | "iris_restore")
 }
 
 fn fixture(source: &str) -> Coverage {
@@ -1689,6 +1700,7 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !iris_preset_authoring_read(read)
                 && !trusted_control_weights_write(read)
                 && !authored_control_weights_scrub(read)
+                && !trusted_training_path_scrub(read)
                 && !trusted_aux_parser(read)
         })
         .map(|read| {

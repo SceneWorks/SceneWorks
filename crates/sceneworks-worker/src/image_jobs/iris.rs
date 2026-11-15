@@ -931,9 +931,31 @@ mod tests {
                 for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                     payload[key] = value;
                 }
-                let request = sceneworks_core::image_request::ImageRequest::from_payload(
-                    payload.as_object().unwrap(),
-                );
+                let authored = payload.as_object().unwrap();
+                let mut effective = authored.clone();
+                if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut)
+                {
+                    for (key, value) in advanced {
+                        if let Some(spec) = sceneworks_core::options::by_wire("advanced", key) {
+                            let lowered = match spec.shape {
+                                sceneworks_core::options::Shape::Integer => {
+                                    sceneworks_core::options::legacy_integer(value)
+                                }
+                                sceneworks_core::options::Shape::Number => {
+                                    sceneworks_core::options::legacy_number(value).map(Value::from)
+                                }
+                                _ => None,
+                            };
+                            if let Some(lowered) = lowered {
+                                *value = lowered;
+                            }
+                        }
+                    }
+                }
+                let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                    authored, &effective,
+                )
+                .unwrap();
                 // The generic routes' image count (`ImageRoute::Mlx` / `CandleTxt2Img`): `count`,
                 // or `prompts × count` for a native prompt batch.
                 let plan =
@@ -1295,10 +1317,6 @@ mod tests {
                 "0 <= start",
             ),
             (
-                json!({ "advanced": { "cfgInterval": "early" } }),
-                "pair of numbers",
-            ),
-            (
                 json!({ "advanced": { "captionOverflow": "loud" } }),
                 "caption-overflow",
             ),
@@ -1319,6 +1337,11 @@ mod tests {
                 "{extra}"
             );
         }
+        let malformed = json!({"advanced": {"cfgInterval": "early"}});
+        let payload = malformed.as_object().unwrap();
+        assert!(
+            sceneworks_core::image_request::ImageRequest::from_resolved(payload, payload).is_err()
+        );
     }
 
     fn generation_adapter(

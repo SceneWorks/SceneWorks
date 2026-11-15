@@ -1574,7 +1574,44 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
 use serde_json::json;
 
 fn request(value: Value) -> VideoRequest {
-    VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    let authored = value.as_object().unwrap();
+    let mut effective = authored.clone();
+    if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+        advanced.retain(|key, value| {
+            !value.is_null()
+                || key == "mlxQuantize"
+                || sceneworks_core::options::by_wire("advanced", key).is_none()
+        });
+        for (key, value) in advanced {
+            if let Some(spec) = sceneworks_core::options::by_wire("advanced", key) {
+                let lowered = match spec.shape {
+                    sceneworks_core::options::Shape::Integer => {
+                        sceneworks_core::options::legacy_integer(value)
+                    }
+                    sceneworks_core::options::Shape::Number => {
+                        sceneworks_core::options::legacy_number(value).map(Value::from)
+                    }
+                    _ => None,
+                };
+                if let Some(lowered) = lowered {
+                    *value = lowered;
+                }
+            }
+        }
+    }
+    let mut request = VideoRequest::from_resolved(authored, &effective).unwrap();
+    if effective
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| advanced.get("__portableFrozenSources") == Some(&Value::Bool(true)))
+    {
+        request.portable_aux =
+            sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                &effective,
+            )
+            .unwrap();
+    }
+    request
 }
 
 #[test]
@@ -4799,16 +4836,12 @@ fn shared_video_funnel_carries_the_reference_resize_mode_to_the_request() {
 #[test]
 fn minimax_h3_recipe_records_the_resolved_reference_resize_mode() {
     let record = |advanced: Value| {
-        let request = VideoRequest::from_payload(
-            json!({
-                "model": "minimax_h3_ref",
-                "mode": "reference_to_video",
-                "prompt": "a courier",
-                "advanced": advanced,
-            })
-            .as_object()
-            .expect("object"),
-        );
+        let request = request(json!({
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "prompt": "a courier",
+            "advanced": advanced,
+        }));
         super::minimax_h3::minimax_h3_raw_settings(
             &request,
             "bf16",
@@ -12247,6 +12280,13 @@ fn ltx25_transformer_variant_defaults_and_refuses_unknown_values() {
         Ltx25TransformerVariant::Dev
     );
     for invalid in [json!("turbo"), json!(30), json!(false)] {
+        if !invalid.is_string() {
+            let payload = json!({"projectId":"p","model":"ltx_2_5","prompt":"a fox",
+                "advanced":{"transformerVariant":invalid}});
+            let payload = payload.as_object().unwrap();
+            assert!(VideoRequest::from_resolved(payload, payload).is_err());
+            continue;
+        }
         let invalid = request(json!({
             "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
             "advanced": { "transformerVariant": invalid }
@@ -12295,13 +12335,17 @@ fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_
         "fps": 25,
         "advanced": {
             "autoDuration": true,
-            "autoDurationMinSeconds": "ignored",
+            "autoDurationMinSeconds": 2,
             "autoDurationMaxSeconds": -1
         }
     }));
     let options = ltx25_generation_options(&explicit).expect("explicit duration wins");
     assert_eq!(options.auto_duration, None);
     assert_eq!(options.planning_frames, 177);
+    let malformed = json!({"projectId":"p","model":"ltx_2_5","prompt":"a fox",
+        "duration":7,"advanced":{"autoDurationMinSeconds":"ignored"}});
+    let malformed = malformed.as_object().unwrap();
+    assert!(VideoRequest::from_resolved(malformed, malformed).is_err());
 
     let wrong_model = request(json!({
         "projectId": "p",
@@ -12320,15 +12364,22 @@ fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_
         "temporalUpsampleRounds",
         "transformerVariant",
     ] {
-        let carried = request(json!({
+        let carried = json!({
             "projectId": "p",
             "model": "ltx_2_3",
             "advanced": { wrong_model_key: "dev" }
-        }));
-        assert!(
-            ltx25_generation_options(&carried).is_err(),
-            "advanced.{wrong_model_key} is an LTX-2.5-only control and must be rejected on ltx_2_3"
-        );
+        });
+        let carried = carried.as_object().unwrap();
+        match VideoRequest::from_resolved(carried, carried) {
+            Ok(carried) => assert!(
+                ltx25_generation_options(&carried).is_err(),
+                "advanced.{wrong_model_key} is an LTX-2.5-only control and must be rejected on ltx_2_3"
+            ),
+            Err(_) => assert!(
+                !matches!(wrong_model_key, "vaeDecoder" | "transformerVariant"),
+                "text-valued advanced.{wrong_model_key} must reach the model gate"
+            ),
+        }
     }
 
     let dead_guidance = request(json!({
@@ -21318,6 +21369,8 @@ fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
         ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step", 4, 12.0),
     ] {
         let lora = minimax_h3_turbo_lora(tiers.path(), lora_id);
+        let veda = json!({"enabled":true,"generated":"90%","reference":"12",
+            "fullAttentionLayers":"0,49","fullAttentionSteps":"0,3"});
         // The reference partition needs a reference, or the SHAPE validator refuses before the
         // recipe is ever consulted.
         let extra = if model == "minimax_h3_ref" {
@@ -21325,12 +21378,12 @@ fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
                 "loras": [lora],
                 "projectId": project_id,
                 "referenceAssetIds": [reference_id],
+                "advanced":{"veda":veda},
             })
         } else {
-            json!({ "loras": [lora] })
+            json!({ "loras": [lora], "advanced":{"veda":veda} })
         };
-        let mut request = minimax_h3_request(model, extra);
-        request.advanced.insert("veda".into(),json!({"enabled":true,"generated":"90%","reference":"12","fullAttentionLayers":"0,49","fullAttentionSteps":"0,3"}));
+        let request = minimax_h3_request(model, extra);
         let probe = ArmProbe::default();
         drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
             .unwrap_or_else(|error| panic!("{lora_id} renders: {error}"));
@@ -21788,8 +21841,15 @@ fn minimax_h3_veda_shared_native_conversion_matches_frozen_contract_and_refuses_
         json!({"enabled":false,"reference":"100%"}),
         json!({"enabled":true,"fullAttentionSteps":"4"}),
     ] {
-        let request = minimax_h3_request("minimax_h3", json!({"advanced":{"veda":wire}}));
-        assert!(super::minimax_h3::requested_h3_veda(&request, Some(4)).is_err());
+        let payload = json!({"projectId":"p","model":"minimax_h3","prompt":"a fox",
+            "advanced":{"veda":wire}});
+        let payload = payload.as_object().unwrap();
+        match VideoRequest::from_resolved(payload, payload) {
+            Err(_) => {}
+            Ok(request) => {
+                assert!(super::minimax_h3::requested_h3_veda(&request, Some(4)).is_err())
+            }
+        }
     }
 }
 // The report getter must run after generate, on the same generator, for each job.

@@ -900,6 +900,7 @@ mod utility_face_source_tests {
         bound.insert(
             "advanced".to_owned(),
             serde_json::json!({
+                "__portableFrozenSources": true,
                 "__portableAuxPaths": {"utility_face_stack": "/private/snapshot/face"}
             }),
         );
@@ -2407,11 +2408,9 @@ mod instantid_memory_tests {
     #[test]
     fn declared_tier_matches_the_tier_this_lane_loads() {
         let request = |advanced: serde_json::Value| {
-            ImageRequest::from_payload(
-                json!({ "model": "instantid_realvisxl", "advanced": advanced })
-                    .as_object()
-                    .unwrap(),
-            )
+            let payload = json!({ "model": "instantid_realvisxl", "advanced": advanced });
+            let authored = payload.as_object().unwrap();
+            ImageRequest::from_resolved(authored, authored).unwrap()
         };
         let dense = instantid_memory_tier(&request(json!({})));
         assert_eq!(dense.quant, None);
@@ -2464,11 +2463,19 @@ mod instantid_tier_tests {
     use serde_json::json;
 
     fn request(advanced: serde_json::Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "instantid_realvisxl", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let payload = json!({ "model": "instantid_realvisxl", "advanced": advanced });
+        let authored = payload.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some(bits) = effective
+            .get_mut("advanced")
+            .and_then(Value::as_object_mut)
+            .and_then(|advanced| advanced.get_mut("mlxQuantize"))
+        {
+            if let Some(lowered) = sceneworks_core::options::legacy_integer(bits) {
+                *bits = lowered;
+            }
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// Seed a present `<tier>/unet/<file>` so [`instantid_tier_subdir`]'s probe sees it downloaded

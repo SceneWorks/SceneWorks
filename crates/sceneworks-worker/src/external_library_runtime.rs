@@ -86,8 +86,17 @@ impl SourceOptionFacts {
             });
         };
         let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
-        let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
-            .map_err(|error| invalid_binding(error.to_string()))?;
+        // Persisted training plans contain API-derived checkpoint paths. Validate their
+        // client controls without treating those trusted paths as new client input.
+        let validation_payload =
+            if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+                sceneworks_core::request_validation::trusted_training_plan_validation_view(payload)
+            } else {
+                payload.clone()
+            };
+        let effective =
+            sceneworks_core::request_validation::resolve_request(kind, &validation_payload, &facts)
+                .map_err(|error| invalid_binding(error.to_string()))?;
         Ok(Self {
             authored,
             effective: RouteOptionFacts::from_payload_syntax(effective.as_payload()),
@@ -169,7 +178,19 @@ impl RuntimeSourceGuard {
         settings: &Settings,
         binding: Option<&PortableRouteBinding>,
     ) -> WorkerResult<Self> {
-        Self::begin_with_binding_cancelable(job_type, payload, settings, binding, None)
+        // Source tests often construct only the model carrier. Supply the unrelated
+        // required job envelope before exercising the production validation path.
+        let mut fixture = payload.clone();
+        if matches!(
+            job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::VideoGenerate
+        ) {
+            fixture.entry("projectId").or_insert_with(|| json!("p"));
+            fixture
+                .entry("prompt")
+                .or_insert_with(|| json!("source selection fixture"));
+        }
+        Self::begin_with_binding_cancelable(job_type, &fixture, settings, binding, None)
     }
 
     pub(crate) fn begin_with_binding_cancelable(
@@ -5213,15 +5234,20 @@ mod tests {
     }
 
     fn training_payload(base_model: &str, kernel: &str, model_path: &Path) -> JsonObject {
+        let (target_id, family, modality) = match base_model {
+            "z_image_turbo" => ("z_image_turbo_lora", "z-image", "image"),
+            "ltx_2_5" => ("ltx_2_5_video_lora", "ltx-video", "video"),
+            _ => panic!("unsupported training source fixture model: {base_model}"),
+        };
         json!({
             "modelManifestEntry":{"id":base_model,"downloads":[],"paths":{"model":model_path}},
             "plan":{
                 "schemaVersion":1,"planVersion":1,"jobId":"job",
-                "target":{"targetId":"target","kernel":kernel,"family":"training","modality":"image","outputKind":"lora","baseModel":base_model,"baseModelPath":model_path},
+                "target":{"targetId":target_id,"kernel":kernel,"family":family,"modality":modality,"outputKind":"lora","baseModel":base_model,"baseModelPath":model_path},
                 "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
-                "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{}},
+                "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":200,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{}},
                 "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
-                "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":base_model,"configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+                "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":target_id,"baseModel":base_model,"configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
             }
         })
         .as_object()
@@ -7031,7 +7057,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"turbo","modelManifestEntry":{
+        let payload = json!({"projectId":"p","prompt":"source selection fixture","model":"turbo","modelManifestEntry":{
             "id":"turbo","downloads":[{"provider":"huggingface","repo":repo,
                 "revision":REV_A,"variant":"default","default":true,"files":["turbo/*"]}]
         }})
@@ -7389,7 +7415,9 @@ mod tests {
                      "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
         );
         let payload = json!({
+            "projectId": "p",
             "model": "m",
+            "prompt": "source selection fixture",
             "modelManifestEntry": {
                 "id": "m",
                 "downloads": [{ "provider": "huggingface", "repo": "guardfx/model",
@@ -7638,14 +7666,19 @@ mod tests {
                         "every bits-driven tier resolver reads the bound tier"
                     );
                     #[cfg(native_lane)]
-                    assert_eq!(
-                        crate::image_jobs::standard_tier_subdir_for_test(
-                            root,
-                            &sceneworks_core::image_request::ImageRequest::from_payload(dispatch),
-                        ),
-                        root.join(bound),
-                        "the engine's implicit tier resolution lands on the bound tier"
-                    );
+                    {
+                        let mut request =
+                            sceneworks_core::image_request::ImageRequest::from_resolved(
+                                dispatch, dispatch,
+                            )
+                            .unwrap();
+                        request.portable_aux = guard.portable_aux().clone();
+                        assert_eq!(
+                            crate::image_jobs::standard_tier_subdir_for_test(root, &request),
+                            root.join(bound),
+                            "the engine's implicit tier resolution lands on the bound tier"
+                        );
+                    }
                     // The load boundary: while the guard serves this route, a loader handed a
                     // sibling tier from the same hub snapshot is refused, naming the path; the
                     // verified tier (and the snapshot root) load.

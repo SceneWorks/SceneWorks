@@ -479,7 +479,8 @@ async fn dispatch_payload(
     job["projectId"] = payload["projectId"].clone();
     job["payload"] = payload.clone();
     let job: JobSnapshot = serde_json::from_value(job).unwrap();
-    let mut request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let authored = payload.as_object().unwrap();
+    let mut request = ImageRequest::from_resolved(authored, authored).unwrap();
     if request.model_manifest_entry.is_empty() {
         // Test-owned source metadata stays separate from the shared submitted request.
         request.model_manifest_entry = json!({"limits":{"minDimension":16},"conditionalComponents":[{

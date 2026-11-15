@@ -290,6 +290,7 @@ pub struct ImageAdvanced {
     pub model_path: Option<Bound<String>>,
     pub text_encoder_model: Option<Bound<String>>,
     pub transparent_background: Option<Bound<bool>>,
+    pub structured_prompt: Option<Bound<JsonObject>>,
     pub flux3_layout: Option<Bound<JsonObject>>,
     pub flux3_reference_ids: Option<Bound<Vec<String>>>,
     pub moss_image: Option<Bound<gen_core::moss_image::MossImageOptions>>,
@@ -374,6 +375,7 @@ impl ImageAdvanced {
         put!(model_path, "modelPath");
         put!(text_encoder_model, "textEncoderModel");
         put!(transparent_background, "transparentBackground");
+        put!(structured_prompt, "structuredPrompt");
         put!(flux3_layout, "flux3_layout");
         put!(flux3_reference_ids, "flux3_reference_ids");
         put!(moss_image, "mossImage");
@@ -447,6 +449,7 @@ impl ImageAdvanced {
             model_path: input.text("advanced", "modelPath")?,
             text_encoder_model: input.text("advanced", "textEncoderModel")?,
             transparent_background: input.boolean("advanced", "transparentBackground")?,
+            structured_prompt: input.structured("advanced", "structuredPrompt")?,
             flux3_layout: input.structured("advanced", "flux3_layout")?,
             flux3_reference_ids: input.structured("advanced", "flux3_reference_ids")?,
             moss_image: input.structured("advanced", "mossImage")?,

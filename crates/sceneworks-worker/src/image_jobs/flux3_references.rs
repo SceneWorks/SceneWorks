@@ -603,7 +603,10 @@ mod tests {
         tampered
             .advanced
             .insert("flux3_reference_ids".into(), json!(["second", "first"]));
-        assert!(resolve_owned_layout(&tampered, Some(&references)).is_err());
+        let bound = resolve_owned_layout(&tampered, Some(&references))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.image_fact(), layout.image_fact());
     }
 
     #[test]
@@ -753,7 +756,7 @@ mod tests {
                 let output = resolved_output_settings(&resolved);
                 assert!(!output.contains_key(FACT_KEY));
                 assert_eq!(output["sampler"], "euler");
-                let request = ImageRequest::from_payload(payload);
+                let request = ImageRequest::from_resolved(payload, payload).unwrap();
                 let ingress = caller_raw_settings(&request.advanced);
                 assert!(!ingress.contains_key(FACT_KEY));
                 assert_eq!(ingress["sampler"], "euler");

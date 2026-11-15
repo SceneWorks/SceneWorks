@@ -656,17 +656,27 @@ mod control_helper_tests {
         std::fs::create_dir_all(dir.path().join("q4")).unwrap();
         std::fs::write(dir.path().join("q4/model.safetensors"), b"metadata fixture").unwrap();
         let payload = json!({"advanced":{}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         assert_eq!(qwen_control_tier_subdir(&request, Some(dir.path())), "q4");
         assert_eq!(qwen_control_tier_subdir(&request, None), "q8");
         let mut bound = request.clone();
-        bound
-            .advanced
-            .insert("__portableBoundTier".into(), json!("q8"));
+        let dispatch =
+            json!({"advanced":{"__portableFrozenSources":true,"__portableBoundTier":"q8"}});
+        bound.portable_aux =
+            sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                dispatch.as_object().unwrap(),
+            )
+            .unwrap();
         assert_eq!(qwen_control_tier_subdir(&bound, Some(dir.path())), "q8");
         for (bits, expected) in [(0, "bf16"), (4, "q4"), (8, "q8")] {
-            let mut request = request.clone();
-            request.advanced.insert("mlxQuantize".into(), json!(bits));
+            let payload = json!({"advanced":{"mlxQuantize":bits}});
+            let request = ImageRequest::from_resolved(
+                payload.as_object().unwrap(),
+                payload.as_object().unwrap(),
+            )
+            .unwrap();
             assert_eq!(
                 qwen_control_tier_subdir(&request, Some(dir.path())),
                 expected
@@ -676,13 +686,15 @@ mod control_helper_tests {
     #[test]
     fn shared_control_telemetry_preserves_backend_nulls_and_native_engine_spelling() {
         let payload = json!({"advanced":{"guidanceScale":19,"mlxQuantize":4,"untouched":true}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         #[cfg(target_os = "macos")]
         let backend = ControlBackend::Mlx(None);
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let backend = ControlBackend::Candle;
         let raw = control_raw_settings(&request, "repo", 8, 0.9, 2, backend, None, None);
-        assert_eq!(raw["untouched"], json!(true));
+        assert!(!raw.contains_key("untouched"));
         assert_eq!(raw["poseCount"], json!(2));
         #[cfg(target_os = "macos")]
         {

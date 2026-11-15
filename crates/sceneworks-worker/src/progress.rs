@@ -759,12 +759,27 @@ fn unavailable_completed_receipt(
         .get("assetWrites")
         .or_else(|| result.get("datasetWrites"))
         .and_then(Value::as_array);
-    let output_count = result
+    let expected_count = result
         .get("expectedCount")
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .or_else(|| writes.map(|writes| writes.len()))
         .unwrap_or(1);
+    let output_count = writes
+        .filter(|writes| !writes.is_empty())
+        .and_then(|writes| {
+            writes
+                .iter()
+                .map(|write| {
+                    write
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|index| usize::try_from(index).ok())
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .and_then(|indices| indices.into_iter().max()?.checked_add(1))
+        .unwrap_or(expected_count);
     if output_count == 0 || output_count > 10_000 {
         return Ok(None);
     }
@@ -879,7 +894,7 @@ fn unavailable_completed_receipt(
 #[test]
 fn unavailable_receipt_keeps_each_completed_output_association() {
     let result = serde_json::json!({
-        "expectedCount":2,
+        "expectedCount":3,
         "assetWrites":[
             {"assetId":"base-a","index":0},
             {"assetId":"base-b","index":1},
