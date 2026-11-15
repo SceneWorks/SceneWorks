@@ -234,6 +234,7 @@ POST	/api/v1/video/jobs	token
 POST	/api/v1/audio/jobs	token
 POST	/api/v1/prompts/refine	token
 POST	/api/v1/face-likeness/compare	token
+POST	/api/v1/options/validate	token
 POST	/api/v1/poses	token
 POST	/api/v1/poses/sources	token
 GET	/api/v1/poses/preview/:job_id/:file_name	token
