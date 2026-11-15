@@ -1755,9 +1755,23 @@ async fn validate_and_canonicalize_merged_generation_payload(
     ) {
         let kind = sceneworks_core::request_validation::kind_for_job(&job_type)
             .expect("registered utility");
+        let validation_payload =
+            if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+                && ["iris", "iris_restore"].into_iter().all(|options| {
+                    ["resume_from", "load_from"].into_iter().all(|key| {
+                        let path = format!("/config/advanced/{options}/{key}");
+                        merged.get("plan").and_then(|plan| plan.pointer(&path))
+                            == persisted.get("plan").and_then(|plan| plan.pointer(&path))
+                    })
+                })
+            {
+                sceneworks_core::request_validation::trusted_training_plan_validation_view(&merged)
+            } else {
+                merged.clone()
+            };
         sceneworks_core::request_validation::validate(
             kind,
-            &merged,
+            &validation_payload,
             &sceneworks_core::request_validation::facts_for_job(&job_type, &merged),
         )
         .map_err(ApiError::from)?;

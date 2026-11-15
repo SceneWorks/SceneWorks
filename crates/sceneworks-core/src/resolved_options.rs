@@ -756,7 +756,24 @@ impl TrainingExecutionOptions {
                     "resolved training request has no config.advanced object".to_owned(),
                 )
             })?;
-        let common = crate::training::resolve_advanced_for_model(advanced, kernel, base_model)?;
+        // The resolver has already lowered the authored controls to f32. Re-running bounded
+        // validation on its JSON serialization can turn an allowed 0.1 into 0.10000000149.
+        let authored_carrier = authored
+            .get("plan")
+            .and_then(Value::as_object)
+            .unwrap_or(authored);
+        let authored_advanced = authored_carrier
+            .get("config")
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("advanced"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                TrainingExecutionError::Binding(
+                    "authored training request has no config.advanced object".to_owned(),
+                )
+            })?;
+        let common =
+            crate::training::resolve_advanced_for_model(authored_advanced, kernel, base_model)?;
         Self::from_effective(authored, effective, advanced, kernel, common)
     }
 

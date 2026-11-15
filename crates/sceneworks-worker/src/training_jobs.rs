@@ -272,8 +272,12 @@ fn resolved_plan_options(
     } else {
         "lora_train"
     };
-    let resolved = sceneworks_core::request_validation::resolve_request(kind, authored, &facts)
-        .map_err(WorkerError::Validation)?;
+    let validation_view =
+        sceneworks_core::request_validation::trusted_training_plan_validation_view(authored);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request(kind, &validation_view, &facts)
+            .map_err(WorkerError::Validation)?;
+    // Bind from the original plan so the engine still receives the API-derived checkpoint path.
     sceneworks_core::resolved_options::TrainingExecutionOptions::bind(authored, &resolved)
         .map_err(WorkerError::InvalidPayload)
 }

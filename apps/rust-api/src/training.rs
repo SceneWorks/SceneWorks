@@ -2223,14 +2223,19 @@ fn bind_resolved_training_options(
 pub(crate) fn resolved_training_options_for_plan(
     plan: &sceneworks_core::training::TrainingPlan,
 ) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    // A stored plan can contain paths that this API derived from an earlier run. The portable
+    // request validator rightly rejects those keys from clients, so remove them only from this
+    // binding view; the original plan still carries them to the trainer.
     let authored = json!({ "plan": plan });
     let authored = authored.as_object().expect("training plan wrapper");
+    let binding_view =
+        sceneworks_core::request_validation::trusted_training_plan_validation_view(authored);
     let kind = if plan.target.kernel == "krea_control" {
         "control_training"
     } else {
         "lora_train"
     };
-    bind_resolved_training_options(kind, authored)
+    bind_resolved_training_options(kind, &binding_view)
 }
 
 pub(crate) fn resolved_training_options_for_config(

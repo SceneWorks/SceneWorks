@@ -2946,7 +2946,8 @@ async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources(
     let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let payload = json!({
-        "model":"instantid_realvisxl", "mode":"character_image",
+        "projectId":"project-1", "model":"instantid_realvisxl", "mode":"character_image",
+        "prompt":"portrait",
         "referenceAssetId":"reference-asset",
         "modelManifestEntry":{
             "id":"instantid_realvisxl", "type":"image", "family":"sdxl",
@@ -3334,7 +3335,7 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3422,7 +3423,7 @@ async fn stalled_historical_metadata_never_delays_a_claim_past_its_deadline() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3511,7 +3512,7 @@ async fn historical_audio_carrier_refuses_same_id_catalog_replacement() {
             job_type: crate::JobType::AudioGenerate,
             project_id: None,
             project_name: None,
-            payload: json!({"model":"custom_tts","text":"hello","modelManifestEntry":original})
+            payload: json!({"projectId":"project-1","model":"custom_tts","prompt":"hello","modelManifestEntry":original})
                 .as_object()
                 .unwrap()
                 .clone(),

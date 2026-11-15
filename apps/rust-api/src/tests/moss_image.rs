@@ -1230,7 +1230,8 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     assert_eq!(owned.inputs().positive.unwrap().batch, 2);
     assert_eq!(
         sceneworks_core::image_request::ImageRequest::from_payload(&stored.payload).image_count(),
-        4
+        2,
+        "the authored parser has no verified tensor shape; the native request above carries its batch"
     );
     let facts = sceneworks_core::workflow_share::WorkflowAssetFacts {
         mode: "edit_image".into(),

@@ -62,12 +62,39 @@ pub(crate) fn route_option_facts(
         return Ok((authored.clone(), authored));
     };
     let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
-    let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
-        .map_err(ApiError::from)?;
+    // A prompt-to-vector parent has no raster asset until its child completes. Its typed
+    // creation route already validates an image-to-SVG request with this pending source; keep
+    // the durable parent's authored absence while letting the shared resolver validate the
+    // remaining vector controls for portable route selection.
+    let pending_vector_parent = *job_type == JobType::VectorGenerate
+        && payload.get("sourceAssetId").is_none_or(Value::is_null)
+        && payload
+            .get("workflow")
+            .and_then(|workflow| workflow.get("kind"))
+            .and_then(Value::as_str)
+            == Some("create_from_prompt");
+    let mut validation_payload =
+        if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+            sceneworks_core::request_validation::trusted_training_plan_validation_view(payload)
+        } else {
+            payload.clone()
+        };
+    if pending_vector_parent {
+        validation_payload.insert(
+            "sourceAssetId".to_owned(),
+            Value::String("workflow_pending_source".to_owned()),
+        );
+    }
+    let effective =
+        sceneworks_core::request_validation::resolve_request(kind, &validation_payload, &facts)
+            .map_err(ApiError::from)?;
+    let mut effective_payload = effective.as_payload().clone();
+    if pending_vector_parent {
+        effective_payload.remove("sourceAssetId");
+    }
     Ok((
         authored.clone(),
-        RouteOptionFacts::from_payload_syntax(effective.as_payload())
-            .with_authored_presence(&authored),
+        RouteOptionFacts::from_payload_syntax(&effective_payload).with_authored_presence(&authored),
     ))
 }
 
