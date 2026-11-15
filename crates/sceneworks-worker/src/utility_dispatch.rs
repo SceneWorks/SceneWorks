@@ -896,6 +896,28 @@ fn shared_promptless_svd_passes_worker_admission_without_inventing_text() {
 
 #[cfg(test)]
 #[test]
+fn promoted_vector_workflow_keeps_raster_carrier_through_worker_admission() {
+    let model = sceneworks_core::registry::builtin_model_spec("starvector_1b")
+        .unwrap()
+        .project(None);
+    let payload = serde_json::json!({
+        "projectId": "p",
+        "model": "starvector_1b",
+        "mode": "image_to_svg",
+        "sourceAssetId": "retained_raster",
+        "modelManifestEntry": model,
+        "modelManifestEntries": [{"id": "flux_dev"}],
+        "workflow": {"kind": "raster_to_vector"}
+    });
+    validate_static_job_options(&JobType::VectorGenerate, payload.as_object().unwrap()).unwrap();
+    assert_eq!(
+        payload["modelManifestEntries"],
+        serde_json::json!([{"id": "flux_dev"}])
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn shared_sensenova_legacy_numbers_survive_worker_gate() {
     let model = sceneworks_core::registry::builtin_model_spec("sensenova_u1_8b")
         .unwrap()

@@ -4161,11 +4161,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
             .expect("test API state");
-        let mut current =
-            json!({"projectId":"p","model":"z_image_turbo","mode":"text_to_image","prompt":"p"})
-                .as_object()
-                .unwrap()
-                .clone();
+        let mut current = json!({"projectId":"project-1","model":"z_image_turbo","mode":"text_to_image","prompt":"p"})
+            .as_object()
+            .unwrap()
+            .clone();
         crate::jobs::canonicalize_image_model_payload(
             &state,
             &JobType::ImageGenerate,
