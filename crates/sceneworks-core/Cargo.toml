@@ -75,6 +75,10 @@ remove_dir_all = "=0.8.4"
 # Safe wrapper around GetFileInformationByHandle. The recent-project registry
 # cache uses volume + file index to distinguish atomic replacement.
 winapi-util = "0.1"
+# One Windows-only call reads a file's NTFS change time for source stamps
+# (`checkpoint_plan_store::windows_change_time`, this crate's only allowed unsafe), through
+# the workspace windows-sys (already locked), so no new package enters the lock.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
 # ARMv8 SHA-2 instructions for the resolved-cache closure verify (sc-21534's load boundary).

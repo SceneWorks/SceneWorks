@@ -220,9 +220,29 @@ pub fn write_produced_artifact_receipt(
     Ok(receipt)
 }
 
+/// [`artifact_content_fingerprint`] through the host's per-tree record. Only a fingerprint equal to
+/// the receipt's `expected` one is recorded, so a mismatch is never reused.
+fn produced_content_fingerprint(
+    cache: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
+    root: &Path,
+    expected: &str,
+) -> WorkerResult<String> {
+    let (fingerprint, _verification) = cache.tree_fingerprint(
+        root,
+        || artifact_files(root),
+        || artifact_content_fingerprint(root),
+        |fingerprint| fingerprint == expected,
+    )?;
+    Ok(fingerprint)
+}
+
 /// Admit a local derivative only while its complete bytes still match the producer's receipt.
 /// Callers also verify that `producer_job_id` names a completed job for the expected source.
+///
+/// The content fingerprint is computed at most once per host while every file under `root` keeps
+/// its stamp: `cache` (the host's shared store) holds the last fingerprint for that exact tree.
 pub fn verify_produced_artifact_receipt(
+    cache: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
     root: &Path,
     producer_job_id: &str,
     source_artifact_id: &str,
@@ -243,7 +263,7 @@ pub fn verify_produced_artifact_receipt(
         || receipt.output_model_id != output_model_id
         || !is_sha256_fingerprint(&receipt.content_sha256)
         || receipt.tree_stamp != artifact_tree_stamp(root)?
-        || receipt.content_sha256 != artifact_content_fingerprint(root)?
+        || receipt.content_sha256 != produced_content_fingerprint(cache, root, &receipt.content_sha256)?
     {
         return Err(WorkerError::InvalidPayload(format!(
             "produced artifact receipt does not match {}",
@@ -366,6 +386,7 @@ pub(crate) fn app_managed_artifact_provenance(
 #[cfg(test)]
 mod artifact_provenance_tests {
     use super::*;
+    use sceneworks_core::verified_source_cache::VerifiedSourceCache;
     use serde_json::json;
 
     #[test]
@@ -378,13 +399,22 @@ mod artifact_provenance_tests {
             write_produced_artifact_receipt(root.path(), "job-7", "mage_flow_base", "finetune-7")
                 .unwrap();
         assert!(produced.content_sha256.starts_with("sha256:"));
+        let verified = tempfile::tempdir().unwrap();
+        let cache = VerifiedSourceCache::for_data_dir(verified.path());
         assert_eq!(
-            verify_produced_artifact_receipt(root.path(), "job-7", "mage_flow_base", "finetune-7")
-                .unwrap()
-                .content_sha256,
+            verify_produced_artifact_receipt(
+                &cache,
+                root.path(),
+                "job-7",
+                "mage_flow_base",
+                "finetune-7"
+            )
+            .unwrap()
+            .content_sha256,
             produced.content_sha256
         );
         assert!(verify_produced_artifact_receipt(
+            &cache,
             root.path(),
             "job-8",
             "mage_flow_base",
@@ -393,12 +423,61 @@ mod artifact_provenance_tests {
         .is_err());
         std::fs::write(&weight, b"substituted").unwrap();
         assert!(verify_produced_artifact_receipt(
+            &cache,
             root.path(),
             "job-7",
             "mage_flow_base",
             "finetune-7"
         )
         .is_err());
+    }
+
+    fn settle(path: &Path) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+            .unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_produced_tree_is_fingerprinted_once_per_host() {
+        let root = tempfile::tempdir().unwrap();
+        let weight = root.path().join("transformer/model.safetensors");
+        std::fs::create_dir_all(weight.parent().unwrap()).unwrap();
+        std::fs::write(&weight, b"trained weights").unwrap();
+        settle(&weight);
+        write_produced_artifact_receipt(root.path(), "job-7", "base", "out").unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let verify = |cache: &VerifiedSourceCache| {
+            verify_produced_artifact_receipt(cache, root.path(), "job-7", "base", "out")
+        };
+        let real_root = std::fs::canonicalize(root.path()).unwrap();
+        let fingerprinted_trees =
+            || sceneworks_core::verified_source_cache::read_counts::of(&real_root);
+        let start = fingerprinted_trees();
+        verify(&VerifiedSourceCache::for_data_dir(data.path())).unwrap();
+        assert_eq!(fingerprinted_trees(), start + 1);
+        // A second check, through a second handle on the same host store (the other side's
+        // view), reads no file bytes.
+        verify(&VerifiedSourceCache::for_data_dir(data.path())).unwrap();
+        assert_eq!(fingerprinted_trees(), start + 1, "the unchanged tree is not read");
+
+        // Same-size substitution, an added file and a removed file are each refused.
+        let cache = VerifiedSourceCache::for_data_dir(data.path());
+        std::fs::write(&weight, b"TRAINED WEIGHTS").unwrap();
+        settle(&weight);
+        let error = verify(&cache).unwrap_err();
+        assert!(error.to_string().contains("produced artifact receipt does not match"));
+        std::fs::write(&weight, b"trained weights").unwrap();
+        settle(&weight);
+        let extra = root.path().join("extra.json");
+        std::fs::write(&extra, b"{}").unwrap();
+        assert!(verify(&cache).is_err(), "an added file is refused");
+        std::fs::remove_file(&extra).unwrap();
+        std::fs::remove_file(&weight).unwrap();
+        assert!(verify(&cache).is_err(), "a removed file is refused");
     }
 
     #[test]
