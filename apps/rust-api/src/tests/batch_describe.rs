@@ -719,10 +719,15 @@ async fn a_qwen38_tier_that_is_not_installed_is_refused_before_queueing() {
 }
 
 /// A 27B row condenses with the tier it was described with: a condense-only job carries that tier
-/// as `variant` and is refused plainly when the tier is not installed (it loads the model). A
-/// measure-only job loads no describer, so it is accepted without the tier installed.
+/// as `variant`, the 27B's own catalog entry as its only source, and that tier's row bound on
+/// every route, and it is refused plainly when the tier is not installed (it loads the model). A
+/// measure-only job is model-free: it carries and binds no source, so an uninstalled tier does
+/// not matter; it still records the tier the row was described with.
 #[tokio::test]
 async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
+    use sceneworks_core::contracts::JobType;
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO;
+    use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
     let _hub = private_hub(&state);
@@ -741,6 +746,27 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
     assert_eq!(job["payload"]["variant"], "q4");
     assert_eq!(job["payload"]["condenseOnly"], true);
     assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
+    let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("condense-only carries its describer's source")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(entries, vec!["vision_describe_qwen3_8_27b"]);
+    let job_id = job["id"].as_str().expect("job id");
+    for platform in ["linux", "windows"] {
+        let (repo, revision, variant, files) =
+            bound_describer_source(&state, job_id, "candle", platform);
+        assert_eq!(
+            (repo.as_str(), variant.as_str()),
+            (QWEN38_27B_DESCRIBER_CANDLE_REPO, "q4")
+        );
+        assert_eq!(revision, qwen38_tier_row(platform, "q4")["revision"]);
+        assert!(
+            files.iter().all(|file| file.starts_with("q4/")),
+            "{files:?}"
+        );
+    }
 
     let (status, body) = request(app.clone(), "POST", &route, condense("q8", false)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -750,10 +776,32 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
         "{detail}"
     );
 
+    // Measure-only on the uninstalled q8 tier: admitted because it is model-free, with no source
+    // carried and none bound, not because the tier check passed.
     let (status, job) = request(app.clone(), "POST", &route, condense("q8", true)).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
-    assert_eq!(job["payload"]["measureOnly"], true);
-    assert_eq!(job["payload"]["variant"], "q8");
+    let payload = job["payload"].as_object().expect("payload");
+    assert_eq!(payload["measureOnly"], true);
+    assert_eq!(payload["variant"], "q8");
+    assert!(model_free_job(&JobType::DatasetBatchDescribe, payload));
+    for carrier in [
+        "modelManifestEntry",
+        "modelManifestEntries",
+        "baseModelManifestEntry",
+    ] {
+        assert!(payload.get(carrier).is_none(), "{carrier}: {job}");
+    }
+    assert_eq!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::DatasetBatchDescribe,
+            payload,
+            "auto",
+        )
+        .await
+        .expect("a model-free job captures no binding"),
+        None
+    );
 }
 
 /// AC1: installing the q4 tier downloads the q4 folder of this platform's re-host and nothing
@@ -1011,4 +1059,67 @@ async fn batch_describe_refuses_an_unusable_fit_to_target_or_condense_rows() {
             "{expect}: {error}"
         );
     }
+}
+
+/// SW-7163: a measure-only job for a row whose describer is not installed is admitted with no
+/// describer source attached and none bound (it is model-free); a condense-only job runs its
+/// describer, so it carries the describer's source and nothing for the target image model.
+#[tokio::test]
+async fn a_measure_only_job_prepares_no_describer_source_and_condense_only_prepares_only_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = json!({ "itemId": item_ids[0], "fields": { "description": "woman_1" },
+                      "condensedText": "woman_1 sits." });
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "measureOnly": true, "condenseRows": [row.clone()] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let payload = job["payload"].as_object().expect("payload");
+    for carrier in [
+        "modelManifestEntry",
+        "modelManifestEntries",
+        "baseModelManifestEntry",
+    ] {
+        assert!(payload.get(carrier).is_none(), "{carrier}: {job}");
+    }
+    assert!(
+        sceneworks_core::model_artifacts::portable_binding::model_free_job(
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload
+        )
+    );
+    assert_eq!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &sceneworks_core::contracts::JobType::DatasetBatchDescribe,
+            payload,
+            "auto",
+        )
+        .await
+        .expect("a model-free job captures no binding"),
+        None
+    );
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "fitTo": "krea_2_turbo", "condenseRows": [row] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
+        .as_array()
+        .expect("condense-only carries its describer's source")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(entries, vec!["vision_caption_qwen3vl_8b"]);
 }

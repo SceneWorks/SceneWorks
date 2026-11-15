@@ -1608,9 +1608,14 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
-    // A measure-only job counts tokens with the target's tokenizer and loads no describer, so
-    // its tier need not be installed. Describe and condense-only jobs load the tier.
-    if let Some(tier) = tier.filter(|_| !payload.measure_only) {
+    // Describe and condense-only jobs load the tier, so it must be installed. A model-free job
+    // (measure-only) loads no describer and carries no source, the same rule the source
+    // preparation above and the claim gate apply.
+    let model_free = sceneworks_core::model_artifacts::portable_binding::model_free_job(
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+    );
+    if let Some(tier) = tier.filter(|_| !model_free) {
         ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
     }
     let requested_gpu = payload.requested_gpu;

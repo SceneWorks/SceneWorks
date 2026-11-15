@@ -1546,6 +1546,52 @@ describe("DatasetPromptBatchDialog", () => {
     window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
   });
 
+  // A job that stops while condensing leaves the image's description checkpointed but uncounted;
+  // the terminal poll drains it so the row shows its fields and says condensing failed.
+  async function stopWhileCondensing(status, items, processedCount) {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await click(button("Describe images"));
+    await settle();
+    const stopped = snapshot(status, items, { itemCount: 3 });
+    stopped.result.processedCount = processedCount;
+    await act(async () => nextPoll(stopped));
+    await settle();
+  }
+
+  it("shows the described fields and a plain notice when condensing fails on the first image", async () => {
+    await stopWhileCondensing("failed", [described("item_a", 300, 400, { provisional: true })], 0);
+    expect(document.body.querySelector('[data-item-id="item_a"] textarea').value).toBe("A woman, woman_1, stands (item_a).");
+    expect(rowNote("item_a", "condense-interrupted").textContent).toContain("Condensing failed for this image");
+    expect(button("Save prompt batch").disabled).toBe(true);
+  });
+
+  it("shows every described image when condensing fails on the third", async () => {
+    await stopWhileCondensing(
+      "failed",
+      [
+        described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+        described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo") }),
+        described("item_c", 400, 300, { provisional: true }),
+      ],
+      2,
+    );
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual([
+      "item_a",
+      "item_b",
+      "item_c",
+    ]);
+    expect(condensedBox("item_a")).toBeTruthy();
+    expect(rowNote("item_c", "condense-interrupted")).toBeTruthy();
+  });
+
+  it("keeps an image whose condensing was canceled, with its fields", async () => {
+    await stopWhileCondensing("canceled", [described("item_a", 300, 400, { provisional: true })], 1);
+    expect(document.body.querySelector('[data-item-id="item_a"] textarea').value).toBe("A woman, woman_1, stands (item_a).");
+    expect(rowNote("item_a", "condense-interrupted")).toBeTruthy();
+  });
+
   it("shows an estimate as about, a result still over the limit as over, and a failed condense plainly", async () => {
     context.models = [...context.models, KREA];
     await render();
