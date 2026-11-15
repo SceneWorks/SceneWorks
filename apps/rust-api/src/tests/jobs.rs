@@ -8644,7 +8644,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown tier",
             json!({ "model": "yue_en_cot", "quantTier": "q2" }),
-            "quantTier must be",
+            "quantTier has an invalid value",
         ),
         (
             "missing lyrics",
@@ -8679,7 +8679,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown output limiter",
             json!({ "model": "yue_en_cot", "outputLimiter": "normalize" }),
-            "outputLimiter must be one of",
+            "outputLimiter has an invalid value",
         ),
         (
             "output limiter on a non-song model",
@@ -12120,7 +12120,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     assert!(
         error["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("without surrounding whitespace")),
+            .is_some_and(|detail| detail.contains("leading or trailing whitespace")),
         "submit must reject a padded reference id rather than letting the worker trim it: {error}"
     );
     let single_reference = vec!["character-0"];
@@ -12286,7 +12286,8 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         assert!(
             error["detail"]
                 .as_str()
-                .is_some_and(|detail| detail.contains("Unsupported video mode")),
+                .is_some_and(|detail| detail
+                    .contains("mode must not contain leading or trailing whitespace")),
             "{operation} must reject the padded-mode capability bypass: {error}"
         );
 
@@ -12346,7 +12347,7 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         );
 
         for (malformed, expected) in [
-            (json!("not-an-array"), "must be an array of string ids"),
+            (json!("not-an-array"), "has an invalid value for Strings"),
             (
                 json!(["character-primary", 7]),
                 "must contain only string ids",
@@ -17451,18 +17452,13 @@ async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
         "diffusers"
     );
 
-    for (model, advanced, needle) in [
-        (
-            "minimax_h3",
-            json!({ "referenceImageResizeMode": "crop" }),
-            "advanced.referenceImageResizeMode has an invalid value",
-        ),
-        (
-            "wan_i2v",
-            json!({ "referenceImageResizeMode": "match" }),
-            "is not supported by wan_i2v",
-        ),
-    ] {
+    // The non-H3 refusal is covered at the static policy owner; wan_i2v has no
+    // eligible route in this API configuration and the route refuses it first.
+    for (model, advanced, needle) in [(
+        "minimax_h3",
+        json!({ "referenceImageResizeMode": "crop" }),
+        "advanced.referenceImageResizeMode must be one of",
+    )] {
         let (status, error) = request(
             app.clone(),
             "POST",

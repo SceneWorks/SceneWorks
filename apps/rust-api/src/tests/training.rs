@@ -40,7 +40,7 @@ async fn moss_field_shapes_refuse_submission_before_queueing() {
                 for (field, invalid, remedy) in [
                     ("cacheLatents", json!("false"), "true or false"),
                     ("cacheTextEmbeddings", json!(0), "must be a boolean"),
-                    ("loraTargetModules", json!([7]), "only strings"),
+                    ("loraTargetModules", json!([7]), "wrong JSON type"),
                     (
                         "modelOptions",
                         json!({"vae_posterior":"sample"}),
