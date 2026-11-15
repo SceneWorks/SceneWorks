@@ -416,22 +416,6 @@ impl SourceStampV1 {
         compared == *other
     }
 
-    /// [`Self::identifies_same_entry`] ignoring only the change key (`ctime` on Unix, the NTFS
-    /// change time on Windows), which adding a hard link to the file moves.
-    pub(crate) fn identifies_same_entry_except_change_key(&self, other: &Self) -> bool {
-        let mut compared = self.clone();
-        compared.observed_nanos = other.observed_nanos;
-        #[cfg(unix)]
-        {
-            compared.changed_nanos = other.changed_nanos;
-        }
-        #[cfg(windows)]
-        {
-            compared.change_time = other.change_time;
-        }
-        compared == *other
-    }
-
     /// Whether this stamp cannot detect a same-size rewrite that restores the modified time, so it
     /// must never stand in for a hash: on Windows, a zero change time (FAT/exFAT and some network
     /// volumes report none). Unix offers no such signal (see the type's documentation).

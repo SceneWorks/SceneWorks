@@ -297,31 +297,6 @@ impl VerifiedSourceCache {
         Ok(self.record(&observed.real_path, sha256, &observed.before))
     }
 
-    /// Carry a trusted verdict for `blob_real` to `link_real`, a hard link this process has just
-    /// created to the same file. Creating a hard link moves the file's change key, which would
-    /// otherwise make the verdict look stale; it is carried only when both paths name the same
-    /// file now and the recorded stamp differs from the blob's current one in that key alone.
-    /// Returns whether it was recorded (best-effort).
-    pub fn carry_to_hard_link(&self, blob_real: &Path, link_real: &Path) -> bool {
-        let (Ok(blob_now), Ok(link_now)) = (
-            SourceStampV1::of(blob_real, StoreClockV1::SYSTEM),
-            SourceStampV1::of(link_real, StoreClockV1::SYSTEM),
-        ) else {
-            return false;
-        };
-        let Some(record) = self.read_record(blob_real) else {
-            return false;
-        };
-        if !link_now.identifies_same_entry(&blob_now)
-            || !record
-                .stamp
-                .identifies_same_entry_except_change_key(&blob_now)
-        {
-            return false;
-        }
-        self.record(link_real, &record.sha256, &link_now)
-    }
-
     fn tree_record_path(&self, real_root: &Path) -> PathBuf {
         let digest = Sha256::digest(real_root.as_os_str().as_encoded_bytes());
         self.root.join(format!("tree-{digest:x}.json"))
@@ -798,34 +773,5 @@ mod tests {
             run("unused", true),
             ("good".to_owned(), SourceVerification::Reused)
         );
-    }
-
-    /// A verdict follows a hard link this process just created to the verified file, although
-    /// creating the link moved the file's change key; nothing is read again.
-    #[test]
-    fn a_verdict_is_carried_to_a_new_hard_link() {
-        let temp = tempfile::tempdir().unwrap();
-        let cache = VerifiedSourceCache::new(temp.path().join("verified"));
-        let blob = temp.path().join("blob");
-        std::fs::write(&blob, b"weights").unwrap();
-        settle(&blob);
-        let blob = std::fs::canonicalize(&blob).unwrap();
-        let ok = || Ok(());
-        cache.verify(&blob, &sha(b"weights"), &ok).unwrap();
-        let link = temp.path().join("snapshot-entry");
-        std::fs::hard_link(&blob, &link).unwrap();
-        let link = std::fs::canonicalize(&link).unwrap();
-        assert!(cache.carry_to_hard_link(&blob, &link));
-        assert_eq!(
-            cache.verify(&link, &sha(b"weights"), &ok).unwrap(),
-            SourceVerification::Reused
-        );
-        assert_eq!(read_counts::of(&link), 0);
-        // No record for an unrelated file is ever carried.
-        let other = temp.path().join("other");
-        std::fs::write(&other, b"weights").unwrap();
-        settle(&other);
-        let other = std::fs::canonicalize(&other).unwrap();
-        assert!(!cache.carry_to_hard_link(&blob, &other));
     }
 }

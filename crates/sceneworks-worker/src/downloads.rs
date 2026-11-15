@@ -1543,7 +1543,8 @@ pub(crate) async fn download_snapshot_into_cache(
     )
     .build()?;
     let mut commit: Option<String> = None;
-    let mut placements: Vec<(String, String)> = Vec::with_capacity(snapshot.files.len());
+    let mut placements: Vec<(String, String, Option<String>)> =
+        Vec::with_capacity(snapshot.files.len());
 
     for file in &snapshot.files {
         check_download_cancel(context).await?;
@@ -1584,7 +1585,7 @@ pub(crate) async fn download_snapshot_into_cache(
             progress,
         )
         .await?;
-        placements.push((file.path.clone(), etag));
+        placements.push((file.path.clone(), etag, file.sha256.clone()));
     }
 
     // Materialize the snapshot once every blob is present: refs/<rev> -> commit and
@@ -1601,7 +1602,7 @@ pub(crate) async fn download_snapshot_into_cache(
     tokio::fs::create_dir_all(&refs_dir).await?;
     tokio::fs::write(safe_join(&refs_dir, revision)?, commit.as_bytes()).await?;
     let snapshot_dir = safe_join(&repo_dir.join("snapshots"), &commit)?;
-    for (relpath, etag) in &placements {
+    for (relpath, etag, expected_sha256) in &placements {
         let link = safe_join(&snapshot_dir, relpath)?;
         if let Some(parent) = link.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -1620,9 +1621,7 @@ pub(crate) async fn download_snapshot_into_cache(
         }
         rel_target.push("blobs");
         rel_target.push(etag);
-        if link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
-            carry_verdict_to_snapshot_entry(context.settings, &blobs_dir.join(etag), &link);
-        } else {
+        if !link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
             // Copy fallback (a Windows hardlink failure across the blob/snapshot pair): a multi-GB
             // blob copy can outlast the stale-worker timeout just like the hash above, so keep the
             // worker heartbeating through it rather than letting the finalize phase get swept
@@ -1643,6 +1642,15 @@ pub(crate) async fn download_snapshot_into_cache(
             )
             .await?;
         }
+        verify_snapshot_entry(
+            context,
+            &blobs_dir.join(etag),
+            &link,
+            expected_sha256.as_deref(),
+            relpath,
+            progress,
+        )
+        .await?;
     }
     Ok(commit)
 }
@@ -1697,24 +1705,50 @@ fn blob_fallback_name(path: &str) -> String {
     )
 }
 
-/// When the snapshot entry is a hard link (Windows), carry the downloader's verdict for the blob to
-/// the entry's own path, which is the path admission and the worker resolve: creating the link
-/// moved the file's change time, so the blob's record alone would not be reused. A symlinked
-/// entry (Unix) resolves to the blob itself and needs nothing. Best-effort.
-pub(crate) fn carry_verdict_to_snapshot_entry(
-    settings: &Settings,
+/// When a snapshot entry is not the blob itself — a Windows hard link, or the copy fallback —
+/// verify the entry once more at download time and record that verdict under the entry's own
+/// path, the one admission and the worker resolve. The blob's own verdict cannot stand in: every
+/// blob is verified before any entry is linked, and creating a hard link moves the change time,
+/// the only stamp field that sees a same-length rewrite with the modified time restored. So on
+/// Windows each downloaded file is read twice here (as a blob, then as its entry), and the first
+/// job after the download reads none. A symlinked entry (Unix) resolves to the blob and needs
+/// nothing. A mismatch fails the download with the usual integrity error.
+pub(crate) async fn verify_snapshot_entry(
+    context: &DownloadContext<'_>,
     blob: &Path,
     entry: &Path,
-) -> bool {
-    let (Ok(blob), Ok(entry)) = (std::fs::canonicalize(blob), std::fs::canonicalize(entry)) else {
-        return false;
+    expected_sha256: Option<&str>,
+    label: &str,
+    progress: &DownloadProgress<'_>,
+) -> WorkerResult<()> {
+    let (Ok(blob), Ok(entry_real)) = (std::fs::canonicalize(blob), std::fs::canonicalize(entry))
+    else {
+        return Ok(());
     };
-    blob != entry
-        && settings.data_dir.is_absolute()
-        && sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
-            &settings.data_dir,
+    let Some(expected_sha256) = expected_sha256 else {
+        return Ok(());
+    };
+    if blob == entry_real {
+        return Ok(());
+    }
+    if tokio::fs::metadata(entry).await?.len() >= VERIFY_PROGRESS_MIN_BYTES {
+        let _ = update_job(
+            context.api,
+            context.job_id,
+            progress.verifying_payload(label),
         )
-        .carry_to_hard_link(&blob, &entry)
+        .await;
+    }
+    verify_file_sha256(
+        context.api,
+        context.settings,
+        context.job_id,
+        entry,
+        expected_sha256,
+        label,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Materialize a snapshot entry pointing at its blob, returning whether it

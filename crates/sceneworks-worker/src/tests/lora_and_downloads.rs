@@ -3832,19 +3832,14 @@ async fn a_downloaded_blob_verdict_serves_the_first_admission_check() {
     );
 }
 
-/// Windows lays a hub snapshot entry down as a HARD link to its blob, which moves the blob's
-/// change time; the downloader's verdict is carried to the entry's own path, so the first
-/// admission after the download still reads nothing. Runs on every platform (a hard link moves
-/// `ctime` on Unix the same way).
-#[tokio::test]
-async fn a_downloaded_blob_verdict_follows_a_hard_linked_snapshot_entry() {
-    use sceneworks_core::verified_source_cache::{read_counts, SourceVerification, VerifiedSourceCache};
+/// A settled blob and the path its hub snapshot entry will take. A hard link moves `ctime` on
+/// Unix just as it moves the NTFS change time on Windows, so these tests run on every platform,
+/// including the Windows lane.
+fn snapshot_entry_fixture(temp: &Path) -> (Settings, PathBuf, PathBuf, String) {
     use sha2::{Digest, Sha256};
-
-    let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
-    settings.data_dir = temp.path().join("data");
-    let repo = temp.path().join("hub/models--owner--model");
+    settings.data_dir = temp.join("data");
+    let repo = temp.join("hub/models--owner--model");
     let blob = repo.join("blobs/etag");
     std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
     std::fs::write(&blob, b"weights").unwrap();
@@ -3854,21 +3849,112 @@ async fn a_downloaded_blob_verdict_follows_a_hard_linked_snapshot_entry() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
         .unwrap();
+    let entry = repo.join("snapshots/rev/model.safetensors");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     let digest = format!("{:x}", Sha256::digest(b"weights"));
+    (settings, blob, entry, digest)
+}
+
+/// Verify the hard-linked `entry` the way the downloader does after linking it.
+async fn verify_linked_entry(
+    settings: &Settings,
+    blob: &Path,
+    entry: &Path,
+    digest: &str,
+) -> crate::error::WorkerResult<()> {
+    let api = ApiClient::new(settings);
+    let client = reqwest::Client::new();
+    let context = crate::downloads::DownloadContext {
+        api: &api,
+        client: &client,
+        settings,
+        job_id: "job-1",
+        cancel_message: "canceled",
+        fresh_download: false,
+    };
+    let progress = crate::downloads::DownloadProgress::new(
+        "model.safetensors",
+        0,
+        Some(7),
+        Duration::from_secs(5),
+    );
+    crate::downloads::verify_snapshot_entry(
+        &context,
+        blob,
+        entry,
+        Some(digest),
+        "model.safetensors",
+        &progress,
+    )
+    .await
+}
+
+/// A snapshot entry that is its own directory entry for the blob (a Windows hard link, or the
+/// copy fallback) is verified again at download time and recorded under the entry's own path, the
+/// path admission resolves, so the first admission after the download reads no bytes.
+#[tokio::test]
+async fn a_hard_linked_snapshot_entry_is_verified_at_download_time() {
+    use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
     let api = ApiClient::new(&settings);
     crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
         .await
         .expect("the downloaded blob matches its declared digest");
-    let entry = repo.join("snapshots/rev/model.safetensors");
-    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::hard_link(&blob, &entry).unwrap();
-    assert!(crate::downloads::carry_verdict_to_snapshot_entry(&settings, &blob, &entry));
-    let real = std::fs::canonicalize(&entry).unwrap();
+    verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect("the linked entry holds the downloaded bytes");
     assert_eq!(
         VerifiedSourceCache::for_data_dir(&settings.data_dir)
-            .verify(&real, &format!("sha256:{digest}"), &|| Ok(()))
+            .verify(
+                &std::fs::canonicalize(&entry).unwrap(),
+                &format!("sha256:{digest}"),
+                &|| Ok(())
+            )
             .unwrap(),
-        SourceVerification::Reused
+        SourceVerification::Reused,
+        "the first admission after the download reads no bytes"
     );
-    assert_eq!(read_counts::of(&real), 0, "admission read no bytes of the entry");
+}
+
+/// A blob rewritten between its verification and its link — same length, modified time restored
+/// — fails the download, and the old digest is never recorded against the rewritten bytes.
+#[tokio::test]
+async fn a_blob_rewritten_before_its_link_fails_the_download() {
+    use sceneworks_core::verified_source_cache::VerifiedSourceCache;
+    let temp = tempdir().expect("tempdir creates");
+    let (settings, blob, entry, digest) = snapshot_entry_fixture(temp.path());
+    let api = ApiClient::new(&settings);
+    crate::downloads::verify_file_sha256(&api, &settings, "job-1", &blob, &digest, "model.safetensors")
+        .await
+        .expect("the downloaded blob matches its declared digest");
+    let modified = std::fs::metadata(&blob).unwrap().modified().unwrap();
+    std::fs::write(&blob, b"WEIGHTS").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    std::fs::hard_link(&blob, &entry).unwrap();
+    let error = verify_linked_entry(&settings, &blob, &entry, &digest)
+        .await
+        .expect_err("substituted bytes fail the download");
+    assert!(
+        error.to_string().contains("failed its integrity check"),
+        "{error}"
+    );
+    let store = VerifiedSourceCache::for_data_dir(&settings.data_dir);
+    let pinned = format!("sha256:{digest}");
+    for path in [&blob, &entry] {
+        if let Ok(real) = std::fs::canonicalize(path) {
+            assert_ne!(
+                store.recorded(&real).as_deref(),
+                Some(pinned.as_str()),
+                "{} is never recorded as the old digest",
+                path.display()
+            );
+        }
+    }
 }
