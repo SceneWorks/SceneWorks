@@ -457,6 +457,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )

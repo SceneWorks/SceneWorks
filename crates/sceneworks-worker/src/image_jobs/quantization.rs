@@ -195,7 +195,11 @@ pub(super) fn gate_tier_key_resolved(
         return tier;
     }
     if nvfp4 {
-        return NVFP4_TIER;
+        return crate::vram_gate::requested_tier_key(
+            &request.advanced,
+            &request.model_manifest_entry,
+            true,
+        );
     }
     let bits = request.resolved_quant_bits().or_else(|| {
         request

@@ -2,6 +2,7 @@ import { jobFailureMessage } from "../generationRefusal.js";
 import { formatMiB } from "../formatting.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import ExactReplayAction from "../components/ExactReplayAction.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -451,9 +452,9 @@ export function QueueScreen() {
                       payloadChanges: { yue2: { ...j.payload.yue2, computePolicy, precision: undefined } },
                     } : undefined,
                   })}
-                  onExactReplay={(j) => jobAction(j, "exact-replay")}
                   hideOpenQueue
                 />
+                <ExactReplayAction job={enrichedJob} onExactReplay={(j) => jobAction(j, "exact-replay")} />
               </div>
             );
           })

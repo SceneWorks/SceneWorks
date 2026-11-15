@@ -384,7 +384,19 @@ pub fn validate_worker_receipt(
     if terminal_result
         .get("expectedCount")
         .and_then(Value::as_u64)
-        .is_some_and(|count| count as usize != submitted.outputs.len())
+        .is_some_and(|count| {
+            let assets = submitted
+                .outputs
+                .iter()
+                .map(|output| output.artifact_ids.len())
+                .sum();
+            count as usize
+                != if terminal_result.contains_key("assetWrites") {
+                    assets
+                } else {
+                    submitted.outputs.len()
+                }
+        })
     {
         return Err(ReplayUnavailable::new(
             "incomplete_completed_assets",
@@ -585,9 +597,6 @@ pub fn require_image_seed_binding(
             .or_else(|| seeds?.get(index)?.as_i64())
             .and_then(|seed| u64::try_from(seed).ok());
         if draw.get("output_index").and_then(Value::as_u64) != Some(provider_index as u64)
-            || draw
-                .get("noise_sha256")
-                .is_some_and(|value| !value.is_null())
             || draw.get("seed").and_then(Value::as_u64) != expected
             || expected.is_none()
         {
@@ -1174,6 +1183,9 @@ mod tests {
             ]
         });
         let fixed = json!({"seed":41,"count":2});
+        assert!(require_image_seed_binding(&receipt, fixed.as_object().unwrap()).is_ok());
+        receipt.execution["identity"]["randomness"]["draws"][0]["noise_sha256"] =
+            json!("a".repeat(64));
         assert!(require_image_seed_binding(&receipt, fixed.as_object().unwrap()).is_ok());
         let changed = json!({"seed":42,"count":2});
         assert_eq!(

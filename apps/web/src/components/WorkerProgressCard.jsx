@@ -722,7 +722,6 @@ export function WorkerProgressCard({
   onRetry,
   onFreshRetry,
   onDuplicate,
-  onExactReplay,
   onOpenQueue,
   hideOpenQueue = false,
   allowTitleExpansion = false,
@@ -736,7 +735,6 @@ export function WorkerProgressCard({
 }) {
   const [titleExpanded, setTitleExpanded] = useState(false);
   const [duplicateComputePolicy, setDuplicateComputePolicy] = useState("");
-  const [replayRefusal, setReplayRefusal] = useState("");
   const { workersById, visibleWorkers } = useAppLive();
   // Catalog read (sc-16965). `models` is a low-churn static field, so reading it through
   // useAppStatic() does not add a job/worker-tick subscription this card did not already have.
@@ -808,24 +806,6 @@ export function WorkerProgressCard({
     job.status !== "completed" &&
     (attempts > 1 || ["resume", "fresh"].includes(job.payload?.downloadAction));
   const canDuplicate = onDuplicate && canRetryBase && !isModelDownload;
-  const canExactReplay = onExactReplay && job.status === "completed" &&
-    ["image_generate", "image_edit"].includes(job.type);
-  const exactReplayReason = (reason) => ({
-    receipt_missing: "This job has no complete execution receipt.",
-    deterministic_replay_unavailable: "The provider has not verified exact replay for this run.",
-    runtime_revision_changed: "The inference runtime changed since this run.",
-    device_unavailable: "The original worker is unavailable.",
-    device_changed: "The original device changed.",
-    source_binding_missing: "The original source binding is unavailable.",
-    source_route_missing: "The original source route is unavailable.",
-    source_route_changed: "The original source route changed.",
-    source_unavailable: "The original model source is unavailable.",
-    route_unavailable: "The original worker no longer supports this route.",
-    seed_draw_binding_changed: "The recorded random draws do not match the saved seed.",
-    unsupported_draw_mapping: "This run used random draws that cannot be pinned for replay.",
-    completed_execution_changed: "The replay's execution choices changed, so it stopped.",
-    execution_failed: "The replay stopped before it could reproduce the recorded execution.",
-  }[reason] ?? "The recorded execution cannot be replayed exactly.");
   const legacyYue2Duplicate = canDuplicate && job.payload?.model === "yue2" &&
     job.payload?.yue2?.kind !== "transcribe" && !job.payload?.yue2?.computePolicy;
   const showOpenQueue = !!onOpenQueue && !hideOpenQueue;
@@ -935,18 +915,12 @@ export function WorkerProgressCard({
       {job.error ? (
         <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}
-      {job.result?.replayUnavailable?.code === "replay_unavailable" ? (
-        <p className="worker-progress-card__message error" role="alert">
-          {exactReplayReason(job.result.replayUnavailable.reason)}
-        </p>
-      ) : null}
       {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
           a prefix KV cache; renders nothing for every other job. */}
       {Array.isArray(job.result?.prefixKvCache) && job.result.prefixKvCache.length > 0 ? (
         <PrefixKvCacheDetailBoundary job={job} />
       ) : null}
       <div className="worker-progress-card__actions">
-        {replayRefusal ? <p role="alert" className="worker-progress-card__message error">{replayRefusal}</p> : null}
         {canCancel ? (
           <button
             className="secondary-action danger"
@@ -1013,19 +987,6 @@ export function WorkerProgressCard({
               type="button"
             >Duplicate</button>
           </>
-        ) : null}
-        {canExactReplay ? (
-          <button
-            className="secondary-action"
-            onClick={async () => {
-              setReplayRefusal("");
-              const outcome = await onExactReplay(job);
-              if (outcome?.code === "replay_unavailable") {
-                setReplayRefusal(exactReplayReason(outcome.reason));
-              }
-            }}
-            type="button"
-          >Exact replay</button>
         ) : null}
         {showOpenQueue ? (
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>

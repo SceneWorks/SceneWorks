@@ -659,8 +659,6 @@ use super::resolved_steps_for_share;
 use super::routing::imported_base_snapshot_companions;
 #[cfg(native_lane)]
 use super::routing::imported_generate_request_has_unsupported_shape;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::routing::prepare_candle_image_route;
 #[cfg(target_os = "macos")]
 use super::routing::prepare_image_route;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -1159,6 +1157,14 @@ fn execution(request: &ImageRequest) -> super::conditioning::ResolvedImageExecut
     );
     super::conditioning::ResolvedImageExecution::new(&bound)
         .expect("fixture execution context resolves")
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn prepare_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<super::routing::PreparedCandleImageRoute>> {
+    super::routing::prepare_candle_image_route(&execution(request), settings)
 }
 
 /// Execute the actual production dispatch/fallback seam, not a copy of its classification.

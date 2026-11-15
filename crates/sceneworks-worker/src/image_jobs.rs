@@ -791,6 +791,7 @@ async fn run_image_generate_job_unexplained(
         }
     }
     // Lower nested pose and phase controls once before a provider chooses its route.
+    #[cfg(native_lane)]
     let execution = conditioning::ResolvedImageExecution::new(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
@@ -1099,7 +1100,8 @@ async fn run_image_generate_job_unexplained(
     {
         let receipt_root = project_path.clone();
         let receipt_writes = asset_writes.clone();
-        let receipt_count = plan.image_count as usize;
+        // Inline upscale adds an asset to each logical output while preserving its base index.
+        let receipt_count = (plan.image_count / upscale_mult) as usize;
         Some(
             crate::load_progress::spawn_blocking(move || {
                 image_execution_receipt(&receipt_root, &receipt_writes, receipt_count)
@@ -1338,7 +1340,7 @@ fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
         receipt.outputs[0].artifact_sha256[1],
         sceneworks_core::hashing::hex(&Sha256::digest(b"final child bytes"))
     );
-    let result = serde_json::json!({"expectedCount":1,"assetWrites":facts});
+    let result = serde_json::json!({"expectedCount":2,"assetWrites":facts});
     sceneworks_core::execution_receipt::validate_worker_receipt(
         &receipt,
         result.as_object().unwrap(),

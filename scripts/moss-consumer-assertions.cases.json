@@ -25,8 +25,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -315,8 +315,8 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
           "op": "body",
-          "anchor": "fn candle_refuses_quant_tier(",
-          "new": "let _ = (model, payload); false"
+          "anchor": "fn candle_refuses_quant_tier_with_facts(",
+          "new": "let _ = (model, facts); false"
         }
       ]
     },
@@ -461,9 +461,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
           "op": "replace",
-          "old": "return super::catalog::moss_training_plan_is_supported(plan);",
+          "old": "return route.is_some_and(|route| {\n            super::catalog::moss_training_plan_is_supported_with_facts(plan, route)\n        });",
           "new": "return false;",
-          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible_with_facts("
         }
       ]
     },
@@ -476,9 +476,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
           "op": "replace",
-          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)",
           "new": "false",
-          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+          "anchor": "pub(crate) fn training_job_is_candle_eligible_with_facts("
         }
       ]
     },
@@ -491,9 +491,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
           "op": "replace",
-          "old": "return super::catalog::moss_training_plan_is_supported(plan);",
+          "old": "return route.is_some_and(|route| {\n            super::catalog::moss_training_plan_is_supported_with_facts(plan, route)\n        });",
           "new": "return true;",
-          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible_with_facts("
         }
       ]
     },
@@ -506,9 +506,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
           "op": "replace",
-          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)",
           "new": "job.job_type == JobType::LoraTrain",
-          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+          "anchor": "pub(crate) fn training_job_is_candle_eligible_with_facts("
         }
       ]
     },
@@ -523,7 +523,7 @@
           "op": "replace",
           "old": "if !matches!(base, Some(\"moss_image_base\" | \"moss_image_sft\"))",
           "new": "if base.is_none()",
-          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+          "anchor": "pub(crate) fn moss_training_plan_is_supported_with_facts("
         }
       ]
     },
@@ -536,9 +536,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
           "op": "replace",
-          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
-          "new": "job.job_type == JobType::LoraTrain && (super::catalog::moss_training_plan_is_supported(plan) || (base_model == \"qwen_image_2_1\" && is_adapter))",
-          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)",
+          "new": "job.job_type == JobType::LoraTrain && (super::catalog::moss_training_plan_is_supported_with_facts(plan, network) || (base_model == \"qwen_image_2_1\" && is_adapter))",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible_with_facts("
         }
       ]
     },
@@ -553,7 +553,7 @@
           "op": "replace",
           "old": "if !matches!(job.job_type, JobType::LoraTrain)",
           "new": "if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)",
-          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible_with_facts("
         }
       ]
     },
@@ -566,9 +566,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
           "op": "replace",
-          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
-          "new": "super::catalog::moss_training_plan_is_supported(plan)",
-          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)",
+          "new": "super::catalog::moss_training_plan_is_supported_with_facts(plan, network)",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible_with_facts("
         }
       ]
     },
@@ -581,9 +581,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
           "op": "replace",
-          "old": "_ => return false,",
-          "new": "_ => \"lora\",",
-          "anchor": "let method = match advanced.and_then(|advanced| advanced.get(\"networkType\"))"
+          "old": "crate::resolved_options::RouteField::Null\n        | crate::resolved_options::RouteField::Invalid => {\n            return false;\n        }",
+          "new": "crate::resolved_options::RouteField::Null\n        | crate::resolved_options::RouteField::Invalid => \"lora\",",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported_with_facts("
         }
       ]
     },
@@ -596,9 +596,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
           "op": "replace",
-          "old": "Some(Value::String(value)) => value.trim(),",
-          "new": "Some(Value::String(value)) => value.as_str(),",
-          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+          "old": "crate::resolved_options::RouteField::Valid(value) => value.trim(),",
+          "new": "crate::resolved_options::RouteField::Valid(value) => value.as_str(),",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported_with_facts("
         }
       ]
     },
@@ -611,9 +611,9 @@
         {
           "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
           "op": "replace",
-          "old": "Some(Value::String(value)) if value.trim().is_empty() => \"lora\",",
-          "new": "Some(Value::String(value)) if value.trim().is_empty() => \"full\",",
-          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+          "old": "crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => \"lora\",",
+          "new": "crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => \"full\",",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported_with_facts("
         }
       ]
     },
@@ -640,8 +640,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.timestep_type=\"uniform\".into();}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.timestep_type=\"uniform\".into();}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -655,8 +655,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.trigger_word=None;}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.trigger_word=None;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -670,8 +670,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.network_type=NetworkType::Lora;}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.network_type=NetworkType::Lora;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -685,8 +685,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.rank=1;}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.rank=1;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -700,8 +700,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.alpha=1.;}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.alpha=1.;}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -715,8 +715,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.lora_target_modules=vec![\"q\".into()];}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.lora_target_modules=vec![\"q\".into()];}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -730,8 +730,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"vae_posterior\".into(),json!(\"sample\"));}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"vae_posterior\".into(),json!(\"sample\"));}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -745,8 +745,8 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"foreign\".into(),json!(true));}\n    config\n",
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"foreign\".into(),json!(true));}\n        config\n",
           "anchor": "fn finalize_training_config("
         }
       ]
@@ -762,7 +762,7 @@
           "op": "replace",
           "old": "        items,\n        config,",
           "new": "        items: items.into_iter().map(|mut item| { item.image_path=PathBuf::from(\"wrong.png\"); item }).collect(),\n        config,",
-          "anchor": "fn training_request_from_plan("
+          "anchor": "fn training_request_from_plan_resolved("
         }
       ]
     },
@@ -777,7 +777,7 @@
           "op": "replace",
           "old": "caption: item.caption.clone(),",
           "new": "caption: String::new(),",
-          "anchor": "fn training_request_from_plan("
+          "anchor": "fn training_request_from_plan_resolved("
         }
       ]
     },
@@ -792,7 +792,7 @@
           "op": "replace",
           "old": "trigger_words: plan.output.trigger_words.clone(),",
           "new": "trigger_words: Vec::new(),",
-          "anchor": "fn training_request_from_plan("
+          "anchor": "fn training_request_from_plan_resolved("
         }
       ]
     },
@@ -850,7 +850,7 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "json!(optional_payload_string(&plan.config.advanced, \"networkType\").unwrap_or(\"lora\"))",
+          "old": "json!(options.common.network_type)",
           "new": "json!(\"lora\")",
           "anchor": "fn training_result("
         }
@@ -954,8 +954,8 @@
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
           "anchor": "fn finalize_training_config(",
-          "old": "if plan.target.kernel == \"moss_image_lora\" {",
-          "new": "if plan.target.kernel == \"moss_image_lora\" {config.train_dtype=\"bf16\".into();"
+          "old": "\n        config\n",
+          "new": "\n        let mut config = config;\n        if plan.target.kernel == \"moss_image_lora\" { config.train_dtype = \"bf16\".to_owned(); }\n        config\n"
         }
       ]
     },

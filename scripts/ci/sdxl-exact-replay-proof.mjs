@@ -7,7 +7,7 @@ import { readFile, writeFile, mkdir, realpath, stat, open, rm } from 'node:fs/pr
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { fileSha256 } from '../lib/file-sha256.mjs';
+import { fileSha256, sha256 } from '../lib/file-sha256.mjs';
 import { inferenceRevision } from '../lib/inference-provenance.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -23,7 +23,6 @@ export function canonical(value) {
     ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : entry);
 }
 export const digest = (value) => createHash('sha256').update(canonical(value)).digest('hex');
-const bytesDigest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const same = (a, b, message) => assert.equal(digest(a), digest(b), message);
 const fact = (value) => { assert.equal(value?.state, 'resolved', 'missing completed fact'); return value.value; };
 
@@ -130,7 +129,7 @@ export function completedWitness({ job, receipt, route, png, workerId, device, p
   assert.equal(job.result.assets?.length, 1, 'persisted output missing');
   assert.equal(job.result.assets[0].id, output.artifactIds[0], 'artifact association changed');
   assert(png.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), 'final output is not PNG');
-  const pngSha256 = bytesDigest(png);
+  const pngSha256 = sha256(png);
   assert.equal(output.artifactSha256[0], pngSha256, 'final PNG differs from trusted receipt');
   const execution = output.execution ?? receipt.execution;
   assert.equal(execution?.state, 'resolved', 'execution unavailable');
@@ -231,7 +230,7 @@ async function runProof() {
   const physicalIndex = Number(execFileSync('nvidia-smi', ['-i', plan.deviceUuid, '--query-gpu=index', '--format=csv,noheader'], { encoding: 'utf8' }).trim());
   verifyDeviceSelection(metadata, physicalIndex, plan);
   const baselineRuntime = runtime(); assert(baselineRuntime.startsWith(plan.deviceUuid), 'physical UUID unavailable');
-  evidence.driverDeviceSha256 = bytesDigest(baselineRuntime);
+  evidence.driverDeviceSha256 = sha256(baselineRuntime);
   if (qualification) for (const key of ['driverDeviceSha256', 'runtimeLibrariesSha256', 'osIdentitySha256']) assert.equal(evidence[key], qualification[key], 'qualified runtime/device changed');
   const workerId = `sdxl-exact-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`;
   const master = randomBytes(32).toString('hex');

@@ -7,7 +7,10 @@ use super::checkpoint_plan::checkpoint_plan_operation;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
-#[cfg(test)]
+#[cfg(any(
+    all(target_os = "macos", test),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_img2img_init_generic;
