@@ -416,40 +416,6 @@ const MEDIA_TICKET_TTL_SECONDS: u64 = 300;
 const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
-fn generation_wire_kind<T: 'static>() -> Option<&'static str> {
-    use std::any::TypeId;
-    let id = TypeId::of::<T>();
-    if id == TypeId::of::<PersonDetectionJobRequest>() {
-        Some("personDetect")
-    } else if id == TypeId::of::<PersonTrackJobRequest>() {
-        Some("personTrack")
-    } else if id == TypeId::of::<LoraTrainingRequest>() {
-        Some("training")
-    } else if id == TypeId::of::<sceneworks_core::yue2_score::jobs::Yue2JobSpec>() {
-        Some("yue2")
-    } else if id == TypeId::of::<ImageJobRequest>() {
-        Some("image")
-    } else if id == TypeId::of::<VideoJobRequest>() {
-        Some("video")
-    } else if id == TypeId::of::<CharacterTestRequest>() {
-        Some("characterTest")
-    } else if id == TypeId::of::<PromptRefineRequest>() {
-        Some("promptRefine")
-    } else if id == TypeId::of::<VectorPromptWorkflowRequest>() {
-        Some("vectorPrompt")
-    } else if id == TypeId::of::<VectorRequest>() {
-        Some("vector")
-    } else if id == TypeId::of::<AudioJobRequest>() {
-        Some("audio")
-    } else if id == TypeId::of::<VqaJobRequest>() {
-        Some("vqa")
-    } else if id == TypeId::of::<InterleaveJobRequest>() {
-        Some("interleave")
-    } else {
-        None
-    }
-}
-
 // sc-4201 (F-API-1): default to loopback so a bare/server run that doesn't set
 // SCENEWORKS_API_HOST isn't exposed to the whole LAN with auth off. Docker and the
 // desktop wrapper set the host explicitly (0.0.0.0 / 127.0.0.1 respectively), so this

@@ -8968,7 +8968,7 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
         ),
         (
             json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
-            "tuning requires",
+            "requires advanced.enhancePrompt=true",
         ),
         (
             json!({ "promptEnhancement": { "outcome": "enhanced" } }),

@@ -1,5 +1,40 @@
 use super::*;
 
+/// Map the API's typed generation envelopes to their shared validation owners.
+pub(super) fn generation_wire_kind<T: 'static>() -> Option<&'static str> {
+    use std::any::TypeId;
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<PersonDetectionJobRequest>() {
+        Some("personDetect")
+    } else if id == TypeId::of::<PersonTrackJobRequest>() {
+        Some("personTrack")
+    } else if id == TypeId::of::<LoraTrainingRequest>() {
+        Some("training")
+    } else if id == TypeId::of::<sceneworks_core::yue2_score::jobs::Yue2JobSpec>() {
+        Some("yue2")
+    } else if id == TypeId::of::<ImageJobRequest>() {
+        Some("image")
+    } else if id == TypeId::of::<VideoJobRequest>() {
+        Some("video")
+    } else if id == TypeId::of::<CharacterTestRequest>() {
+        Some("characterTest")
+    } else if id == TypeId::of::<PromptRefineRequest>() {
+        Some("promptRefine")
+    } else if id == TypeId::of::<VectorPromptWorkflowRequest>() {
+        Some("vectorPrompt")
+    } else if id == TypeId::of::<VectorRequest>() {
+        Some("vector")
+    } else if id == TypeId::of::<AudioJobRequest>() {
+        Some("audio")
+    } else if id == TypeId::of::<VqaJobRequest>() {
+        Some("vqa")
+    } else if id == TypeId::of::<InterleaveJobRequest>() {
+        Some("interleave")
+    } else {
+        None
+    }
+}
+
 pub(super) fn requested_gpu_or_auto(value: String) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
