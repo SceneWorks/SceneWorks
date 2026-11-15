@@ -48,10 +48,21 @@ export function validateResult(result, tier, imageSide = 'default') {
   };
 }
 
-export function validateReceipt(receipt) {
+// The guard policy each GPU admission must have run under.
+export const ADMISSION_POLICIES = Object.freeze({ idle: 'strict-idle', shared: 'functional-coexistence' });
+
+export function validateReceipt(receipt, admission = 'idle') {
   assert.equal(receipt?.kind, 'cuda-execution-resource-lease-v1', 'not a CUDA guard receipt');
   assert.equal(receipt.actor, GUARD_ACTOR);
   assert.equal(receipt.resource_completed, true, `the CUDA guard did not complete: ${receipt.error ?? 'no error recorded'}`);
+  assert.equal(receipt.admission_policy, ADMISSION_POLICIES[admission],
+    `a ${admission} run must hold the card under the ${ADMISSION_POLICIES[admission]} policy`);
+  if (admission === 'shared') {
+    assert.equal(receipt.shared_device, true, 'a shared run receipt must record the shared card');
+    assert.equal(receipt.vram_measurement, false, 'a shared run receipt cannot claim a VRAM measurement');
+  } else {
+    assert.equal(receipt.post_child_idle_verified, true, 'an idle run must verify the card idle after the child');
+  }
 }
 
 async function readBoundedJson(file) {
@@ -64,7 +75,11 @@ async function readBoundedJson(file) {
 export function summary(evidence) {
   const lines = [`## Qwen3.8 27B describer CUDA validation`, '', `Accepted: **${evidence.accepted}**`, ''];
   if (evidence.error) lines.push(`Error: ${evidence.error}`, '');
-  if (evidence.gpu_admission === 'shared') lines.push('GPU admission: shared with the desktop on the display card (no idle guard); the peak is card-wide, above the smoke\'s own baseline.', '');
+  lines.push(evidence.gpu_admission === 'shared'
+    ? 'GPU admission: shared (functional-coexistence guard: per-GPU lock and owned child, no idle check; the '
+      + 'card was shared with the desktop). The peak below was measured on a shared card: card-wide, above the '
+      + 'smoke\'s own baseline.'
+    : 'GPU admission: idle (strict-idle guard: the card was idle before and after the run).', '');
   const result = evidence.result;
   if (result) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
@@ -80,12 +95,12 @@ export function summary(evidence) {
 }
 
 // Stage only what was validated: evidence.json, plus a byte copy of the guard receipt.
-// `admission` is how the run took the card: `idle` under the CUDA guard (its receipt must show a
-// completed lease), or `shared`, beside the desktop on the display card with no guard and so no
-// receipt. A shared run's peak is still measured above the smoke's own baseline, on a card other
-// programs also use.
+// `admission` is how the run took the card: `idle` under the guard's strict-idle policy, or `shared`
+// under its functional-coexistence policy (the per-GPU lock and owned child, no idle check). Both
+// need a completed receipt of the matching policy. A shared run's peak is still measured above the
+// smoke's own baseline, on a card other programs also use, so it is labelled as such.
 export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'idle') {
-  assert(['idle', 'shared'].includes(admission), `unsupported GPU admission ${admission}`);
+  assert(Object.hasOwn(ADMISSION_POLICIES, admission), `unsupported GPU admission ${admission}`);
   const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
     gpu_admission: admission };
   const artifact = path.join(outputDir, 'artifact');
@@ -94,15 +109,18 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
   try {
     evidence.result = validateResult(
       await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
+    evidence.result.gpu_memory = { ...evidence.result.gpu_memory,
+      measured_on: admission === 'shared' ? 'shared-card' : 'idle-card' };
   } catch (error) {
     failure = error;
   }
   // The receipt is staged even when the result is missing: it says why the guarded run failed.
-  if (admission === 'idle') try {
+  try {
     const receipt = await readBoundedJson(receiptFile);
     await fs.writeFile(path.join(artifact, 'resource-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx' });
-    evidence.resource_receipt = { actor: receipt.actor, resource_completed: receipt.resource_completed };
-    validateReceipt(receipt);
+    evidence.resource_receipt = { actor: receipt.actor, resource_completed: receipt.resource_completed,
+      admission_policy: receipt.admission_policy };
+    validateReceipt(receipt, admission);
   } catch (error) {
     failure ??= error;
   }

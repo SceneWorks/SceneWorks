@@ -29,6 +29,12 @@ WINDOWS_SHA = "b50647bb1566df498f8cf4b57fa9288278e8ee1301de37afec3da478783123dd"
 
 STRICT_POLICY = "strict-idle"
 FUNCTIONAL_POLICY = "functional-coexistence"
+# The explicit allow-list of functional-coexistence callers: each actor with the only manual
+# workflows it may run from.
+FUNCTIONAL_ACTORS = {
+    "load-progress-acceptance": ("memory-catalog-campaign.yml", "load-progress-acceptance.yml"),
+    "qwen38-describer": ("qwen38-describer-validation.yml",),
+}
 
 
 class DeviceIdentity:
@@ -52,13 +58,39 @@ class DeviceIdentity:
             raise RuntimeError("ambiguous physical device identity")
         return devices, []
 
+    def free_mib(self, index, deadline):
+        """One `memory.free` reading (MiB) of physical GPU `index`."""
+        remaining = min(30, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("device free-memory deadline exhausted")
+        result = self.run([self.executable, "--query-gpu=memory.free", "--format=csv,noheader,nounits",
+                           "-i", str(index)], capture_output=True, text=True, check=True, timeout=remaining)
+        value = result.stdout.strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise RuntimeError("invalid device free-memory reading")
+        return int(value)
+
+
+def require_free_memory(identity, devices, need_mib, deadline):
+    """Refuse to launch unless every held card has `need_mib` free. Read with the UUID lock held, so
+    two functional runs cannot both pass on the same free memory."""
+    readings = []
+    for device in devices:
+        free = identity.free_mib(device["index"], deadline)
+        readings.append({"index": device["index"], "uuid": device["uuid"], "free_mib": free, "need_mib": need_mib})
+        if free < need_mib:
+            raise RuntimeError(f'GPU {device["index"]} has {free} MiB free; this run needs {need_mib} MiB. '
+                               "Free memory on the card or run again later.")
+    return readings
+
 
 def require_admission_policy(policy, actor, environment, physical_indices, cuda_ordinals, probe_visible):
     if policy == STRICT_POLICY:
         return
-    if policy != FUNCTIONAL_POLICY or actor != "load-progress-acceptance":
-        raise RuntimeError("functional coexistence is restricted to load-progress acceptance")
-    workflows = ("memory-catalog-campaign.yml", "load-progress-acceptance.yml")
+    if policy != FUNCTIONAL_POLICY or actor not in FUNCTIONAL_ACTORS:
+        raise RuntimeError("functional coexistence is restricted to load-progress acceptance "
+                           "and the Qwen3.8 describer validation")
+    workflows = FUNCTIONAL_ACTORS[actor]
     if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
             or not any(environment.get("GITHUB_WORKFLOW_REF", "").startswith(
                 f"SceneWorks/SceneWorks/.github/workflows/{name}@") for name in workflows)):
@@ -385,6 +417,8 @@ def main():
     modes.add_argument("--cuda-ordinals", default="0")
     parser.add_argument("--probe-visible")
     parser.add_argument("--admission-policy", choices=(STRICT_POLICY, FUNCTIONAL_POLICY), default=STRICT_POLICY)
+    parser.add_argument("--require-free-mib", type=int,
+                        help="functional coexistence only: refuse to launch unless the held card has this much free memory")
     parser.add_argument("--service-url", help="actual loopback service URL; optional host transaction lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -395,6 +429,9 @@ def main():
     require_outermost(environment)
     require_admission_policy(args.admission_policy, args.actor, environment,
                              args.physical_indices, args.cuda_ordinals, args.probe_visible)
+    if args.require_free_mib is not None and (args.admission_policy != FUNCTIONAL_POLICY
+                                              or args.require_free_mib <= 0):
+        raise RuntimeError("--require-free-mib needs functional coexistence and a positive MiB value")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise RuntimeError("original actor argv is required")
@@ -435,6 +472,8 @@ def main():
             receipt["binding_rechecked"] = rechecked
         if rechecked["key"] != binding["key"]:
             raise RuntimeError("actual CUDA UUID binding changed before owned launch")
+        if args.require_free_mib is not None:
+            receipt["free_memory"] = require_free_memory(guard, devices, args.require_free_mib, deadline)
         # Legacy actors retain their original console/evidence streams; only the
         # fixed NVFP4 sealer opts into separate bounded collector-owned logs.
         result = execute_owned(command, out, deadline, windows.WindowsJob, environment, capture=False)
