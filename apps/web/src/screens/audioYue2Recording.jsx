@@ -755,7 +755,7 @@ export function Yue2RecordingCover({
   const transcribeRefusal = transcribeFeedback?.state === "invalid" ? transcribeFeedback.refusal : null;
   const problems = yue2RequestProblems("transcribe", settings, target, { hasProject: Boolean(projectId) });
   const blockedReason = !setup.installed ? "Set up covers first — the transcriber is not installed." : "";
-  const canTranscribe = !submitting && !problems.length && !blockedReason && !portableFeedbackBlocks(transcribeFeedback);
+  const canTranscribe = Boolean(settings.transcribeAssetId) && !submitting && !problems.length && !blockedReason && !portableFeedbackBlocks(transcribeFeedback);
 
   if (!setup.declared) {
     return (
