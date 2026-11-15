@@ -212,7 +212,9 @@ describe("YuE2 request builder (sc-23000)", () => {
     expect(yue2RequestProblems("cover", { ...settings, lyrics: "x" })).toEqual([]);
     expect(
       yue2RequestProblems("create", { ...settings, lyrics: "x", planSource: "supplied", planning: "off" }),
-    ).toEqual([]);
+    ).toContain("Supply an ABC score before starting this run.");
+    expect(yue2RequestProblems("plan", { ...settings, planSource: "supplied", suppliedScore: "  " }))
+      .toContain("Supply an ABC score before starting this run.");
     expect(yue2RequestProblems("fromPlan", settings)).toEqual([]);
     expect(yue2RequestProblems("plan", { ...settings, lyrics: "x", planning: "off" })).toEqual([]);
     expect(yue2RequestProblems("cover", { ...settings, lyrics: "x", coverVersionId: "v", coverMode: "" })).toEqual([]);

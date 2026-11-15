@@ -630,7 +630,11 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(lab(), "Supply an ABC score"));
     // A supplied score cannot be planned with planning off.
     expect(buttonWithText(lab(), "Off (no score)").disabled).toBe(true);
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+    await click(buttonWithText(lab(), "Generate song"));
+    expect(calls("/yue2/jobs")).toHaveLength(0);
     await typeText(byLabel(lab(), "Supplied ABC score"), "X:1\nK:C\nC4|");
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(false);
     await click(buttonWithText(lab(), "Preview score"));
     await settle({ microtasks: 10 });
     expect(JSON.parse(calls("/yue2/score/inspect").at(-1)[2].body)).toEqual({ abc: "X:1\nK:C\nC4|" });
