@@ -2130,7 +2130,8 @@ export async function readExceededBounds(root = ROOT) {
     if (!bound.modelId || !bound.tier || !bound.backend) continue;
     const declared = closures.models?.[`${bound.modelId}:${bound.backend}`]?.digest;
     const current = declared !== undefined && declared === bound.source?.loaderClosureDigest;
-    const key = `${bound.modelId}:${bound.tier}:${bound.backend}`;
+    // SW-F363: a regime row's stop classifies that regime row, never its cell's base row.
+    const key = recordAnchorKey(bound.modelId, bound.tier, bound.backend, bound.regime);
     // A cell can carry more than one bound (stops at more than one geometry, or a stale stop
     // beside the current one that superseded it at a wider geometry). The cell is `exceeded_current`
     // if ANY of them is current — the adapter's seam consults only the current bounds, so this

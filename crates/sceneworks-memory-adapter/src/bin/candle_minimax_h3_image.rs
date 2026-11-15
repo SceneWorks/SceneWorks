@@ -14,11 +14,11 @@
 //! calibration identity on every load ([`plan_fingerprint`], the engine constant), and the plan
 //! row runs at this lane's default staged-residency rung, which the contract implements.
 //!
-//! SW-F363: the same arm captures the cell's regime anchors — `:resident` (the resident rung, eager),
-//! `:optimized` (a deferred load engaging every rung the contract implements, at the row's exact
+//! SW-F363: the same arm captures the cell's regime anchors — `:optimized` (a deferred load engaging every rung the contract implements, at the row's exact
 //! parameter tuple, under the same request scope) and `:lora` (the base composition with the
 //! pinned community LoRA installed through `LoadSpec::adapters`, overlay `lora` on the context as
-//! the worker's Candle image path states it).
+//! the worker's Candle image path states it). There is no `:resident` row: the generator stages
+//! every request, so the staged base row IS the least-optimized composition it can render.
 
 use super::*;
 use runtime_cuda::gen_core::MemoryCalibrationIdentity;
@@ -308,7 +308,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         "status": "gated",
         "strategy": strategy,
         "loadShape": load_shape_key(plan.load_shape),
-        "artifact": inputs.artifact_json(),
+        "artifact": inputs.artifact_json_with_lora(plan.lora),
         "sweep": protocol::exact_tuple_sweep(request, "passed")?,
         "scenarios": [
             { "name": "exact_fit", "result": "not_run", "reason": blocker },
@@ -498,14 +498,11 @@ mod tests {
         let expected: Vec<(String, Option<String>)> = [
             ("bf16", None),
             ("bf16", Some("optimized")),
-            ("bf16", Some("resident")),
             ("q4", None),
             ("q4", Some("lora")),
             ("q4", Some("optimized")),
-            ("q4", Some("resident")),
             ("q8", None),
             ("q8", Some("optimized")),
-            ("q8", Some("resident")),
         ]
         .into_iter()
         .map(|(tier, regime)| (tier.to_owned(), regime.map(str::to_owned)))

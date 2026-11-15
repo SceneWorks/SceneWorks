@@ -753,6 +753,8 @@ const exceededBoundId = (entry, cell) =>
     entry.target.tier,
     entry.target.transformerVariant ?? "base",
     entry.target.decoder ?? "base",
+    // SW-F363: a regime row's stop names its regime; a base stop's id is unchanged.
+    ...(entryRegime(entry) ? [entryRegime(entry)] : []),
     entry.calibrationFingerprint,
     entry.id,
   ].join(":");
@@ -769,6 +771,7 @@ const boundIdentity = ({
   tier,
   transformerVariant,
   decoder,
+  regime,
   provider,
   mode,
   overlay,
@@ -780,11 +783,17 @@ const boundIdentity = ({
     tier,
     transformerVariant ?? "-",
     decoder ?? "-",
+    // SW-F363: a regime render retires only its own regime's stop, never the cell's, and the reverse.
+    regime ?? "-",
     provider,
     mode,
     overlay ?? "-",
     referenceCount,
   ].join(":");
+
+/** The regime row a bundle `exceededBounds` entry was planned from (SW-F363), or `null`. */
+const entryRegime = (entry) =>
+  ANCHOR_REGIMES.includes(entry?.target?.anchorRegime) ? entry.target.anchorRegime : null;
 
 const entryIdentity = (entry) =>
   boundIdentity({
@@ -793,6 +802,7 @@ const entryIdentity = (entry) =>
     tier: entry.target.tier,
     transformerVariant: entry.target.transformerVariant ?? null,
     decoder: entry.target.decoder ?? null,
+    regime: entryRegime(entry),
     provider: entry.target.provider,
     mode: entry.target.mode,
     overlay:
@@ -883,6 +893,8 @@ function exceededBoundRow(entry, corpus, cell, previousStore) {
     tier: entry.target.tier,
     transformerVariant: entry.target.transformerVariant ?? null,
     decoder: entry.target.decoder ?? null,
+    // SW-F363: emitted only on a regime row's stop, so every base bound row is byte-identical.
+    ...(entryRegime(entry) ? { regime: entryRegime(entry) } : {}),
     mode: entry.target.mode,
     overlay:
       entry.target.overlay && entry.target.overlay !== "none"
@@ -1896,10 +1908,10 @@ export async function buildAnchorStore({
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null) continue;
+      completedRenders.push(candidate);
       // SW-F363: a REGIME render is filed under its own identity, never under the cell's
-      // derivation anchor — it is a deliberately different composition (or overlay) of the cell —
-      // and it retires no measured lower bound either: an optimized render completing says nothing
-      // about whether the cell's own composition does.
+      // derivation anchor — it is a deliberately different composition (or overlay) of the cell.
+      // It retires only its own regime's stop (`boundIdentity` carries the regime).
       if (candidate.regime !== null) {
         if (!catalogByCell.get(cellKey(candidate.modelId, candidate.backend, candidate.tier))) continue;
         const key = `${identityKey(candidate)}:${candidate.regime}`;
@@ -1908,7 +1920,6 @@ export async function buildAnchorStore({
         else byRegimeIdentity.set(key, [candidate]);
         continue;
       }
-      completedRenders.push(candidate);
       // An OVERLAY render measures a different resident set (krea's q4 MLX evidence is
       // control-branch-only, under its own `*_control` provider). Anchoring the base cell from it
       // would let one provider's measurement answer for another's render, which is exactly what
@@ -2083,10 +2094,9 @@ export async function buildAnchorStore({
   for (const corpus of corpora) {
     if (!packagedSources.has(corpus.path)) continue;
     for (const entry of corpus.exceededBounds) {
-      // SW-F363: a stop on a REGIME row bounds that regime's composition, not the cell's derivation
-      // anchor (a resident or LoRA render outweighs the cell's own), so it bounds nothing the
-      // runtime prices and is not carried.
-      if (entry.target?.anchorRegime !== undefined) continue;
+      // SW-F363: a stop on a REGIME row is carried too, tagged with its regime: the runtime lookup
+      // never consults a tagged bound (it bounds that regime's composition, not the cell's), but
+      // the probe tooling reads it so the regime row is not booked again.
       const cell = catalogByCell.get(
         cellKey(entry.target.modelId, entry.backend, entry.target.tier),
       );

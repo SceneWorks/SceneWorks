@@ -1323,6 +1323,21 @@ impl MinimaxH3ImageInputs {
         })
     }
 
+    /// [`Self::artifact_json`] for a capture that ALSO installed the community LoRA (a `:lora`
+    /// row, SW-F363): the record names the overlay's repository, revision and file beside the base
+    /// artifact, so the evidence says which LoRA its overlay bytes are.
+    pub fn artifact_json_with_lora(&self, lora: bool) -> Value {
+        let mut artifact = self.artifact_json();
+        if lora {
+            artifact["overlay"] = json!({
+                "repository": MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+                "resolvedRevision": MINIMAX_H3_IMAGE_LORA_REVISION,
+                "file": MINIMAX_H3_IMAGE_LORA_FILE,
+            });
+        }
+        artifact
+    }
+
     pub fn loadability_fingerprint(&self) -> String {
         let artifact = self.dit.as_ref().map_or(&self.upstream, |(dit, _)| dit);
         format!(
@@ -1929,6 +1944,19 @@ mod minimax_h3_image_tests {
         assert_eq!(
             inputs.artifact_json()["repository"],
             MINIMAX_H3_IMAGE_REPOSITORY
+        );
+        // SW-F363: a `:lora` capture names its LoRA in the record's artifact; a base one does not.
+        assert_eq!(
+            inputs.artifact_json_with_lora(false),
+            inputs.artifact_json()
+        );
+        assert_eq!(
+            inputs.artifact_json_with_lora(true)["overlay"],
+            json!({
+                "repository": MINIMAX_H3_IMAGE_LORA_REPOSITORY,
+                "resolvedRevision": MINIMAX_H3_IMAGE_LORA_REVISION,
+                "file": MINIMAX_H3_IMAGE_LORA_FILE,
+            })
         );
     }
 }

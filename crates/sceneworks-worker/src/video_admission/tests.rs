@@ -5103,6 +5103,7 @@ fn bernini_bound_store(
             tier: "q8".to_owned(),
             transformer_variant: None,
             decoder: None,
+            regime: None,
             mode: "text_to_video".to_owned(),
             overlay: None,
             reference_count: 0,

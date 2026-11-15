@@ -1579,6 +1579,23 @@ function loadAnchorStrategy() {
 export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /**
+ * SW-F363: `<lane> -> Set<provider>` of engines that stage EVERY request whatever rung is selected
+ * (`enginesThatAlwaysStage` in the same file). Their least-optimized achievable anchor is the
+ * staged composition: `validatePlan` makes their rows engage `staged_residency` and refuses a
+ * `:resident` regime row for them, which would claim a render the engine cannot produce.
+ */
+function loadEnginesThatAlwaysStage() {
+  const declared = JSON.parse(
+    readFileSync(path.join(ROOT, ANCHOR_LANE_DEFAULT_STRATEGY_PATH), "utf8"),
+  ).enginesThatAlwaysStage ?? {};
+  return Object.freeze(Object.fromEntries(
+    ["mlx", "candle"].map((backend) => [backend, new Set(declared[backend] ?? [])]),
+  ));
+}
+
+export const ENGINES_THAT_ALWAYS_STAGE = loadEnginesThatAlwaysStage();
+
+/**
  * `<modelId>:<tier>:<backend>[:<regime>]` — the anchor plan's key. The first three segments are the
  * cell identity itself; the optional fourth names one of the cell's regime anchors (SW-F363):
  *
@@ -1695,6 +1712,12 @@ function validateRegimeRow(plan, key, regime, backend) {
   }
   if (!anchor.strategy) fail(`anchor plan is invalid: ${key}: a ${regime} regime row states its strategy`);
   if (regime === "resident") {
+    if (ENGINES_THAT_ALWAYS_STAGE[backend].has(anchor.provider)) {
+      fail(
+        `anchor plan is invalid: ${key}: ${anchor.provider} stages every request on ${backend}, so its ` +
+          "least-optimized anchor is the staged base row and a resident render cannot be captured",
+      );
+    }
     if (!equal(strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} })) {
       fail(`anchor plan is invalid: ${key}: the resident regime engages the resident rung alone`);
     }
@@ -1793,6 +1816,16 @@ export function validatePlan(plan) {
     }
     const { backend, regime } = parseAnchorKey(key);
     validateStrategyParameters(key, plannedAnchorStrategy(anchor, backend));
+    // SW-F363: a row of an always-staging engine records the staging it renders under.
+    if (
+      ENGINES_THAT_ALWAYS_STAGE[backend].has(anchor.provider)
+      && !plannedAnchorStrategy(anchor, backend).engagedRungs.includes("staged_residency")
+    ) {
+      fail(
+        `anchor plan is invalid: ${key}: ${anchor.provider} stages every request on ${backend}, so the ` +
+          "row's composition must engage staged_residency to record what the engine renders",
+      );
+    }
     if (regime) validateRegimeRow(plan, key, regime, backend);
   }
   return plan;

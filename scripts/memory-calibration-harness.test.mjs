@@ -14,7 +14,7 @@ import {
   LTX25_CAPTURE_REVISION, SCHEMA_VERSION, atomicWrite, canonicalJson, captureAnchor,
   projectPhaseMetricsToSchemaV5,
   evidenceSemantics, logicalCaseId, parseAnchorKey, planAnchor, planAnchors, recordId,
-  ANCHOR_REGIMES, baseAnchorKey,
+  ANCHOR_REGIMES, baseAnchorKey, ENGINES_THAT_ALWAYS_STAGE,
   ltx25ProviderEnvironment, parsePhysicalMlxAvContent, physicalMlxSessionId,
   prepareLtx25CaptureArtifacts, validateBundle, validateRecord, validatePlan,
   validatePhysicalMlxAvContentsAgainstRecord,
@@ -1380,6 +1380,27 @@ test("a regime row is held to its base row and to its regime", () => {
     mutate?.(fixture);
     assert.throws(() => validatePlan(fixture), (error) => error.message.includes(needle), `${JSON.stringify(rows)} -> ${needle}`);
   }
+});
+
+// SW-F363. An engine that stages every request (MiniMax-H3-Image on both lanes) has no resident
+// render to capture: its rows must engage staging, and a `:resident` regime row is refused.
+// Mutations this kills: dropping either `ENGINES_THAT_ALWAYS_STAGE` rule from `validatePlan`.
+test("an always-staging engine plans staged rows and no resident regime row", () => {
+  assert.ok(ENGINES_THAT_ALWAYS_STAGE.candle.has("minimax_h3_image"));
+  assert.ok(ENGINES_THAT_ALWAYS_STAGE.mlx.has("minimax_h3_image"));
+  const candle = "minimax_h3_image:q4:candle";
+  const staged = anchorPlanFixture(candle);
+  assert.equal(validatePlan(staged), staged);
+  const withResident = anchorPlanFixture(candle);
+  withResident.anchors[`${candle}:resident`] = {
+    ...structuredClone(withResident.anchors[candle]),
+    strategy: { rung: "resident", engagedRungs: ["resident"] },
+  };
+  assert.throws(() => validatePlan(withResident), /stages every request/);
+  const mlx = "minimax_h3_image:q4:mlx";
+  assert.throws(() => validatePlan(anchorPlanFixture(mlx)), /must engage staged_residency/);
+  const mlxStaged = anchorPlanFixture(mlx, { strategy: { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] } });
+  assert.equal(validatePlan(mlxStaged), mlxStaged);
 });
 
 // sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —

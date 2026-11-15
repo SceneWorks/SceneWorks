@@ -2143,6 +2143,16 @@ mod tests {
                 frozen.as_slice(),
                 "{key} public order"
             );
+            // Exactly the two post-freeze kernels, in their declared rank order: nothing else may
+            // ride in after the frozen prefix unreviewed.
+            assert_eq!(
+                &current[frozen.len()..],
+                &[
+                    serde_json::json!("minimax_h3_image_lora"),
+                    serde_json::json!("minimax_h3_image_edit_lora"),
+                ],
+                "{key}: the only post-freeze kernels are the two MiniMax-H3-Image ones"
+            );
             for kernel in &current[frozen.len()..] {
                 let kernel = kernel.as_str().unwrap();
                 assert!(

@@ -2713,6 +2713,7 @@ fn bernini_bound() -> ExceededBound {
         tier: "bf16".to_owned(),
         transformer_variant: None,
         decoder: None,
+        regime: None,
         mode: "text_to_video".to_owned(),
         overlay: None,
         reference_count: 0,
@@ -5162,4 +5163,37 @@ fn regime_anchors_are_filed_apart_named_unique_and_bound_to_their_record() {
     assert!(load(&misfiled)
         .unwrap_err()
         .contains("identity disagrees with its source record"));
+}
+
+/// SW-F363: a stop on a REGIME row bounds that regime's composition, so the runtime never consults
+/// it — it is carried only so the probe tooling stops re-booking the regime row — and it is bound
+/// to its source entry's `target.anchorRegime` (the packaged bernini entry names none).
+///
+/// *Mutations this kills:* drop the `regime.is_none()` conjunct from `binding_exceeded_bound`, or
+/// the `anchorRegime` conjunct from `validate_exceeded_bounds`.
+#[test]
+fn a_regime_rows_stop_binds_nothing_and_is_bound_to_its_entry() {
+    let tagged = ExceededBound {
+        regime: Some(AnchorRegime::Lora),
+        ..bernini_bound()
+    };
+    assert_eq!(
+        bound_store(vec![tagged]).binding_exceeded_bound(bernini_query(848, 480, 49)),
+        None
+    );
+    assert!(bound_store(vec![bernini_bound()])
+        .binding_exceeded_bound(bernini_query(848, 480, 49))
+        .is_some());
+    let mut store = store().clone();
+    let packaged = store
+        .exceeded_bounds
+        .first()
+        .cloned()
+        .expect("the packaged store carries a measured lower bound");
+    store.exceeded_bounds = vec![ExceededBound {
+        regime: Some(AnchorRegime::Lora),
+        ..packaged
+    }];
+    let error = load_memory_anchors(&serde_json::to_string(&store).unwrap()).unwrap_err();
+    assert!(error.contains("identity disagrees"), "{error}");
 }

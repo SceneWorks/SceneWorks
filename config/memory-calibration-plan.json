@@ -1946,8 +1946,15 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-resident-v1",
-      "fixture": "minimax-h3-image-mlx-bf16-1024-seed7100-step6"
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+      "fixture": "minimax-h3-image-mlx-bf16-1024-seed7100-step6",
+      "strategy": {
+        "rung": "staged_residency",
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ]
+      }
     },
     "minimax_h3_image:bf16:mlx:optimized": {
       "provider": "minimax_h3_image",
@@ -1961,7 +1968,7 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-optimized-v1",
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
       "fixture": "minimax-h3-image-mlx-bf16-1024-seed7100-step6-optimized",
       "strategy": {
         "rung": "bounded_transformer_residency",
@@ -1994,8 +2001,15 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-resident-v1",
-      "fixture": "minimax-h3-image-mlx-q4-1024-seed7100-step6"
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+      "fixture": "minimax-h3-image-mlx-q4-1024-seed7100-step6",
+      "strategy": {
+        "rung": "staged_residency",
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ]
+      }
     },
     "minimax_h3_image:q4:mlx:optimized": {
       "provider": "minimax_h3_image",
@@ -2009,7 +2023,7 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-optimized-v1",
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
       "fixture": "minimax-h3-image-mlx-q4-1024-seed7100-step6-optimized",
       "strategy": {
         "rung": "bounded_transformer_residency",
@@ -2042,8 +2056,15 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-resident-v1",
-      "fixture": "minimax-h3-image-mlx-q4-1024-seed7100-step6-lora"
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+      "fixture": "minimax-h3-image-mlx-q4-1024-seed7100-step6-lora",
+      "strategy": {
+        "rung": "staged_residency",
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ]
+      }
     },
     "minimax_h3_image:q8:mlx": {
       "provider": "minimax_h3_image",
@@ -2057,8 +2078,15 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-resident-v1",
-      "fixture": "minimax-h3-image-mlx-q8-1024-seed7100-step6"
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+      "fixture": "minimax-h3-image-mlx-q8-1024-seed7100-step6",
+      "strategy": {
+        "rung": "staged_residency",
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ]
+      }
     },
     "minimax_h3_image:q8:mlx:optimized": {
       "provider": "minimax_h3_image",
@@ -2072,7 +2100,7 @@
       },
       "evidenceScope": "candidate",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "minimax-h3-image-mlx-optimized-v1",
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
       "fixture": "minimax-h3-image-mlx-q8-1024-seed7100-step6-optimized",
       "strategy": {
         "rung": "bounded_transformer_residency",
@@ -5577,27 +5605,6 @@
       "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
       "fixture": "minimax-h3-image-candle-bf16-1024-seed7100-step6"
     },
-    "minimax_h3_image:bf16:candle:resident": {
-      "provider": "minimax_h3_image",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "candidate",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
-      "fixture": "minimax-h3-image-candle-bf16-1024-seed7100-step6-resident",
-      "strategy": {
-        "rung": "resident",
-        "engagedRungs": [
-          "resident"
-        ]
-      }
-    },
     "minimax_h3_image:bf16:candle:optimized": {
       "provider": "minimax_h3_image",
       "mode": "text_to_image",
@@ -5645,27 +5652,6 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
       "fixture": "minimax-h3-image-candle-q4-1024-seed7100-step6"
-    },
-    "minimax_h3_image:q4:candle:resident": {
-      "provider": "minimax_h3_image",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "candidate",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
-      "fixture": "minimax-h3-image-candle-q4-1024-seed7100-step6-resident",
-      "strategy": {
-        "rung": "resident",
-        "engagedRungs": [
-          "resident"
-        ]
-      }
     },
     "minimax_h3_image:q4:candle:optimized": {
       "provider": "minimax_h3_image",
@@ -5729,27 +5715,6 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
       "fixture": "minimax-h3-image-candle-q8-1024-seed7100-step6"
-    },
-    "minimax_h3_image:q8:candle:resident": {
-      "provider": "minimax_h3_image",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "geometry": {
-        "width": 1024,
-        "height": 1024,
-        "batch": 1,
-        "frames": 1
-      },
-      "evidenceScope": "candidate",
-      "loadShape": "eager_materialization",
-      "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
-      "fixture": "minimax-h3-image-candle-q8-1024-seed7100-step6-resident",
-      "strategy": {
-        "rung": "resident",
-        "engagedRungs": [
-          "resident"
-        ]
-      }
     },
     "minimax_h3_image:q8:candle:optimized": {
       "provider": "minimax_h3_image",

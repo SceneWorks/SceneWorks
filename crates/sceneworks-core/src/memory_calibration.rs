@@ -526,6 +526,17 @@ pub struct Artifact {
     pub resolved_revision: String,
     pub variant: String,
     pub inventory_sha256: Option<String>,
+    /// SW-F363: the overlay artifact a `lora` capture installed beside the base artifact.
+    pub overlay: Option<OverlayArtifact>,
+}
+
+/// The LoRA (or other overlay) file one capture installed: repository, revision and file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OverlayArtifact {
+    pub repository: String,
+    pub resolved_revision: String,
+    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

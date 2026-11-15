@@ -20,27 +20,17 @@
 //! and engages every rung the contract implements under the provider's own request scope (with
 //! explicit estimate authority, which an uncalibrated optimized selection requires); a `:lora`
 //! row installs the pinned community LoRA through `LoadSpec::adapters`. The base rows render
-//! exactly as before: resident, eager, no scope.
+//! staged and eager (the engine stages every request, so the staged composition is the
+//! least-optimized one it can render), under the same request scope.
 
 use super::*;
 use std::time::Instant;
 
 const LANE: &str = "mlx";
 
-/// The adapter-owned identity the MLX plan rows name (see the module docs).
-pub(super) const PLAN_FINGERPRINT: &str = "minimax-h3-image-mlx-resident-v1";
-/// The adapter-owned identity the MLX `:optimized` regime rows name (SW-F363): a different
-/// composition, so a different label.
-pub(super) const OPTIMIZED_PLAN_FINGERPRINT: &str = "minimax-h3-image-mlx-optimized-v1";
-
-/// The identity a row of `regime` names on this lane.
-pub(super) fn plan_fingerprint(regime: Option<&str>) -> &'static str {
-    if regime == Some("optimized") {
-        OPTIMIZED_PLAN_FINGERPRINT
-    } else {
-        PLAN_FINGERPRINT
-    }
-}
+/// The adapter-owned identity every MLX plan row names, base and regime alike (see the module
+/// docs) — one identity per lane, as the Candle lane's engine constant is.
+pub(super) const PLAN_FINGERPRINT: &str = "minimax-h3-image-mlx-v1";
 
 /// The env family the catalog runner exports for this arm (`PROVIDER_FAMILIES.minimax_h3_image`).
 pub(super) const ENVS: protocol::MinimaxH3ImageEnvs = protocol::MinimaxH3ImageEnvs {
@@ -167,7 +157,7 @@ fn generate_scoped(
 pub(super) fn run(request: &Value) -> Result<Value, String> {
     // Provider, mode, tier, the still, overlay, load shape, fixture and identity — all before an
     // env var or a weight.
-    let fingerprint = plan_fingerprint(protocol::minimax_h3_image_regime(request)?);
+    let fingerprint = PLAN_FINGERPRINT;
     let plan = protocol::validate_minimax_h3_image_plan(request, LANE, fingerprint)?;
     let (width, height, tier) = (plan.width, plan.height, plan.tier);
     let selection = planned_selection(request)?;
@@ -436,7 +426,9 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         "scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator ",
         "cleanup bounds are attested in quality and diagnostics instead"
     );
-    let status = if calibration.is_some() {
+    // Runtime-complete evidence is base-only (the harness refuses an overlay there), so a `:lora`
+    // capture is gated whatever the provider publishes.
+    let status = if calibration.is_some() && !plan.lora {
         "runtime_complete"
     } else {
         "gated"
@@ -460,7 +452,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         "status": status,
         "strategy": strategy,
         "loadShape": load_shape_key(plan.load_shape),
-        "artifact": inputs.artifact_json(),
+        "artifact": inputs.artifact_json_with_lora(plan.lora),
         "sweep": sweep,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
@@ -565,13 +557,11 @@ mod tests {
             protocol::MINIMAX_H3_IMAGE_PROVIDER,
             mlx_gen_minimax_h3::h3_image::model::IMAGE_MODEL_ID
         );
-        for fingerprint in [PLAN_FINGERPRINT, OPTIMIZED_PLAN_FINGERPRINT] {
-            assert_ne!(
-                fingerprint,
-                mlx_gen_minimax_h3::h3_image::memory::STATIC_CALIBRATION_FINGERPRINT,
-                "the plan must not name the weights-free registry identity"
-            );
-        }
+        assert_ne!(
+            PLAN_FINGERPRINT,
+            mlx_gen_minimax_h3::h3_image::memory::STATIC_CALIBRATION_FINGERPRINT,
+            "the plan must not name the weights-free registry identity"
+        );
         let plan: Value = serde_json::from_str(include_str!(
             "../../../../config/memory-calibration-plan.json"
         ))
@@ -621,9 +611,8 @@ mod tests {
                     },
                 },
             });
-            let plan =
-                protocol::validate_minimax_h3_image_plan(&request, LANE, plan_fingerprint(regime))
-                    .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let plan = protocol::validate_minimax_h3_image_plan(&request, LANE, PLAN_FINGERPRINT)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
             assert_eq!(
                 (plan.width, plan.height, plan.tier),
                 (1024, 1024, tier),
@@ -681,7 +670,8 @@ mod tests {
                 ("q8", None),
                 ("q8", Some("optimized")),
             ],
-            "the MLX base row is the resident anchor, so the lane plans no :resident row"
+            "MiniMax-H3-Image stages every request, so the staged base row is the lane's \
+             least-optimized anchor and no :resident row is planned"
         );
     }
 

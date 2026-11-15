@@ -166,6 +166,7 @@ import {
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
+  ENGINES_THAT_ALWAYS_STAGE,
   LTX25_LANE_PROVIDERS,
   parseWatchdogHardStop,
   planAnchor,
@@ -2491,6 +2492,27 @@ test("a regime anchor's currency is keyed on its own plan row", async () => {
   assert.equal((await readRegimeAnchorCurrency(await mkdtemp(path.join(tmpdir(), "catalog-none-")))).size, 0);
 });
 
+// SW-F363. A guard stop on a REGIME row is carried in the store tagged with its regime, and it
+// classifies THAT row `exceeded_current` — never the cell's base row — so `--skip-current` does not
+// re-book it, and the base row stays runnable.
+test("a regime row's measured lower bound is keyed on its own plan row", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-regime-bound-"));
+  await mkdir(path.join(root, "config"), { recursive: true });
+  const digest = "f".repeat(64);
+  await writeFile(path.join(root, ANCHOR_STORE_PATH), JSON.stringify({
+    anchors: [],
+    exceededBounds: [{
+      modelId: "minimax_h3_image", tier: "q4", backend: "mlx", regime: "lora", observedFootprintBytes: 1,
+      source: { path: "docs/calibration/x/y.json", loaderClosureDigest: digest },
+    }],
+  }));
+  await writeFile(path.join(root, ANCHOR_LOADER_CONFIG_PATH), JSON.stringify({ models: { "minimax_h3_image:mlx": { digest } } }));
+  const bounds = await readExceededBounds(root);
+  assert.deepEqual([...bounds.keys()], ["minimax_h3_image:q4:mlx:lora"]);
+  assert.equal(bounds.get("minimax_h3_image:q4:mlx:lora").current, true);
+  assert.equal(bounds.has("minimax_h3_image:q4:mlx"), false);
+});
+
 // SW-F363. The `:lora` regime row needs a second root the manifest does not ship — the pinned
 // community LoRA — resolved from the ROW's declared overlay, never for an overlay-free row of the
 // same family; it is fetchable by `--download-missing` and is the file the adapter arm opens.
@@ -4110,9 +4132,15 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       );
     }
     const fallback = ANCHOR_STRATEGY[backend];
-    const expected = exempt && fallback.rung === "staged_residency"
-      ? { rung: "resident", engagedRungs: ["resident"] }
-      : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
+    // SW-F363: the fourth source — an engine that stages every request records the staged
+    // composition it actually renders (config/anchor-lane-default-strategy.json
+    // `enginesThatAlwaysStage`, bound to the MLX descriptor flag by inference_runtime.rs).
+    const alwaysStages = ENGINES_THAT_ALWAYS_STAGE[backend].has(anchor.provider);
+    const expected = alwaysStages
+      ? { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] }
+      : exempt && fallback.rung === "staged_residency"
+        ? { rung: "resident", engagedRungs: ["resident"] }
+        : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
     const effective = anchor.strategy ?? fallback;
     assert.equal(
       effective.rung,

@@ -530,6 +530,37 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         })
         .to_owned();
     let lane_default_rung = lane_default_rung.as_str();
+    // SW-F363: the engines that stage every request whatever rung is selected. Their rows record
+    // the staged composition they render, which makes a staged override legitimate for them; on
+    // MLX each listed provider's registered descriptor must carry the engine's own flag. (Candle
+    // descriptors publish no such flag, so the Candle half is the declaration's word.)
+    let always_stage: Vec<String> = lane_defaults["enginesThatAlwaysStage"][lane]
+        .as_array()
+        .map(|providers| {
+            providers
+                .iter()
+                .filter_map(|provider| provider.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if lane == "mlx" {
+        for provider in &always_stage {
+            let descriptor = registry
+                .generators()
+                .map(|registration| (registration.descriptor)())
+                .find(|descriptor| descriptor.id == provider.as_str())
+                .unwrap_or_else(|| {
+                    panic!("{provider} is declared always-staging but not registered")
+                });
+            assert!(
+                descriptor
+                    .capabilities
+                    .unconditionally_engages_staged_residency,
+                "{provider} is declared always-staging on mlx but its descriptor does not say so"
+            );
+        }
+    }
+    let mut engine_staged = 0_usize;
     let mut checked = 0_usize;
     let mut overridden = 0_usize;
     let mut forced = 0_usize;
@@ -823,7 +854,12 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         if override_rung.is_some() {
             overridden += 1;
         }
-        if planned_rung != lane_default_rung {
+        if planned_rung != lane_default_rung
+            && planned_rung == "staged_residency"
+            && always_stage.iter().any(|staged| staged == provider)
+        {
+            engine_staged += 1;
+        } else if planned_rung != lane_default_rung {
             let default_refused = contract
                 .validate_selection(&selection_for(as_strategy(lane_default_rung)))
                 .is_err();
@@ -860,6 +896,12 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         overridden > 0,
         "{lane}: the plan exercises the strategy override at least once"
     );
+    if lane == "mlx" {
+        assert!(
+            engine_staged > 0,
+            "mlx: the always-staging declaration is exercised by at least one staged row"
+        );
+    }
     assert!(
         optimized_rows > 0,
         "{lane}: the plan carries at least one fully optimized regime anchor (SW-F363)"

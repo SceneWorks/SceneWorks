@@ -2302,6 +2302,13 @@ pub struct ExceededBound {
     pub tier: String,
     pub transformer_variant: Option<Ltx25TransformerVariant>,
     pub decoder: Option<Ltx25Decoder>,
+    /// SW-F363: the regime row whose capture the guard stopped, `None` for a cell's base row.
+    /// A regime stop bounds THAT composition (a resident or LoRA render outweighs the cell's own),
+    /// so [`MemoryAnchorStore::binding_exceeded_bound`] never consults it; it is carried so the
+    /// probe tooling stops re-booking the regime row. Bound to the source entry's
+    /// `target.anchorRegime` in both directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime: Option<AnchorRegime>,
     pub mode: String,
     pub overlay: Option<String>,
     pub reference_count: u32,
@@ -3223,6 +3230,7 @@ fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
             || str_at(entry, "calibrationFingerprint").as_deref()
                 != Some(bound.source.calibration_fingerprint.as_str())
             || entry_overlay != bound.overlay
+            || str_at(target, "anchorRegime").as_deref() != bound.regime.map(AnchorRegime::as_key)
             || u64_at(entry, "referenceCount") != Some(u64::from(bound.reference_count))
         {
             return Err(format!(
@@ -3865,7 +3873,9 @@ impl MemoryAnchorStore {
         self.exceeded_bounds
             .iter()
             .filter(|bound| {
-                bound.model_id == query.model_id
+                // A regime row's stop bounds that regime's composition, not the cell's.
+                bound.regime.is_none()
+                    && bound.model_id == query.model_id
                     && query
                         .model_family
                         .is_none_or(|family| bound.model_family == family)

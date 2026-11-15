@@ -169,9 +169,17 @@ grid:
 
 | suffix | composition | rule (`validatePlan`, `memory-calibration-harness.mjs`) |
 |---|---|---|
-| `resident` | the resident rung alone | only where the base row is not already resident (the candle lane default is `staged_residency`; on MLX the base row IS the resident anchor) |
+| `resident` | the resident rung alone | only where the base row is not already resident (the candle lane default is `staged_residency`; on MLX the base row IS the resident anchor), and never for an engine that stages every request (`enginesThatAlwaysStage` in `config/anchor-lane-default-strategy.json`) |
 | `optimized` | every rung the contract implements, engaged at once, with each bounded rung's one exact parameter tuple (`strategy.parameters`) | strictly deeper than the base row, rung = deepest engaged rung; `inference_runtime.rs` checks against the weights-free contract that the engaged set is EVERY implemented rung |
 | `lora` | the base row's composition, overlay `lora` | the adapter arm installs one pinned community LoRA through `LoadSpec::adapters`; the catalog runner resolves and `--download-missing` fetches it as the family's `overlayArtifact` |
+
+🔴 **MiniMax-H3-Image's least-optimized anchor is STAGED, on both lanes.** Its generator stages every
+request (text encoder, then DiT, then VAE, each released before the next maps) whatever rung is
+selected — MLX's descriptor says so (`unconditionally_engages_staged_residency`), Candle's engine
+source says so — so a resident render does not exist to be captured. Its base rows plan
+`staged_residency` on BOTH lanes (an MLX override the always-staging declaration authorizes) so the
+record's `measuredRegime.staged` is true, and it plans no `:resident` row; its two anchors are the
+staged base row and `:optimized`.
 
 A regime row shares its base row's provider, mode, geometry, reference count and scope. The harness
 writes the suffix into `planned.target.anchorRegime`, so the record says which regime it is; the
