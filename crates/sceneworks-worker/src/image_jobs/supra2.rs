@@ -862,9 +862,14 @@ mod tests {
             let job: JobSnapshot = serde_json::from_value(job).expect("smoke job deserializes");
             let api = ApiClient::new(&settings);
             let started = std::time::Instant::now();
-            crate::image_jobs::run_image_generate_job(&api, &settings, &job)
-                .await
-                .expect("the Supra2-IMG CUDA worker job completes");
+            crate::image_jobs::run_image_generate_job(
+                &api,
+                &settings,
+                &job,
+                &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+            )
+            .await
+            .expect("the Supra2-IMG CUDA worker job completes");
             let render_s = started.elapsed().as_secs_f64();
 
             let posts = posts.lock().unwrap().clone();
@@ -1046,7 +1051,13 @@ mod tests {
             });
             let job: JobSnapshot = serde_json::from_value(job).expect("lifecycle job deserializes");
             let api = ApiClient::new(&settings);
-            let outcome = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+            let outcome = crate::image_jobs::run_image_generate_job(
+                &api,
+                &settings,
+                &job,
+                &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+            )
+            .await;
             let posts = posts.lock().unwrap().clone();
             (outcome, posts, PathBuf::from(&project.path))
         }
@@ -1288,7 +1299,13 @@ mod tests {
             let job: JobSnapshot = serde_json::from_value(job).expect("matrix job deserializes");
             let api = ApiClient::new(&settings);
             let started = Instant::now();
-            let outcome = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+            let outcome = crate::image_jobs::run_image_generate_job(
+                &api,
+                &settings,
+                &job,
+                &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+            )
+            .await;
             let latency_s = started.elapsed().as_secs_f64();
             let posts = posts.lock().unwrap().clone();
             outcome.unwrap_or_else(|error| panic!("{job_id} failed: {error}\n{posts:#?}"));
@@ -1889,7 +1906,7 @@ mod tests {
             let seed = lane::resolve_seed(request, 0);
             let steps = lane::sampling::resolve_steps(request, &model);
             let guidance = lane::sampling::resolve_guidance(request, &model);
-            let enhance = lane::PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+            let enhance = lane::PromptEnhance::from_resolved(request)?;
             let cancel = CancelFlag::new();
             lane::stream::drive_native_prompt_batch(
                 tx,
@@ -1922,6 +1939,7 @@ mod tests {
                         gen_core::PromptEnhancementSink::default(),
                         preview,
                         &lane::LaneRgbaSurface {
+                            execution_report: None,
                             warnings: Some(&warnings),
                             prompt_batch: Some(&batch),
                             ..Default::default()

@@ -1,4 +1,42 @@
+use crate::resolved_options::Bound;
 pub use sceneworks_options::payload_util::*;
+
+/// Select quantization from a resolved request and the worker's verified frozen tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedQuantSelection {
+    Explicit(i64),
+    Bound(i64),
+    Unselected,
+    Null,
+}
+
+pub fn resolved_quant_selection(
+    explicit: Option<&Bound<Option<i64>>>,
+    trusted_bound_tier: Option<&str>,
+) -> ResolvedQuantSelection {
+    match explicit {
+        Some(Bound {
+            value: Some(bits), ..
+        }) => ResolvedQuantSelection::Explicit(*bits),
+        Some(Bound { value: None, .. }) => ResolvedQuantSelection::Null,
+        None => match trusted_bound_tier {
+            Some("q4") => ResolvedQuantSelection::Bound(4),
+            Some("q8") => ResolvedQuantSelection::Bound(8),
+            Some("bf16") => ResolvedQuantSelection::Bound(0),
+            _ => ResolvedQuantSelection::Unselected,
+        },
+    }
+}
+
+pub fn request_quant_bits_typed(
+    explicit: Option<&Bound<Option<i64>>>,
+    trusted_bound_tier: Option<&str>,
+) -> Option<i64> {
+    match resolved_quant_selection(explicit, trusted_bound_tier) {
+        ResolvedQuantSelection::Explicit(bits) | ResolvedQuantSelection::Bound(bits) => Some(bits),
+        ResolvedQuantSelection::Unselected | ResolvedQuantSelection::Null => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

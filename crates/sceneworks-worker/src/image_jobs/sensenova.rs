@@ -1,7 +1,6 @@
 use super::artifact_resolution::is_sensenova_model;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
-use super::conditioning::edit_grouping;
 use super::conditioning::load_reference_image;
 use super::conditioning::stage_likeness;
 use super::conditioning::EditGrouping;
@@ -66,14 +65,8 @@ pub(super) fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
         1.0
     };
     request
-        .advanced
-        .get("trueCfgScale")
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("trueCfgScale")
+        .or_else(|| request.advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(default)
         .max(1.0)
@@ -84,14 +77,8 @@ pub(super) fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
 /// back to 3.0. The only sampling knob SenseNova exposes (mirrors the Python adapter).
 pub(super) fn resolve_sensenova_timestep_shift(request: &ImageRequest) -> f32 {
     let raw = request
-        .advanced
-        .get("schedulerShift")
-        .or_else(|| request.advanced.get("timestepShift"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("schedulerShift")
+        .or_else(|| request.advanced_f64("timestepShift"))
         .map(|value| value as f32)
         .unwrap_or(3.0);
     if raw > 0.0 {
@@ -113,7 +100,7 @@ fn sensenova_edit_raw_settings(
     timestep_shift: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -152,7 +139,7 @@ pub(super) fn sensenova_edit_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -168,15 +155,17 @@ pub(super) fn sensenova_edit_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("SenseNova edit generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("SenseNova edit generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("SenseNova edit produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "SenseNova edit returned non-image output".to_owned(),
@@ -194,6 +183,7 @@ pub(super) async fn generate_sensenova_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -244,7 +234,7 @@ pub(super) async fn generate_sensenova_edit_stream(
     // identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406, sc-4409
     // angles / sc-4411 plain With-Character) is generator-agnostic — SenseNova-U1 produces the FINAL
     // image directly (no face-restore pass), so scoring the generated image scores what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     if matches!(grouping, EditGrouping::Poses(_)) {
         // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
         return Err(WorkerError::InvalidPayload(
@@ -259,6 +249,7 @@ pub(super) async fn generate_sensenova_edit_stream(
         score_likeness,
     } = plan_edit_batch(
         request,
+        execution,
         &grouping,
         sensenova_edit_raw_settings(
             request,
@@ -282,6 +273,7 @@ pub(super) async fn generate_sensenova_edit_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -311,10 +303,10 @@ pub(super) async fn generate_sensenova_edit_stream(
                 _ => None,
             };
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 seeds.into_iter().zip(prompts),
-                move |_index, (seed, prompt), preview, on_progress| {
-                    let (w, h, pixels) = sensenova_edit_generate_one(
+                move |index, (seed, prompt), preview, on_progress| {
+                    let (w, h, pixels, execution) = sensenova_edit_generate_one(
                         generator,
                         &prompt,
                         out_w,
@@ -329,6 +321,12 @@ pub(super) async fn generate_sensenova_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4409 angles /
                     // sc-4411 plain With-Character). The Image build + pixel clone is paid ONLY when a
                     // scorer exists (a character_image generation) — a plain `edit_image` job has no

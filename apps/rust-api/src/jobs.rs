@@ -24,6 +24,37 @@ pub(crate) async fn list_jobs(
     Ok(Json(public_job_snapshots(jobs)))
 }
 
+#[cfg(test)]
+mod typed_image_detail_tier_tests {
+    use super::*;
+
+    fn payload(advanced: Value) -> JsonObject {
+        json!({"advanced":advanced}).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn candle_detail_preserves_numeric_string_and_explicit_dense_semantics() {
+        for advanced in [
+            json!({"mlxQuantize":" 4 "}),
+            json!({"mlxQuantize":"4.5"}),
+            json!({"convRot":true}),
+            json!({"convRot":"true"}),
+            json!({"quantTier":"q8"}),
+        ] {
+            assert!(reject_image_detail_packed_tier_for_candle(&payload(advanced)).is_err());
+        }
+        for advanced in [
+            json!({"mlxQuantize":" 0 "}),
+            json!({"mlxQuantize":null}),
+            json!({"convRot":false}),
+            json!({"quantTier":" Bf16 "}),
+            json!({}),
+        ] {
+            assert!(reject_image_detail_packed_tier_for_candle(&payload(advanced)).is_ok());
+        }
+    }
+}
+
 /// Worker → API write of a job's structured generation metrics (epic 10402).
 /// Posted once on completion; upserts (merges) into the `generation_metrics`
 /// table and echoes the stored block back.
@@ -282,10 +313,24 @@ pub(crate) async fn claim_job(
                     payload.portable_platform.as_deref(),
                     keyed,
                 )?;
+            let execution_claim_capability = job
+                .as_ref()
+                .map(|claimed| store.execution_claim_capability(&claimed.id, &payload.worker_id))
+                .transpose()?
+                .flatten();
+            let exact_replay_expected = job
+                .as_ref()
+                .map(|claimed| {
+                    store.exact_replay_expected_for_claim(&claimed.id, &payload.worker_id)
+                })
+                .transpose()?
+                .flatten();
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
                 portable_binding,
+                execution_claim_capability,
+                exact_replay_expected,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -301,6 +346,8 @@ pub(crate) async fn claim_job(
         response,
         decision,
         portable_binding,
+        execution_claim_capability,
+        exact_replay_expected,
         stranded,
         unsupported,
         candle_stranded,
@@ -391,6 +438,8 @@ pub(crate) async fn claim_job(
     Ok(Json(ClaimResponse {
         job: response,
         portable_model_binding,
+        execution_claim_capability,
+        exact_replay_expected,
         extra: Default::default(),
     }))
 }
@@ -750,6 +799,86 @@ pub(crate) async fn get_job(
     )))
 }
 
+/// Public execution facts omit the private source route and the claim secret.
+/// The result remains read-only; exact replay is a separate POST action.
+pub(crate) async fn get_execution_receipt(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let receipt = store_call(state, move |store, _timeout| {
+        store.completed_execution_receipt(&job_id)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::typed(
+            StatusCode::CONFLICT,
+            "This job has no complete execution receipt.",
+            "replay_unavailable",
+            json!({"reason":"receipt_missing","field":"executionReceipt"}),
+        )
+    })?;
+    Ok(Json(json!({
+        "version": receipt.version,
+        "jobId": receipt.job_id,
+        "jobType": receipt.job_type,
+        "attemptId": receipt.attempt_id,
+        "acceptedBackend": receipt.accepted_backend,
+        "acceptedDevice": receipt.accepted_device,
+        "inferenceRevision": receipt.inference_revision,
+        "acceptedBindingSha256": receipt.accepted_binding_sha256,
+        "acceptedResultSha256": receipt.accepted_result_sha256,
+        "execution": receipt.execution,
+        "outputs": receipt.outputs,
+    })))
+}
+
+/// Re-enter the queue only through the stored completed identity. The store
+/// atomically freezes the expected receipt on the new job and pins the worker,
+/// device, source route and current inference revision at claim.
+pub(crate) async fn exact_replay_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    request: AxumRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let headers = request.headers().clone();
+    let body = to_bytes(request.into_body(), 1024)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?;
+    auth::require_json_content_type(&headers, !body.is_empty())?;
+    if !body.iter().all(|byte| byte.is_ascii_whitespace())
+        && serde_json::from_slice::<Value>(&body)
+            .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?
+            != json!({})
+    {
+        tracing::info!(event = "exact_replay_refused", job_id = %job_id, reason = "options_not_allowed");
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "Exact replay accepts no changed options.",
+            "replay_unavailable",
+            json!({"reason":"options_not_allowed","field":"payload"}),
+        ));
+    }
+    let replay_job_id = job_id.clone();
+    let job = store_call(state.clone(), move |store, timeout| {
+        store.create_exact_replay_job(&job_id, timeout)
+    })
+    .await
+    .inspect_err(|error| {
+        if error.code == Some("replay_unavailable") {
+            let reason = error
+                .context
+                .as_ref()
+                .and_then(|context| context.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("unspecified");
+            tracing::info!(event = "exact_replay_refused", job_id = %replay_job_id, reason);
+        }
+    })?;
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ImportClaimProbeRequest {
@@ -988,12 +1117,12 @@ async fn apply_training_retry_resume(
         .and_then(|plan| plan.pointer("/target/kernel"))
         .and_then(Value::as_str)
         .is_some_and(|kernel| sceneworks_core::training::flux3::KERNELS.contains(&kernel));
-    let effective_resume = resume.unwrap_or_else(|| {
-        plan.get("config")
-            .and_then(|config| config.pointer("/advanced/resume"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    });
+    let authored_training =
+        sceneworks_core::resolved_options::TrainingRouteFacts::from_plan_syntax(&plan);
+    let effective_resume = resume.unwrap_or(matches!(
+        authored_training.resume,
+        sceneworks_core::resolved_options::RouteField::Valid(true)
+    ));
     if source_is_flux3 && effective_resume {
         let original = job
             .payload
@@ -1662,9 +1791,8 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
         // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
         validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
-        sceneworks_core::video_request::VideoRequest::from_payload(&merged)
-            .h3_veda_settings()
-            .map_err(ApiError::bad_request)?;
+        // The portable video validator above checks Veda against the selected recipe and
+        // authoritative entry before this replay is stamped and queued.
         crate::generation::ensure_video_model_available_on_platform(
             model_id,
             &model_manifest_entry,
@@ -1768,7 +1896,15 @@ async fn validate_and_canonicalize_merged_generation_payload(
             // model that refuses it, or switch the model out from under a stored block, and only
             // fail at the worker instead of being refused at this creation boundary.
             {
-                let request = sceneworks_core::image_request::ImageRequest::from_payload(&merged);
+                let facts = sceneworks_core::request_validation::facts_for_job(&job_type, &merged);
+                let resolved =
+                    sceneworks_core::request_validation::resolve_request("image", &merged, &facts)
+                        .map_err(ApiError::from)?;
+                let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                    &merged,
+                    resolved.as_payload(),
+                )
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
                 let family = merged
                     .get("modelManifestEntry")
                     .and_then(|entry| entry.get("family"))
@@ -1807,10 +1943,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // when it stops being a no-op, so the overwhelmingly common decoder-less replay costs no
         // extra catalog resolution. The LoRA gate needs no such guard: it returns before touching a
         // catalog when `loras` is absent or empty.
-        let selects_decoder = merged
-            .get("advanced")
-            .and_then(Value::as_object)
-            .is_some_and(|advanced| advanced.contains_key("decoder"));
+        let route_options =
+            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(&merged);
+        let selects_decoder = !matches!(
+            route_options.decoder,
+            sceneworks_core::resolved_options::RouteField::Absent
+        );
         if let Some(model_id) = merged
             .get("model")
             .and_then(Value::as_str)
@@ -2371,43 +2509,39 @@ fn canonicalize_image_detail_dense_tier(payload: &mut JsonObject) -> Result<(), 
 
 #[cfg(not(target_os = "macos"))]
 fn reject_image_detail_packed_tier(payload: &JsonObject) -> Result<(), ApiError> {
-    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+    reject_image_detail_packed_tier_for_candle(payload)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn reject_image_detail_packed_tier_for_candle(payload: &JsonObject) -> Result<(), ApiError> {
+    let Some(Value::Object(_)) = payload.get("advanced") else {
         return Ok(());
     };
-    if let Some(value) = advanced.get("mlxQuantize") {
-        let bits = if value.is_null() {
-            0
-        } else {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
-                .ok_or_else(|| {
-                    ApiError::bad_request("image_detail advanced.mlxQuantize must be an integer")
-                })?
-        };
-        if bits > 0 {
-            return Err(dense_image_detail_error());
+    use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
+    let options = RouteOptionFacts::from_payload_syntax(payload);
+    match options.mlx_quantize {
+        RouteField::Valid(bits) if bits > 0 => return Err(dense_image_detail_error()),
+        RouteField::Invalid => {
+            return Err(ApiError::bad_request(
+                "image_detail advanced.mlxQuantize must be an integer",
+            ));
         }
+        RouteField::Absent | RouteField::Null | RouteField::Valid(_) => {}
     }
-    if let Some(value) = advanced.get("convRot") {
-        match value {
-            Value::Bool(false) | Value::Null => {}
-            Value::Bool(true) => return Err(dense_image_detail_error()),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "image_detail advanced.convRot must be a boolean",
-                ))
-            }
+    match options.conv_rot {
+        RouteField::Valid(true) => return Err(dense_image_detail_error()),
+        RouteField::Invalid => {
+            return Err(ApiError::bad_request(
+                "image_detail advanced.convRot must be a boolean",
+            ));
         }
+        RouteField::Absent | RouteField::Null | RouteField::Valid(false) => {}
     }
-    if let Some(value) = advanced.get("quantTier") {
-        let dense = value.is_null()
-            || value.as_str().is_some_and(|tier| {
-                tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16")
-            });
-        if !dense {
-            return Err(dense_image_detail_error());
-        }
+    match options.quant_tier {
+        RouteField::Valid(tier)
+            if tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16") => {}
+        RouteField::Absent | RouteField::Null => {}
+        RouteField::Valid(_) | RouteField::Invalid => return Err(dense_image_detail_error()),
     }
 
     Ok(())
@@ -2424,7 +2558,7 @@ fn reject_image_detail_packed_tier(_payload: &JsonObject) -> Result<(), ApiError
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn dense_image_detail_error() -> ApiError {
     ApiError::bad_request(
         "Candle image_detail requires the dense bf16 model tier; packed quant selectors are unsupported",
@@ -2474,17 +2608,6 @@ async fn validate_raw_job_payload(
             .expect("registered source utility");
         sceneworks_core::request_validation::validate_shape(kind, payload)
             .map_err(ApiError::from)?;
-    }
-    if matches!(
-        job_type,
-        JobType::VideoGenerate
-            | JobType::VideoExtend
-            | JobType::VideoBridge
-            | JobType::PersonReplace
-    ) {
-        sceneworks_core::video_request::VideoRequest::from_payload(payload)
-            .h3_veda_settings()
-            .map_err(ApiError::bad_request)?;
     }
     if matches!(
         job_type,
@@ -2837,6 +2960,25 @@ pub(crate) async fn update_job_progress(
     let peak_gpu_load_pct =
         optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
     let submitted_result = payload.result;
+    if submitted_result.as_ref().is_some_and(|result| {
+        result.contains_key("executionReceipt") || result.contains_key("executionClaimCapability")
+    }) {
+        return Err(ApiError::bad_request(
+            "Execution receipts use the private terminal report field",
+        ));
+    }
+    let submitted_execution_receipt = payload
+        .extra
+        .get("executionReceipt")
+        .cloned()
+        .map(serde_json::from_value::<sceneworks_core::execution_receipt::WorkerExecutionReceipt>)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(format!("Invalid execution receipt: {error}")))?;
+    let execution_claim_capability = payload
+        .extra
+        .get("executionClaimCapability")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     // Test-only one-shot rendezvous that makes a competing terminal transition
     // deterministic. Take the hook before awaiting so the competing request is
@@ -2862,8 +3004,10 @@ pub(crate) async fn update_job_progress(
         let message = payload.message.clone();
         let error = payload.error.clone();
         let backend = payload.backend.clone();
+        let receipt = submitted_execution_receipt.clone();
+        let capability = execution_claim_capability.clone();
         move |store, _timeout| {
-            store.update_job_progress_with_outcome(
+            store.update_job_progress_with_execution_receipt(
                 &job_id,
                 ProgressUpdate {
                     status,
@@ -2878,6 +3022,8 @@ pub(crate) async fn update_job_progress(
                     backend,
                     worker_id,
                 },
+                receipt.as_ref(),
+                capability.as_deref(),
             )
         }
     })

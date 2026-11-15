@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(native_lane)]
-use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
+use super::wan::{generate_video_using, resolved_video_f32, resolved_video_u32, VideoGenInput};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda as platform_runtime;
 #[cfg(target_os = "macos")]
@@ -601,12 +601,10 @@ pub(super) fn requested_h3_veda(
     steps: Option<u32>,
 ) -> WorkerResult<Option<gen_core::VedaRequest>> {
     use sceneworks_core::video_request::H3VedaBudget;
-    let parsed = sceneworks_core::video_request::requested_h3_veda(
-        &request.model,
-        &request.advanced,
-        steps.unwrap_or(50),
-    )
-    .map_err(WorkerError::InvalidPayload)?;
+    let parsed = request
+        .options()
+        .h3_veda_settings(&request.model, steps.unwrap_or(50))
+        .map_err(WorkerError::InvalidPayload)?;
     let budget = |value| match value {
         H3VedaBudget::Percent(p) => gen_core::VedaBudget::SparsityPercent(p),
         H3VedaBudget::KeyTiles(n) => gen_core::VedaBudget::KeyTiles(n),
@@ -664,14 +662,14 @@ pub(super) fn minimax_h3_sampling(
         // own DEFAULT_STEPS (50) and VIDEO_SIGMA_SHIFT (12.0), with the pre-existing `advanced`
         // overrides still honored.
         return Ok((
-            advanced_opt_u32(request, "steps"),
-            advanced_opt_f32(request, "schedulerShift"),
+            resolved_video_u32(request, "steps"),
+            resolved_video_f32(request, "schedulerShift"),
             None,
         ));
     };
     Ok((
-        advanced_opt_u32(request, "steps").or(Some(recipe.steps)),
-        advanced_opt_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
+        resolved_video_u32(request, "steps").or(Some(recipe.steps)),
+        resolved_video_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
         Some(recipe),
     ))
 }
@@ -731,11 +729,10 @@ pub(super) fn minimax_h3_raw_settings(
     // keeps an asset made today distinguishable from a pre-sc-26691 one (which has no key and was
     // rendered under the forced short edge, i.e. `diffusers`). The arms refused a malformed value
     // before this point, so the fallback below is never the recorded answer to a bad request.
-    let resize_mode = sceneworks_core::video_request::effective_reference_image_resize_mode(
-        sceneworks_core::video_request::requested_reference_image_resize_mode(&request.advanced)
-            .ok()
-            .flatten(),
-    );
+    let resize_mode = request
+        .options()
+        .reference_image_resize_mode()
+        .unwrap_or(sceneworks_core::video_request::ReferenceImageResizeMode::Match);
     raw.insert(
         sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
         Value::String(resize_mode.as_str().to_owned()),
@@ -780,12 +777,25 @@ pub(super) fn minimax_h3_raw_settings(
 /// edge beside it, so a typo costs a payload parse rather than a 53 GB text-encoder load.
 #[cfg(native_lane)]
 pub(super) fn minimax_h3_reference_image_resize_mode(
-    advanced: &sceneworks_core::contracts::JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
 ) -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
     use sceneworks_core::video_request::ReferenceImageResizeMode as Requested;
-    let requested = sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
+    if !options
+        .reference_image_resize_mode
+        .as_ref()
+        .is_some_and(|mode| {
+            matches!(
+                mode.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        })
+    {
+        return Ok(None);
+    }
+    let requested = options
+        .reference_image_resize_mode()
         .map_err(WorkerError::InvalidPayload)?;
-    Ok(requested.map(|mode| match mode {
+    Ok(Some(match requested {
         Requested::Match => gen_core::ReferenceImageResizeMode::Match,
         Requested::Max => gen_core::ReferenceImageResizeMode::Max,
         Requested::Diffusers => gen_core::ReferenceImageResizeMode::Diffusers,
@@ -1549,10 +1559,11 @@ pub(super) async fn generate_minimax_h3_using(
     // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
     // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
     // independently — this is the earlier of two gates, not a replacement for it.
-    let reference_image_short_edge =
-        sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
-            .map_err(WorkerError::InvalidPayload)?;
-    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
+    let reference_image_short_edge = request
+        .options()
+        .requested_reference_image_short_edge()
+        .map_err(WorkerError::InvalidPayload)?;
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(request.options())?;
     let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
     let mut raw_settings = minimax_h3_raw_settings(
         request,
@@ -1622,7 +1633,8 @@ pub(super) async fn generate_minimax_h3_using(
         settings,
         job,
         backend,
-        &request.advanced,
+        request.options(),
+        &request.portable_aux,
         input,
         load_generator,
     )
@@ -1634,7 +1646,7 @@ pub(super) async fn generate_minimax_h3_using(
 /// manifest default is q4; non-positive values explicitly select the dense upstream bf16 route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_minimax_h3_tier(request: &VideoRequest) -> (&'static str, Option<Quant>) {
-    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "q4") {
         "bf16" => ("bf16", None),
         "q4" => ("q4", Some(Quant::Q4)),
         _ => ("q8", Some(Quant::Q8)),
@@ -1783,10 +1795,11 @@ pub(super) async fn generate_candle_minimax_h3_using(
     // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
     // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
     // independently — this is the earlier of two gates, not a replacement for it.
-    let reference_image_short_edge =
-        sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
-            .map_err(WorkerError::InvalidPayload)?;
-    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
+    let reference_image_short_edge = request
+        .options()
+        .requested_reference_image_short_edge()
+        .map_err(WorkerError::InvalidPayload)?;
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(request.options())?;
     let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
     let (load, shared_tier) = match imported.as_ref() {
         Some(dit) => resolve_candle_imported_minimax_h3_load(settings, request, dit)?,
@@ -1854,7 +1867,8 @@ pub(super) async fn generate_candle_minimax_h3_using(
         settings,
         job,
         backend,
-        &request.advanced,
+        request.options(),
+        &request.portable_aux,
         input,
         load_generator,
     )
@@ -2718,10 +2732,18 @@ fn resolve_imported_h3_components(
     let dit_config: Value =
         serde_json::from_slice(&std::fs::read(dit.transformer_dir.join("config.json"))?)
             .map_err(|error| refuse(format!("bound transformer config: {error}")))?;
-    if let Some(value) = request.advanced.get("mlxQuantize") {
-        let bits = crate::payload::quant_int(value).ok_or_else(|| {
-            refuse("explicit mlxQuantize must name the bound shared component precision".into())
-        })?;
+    if let Some(bits) = request
+        .options()
+        .mlx_quantize
+        .as_ref()
+        .filter(|bound| {
+            matches!(
+                bound.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        })
+        .and_then(|bound| bound.value)
+    {
         let explicit = crate::payload::tier_for_bits(Some(bits), "q4");
         if explicit != tier {
             return Err(refuse(format!("explicit {explicit} shared precision differs from the imported checkpoint's bound {tier} closure; no component substitution is permitted")));

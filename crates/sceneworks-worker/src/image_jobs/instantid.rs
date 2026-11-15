@@ -4,7 +4,6 @@ use super::admit_conditioning_paths;
 use super::conditioning::augment_prompt_for_angle;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 #[cfg(not(target_os = "macos"))]
@@ -16,9 +15,9 @@ use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
 use super::tier_components_present;
@@ -29,6 +28,7 @@ use super::AdapterSpec;
 use super::BodyPoint;
 #[cfg(target_os = "macos")]
 use super::BodyPoint;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -59,7 +59,6 @@ use super::COMPONENT_VAE_FP16_FIX;
 use super::FACE_RESTORE_PROMPT;
 #[cfg(target_os = "macos")]
 use super::FACE_RESTORE_PROMPT;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::quant_int;
@@ -535,7 +534,7 @@ enum InstantIdMode {
 
 /// The 11-view Character-Studio angle set flag.
 fn instantid_angle_set(request: &ImageRequest) -> bool {
-    advanced::flag(&request.advanced, "angleSet")
+    request.advanced_bool("angleSet").unwrap_or(false)
 }
 
 /// Classify the InstantID iteration mode (pose set > angle set > plain identity).
@@ -544,6 +543,18 @@ fn instantid_mode(request: &ImageRequest) -> InstantIdMode {
     if poses > 0 {
         InstantIdMode::PoseSet(poses)
     } else if instantid_angle_set(request) {
+        InstantIdMode::AngleSet
+    } else {
+        InstantIdMode::Identity
+    }
+}
+
+fn instantid_mode_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> InstantIdMode {
+    if !execution.poses().is_empty() {
+        InstantIdMode::PoseSet(execution.poses().len())
+    } else if instantid_angle_set(execution) {
         InstantIdMode::AngleSet
     } else {
         InstantIdMode::Identity
@@ -584,13 +595,7 @@ fn resolve_instantid_sdxl_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "InstantID SDXL modelPath")
             .map(Some);
     }
@@ -684,6 +689,17 @@ pub(super) fn instantid_image_count(request: &ImageRequest, settings: &Settings)
     }
 }
 
+pub(super) fn instantid_image_count_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> u32 {
+    match instantid_mode_resolved(execution) {
+        InstantIdMode::PoseSet(_) => execution.poses().len() as u32,
+        InstantIdMode::AngleSet => active_angle_collection(execution, settings).1.len() as u32,
+        InstantIdMode::Identity => execution.count,
+    }
+}
+
 /// Resolve the active angle-set collection for this job (sc-4450): the per-generation override
 /// (`advanced.keypointCollectionId`) → the user default → the built-in 11. Built-in fallback on
 /// any store error so angle generation never hard-fails on a Key Point Library hiccup.
@@ -701,7 +717,7 @@ fn active_angle_collection(
     Vec<sceneworks_core::project_store::ResolvedAnglePreset>,
 ) {
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
-    let override_id = advanced::str(&request.advanced, "keypointCollectionId", "");
+    let override_id = super::sampling::resolved_text(request, "keypointCollectionId", "");
     let override_id = override_id.trim();
     let override_id = (!override_id.is_empty()).then_some(override_id);
     store
@@ -732,13 +748,13 @@ fn builtin_angle_presets() -> Vec<sceneworks_core::project_store::ResolvedAngleP
 /// Resolve InstantID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` →
 /// the torch-parity default (30).
 fn instantid_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", INSTANTID_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", INSTANTID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve InstantID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the
 /// RealVisXL-tuned default (3.0). Clamped to a sane CFG range.
 fn instantid_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         INSTANTID_DEFAULT_GUIDANCE,
@@ -751,7 +767,7 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
 /// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
 fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
-    let raw = request.quant_bits().or_else(|| {
+    let raw = request.resolved_quant_bits().or_else(|| {
         request
             .model_manifest_entry
             .get("mlx")
@@ -779,7 +795,7 @@ fn instantid_raw_settings(
     controlnet_scale: f32,
     angle_set: bool,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -847,16 +863,15 @@ pub(super) async fn ensure_instantid_file(
 /// face detection but neither ArcFace nor the SDXL/IdentityNet stack. Shares the env override
 /// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
 /// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
-fn bound_utility_face_stack(payload: &JsonObject) -> WorkerResult<PathBuf> {
-    let advanced = payload
-        .get("advanced")
-        .and_then(Value::as_object)
+fn bound_utility_face_stack(
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
+) -> WorkerResult<PathBuf> {
+    portable_aux
+        .path("utility_face_stack")
+        .map(Path::to_path_buf)
         .ok_or_else(|| {
-            WorkerError::InvalidPayload("face utility lacks portable source map".to_owned())
-        })?;
-    crate::portable_aux_sources::bound_aux_path(advanced, "utility_face_stack").ok_or_else(|| {
-        WorkerError::InvalidPayload("face utility lacks bound face stack".to_owned())
-    })
+            WorkerError::InvalidPayload("face utility lacks bound face stack".to_owned())
+        })
 }
 
 #[cfg(test)]
@@ -865,7 +880,7 @@ mod utility_face_source_tests {
 
     #[test]
     fn utility_face_loader_requires_verified_dispatch_map() {
-        let absent = JsonObject::new();
+        let absent = sceneworks_core::portable_aux_bindings::PortableAuxBindings::default();
         assert!(bound_utility_face_stack(&absent).is_err());
         let mut bound = JsonObject::new();
         bound.insert(
@@ -875,7 +890,9 @@ mod utility_face_source_tests {
             }),
         );
         assert_eq!(
-            bound_utility_face_stack(&bound).unwrap(),
+            bound_utility_face_stack(
+                &sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(&bound).unwrap()
+            ).unwrap(),
             PathBuf::from("/private/snapshot/face")
         );
     }
@@ -888,12 +905,13 @@ pub(crate) async fn ensure_scrfd_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
     if matches!(
         job.job_type,
         sceneworks_core::contracts::JobType::KpsExtract
     ) {
-        return Ok(bound_utility_face_stack(&job.payload)?.join(INSTANTID_SCRFD_FILE));
+        return Ok(bound_utility_face_stack(portable_aux)?.join(INSTANTID_SCRFD_FILE));
     }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
@@ -930,11 +948,10 @@ pub(crate) async fn ensure_face_stack_dir(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if let Some(dir) = crate::portable_aux_sources::bound_aux_path(advanced, "instantid_mlx") {
-            return Ok(dir);
-        }
+    if let Some(dir) = portable_aux.path("instantid_mlx") {
+        return Ok(dir.to_path_buf());
     }
     if matches!(
         job.job_type,
@@ -943,7 +960,7 @@ pub(crate) async fn ensure_face_stack_dir(
             | sceneworks_core::contracts::JobType::FaceLikenessCompare
             | sceneworks_core::contracts::JobType::CatalogAnalysis
     ) {
-        return bound_utility_face_stack(&job.payload);
+        return bound_utility_face_stack(portable_aux);
     }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
@@ -1111,6 +1128,7 @@ pub(super) async fn generate_instantid_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -1134,23 +1152,24 @@ pub(super) async fn generate_instantid_stream(
         project_path,
     )?;
 
-    let (controlnet, ip_adapter, scrfd_path, arcface_path) =
-        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-            let bound = |id| {
-                crate::portable_aux_sources::bound_aux_path(&request.advanced, id).ok_or_else(
-                    || WorkerError::InvalidPayload(format!("missing bound {id} source")),
-                )
-            };
-            let bundle = bound("instantid_mlx")?;
-            (
-                WeightsSource::Dir(bound("instantid_controlnet")?),
-                bundle.join(INSTANTID_IP_ADAPTER_FILE),
-                bundle.join(INSTANTID_SCRFD_FILE),
-                bundle.join(INSTANTID_ARCFACE_FILE),
-            )
-        } else {
-            ensure_instantid_weights(api, settings, job).await?
+    let (controlnet, ip_adapter, scrfd_path, arcface_path) = if request.portable_aux.has_paths() {
+        let bound = |id| {
+            request
+                .portable_aux
+                .path(id)
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| WorkerError::InvalidPayload(format!("missing bound {id} source")))
         };
+        let bundle = bound("instantid_mlx")?;
+        (
+            WeightsSource::Dir(bound("instantid_controlnet")?),
+            bundle.join(INSTANTID_IP_ADAPTER_FILE),
+            bundle.join(INSTANTID_SCRFD_FILE),
+            bundle.join(INSTANTID_ARCFACE_FILE),
+        )
+    } else {
+        ensure_instantid_weights(api, settings, job).await?
+    };
 
     // User style/character LoRAs (sc-6038). InstantID is a stock SDXL (RealVisXL) UNet, so SDXL
     // adapters apply on top of IdentityNet + the identity IP-Adapter — and the manifest advertises
@@ -1172,13 +1191,13 @@ pub(super) async fn generate_instantid_stream(
         let _ = (quant_bits, recipe_bits);
         None
     };
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         INSTANTID_IP_SCALE,
         0.0..=1.0,
     );
-    let mode = instantid_mode(request);
+    let mode = instantid_mode_resolved(execution);
     let angle_set = matches!(mode, InstantIdMode::AngleSet);
     let pose_set = matches!(mode, InstantIdMode::PoseSet(_));
     // The angle set runs a softer landmark lock by default (sc-8354) so the off-axis views clear the
@@ -1189,8 +1208,8 @@ pub(super) async fn generate_instantid_stream(
     } else {
         INSTANTID_CONTROLNET_SCALE
     };
-    let controlnet_scale = advanced::f32_clamped(
-        &request.advanced,
+    let controlnet_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlnetConditioningScale",
         controlnet_default,
         0.0..=2.0,
@@ -1201,13 +1220,13 @@ pub(super) async fn generate_instantid_stream(
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation
     // override > user default > built-in 11. Resolved once (and only for angle jobs).
     let angle_collection = angle_set.then(|| active_angle_collection(request, settings));
-    let openpose_scale = advanced::f32_clamped(
-        &request.advanced,
+    let openpose_scale = super::sampling::resolved_f32_clamped(
+        request,
         "openPoseScale",
         INSTANTID_OPENPOSE_SCALE,
         0.0..=2.0,
     );
-    let face_restore = advanced::flag(&request.advanced, "faceRestore");
+    let face_restore = request.advanced_bool("faceRestore").unwrap_or(false);
     // PiD decoder overlay (epic 7840, sc-8371 mlx / sc-8373 candle): decode Angles/Poses through the
     // `sdxl` PiD super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
     // (`advanced.usePid`) AND the checkpoint + Gemma snapshots are cached. `resolve_pid_weights`
@@ -1222,23 +1241,21 @@ pub(super) async fn generate_instantid_stream(
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
     let openpose = if pose_set {
-        Some(
-            if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-                WeightsSource::Dir(
-                    crate::portable_aux_sources::bound_aux_path(
-                        &request.advanced,
-                        "instantid_openpose",
-                    )
+        Some(if request.portable_aux.has_paths() {
+            WeightsSource::Dir(
+                request
+                    .portable_aux
+                    .path("instantid_openpose")
+                    .map(std::path::Path::to_path_buf)
                     .ok_or_else(|| {
                         WorkerError::InvalidPayload(
                             "missing bound InstantID OpenPose source".to_owned(),
                         )
                     })?,
-                )
-            } else {
-                ensure_instantid_openpose(api, settings, job).await?
-            },
-        )
+            )
+        } else {
+            ensure_instantid_openpose(api, settings, job).await?
+        })
     } else {
         None
     };
@@ -1304,8 +1321,9 @@ pub(super) async fn generate_instantid_stream(
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
         InstantIdMode::PoseSet(_) => {
             let set_seed = resolve_seed(request, 0);
-            parse_poses(request)
-                .into_iter()
+            execution
+                .poses()
+                .iter()
                 .map(|pose| {
                     (
                         set_seed,
@@ -1354,7 +1372,7 @@ pub(super) async fn generate_instantid_stream(
     // engine default + emits an event rather than hard-failing `validate_request`. N1: with neither set
     // the request carries `None` ⇒ the bespoke ancestral default loop runs byte-for-byte unchanged.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -1677,6 +1695,7 @@ pub(super) async fn generate_instantid_stream(
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
+            let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
             // engine's are `&self`. Bind `mut` for the candle lane and allow the unused-mut on macOS.
@@ -1688,7 +1707,7 @@ pub(super) async fn generate_instantid_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt, action), _preview, on_progress| {
+                move |index, (seed, prompt, action), _preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -1732,19 +1751,34 @@ pub(super) async fn generate_instantid_stream(
                                 "InstantID memory request refused: {error}"
                             ))
                         })?;
-                    let result = match &action {
-                        InstantIdAction::Identity => {
-                            model.generate(&req, &reference, &mut *on_progress)
-                        }
-                        InstantIdAction::Angle(kps) => {
-                            model.generate_with_kps(&req, &reference, kps, &mut *on_progress)
-                        }
-                        InstantIdAction::Pose(keypoints) => {
-                            model.generate_pose(&req, &reference, keypoints, &mut *on_progress)
-                        }
+                    let stage = match &action {
+                        InstantIdAction::Identity => "identity",
+                        InstantIdAction::Angle(_) => "angle",
+                        InstantIdAction::Pose(_) => "pose",
                     };
-                    let mut out = match result {
-                        Ok(out) => out,
+                    let result = match &action {
+                        InstantIdAction::Identity => model.generate_with_execution_report(
+                            &req,
+                            &reference,
+                            &mut *on_progress,
+                        ),
+                        InstantIdAction::Angle(kps) => model
+                            .generate_with_kps_with_execution_report(
+                                &req,
+                                &reference,
+                                kps,
+                                &mut *on_progress,
+                            ),
+                        InstantIdAction::Pose(keypoints) => model
+                            .generate_pose_with_execution_report(
+                                &req,
+                                &reference,
+                                keypoints,
+                                &mut *on_progress,
+                            ),
+                    };
+                    let completed = match result {
+                        Ok(completed) => completed,
                         // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
                         // stop cleanly (consume_gen_events posts the Canceled update). The scope
                         // still gets its terminal `finish`, which is what synchronizes the device and
@@ -1762,6 +1796,21 @@ pub(super) async fn generate_instantid_stream(
                             return Err(WorkerError::Engine(message));
                         }
                     };
+                    let mut out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                message: "InstantID returned an incomplete image".into(),
+                            });
+                            return Err(WorkerError::Engine(
+                                "InstantID returned an incomplete image".into(),
+                            ));
+                        }
+                    };
+                    let base_execution = completed.execution;
+                    let mut execution_stages = Vec::new();
                     // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
                     // reference identity on the cropped face with the gender-neutral restore prompt.
                     if let Some(embedding) = &restore_embedding {
@@ -1786,13 +1835,13 @@ pub(super) async fn generate_instantid_stream(
                             scheduler: scheduler.clone(),
                             cancel: cancel.clone(),
                         };
-                        out = match model.restore_face(
+                        let restored = match model.restore_face_with_execution_report(
                             &restore_req,
                             &out,
                             embedding,
                             &mut *on_progress,
                         ) {
-                            Ok(out) => out,
+                            Ok(completed) => completed,
                             Err(_) if cancel.is_cancelled() => {
                                 let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
                                 return Ok(None);
@@ -1805,6 +1854,32 @@ pub(super) async fn generate_instantid_stream(
                                 return Err(WorkerError::InvalidPayload(message));
                             }
                         };
+                        out = match restored.generation.output {
+                            Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                                images.remove(0)
+                            }
+                            _ => {
+                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                    message: "InstantID face-restore returned an incomplete image"
+                                        .into(),
+                                });
+                                return Err(WorkerError::Engine(
+                                    "InstantID face-restore returned an incomplete image".into(),
+                                ));
+                            }
+                        };
+                        execution_stages = vec![
+                            sceneworks_core::execution_receipt::ExecutionStageBinding {
+                                stage: stage.into(),
+                                execution: serde_json::to_value(&base_execution)
+                                    .map_err(WorkerError::Json)?,
+                            },
+                            sceneworks_core::execution_receipt::ExecutionStageBinding {
+                                stage: "restore_face".into(),
+                                execution: serde_json::to_value(restored.execution)
+                                    .map_err(WorkerError::Json)?,
+                            },
+                        ];
                     }
                     // Both engine calls for this item are done: run the scope's terminal cleanup
                     // (synchronize + release the request-local allocations) and drop it, so the next
@@ -1818,6 +1893,30 @@ pub(super) async fn generate_instantid_stream(
                             ))
                         })?;
                     drop(scope);
+                    let execution = if execution_stages.is_empty() {
+                        base_execution
+                    } else {
+                        gen_core::generator::ExecutionIdentity::unavailable(
+                            gen_core::generator::ExecutionUnavailable {
+                                code: "instantid_face_restore_composite_replay_unavailable".into(),
+                                detail: "the final image combines an InstantID render with a separate face restoration pass".into(),
+                                missing_facts: vec!["cross-stage crop and paste-back replay contract".into()],
+                            },
+                        )
+                    };
+                    let mut facts = JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    if !execution_stages.is_empty() {
+                        facts.insert(
+                            "workerExecutionStages".into(),
+                            serde_json::to_value(execution_stages).map_err(WorkerError::Json)?,
+                        );
+                    }
+                    let _ = facts_tx
+                        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Identity-likeness post-pass (sc-4409 angles / sc-4410 poses / sc-4411 plain
                     // With-Character): score this finished image against the per-job cached source
                     // embedding, on this blocking thread (the `!Send` face stack lives here). CRITICAL

@@ -171,6 +171,12 @@ impl From<JobsStoreError> for ApiError {
             }
             JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
             JobsStoreError::InvalidResultItem(detail) => Self::bad_request(detail),
+            JobsStoreError::ReplayUnavailable(reason) => Self::typed(
+                StatusCode::CONFLICT,
+                "Exact replay is unavailable for this job.",
+                "replay_unavailable",
+                serde_json::json!({ "reason": reason.reason, "field": reason.field }),
+            ),
             JobsStoreError::RetryLimit { max_attempts } => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),

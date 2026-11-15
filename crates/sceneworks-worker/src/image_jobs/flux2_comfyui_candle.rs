@@ -4,7 +4,7 @@ use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::ColdLoadAdmission;
@@ -203,6 +203,21 @@ pub(super) fn prepare_flux2_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    prepare_flux2_comfyui_sources_with_preflight(request, settings, None)
+}
+
+pub(super) fn prepare_flux2_comfyui_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    prepare_flux2_comfyui_sources_with_preflight(execution, settings, Some(execution))
+}
+
+fn prepare_flux2_comfyui_sources_with_preflight(
+    request: &ImageRequest,
+    settings: &Settings,
+    execution: Option<&super::conditioning::ResolvedImageExecution>,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
     // A plan-backed entry whose REQUEST the plan-driven route claims belongs to that route; this
     // lane never also claims it. Explicit rather than left to the `external_base_` id prefix below:
     // that prefix is an incidental property of how the catalog names a scanned row, and an
@@ -210,11 +225,20 @@ pub(super) fn prepare_flux2_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let Some(_descriptor) = super::routing::imported_generate_request_supported(
-        request,
-        "flux2",
-        gen_core::ImportedModelSource::ComfyUiTree,
-    ) else {
+    let descriptor = if let Some(execution) = execution {
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "flux2",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    } else {
+        super::routing::imported_generate_request_supported(
+            request,
+            "flux2",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    };
+    let Some(_descriptor) = descriptor else {
         return Ok(None);
     };
     let quant = match flux2_comfyui_quant(request) {
@@ -273,12 +297,28 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
             "this runtime has no registered ComfyUI FLUX.2 generate route".to_owned(),
         )
     })?;
-    let explicit = ["quantTier", "quant", "mlxQuantize"].iter().any(|key| {
-        request
-            .advanced
-            .get(*key)
-            .is_some_and(|value| !value.is_null())
-    });
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    let authored = |origin| {
+        matches!(
+            origin,
+            sceneworks_core::resolved_options::Origin::Authored { .. }
+        )
+    };
+    let explicit = options
+        .quant_tier
+        .as_ref()
+        .is_some_and(|value| authored(value.origin))
+        || options
+            .quant
+            .as_ref()
+            .is_some_and(|value| authored(value.origin))
+        || options
+            .mlx_quantize
+            .as_ref()
+            .is_some_and(|value| value.value.is_some() && authored(value.origin));
     let (selected, _) =
         super::krea_imported::imported_model_quant(request, &descriptor, "ComfyUI FLUX.2")?;
     match selected {
@@ -304,13 +344,7 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
 /// same `advanced` knob directly. FLUX.2-dev is guidance-distilled (embedded scalar, no negative pass).
 fn flux2_comfyui_guidance(request: &ImageRequest) -> Option<f32> {
     request
-        .advanced
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
         .map(|value| value as f32)
 }
 
@@ -321,7 +355,7 @@ fn flux2_comfyui_raw_settings(
     guidance: Option<f32>,
     quant: Quant,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
@@ -458,7 +492,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     })?;
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
+        resolved_option_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
     let quant = paths.quant;
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
@@ -511,9 +545,9 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         ),
         move |model, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -529,22 +563,33 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                         cancel: cancel.clone(),
                         ..sampling_controls.clone()
                     };
-                    let output = match model.generate(&request, &mut *on_progress) {
-                        Ok(output) => output,
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "ComfyUI FLUX.2-dev generation failed: {error}"
-                            )));
-                        }
-                    };
-                    match output {
-                        GenerationOutput::Images(mut images) => {
+                    let completed =
+                        match model.generate_with_execution_report(&request, &mut *on_progress) {
+                            Ok(completed) => completed,
+                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(error) => {
+                                return Err(WorkerError::Engine(format!(
+                                    "ComfyUI FLUX.2-dev generation failed: {error}"
+                                )));
+                            }
+                        };
+                    match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                             let image = images.pop().ok_or_else(|| {
                                 WorkerError::Engine(
                                     "ComfyUI FLUX.2-dev produced no image".to_owned(),
                                 )
                             })?;
+                            let mut facts = crate::JsonObject::new();
+                            facts.insert(
+                                "workerExecutionReport".into(),
+                                serde_json::to_value(completed.execution)
+                                    .map_err(WorkerError::Json)?,
+                            );
+                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
+                                index,
+                                facts,
+                            });
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

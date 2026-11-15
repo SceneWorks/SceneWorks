@@ -154,12 +154,12 @@ fn canonicalize_using(
         .get("projectId")
         .and_then(Value::as_str)
         .ok_or("advanced tensors require projectId")?;
-    let context = payload
+    let effective_advanced = payload
         .get("advanced")
-        .and_then(|v| v.get("mossImage"))
-        .and_then(|v| v.get("max_sequence_length"))
-        .and_then(Value::as_u64)
-        .unwrap_or(4096) as usize;
+        .and_then(Value::as_object)
+        .ok_or("advanced must be an object")?;
+    let context = sceneworks_options::moss_validation::options(effective_advanced)?
+        .max_sequence_length as usize;
     if !(1..=4096).contains(&context) {
         return Err("context limit must be in1–4096".into());
     }

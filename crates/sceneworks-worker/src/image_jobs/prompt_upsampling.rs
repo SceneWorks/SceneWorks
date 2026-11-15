@@ -3,6 +3,7 @@
 
 #[cfg(all(test, native_lane))]
 use super::events::consume_gen_events;
+#[cfg(test)]
 use super::parse_prompt_enhancement_fields;
 #[cfg(all(test, native_lane))]
 use super::stream::GenEvent;
@@ -32,9 +33,20 @@ pub(crate) struct PromptEnhance {
 }
 
 impl PromptEnhance {
+    pub(crate) fn from_resolved(request: &ImageRequest) -> WorkerResult<Self> {
+        let (enabled, temperature, max_tokens) =
+            super::resolved_prompt_enhancement_fields(request)?;
+        Ok(Self {
+            enabled,
+            temperature,
+            max_tokens,
+        })
+    }
+
     /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
     /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
     /// the API and inference providers.
+    #[cfg(test)]
     pub(crate) fn from_advanced(
         model_id: &str,
         advanced: &serde_json::Map<String, Value>,
@@ -75,7 +87,7 @@ pub(super) fn attach_prompt_upsampler(
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
     if !matches!(engine_id, "flux3_klein" | "flux3_klein_base")
-        || !parse_prompt_enhancement_fields(engine_id, &request.advanced)?.0
+        || !request.advanced_bool("enhancePrompt").unwrap_or(false)
     {
         return Ok(spec);
     }
@@ -101,8 +113,11 @@ pub(super) fn attach_prompt_upsampler(
             "FLUX 3 enhancement requires the pinned optional {UPSAMPLER_COMPONENT} component: {UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}; refresh the model catalog"
         )));
     }
-    let dir = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, UPSAMPLER_COMPONENT)
+    let dir = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path(UPSAMPLER_COMPONENT)
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable FLUX 3 prompt upsampler is not bound".to_owned(),

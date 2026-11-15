@@ -332,7 +332,7 @@ async fn run_imported_comfy_quant_smoke(
             "modelManifestEntry": imported
         }),
     );
-    crate::image_jobs::run_image_generate_job(&api, &settings, &image_job)
+    crate::image_jobs::run_image_generate_job(&api, &settings, &image_job, &Default::default())
         .await
         .expect("the linked ComfyUI-quantized worker generation completes");
 

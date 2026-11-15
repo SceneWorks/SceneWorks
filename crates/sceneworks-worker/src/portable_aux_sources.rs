@@ -3,11 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use sceneworks_core::contracts::JsonObject;
+use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
+#[cfg(test)]
 use serde_json::Value;
 
 /// Only the verified dispatch clone carries this private map. The worker guard removes every
 /// client-supplied copy before adding immutable leased paths for the selected route.
+#[cfg(test)]
 pub(crate) fn bound_aux_path(advanced: &JsonObject, source_id: &str) -> Option<PathBuf> {
     advanced
         .get("__portableAuxPaths")?
@@ -16,13 +20,14 @@ pub(crate) fn bound_aux_path(advanced: &JsonObject, source_id: &str) -> Option<P
         .map(PathBuf::from)
 }
 
+#[cfg(test)]
 pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
     advanced.get("__portableAuxPaths").is_some()
 }
 
 /// A verified portable attempt must use its leased strict-control copy even when an operator
 /// env override is present. Legacy, unbound jobs retain the operator override behavior.
-#[cfg(any(test, native_lane))]
+#[cfg(test)]
 pub(crate) fn selected_krea_control_override(
     advanced: &JsonObject,
     env_override: Option<&str>,
@@ -40,10 +45,31 @@ pub(crate) fn selected_krea_control_override(
         .filter(|path| path.is_file()))
 }
 
+/// Select from the verified attempt context without re-reading the dispatch JSON.
+#[cfg(any(test, native_lane))]
+pub(crate) fn selected_krea_control_override_typed(
+    bindings: &PortableAuxBindings,
+    env_override: Option<&str>,
+) -> crate::WorkerResult<Option<PathBuf>> {
+    if bindings.has_paths() {
+        return bindings
+            .path("strict_control")
+            .map(Path::to_path_buf)
+            .map(Some)
+            .ok_or_else(|| {
+                crate::WorkerError::InvalidPayload("missing bound strict_control source".to_owned())
+            });
+    }
+    Ok(env_override
+        .map(str::trim)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file()))
+}
+
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
-#[cfg(native_lane)]
+#[cfg(test)]
 pub(crate) fn bound_pulid_weights(
     advanced: &JsonObject,
 ) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
@@ -67,12 +93,39 @@ pub(crate) fn bound_pulid_weights(
     Ok((adapter, eva, staged.path().to_path_buf(), staged))
 }
 
-/// Effective path plus whether the loader selected an authorized operator override.
-/// The caller hashes the exact file/dir closure and records pinned-repo provenance otherwise.
-pub(crate) fn resolve_selected_aux_source(
+/// Assemble PuLID components from the guard's typed route context.
+#[cfg(native_lane)]
+pub(crate) fn bound_pulid_weights_typed(
+    bindings: &PortableAuxBindings,
+) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
+    let required = |id| {
+        bindings
+            .path(id)
+            .map(Path::to_path_buf)
+            .ok_or_else(|| crate::WorkerError::InvalidPayload(format!("missing bound {id} source")))
+    };
+    let adapter = required("pulid_adapter")?;
+    let eva = required("pulid_eva")?;
+    let bisenet = required("pulid_bisenet")?;
+    let scrfd = required("pulid_scrfd")?;
+    let arcface = required("pulid_arcface")?;
+    let staged = tempfile::tempdir()?;
+    for (source, file) in [
+        (&bisenet, "bisenet_parsing.safetensors"),
+        (&scrfd, "scrfd_10g.safetensors"),
+        (&arcface, "arcface_iresnet100.safetensors"),
+    ] {
+        std::fs::copy(source, staged.path().join(file))?;
+    }
+    Ok((adapter, eva, staged.path().to_path_buf(), staged))
+}
+
+/// Resolve an auxiliary source from the bound tile repository selection.
+pub(crate) fn resolve_selected_aux_source_typed(
     source_id: &str,
     data_dir: &Path,
-    payload: &JsonObject,
+    tile_control_net_repo: Option<&str>,
+    plan_base_model_path: Option<&str>,
 ) -> Option<(PathBuf, bool)> {
     let snapshot = |repo| crate::model_jobs::huggingface_snapshot_dir(data_dir, repo);
     match source_id {
@@ -221,11 +274,7 @@ pub(crate) fn resolve_selected_aux_source(
         }
         #[cfg(native_lane)]
         "ltx_training_text_encoder" => {
-            let model_dir = payload
-                .get("plan")?
-                .get("target")?
-                .get("baseModelPath")?
-                .as_str()?;
+            let model_dir = plan_base_model_path?;
             let path = crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(Path::new(model_dir))?;
             let overridden = std::env::var_os("LTX_GEMMA_DIR")
                 .is_some_and(|value| path.as_os_str() == value.as_os_str());
@@ -323,11 +372,7 @@ pub(crate) fn resolve_selected_aux_source(
             }
         }
         "sdxl_detail_tile_control" => {
-            let repo = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("tileControlNetRepo"))
-                .and_then(Value::as_str)
+            let repo = tile_control_net_repo
                 .filter(|repo| !repo.trim().is_empty())
                 .unwrap_or("xinsir/controlnet-tile-sdxl-1.0");
             let root = snapshot(repo)?;

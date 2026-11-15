@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_policy::apply_candle_image_load_shape;
 use super::load_spec::attach_manifest_text_encoder;
@@ -10,8 +11,8 @@ use super::pid::pid_effective_dims;
 use super::pid::pid_output_tier;
 use super::pid::resolve_pid_weights;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 use super::CancelFlag;
@@ -24,7 +25,6 @@ use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
 use super::Quant;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
@@ -117,10 +117,15 @@ fn resolve_flux2_control_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX.2 control modelPath")
@@ -146,11 +151,29 @@ pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &
         && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
 }
 
+pub(super) fn flux2_control_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    let request: &ImageRequest = execution;
+    is_flux2_control_model(&request.model)
+        && request.mode != "edit_image"
+        && flux2_control_candle_pose_count_resolved(execution).is_some_and(|count| count > 0)
+        && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
+}
+
 /// Strict scheduler/worker pose contract: no filtered-away malformed entries and no unbounded set.
 fn flux2_control_candle_pose_count(request: &ImageRequest) -> Option<usize> {
-    match request.advanced.get("poses") {
-        None | Some(Value::Null) => Some(0),
-        Some(Value::Array(poses))
+    match request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref()
+        .map(|bound| &bound.value)
+    {
+        None => Some(0),
+        Some(poses)
             if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
                 && poses.iter().all(Value::is_object) =>
         {
@@ -158,6 +181,14 @@ fn flux2_control_candle_pose_count(request: &ImageRequest) -> Option<usize> {
         }
         Some(_) => None,
     }
+}
+
+pub(super) fn flux2_control_candle_pose_count_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> Option<usize> {
+    (execution.pose_source_count() <= sceneworks_core::image_request::MAX_JOB_POSES
+        && execution.invalid_pose_entries().is_empty())
+    .then_some(execution.pose_source_count())
 }
 
 /// Strict control consumes a control-map overlay, not an image-reference edit route. Character
@@ -169,13 +200,13 @@ fn flux2_control_memory_request_mode(_catalog_mode: &str) -> &'static str {
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (28).
 fn flux2_control_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", FLUX2_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
+    resolved_option_or_manifest_u32(request, "steps", FLUX2_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
 }
 
 /// Resolve embedded guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0),
 /// clamped. dev rides this scalar on the transformer's guidance embedder (no true-CFG).
 fn flux2_control_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         FLUX2_CONTROL_CANDLE_DEFAULT_GUIDANCE,
@@ -189,15 +220,15 @@ fn flux2_control_candle_guidance(request: &ImageRequest) -> f32 {
 pub(super) fn flux2_control_candle_repo_file(
     request: &ImageRequest,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", FLUX2_CONTROL_CANDLE_REPO);
     let file = safe_weight_filename(
@@ -219,8 +250,11 @@ async fn ensure_flux2_control_candle_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -277,7 +311,7 @@ fn flux2_control_candle_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -436,7 +470,7 @@ impl CandleStrictControl for Flux2StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = Flux2ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
@@ -454,14 +488,18 @@ impl CandleStrictControl for Flux2StrictControl {
             cancel: cancel.clone(),
         };
         let generated = match self.memory_context.as_ref() {
-            Some(context) => {
-                model.generate_with_memory_context(context, &req, control, on_progress)
-            }
-            None => model.generate(&req, control, on_progress),
+            Some(context) => model.generate_with_memory_context_with_execution_report(
+                context,
+                &req,
+                control,
+                on_progress,
+            ),
+            None => model.generate_with_execution_report(&req, control, on_progress),
         };
-        generated.map_err(|error| {
+        let completed = generated.map_err(|error| {
             WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
-        })
+        })?;
+        completed_control_image(completed)
     }
 }
 
@@ -477,6 +515,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -493,8 +532,8 @@ pub(super) async fn generate_candle_flux2_control_stream(
     let (quant, quant_bits) = candle_quant_for_resolved_tier(request, tier, &base, true, false);
     let steps = flux2_control_candle_steps(request);
     let guidance = flux2_control_candle_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         FLUX2_CONTROL_CANDLE_DEFAULT_SCALE,
         0.0..=2.0,
@@ -506,7 +545,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         })
         .to_owned();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
     // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
@@ -641,6 +680,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

@@ -3,8 +3,8 @@ use super::adapters::resolve_adapters;
 use super::admit_conditioning_paths;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
-use super::conditioning::parse_poses;
 use super::conditioning::PoseInput;
+use super::conditioning::ResolvedImageExecution;
 use super::events::consume_gen_events;
 use super::load_spec::attach_manifest_text_encoder;
 use super::load_spec::attach_required_components;
@@ -38,13 +38,13 @@ use super::WeightsSource;
 use crate::safe_weight_filename;
 use crate::ApiClient;
 use crate::JobSnapshot;
-use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+use sceneworks_core::image_request::ControlWeightField;
 use serde_json::json;
 // Generic SDXL OpenPose ControlNet, shared by MLX and Candle.
 //
@@ -75,25 +75,20 @@ fn is_sdxl_control_model(model: &str) -> bool {
     })
 }
 
-fn has_material_sdxl_control_intent(advanced: &JsonObject) -> bool {
-    let poses_are_material = match advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) if poses.is_empty() => false,
-        Some(_) => true,
-    };
-    let named_control_is_material = match advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
-    };
-    poses_are_material
-        || named_control_is_material
-        || advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-        || advanced
-            .get("controlWeights")
-            .is_some_and(|value| !value.is_null())
+fn has_material_sdxl_control_intent(request: &ImageRequest) -> bool {
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    options
+        .poses
+        .as_ref()
+        .is_some_and(|poses| !poses.value.is_empty())
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty())
+        || options.control_image.is_some()
+        || options.control_weights.is_some()
 }
 
 /// A material pose carrier on one of the exact five supported models. This deliberately does not
@@ -103,22 +98,40 @@ pub(super) fn sdxl_control_candidate(request: &ImageRequest) -> bool {
     if !is_sdxl_control_model(&request.model) {
         return false;
     }
-    has_material_sdxl_control_intent(&request.advanced)
+    has_material_sdxl_control_intent(request)
+}
+
+pub(super) fn sdxl_control_candidate_resolved(execution: &ResolvedImageExecution) -> bool {
+    let request: &ImageRequest = execution;
+    if !is_sdxl_control_model(&request.model) {
+        return false;
+    }
+    execution.pose_source_count() > 0
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty())
+        || request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .control_image
+            .is_some()
+        || request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .control_weights
+            .is_some()
 }
 
 /// The terminal CUDA campaign proved only the q4 composition. Missing selectors resolve to each
 /// accepted model's default q4 package; explicit selectors must name q4 exactly so q8/bf16 cannot
 /// borrow the q4 receipt or fall through to a dense/on-the-fly load.
 fn validate_sdxl_control_candle_tier(request: &ImageRequest) -> WorkerResult<()> {
-    let quant_tier_is_q4 = match request.advanced.get("quantTier") {
-        None | Some(Value::Null) => true,
-        Some(Value::String(tier)) => tier.trim().eq_ignore_ascii_case("q4"),
-        Some(_) => false,
-    };
-    let quant_bits_are_q4 = match request.advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => true,
-        Some(value) => crate::payload::quant_int(value) == Some(4),
-    };
+    let quant_tier_is_q4 = request
+        .advanced_text("quantTier")
+        .is_none_or(|tier| tier.trim().eq_ignore_ascii_case("q4"));
+    let quant_bits_are_q4 = request.resolved_quant_bits().is_none_or(|bits| bits == 4);
     if quant_tier_is_q4 && quant_bits_are_q4 {
         return Ok(());
     }
@@ -149,10 +162,7 @@ fn resolve_sdxl_control_candle_q4_weights_dir(
     validate_sdxl_control_candle_tier(request)?;
     // The generic standard-tier resolver intentionally falls back to any complete installed tier.
     // Force its probe to q4, then verify the directory it actually returned before any load/admission.
-    let mut q4_request = request.clone();
-    q4_request
-        .advanced
-        .insert("mlxQuantize".to_owned(), Value::from(4));
+    let q4_request = request.with_probe_quant_bits(4);
     bind_sdxl_control_candle_q4_resolution(resolve_weights_dir(&q4_request, settings)?)
 }
 
@@ -164,16 +174,11 @@ fn sdxl_control_native_backend() -> &'static str {
     }
 }
 
-fn strict_optional_number(advanced: &JsonObject, key: &str) -> WorkerResult<Option<f32>> {
-    let Some(value) = advanced.get(key) else {
+fn strict_optional_number(request: &ImageRequest, key: &'static str) -> WorkerResult<Option<f32>> {
+    let Some(number) = request.advanced_f64(key) else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let number = value
-        .as_f64()
-        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+    let number = Some(number)
         .filter(|value| value.is_finite())
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!("advanced.{key} must be a finite number"))
@@ -186,16 +191,12 @@ fn strict_optional_number(advanced: &JsonObject, key: &str) -> WorkerResult<Opti
     Ok(Some(number))
 }
 
-fn strict_optional_steps(advanced: &JsonObject) -> WorkerResult<Option<u32>> {
-    let Some(value) = advanced.get("steps") else {
+fn strict_optional_steps(request: &ImageRequest) -> WorkerResult<Option<u32>> {
+    let Some(value) = request.advanced_i64("steps") else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let steps = value
-        .as_u64()
-        .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
+    let steps = u64::try_from(value)
+        .ok()
         .filter(|steps| (1..=80).contains(steps))
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
@@ -205,16 +206,13 @@ fn strict_optional_steps(advanced: &JsonObject) -> WorkerResult<Option<u32>> {
     Ok(Some(steps as u32))
 }
 
-fn optional_advanced_name(advanced: &JsonObject, key: &str) -> WorkerResult<Option<String>> {
-    let Some(value) = advanced.get(key) else {
+fn optional_advanced_name(
+    request: &ImageRequest,
+    key: &'static str,
+) -> WorkerResult<Option<String>> {
+    let Some(value) = request.advanced_text(key) else {
         return Ok(None);
     };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let value = value
-        .as_str()
-        .ok_or_else(|| WorkerError::InvalidPayload(format!("advanced.{key} must be a string")))?;
     let value = value.trim();
     if value.is_empty() || value.eq_ignore_ascii_case("default") {
         Ok(None)
@@ -223,7 +221,14 @@ fn optional_advanced_name(advanced: &JsonObject, key: &str) -> WorkerResult<Opti
     }
 }
 
-fn validate_sdxl_control_request(request: &ImageRequest) -> WorkerResult<Vec<PoseInput>> {
+fn validate_sdxl_control_request(
+    execution: &ResolvedImageExecution,
+) -> WorkerResult<Vec<PoseInput>> {
+    let request: &ImageRequest = execution;
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
     if !is_sdxl_control_model(&request.model) {
         return Err(WorkerError::InvalidPayload(format!(
             "SDXL pose control is not supported for model '{}'",
@@ -253,81 +258,68 @@ fn validate_sdxl_control_request(request: &ImageRequest) -> WorkerResult<Vec<Pos
             "SDXL pose control cannot be combined with Hires.fix".to_owned(),
         ));
     }
-    for key in ["controlImage", "phases"] {
-        if request
-            .advanced
-            .get(key)
-            .is_some_and(|value| !value.is_null())
-        {
+    for (key, present) in [
+        ("controlImage", options.control_image.is_some()),
+        ("phases", options.phases.is_some()),
+    ] {
+        if present {
             return Err(WorkerError::InvalidPayload(format!(
                 "advanced.{key} cannot be combined with SDXL pose control"
             )));
         }
     }
-    if request
-        .advanced
-        .get("usePid")
-        .is_some_and(|value| value.as_bool() != Some(false) && !value.is_null())
-    {
+    if request.advanced_bool("usePid").unwrap_or(false) {
         return Err(WorkerError::InvalidPayload(
             "advanced.usePid cannot be combined with SDXL pose control".to_owned(),
         ));
     }
-    if request.advanced.get("decoder").is_some_and(|value| {
-        !value.is_null()
-            && value
-                .as_str()
-                .is_none_or(|value| !matches!(value.trim(), "" | "native"))
-    }) {
+    if request
+        .advanced_text("decoder")
+        .is_some_and(|value| !matches!(value.trim(), "" | "native"))
+    {
         return Err(WorkerError::InvalidPayload(
             "advanced.decoder cannot be combined with SDXL pose control".to_owned(),
         ));
     }
 
-    match request.advanced.get("controlMode") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(mode)) if mode.trim().eq_ignore_ascii_case("pose") => {}
-        Some(Value::String(mode)) => {
+    match request.advanced_text("controlMode") {
+        None => {}
+        Some(mode) if mode.trim().eq_ignore_ascii_case("pose") => {}
+        Some(mode) => {
             return Err(WorkerError::InvalidPayload(format!(
                 "SDXL control supports pose only; advanced.controlMode '{}' is unsupported",
                 mode.trim()
             )));
         }
-        Some(_) => {
-            return Err(WorkerError::InvalidPayload(
-                "advanced.controlMode must be the string 'pose' for SDXL control".to_owned(),
-            ));
-        }
     }
 
-    let poses = request.advanced.get("poses").ok_or_else(|| {
-        WorkerError::InvalidPayload("SDXL pose control requires advanced.poses".to_owned())
-    })?;
-    let poses = poses
-        .as_array()
-        .ok_or_else(|| WorkerError::InvalidPayload("advanced.poses must be an array".to_owned()))?;
-    if poses.is_empty() {
+    if !execution.has_pose_source() {
+        return Err(WorkerError::InvalidPayload(
+            "SDXL pose control requires advanced.poses".to_owned(),
+        ));
+    }
+    if execution.pose_source_count() == 0 {
         return Err(WorkerError::InvalidPayload(
             "SDXL pose control requires at least one pose".to_owned(),
         ));
     }
-    if poses.len() > sceneworks_core::image_request::MAX_JOB_POSES {
+    if execution.pose_source_count() > sceneworks_core::image_request::MAX_JOB_POSES {
         return Err(WorkerError::InvalidPayload(format!(
             "advanced.poses exceeds the {}-pose job limit",
             sceneworks_core::image_request::MAX_JOB_POSES
         )));
     }
-    if !poses.iter().all(Value::is_object) {
+    if !execution.invalid_pose_entries().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "every advanced.poses entry must be an object".to_owned(),
         ));
     }
-    Ok(parse_poses(request))
+    Ok(execution.poses().to_vec())
 }
 
 fn sdxl_control_scale(request: &ImageRequest) -> WorkerResult<f32> {
-    let scale = strict_optional_number(&request.advanced, "controlScale")?
-        .unwrap_or(SDXL_CONTROL_DEFAULT_SCALE);
+    let scale =
+        strict_optional_number(request, "controlScale")?.unwrap_or(SDXL_CONTROL_DEFAULT_SCALE);
     if !(0.0..=2.0).contains(&scale) {
         return Err(WorkerError::InvalidPayload(
             "advanced.controlScale must be between 0 and 2".to_owned(),
@@ -344,10 +336,10 @@ struct SdxlControlSampling {
 }
 
 fn sdxl_control_sampling(request: &ImageRequest) -> WorkerResult<SdxlControlSampling> {
-    let requested_steps = strict_optional_steps(&request.advanced)?;
-    let requested_guidance = strict_optional_number(&request.advanced, "guidanceScale")?;
-    let requested_sampler = optional_advanced_name(&request.advanced, "sampler")?;
-    let requested_scheduler = optional_advanced_name(&request.advanced, "scheduler")?;
+    let requested_steps = strict_optional_steps(request)?;
+    let requested_guidance = strict_optional_number(request, "guidanceScale")?;
+    let requested_sampler = optional_advanced_name(request, "sampler")?;
+    let requested_scheduler = optional_advanced_name(request, "scheduler")?;
 
     if request.model == "realvisxl_lightning" {
         let guidance = requested_guidance.unwrap_or(SDXL_CONTROL_LIGHTNING_GUIDANCE);
@@ -412,35 +404,31 @@ fn sdxl_control_sampling(request: &ImageRequest) -> WorkerResult<SdxlControlSamp
 }
 
 fn sdxl_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String, String)> {
-    let control = match request.advanced.get("controlWeights") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(control)) => Some(control),
-        Some(_) => {
-            return Err(WorkerError::InvalidPayload(
-                "advanced.controlWeights must be an object".to_owned(),
-            ));
-        }
-    };
-    let string_field = |key: &str| -> WorkerResult<Option<String>> {
-        let Some(value) = control.and_then(|control| control.get(key)) else {
-            return Ok(None);
+    let control = super::strict_control::resolved_control_weights(request);
+    let string_field =
+        |key: &str, field: Option<&ControlWeightField<String>>| -> WorkerResult<Option<String>> {
+            match field {
+                None | Some(ControlWeightField::Absent) => Ok(None),
+                Some(ControlWeightField::Valid(value)) if !value.trim().is_empty() => {
+                    Ok(Some(value.trim().to_owned()))
+                }
+                Some(ControlWeightField::Valid(_)) => Err(WorkerError::InvalidPayload(format!(
+                    "advanced.controlWeights.{key} cannot be empty"
+                ))),
+                Some(ControlWeightField::Null | ControlWeightField::Invalid) => {
+                    Err(WorkerError::InvalidPayload(format!(
+                        "advanced.controlWeights.{key} must be a string"
+                    )))
+                }
+            }
         };
-        let value = value.as_str().ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("advanced.controlWeights.{key} must be a string"))
-        })?;
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "advanced.controlWeights.{key} cannot be empty"
-            )));
-        }
-        Ok(Some(value.to_owned()))
-    };
     let default_repo = strict_control_default_repo(SDXL_CONTROL_ENGINE_ID);
     debug_assert_eq!(default_repo, SDXL_CONTROL_REPO);
-    let repo = string_field("repo")?.unwrap_or_else(|| default_repo.to_owned());
+    let repo = string_field("repo", control.map(|fields| &fields.repo))?
+        .unwrap_or_else(|| default_repo.to_owned());
     let file = safe_weight_filename(
-        &string_field("filename")?.unwrap_or_else(|| SDXL_CONTROL_FILE.to_owned()),
+        &string_field("filename", control.map(|fields| &fields.filename))?
+            .unwrap_or_else(|| SDXL_CONTROL_FILE.to_owned()),
         "advanced.controlWeights.filename",
     )?;
     let revision = trusted_control_weight_revision(request, SDXL_CONTROL_ENGINE_ID, &repo, &file)?;
@@ -543,11 +531,7 @@ fn apply_sdxl_control_mlx_residency(spec: LoadSpec) -> WorkerResult<LoadSpec> {
 
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn sdxl_control_flash_attn(request: &ImageRequest) -> bool {
-    request
-        .advanced
-        .get("flashAttn")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    request.advanced_bool("flashAttn").unwrap_or(true)
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -568,7 +552,7 @@ fn sdxl_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -585,15 +569,17 @@ fn sdxl_control_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("SDXL pose-control generation failed: {error}"))
-    })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let completed = generator
+        .generate_with_execution_report(&request, on_progress)
+        .map_err(|error| {
+            WorkerError::Engine(format!("SDXL pose-control generation failed: {error}"))
+        })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("SDXL pose-control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, completed.execution))
         }
         _ => Err(WorkerError::Engine(
             "SDXL pose-control generator returned non-image output".to_owned(),
@@ -607,12 +593,13 @@ pub(super) async fn generate_sdxl_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let poses = validate_sdxl_control_request(request)?;
+    let poses = validate_sdxl_control_request(execution)?;
     // `backend` is the telemetry device label (`metal`, `cuda:0`, ...), not the provider family.
     // Select the native provider from the compiled bundle; both current native implementations
     // support the exact single-ControlNet Lightning composition.
@@ -736,34 +723,44 @@ pub(super) async fn generate_sdxl_control_stream(
             })
         },
         move |generator, tx, cancel| {
-            drive_gen_items(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &ControlKind::Pose,
-                    None,
-                    Some(&pose),
-                    None,
-                    width,
-                    height,
-                    stickwidth,
-                    None,
-                )?;
-                let conditioning =
-                    build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-                let (out_w, out_h, pixels) = sdxl_control_generate_one(
-                    generator.as_ref(),
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    &sampling,
-                    conditioning,
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
-            })
+            drive_gen_items(
+                tx.clone(),
+                poses,
+                move |index, pose, preview, on_progress| {
+                    let control = preprocess_control_entry(
+                        &ControlKind::Pose,
+                        None,
+                        Some(&pose),
+                        None,
+                        width,
+                        height,
+                        stickwidth,
+                        None,
+                    )?;
+                    let conditioning =
+                        build_control_conditioning(control, ControlKind::Pose, control_scale, None);
+                    let (out_w, out_h, pixels, execution) = sdxl_control_generate_one(
+                        generator.as_ref(),
+                        &prompt,
+                        negative_prompt.clone(),
+                        width,
+                        height,
+                        seed,
+                        &sampling,
+                        conditioning,
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    Ok(Some((seed, out_w, out_h, pixels)))
+                },
+            )
         },
     );
 
@@ -790,7 +787,13 @@ mod sdxl_control_tests {
     use super::*;
 
     fn request(value: Value) -> ImageRequest {
-        ImageRequest::from_payload(value.as_object().expect("payload"))
+        let payload = value.as_object().expect("payload");
+        ImageRequest::from_resolved(payload, payload).expect("resolved image request")
+    }
+
+    fn validate_request(request: &ImageRequest) -> WorkerResult<Vec<PoseInput>> {
+        let execution = ResolvedImageExecution::new(request)?;
+        validate_sdxl_control_request(&execution)
     }
 
     fn offline_settings_at(data_dir: &Path) -> Settings {
@@ -1095,7 +1098,7 @@ mod sdxl_control_tests {
             "model": "sdxl", "mode": "text_to_image",
             "advanced": { "controlMode": "pose", "poses": [{ "keypoints": [] }] }
         }));
-        assert_eq!(validate_sdxl_control_request(&valid).unwrap().len(), 1);
+        assert_eq!(validate_request(&valid).unwrap().len(), 1);
 
         for bad in [
             json!({ "model": "sdxl", "mode": "edit_image", "sourceAssetId": "source", "advanced": { "poses": [{}] } }),
@@ -1104,13 +1107,16 @@ mod sdxl_control_tests {
             json!({ "model": "sdxl", "advanced": { "controlMode": "canny" } }),
             json!({ "model": "sdxl", "advanced": { "controlMode": "pose" } }),
             json!({ "model": "sdxl", "advanced": { "poses": [] } }),
-            json!({ "model": "sdxl", "advanced": { "poses": "bad" } }),
             json!({ "model": "sdxl", "advanced": { "poses": [null] } }),
             json!({ "model": "sdxl", "advanced": { "poses": [{}], "usePid": true } }),
             json!({ "model": "sdxl", "advanced": { "poses": [{}], "phases": [] } }),
         ] {
-            assert!(validate_sdxl_control_request(&request(bad)).is_err());
+            assert!(validate_request(&request(bad)).is_err());
         }
+
+        let malformed = json!({ "model": "sdxl", "advanced": { "poses": "bad" } });
+        let payload = malformed.as_object().unwrap();
+        assert!(ImageRequest::from_resolved(payload, payload).is_err());
 
         let overflowing_scale = request(json!({
             "model": "sdxl",
@@ -1123,7 +1129,7 @@ mod sdxl_control_tests {
             "model": "sdxl",
             "advanced": { "poses": too_many }
         }));
-        assert!(validate_sdxl_control_request(&over_limit).is_err());
+        assert!(validate_request(&over_limit).is_err());
     }
 
     #[test]

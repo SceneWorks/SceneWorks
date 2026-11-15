@@ -1,11 +1,11 @@
 use super::admit_conditioning_overlay;
-use super::conditioning::parse_poses;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
 use super::events::consume_gen_events;
 use super::resolve_seed;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
+use super::stream::GenEvent;
 use super::strict_control::ensure_depth_estimator_dir;
 use super::strict_control::preprocess_control_entry;
 use super::strict_control::requested_control_kind;
@@ -24,11 +24,14 @@ use crate::JsonObject;
 use crate::Path;
 use crate::Settings;
 use crate::Value;
+use crate::WorkerError;
 use crate::WorkerResult;
+use gen_core::generator::{CompletedGeneration, ExecutionIdentity};
+use gen_core::GenerationOutput;
 
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the
-// MLX `strict_control.rs` driver: the three bespoke non-registry candle control providers
-// (`ZImageControl` / `Flux2Control` / `QwenControl`) used to each carry a near-identical
+// MLX `strict_control.rs` driver: the six bespoke non-registry candle control providers
+// (FLUX.1/2, Qwen, Z-Image, Krea, Kolors) used to each carry a near-identical
 // `start_gen_stream` lane that rendered a DWPose skeleton, fed it as a raw control `Image` to the
 // provider, and scored the result. That scaffold — control-kind resolution + validation against the
 // SAME [`STRICT_CONTROL_ENGINES`] table, pose/canny/depth/user-passthrough preprocessing via the
@@ -108,7 +111,7 @@ pub(super) trait CandleStrictControl: Send + 'static {
     /// Generate one image conditioned on the already-preprocessed `control` map (pose skeleton, canny
     /// edges, or depth map — the driver picked which). Builds the bespoke request struct internally; the
     /// driver supplies the shared seed + cancel + progress callback + preview sink. Returns the output
-    /// [`Image`].
+    /// [`Image`] and the provider's same-attempt execution identity.
     ///
     /// `preview` is the job's **live** per-image [`gen_core::PreviewSink`] (epic 16948, sc-16962), built by
     /// [`preview_sink_for`](super::stream) and handed down by [`run_candle_strict_control`]. Every bespoke
@@ -129,7 +132,229 @@ pub(super) trait CandleStrictControl: Send + 'static {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image>;
+    ) -> WorkerResult<(Image, ExecutionIdentity)>;
+}
+
+/// Extract exactly one RGB image from a completed bespoke provider call. A missing or extra image
+/// is an engine error; never attach its identity to a different pose's output.
+pub(super) fn completed_control_image(
+    completed: CompletedGeneration,
+) -> WorkerResult<(Image, ExecutionIdentity)> {
+    let CompletedGeneration {
+        generation,
+        execution,
+    } = completed;
+    match generation.output {
+        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+            Ok((images.remove(0), execution))
+        }
+        _ => Err(WorkerError::Engine(
+            "strict-control provider did not complete exactly one RGB image".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_control_item<P: CandleStrictControl>(
+    provider: &P,
+    model: &P::Model,
+    control: &Image,
+    seed: u64,
+    cancel: &CancelFlag,
+    preview: &gen_core::PreviewSink,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Option<(Image, ExecutionIdentity)>> {
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    match provider.generate_one(model, control, seed, cancel, preview, on_progress) {
+        Ok(_) if cancel.is_cancelled() => Ok(None),
+        Ok(completed) => Ok(Some(completed)),
+        Err(_) if cancel.is_cancelled() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn send_control_report(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+    execution: ExecutionIdentity,
+) -> WorkerResult<bool> {
+    let mut facts = JsonObject::new();
+    facts.insert(
+        "workerExecutionReport".into(),
+        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+    );
+    Ok(tx
+        .blocking_send(GenEvent::ImageFacts { index, facts })
+        .is_ok())
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use gen_core::generator::ExecutionUnavailable;
+
+    fn unavailable(code: &str) -> ExecutionIdentity {
+        ExecutionIdentity::Unavailable {
+            reason: ExecutionUnavailable {
+                code: code.into(),
+                detail: "fixture has no model observations".into(),
+                missing_facts: vec!["fixture observations".into()],
+            },
+        }
+    }
+
+    struct Fixture;
+
+    impl CandleStrictControl for Fixture {
+        type Model = ();
+
+        fn engine_id(&self) -> &'static str {
+            "fixture"
+        }
+        fn engine_label(&self) -> &'static str {
+            "fixture"
+        }
+        fn stream_tag(&self) -> &'static str {
+            "fixture"
+        }
+        fn out_width(&self) -> u32 {
+            1
+        }
+        fn out_height(&self) -> u32 {
+            1
+        }
+        fn conditioning_admission(&self) -> ConditioningAdmission {
+            ConditioningAdmission::GatedInPreamble { gate: "fixture" }
+        }
+        fn load(&self) -> WorkerResult<Self::Model> {
+            Ok(())
+        }
+        fn generate_one(
+            &self,
+            _model: &Self::Model,
+            _control: &Image,
+            seed: u64,
+            cancel: &CancelFlag,
+            _preview: &gen_core::PreviewSink,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> WorkerResult<(Image, ExecutionIdentity)> {
+            if seed == 2 {
+                return Err(WorkerError::Engine("fixture error".into()));
+            }
+            if seed == 3 {
+                cancel.cancel();
+            }
+            Ok((
+                Image {
+                    width: seed as u32,
+                    height: 1,
+                    pixels: vec![0; seed as usize * 3],
+                },
+                unavailable(&format!("attempt-{seed}")),
+            ))
+        }
+    }
+
+    #[test]
+    fn strict_control_reports_follow_each_success_and_skip_error_cancel_retry() {
+        let provider = Fixture;
+        let control = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 3],
+        };
+        let preview = gen_core::PreviewSink::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut progress = |_| {};
+        let first_cancel = CancelFlag::default();
+        let first = generate_control_item(
+            &provider,
+            &(),
+            &control,
+            1,
+            &first_cancel,
+            &preview,
+            &mut progress,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0.width, 1);
+        assert!(send_control_report(&tx, 0, first.1).unwrap());
+
+        let failed_cancel = CancelFlag::default();
+        assert!(generate_control_item(
+            &provider,
+            &(),
+            &control,
+            2,
+            &failed_cancel,
+            &preview,
+            &mut progress
+        )
+        .is_err());
+        let canceled = CancelFlag::default();
+        assert!(generate_control_item(
+            &provider,
+            &(),
+            &control,
+            3,
+            &canceled,
+            &preview,
+            &mut progress
+        )
+        .unwrap()
+        .is_none());
+
+        let retry_cancel = CancelFlag::default();
+        let retry = generate_control_item(
+            &provider,
+            &(),
+            &control,
+            4,
+            &retry_cancel,
+            &preview,
+            &mut progress,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.0.width, 4);
+        assert!(send_control_report(&tx, 1, retry.1).unwrap());
+
+        let first_fact = rx.try_recv().unwrap();
+        let retry_fact = rx.try_recv().unwrap();
+        assert!(
+            matches!(first_fact, GenEvent::ImageFacts { index: 0, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-1")
+        );
+        assert!(
+            matches!(retry_fact, GenEvent::ImageFacts { index: 1, facts } if facts["workerExecutionReport"]["reason"]["code"] == "attempt-4")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn completed_control_image_refuses_missing_or_extra_outputs() {
+        for images in [
+            Vec::new(),
+            vec![
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 3]
+                };
+                2
+            ],
+        ] {
+            let completed = CompletedGeneration {
+                generation: gen_core::GenerationReport::from_output(GenerationOutput::Images(
+                    images,
+                )),
+                execution: unavailable("fixture"),
+            };
+            assert!(completed_control_image(completed).is_err());
+        }
+    }
 }
 
 /// The shared async preamble + per-pose streaming driver for a candle strict-control lane (sc-8304).
@@ -155,6 +380,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     backend: &str,
     provider: P,
     raw_settings: JsonObject,
+    execution: &super::conditioning::ResolvedImageExecution,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
@@ -203,12 +429,12 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     // depth map (the passthrough short-circuits estimation). Fetched once on the first depth job (the
     // off-Mac candle estimator, sc-8413).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let pose_count = poses.len();
 
     // Render the control map + generate at the provider's output dims (normally the request's W×H; a PiD
@@ -259,7 +485,8 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
+            let report_tx = tx.clone();
+            drive_gen_items_scored(tx, poses, move |index, pose, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -280,18 +507,21 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
                 // `WorkerProgressCard`. This closure used to bind `_preview` and drop it, which is why the
                 // Krea control lane shipped an inert `Default::default()` sink.
-                let out = match provider.generate_one(
+                let Some((out, execution)) = generate_control_item(
+                    &provider,
                     &model,
                     &control,
                     seed as u64,
                     &cancel,
                     &preview,
                     on_progress,
-                ) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => return Err(error),
+                )?
+                else {
+                    return Ok(None);
                 };
+                if !send_control_report(&report_tx, index, execution)? {
+                    return Ok(None);
+                }
                 // Score this finished pose against the cached source embedding (sc-4410). The candle
                 // strict-control lane produces the FINAL image directly (no face-restore pass). Clone
                 // paid ONLY when a scorer exists; a full-body / turned pose with no reliable frontal

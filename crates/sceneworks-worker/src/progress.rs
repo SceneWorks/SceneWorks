@@ -619,6 +619,41 @@ tokio::task_local! {
     /// the scope reaches every checkpoint. Unset outside a job (e.g. unit tests) ⇒ [`shutdown_requested`]
     /// reads `false`.
     pub(crate) static SHUTDOWN_FLAG: gen_core::CancelFlag;
+    /// The private capability minted by the accepted claim. It is scoped to one
+    /// job future and leaves the worker only on that job's terminal progress POST.
+    pub(crate) static EXECUTION_CLAIM_CAPABILITY: Option<String>;
+    /// Immutable receipt supplied only by the exact-replay claim. Route
+    /// preflight compares this with the chosen plan before inference starts.
+    pub(crate) static EXACT_REPLAY_EXPECTED: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>;
+    /// Project root resolved by the worker rather than an output fact.
+    pub(crate) static EXECUTION_PROJECT_ROOT: Option<PathBuf>;
+}
+
+pub(crate) async fn with_execution_project_root<F>(root: Option<PathBuf>, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXECUTION_PROJECT_ROOT.scope(root, future).await
+}
+
+pub(crate) async fn with_exact_replay_expected<F>(
+    expected: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXACT_REPLAY_EXPECTED.scope(expected, future).await
+}
+
+pub(crate) async fn with_execution_claim_capability<F>(
+    capability: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXECUTION_CLAIM_CAPABILITY.scope(capability, future).await
 }
 
 /// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
@@ -679,8 +714,345 @@ pub(crate) async fn post_job_progress(
     // resulting 409 propagates as WorkerError::Api and aborts the local job
     // handling — i.e. the worker abandons the job (sc-4172).
     payload.worker_id = Some(api.worker_id.clone());
+    if JobStatus::terminal_statuses().contains(&payload.status.as_str()) {
+        if let Some(capability) = EXECUTION_CLAIM_CAPABILITY
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+        {
+            payload.extra.insert(
+                "executionClaimCapability".to_owned(),
+                Value::String(capability),
+            );
+            if payload.status == JobStatus::Completed
+                && !payload.extra.contains_key("executionReceipt")
+            {
+                if let Some(result) = payload.result.clone() {
+                    let root = EXECUTION_PROJECT_ROOT.try_with(Clone::clone).ok().flatten();
+                    let receipt = crate::load_progress::spawn_blocking(move || {
+                        unavailable_completed_receipt(&result, root.as_deref())
+                    })
+                    .await
+                    .map_err(|error| crate::task_join_error("completed media receipt", error))??;
+                    if let Some(receipt) = receipt {
+                        payload.extra.insert("executionReceipt".to_owned(), receipt);
+                    }
+                }
+            }
+        }
+    }
     api.post_json(&format!("/api/v1/jobs/{job_id}/progress"), &payload)
         .await
+}
+
+/// A completed route without the provider's report still records its claimed
+/// attempt and output association. It cannot qualify for exact replay. Native
+/// routes replace this with their actual completed provider report and file
+/// digests at their terminal boundary.
+fn unavailable_completed_receipt(
+    result: &JsonObject,
+    project_root: Option<&Path>,
+) -> WorkerResult<Option<Value>> {
+    use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
+    use std::io::Read;
+    let writes = result
+        .get("assetWrites")
+        .or_else(|| result.get("datasetWrites"))
+        .and_then(Value::as_array);
+    let output_count = result
+        .get("expectedCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .or_else(|| writes.map(|writes| writes.len()))
+        .unwrap_or(1);
+    if output_count == 0 || output_count > 10_000 {
+        return Ok(None);
+    }
+    let mut outputs = (0..output_count)
+        .map(|output_index| OutputExecutionBinding {
+            output_index,
+            execution: None,
+            artifact_ids: Vec::new(),
+            artifact_sha256: Vec::new(),
+            stages: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(writes) = writes {
+        let confined_root = project_root.map(Path::canonicalize).transpose()?;
+        for (position, fact) in writes.iter().enumerate() {
+            let Some(id) = fact.get("assetId").and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            let output_index = fact
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(position);
+            let Some(output) = outputs.get_mut(output_index) else {
+                return Ok(None);
+            };
+            output.artifact_ids.push(id.to_owned());
+            if let Some(report) = fact.get("workerExecutionReport") {
+                if output
+                    .execution
+                    .as_ref()
+                    .is_some_and(|previous| previous != report)
+                {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed output has conflicting provider reports".into(),
+                    ));
+                }
+                output.execution = Some(report.clone());
+            }
+            if let Some(stages) = fact.get("workerExecutionStages") {
+                let stages: Vec<sceneworks_core::execution_receipt::ExecutionStageBinding> =
+                    serde_json::from_value(stages.clone()).map_err(WorkerError::Json)?;
+                if !output.stages.is_empty() && output.stages != stages {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed output has conflicting provider stages".into(),
+                    ));
+                }
+                output.stages = stages;
+            }
+            if let Some(relative) = fact.get("mediaPath").and_then(Value::as_str) {
+                let root = confined_root.as_ref().ok_or_else(|| {
+                    WorkerError::InvalidPayload("completed media has no project root".into())
+                })?;
+                let path = root.join(relative).canonicalize()?;
+                if !path.starts_with(root) || !path.is_file() {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed media escapes the project".into(),
+                    ));
+                }
+                let mut file = std::fs::File::open(path)?;
+                let mut digest = Sha256::new();
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                }
+                output
+                    .artifact_sha256
+                    .push(sceneworks_core::hashing::hex(&digest.finalize()));
+            }
+        }
+    }
+    for output in &mut outputs {
+        if output.artifact_sha256.len() != output.artifact_ids.len() {
+            output.artifact_sha256.clear();
+        }
+    }
+    let receipt = WorkerExecutionReceipt {
+        version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
+        execution: result
+            .get("workerExecutionReport")
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "state":"unavailable",
+                    "reason":{
+                        "code":"provider_report_unavailable",
+                        "detail":"completed route did not publish a provider execution report",
+                        "missing_facts":["provider_resolved_execution"]
+                    }
+                })
+            }),
+        outputs,
+        stages: result
+            .get("workerExecutionStages")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(WorkerError::Json)?
+            .unwrap_or_default(),
+    };
+    if sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).is_err() {
+        return Ok(None);
+    }
+    Ok(serde_json::to_value(receipt).ok())
+}
+
+#[cfg(test)]
+#[test]
+fn unavailable_receipt_keeps_each_completed_output_association() {
+    let result = serde_json::json!({
+        "expectedCount":2,
+        "assetWrites":[
+            {"assetId":"base-a","index":0},
+            {"assetId":"base-b","index":1},
+            {"assetId":"variant-a","index":0}
+        ]
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["execution"]["state"], "unavailable");
+    assert_eq!(
+        receipt["outputs"][0]["artifactIds"],
+        serde_json::json!(["base-a", "variant-a"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactIds"],
+        serde_json::json!(["base-b"])
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn completed_media_receipt_keeps_the_provider_report_with_its_asset() {
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "assetWrites":[{"assetId":"svg","index":0,"workerExecutionReport":report}]
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["outputs"][0]["execution"], report);
+    let answer = serde_json::json!({"answer":"yes","workerExecutionReport":report});
+    let answer_receipt = unavailable_completed_receipt(answer.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer_receipt["execution"], report);
+}
+
+#[cfg(test)]
+#[test]
+fn terminal_media_receipt_hashes_audio_video_vector_and_document_files() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let names = ["clip.mp4", "track.wav", "vector.svg", "document.json"];
+    for name in names {
+        std::fs::write(project.path().join(name), name.as_bytes()).unwrap();
+    }
+    std::fs::write(outside.path().join("elsewhere.mp4"), b"escape").unwrap();
+    let writes = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            serde_json::json!({
+                "assetId":format!("asset-{index}"), "index":index, "mediaPath":name
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"expectedCount":4,"assetWrites":writes});
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(
+            receipt["outputs"][index]["artifactSha256"][0],
+            sceneworks_core::hashing::hex(&Sha256::digest(name.as_bytes()))
+        );
+    }
+    let escaped = serde_json::json!({"expectedCount":1,"assetWrites":[{
+        "assetId":"escape", "index":0, "mediaPath":outside.path().join("elsewhere.mp4")
+    }]});
+    assert!(
+        unavailable_completed_receipt(escaped.as_object().unwrap(), Some(project.path())).is_err()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn seedvr2_upscale_receipt_binds_window_order_and_final_mp4_bytes() {
+    let project = tempfile::tempdir().unwrap();
+    let bytes = b"final encoded and muxed clip";
+    std::fs::write(project.path().join("upscaled.mp4"), bytes).unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let stages = [0, 1]
+        .into_iter()
+        .map(|index| {
+            serde_json::json!({"stage":format!("seedvr2_window_{index}"),"execution":report.clone()})
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "generationSet":{"mode":"video_upscale"},
+        "assetWrites":[{"assetId":"upscaled","index":0,"mediaPath":"upscaled.mp4"}],
+        "workerExecutionStages":stages,
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["stages"], result["workerExecutionStages"]);
+    assert_eq!(receipt["outputs"][0]["artifactIds"][0], "upscaled");
+    assert_eq!(
+        receipt["outputs"][0]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(bytes))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn detail_receipt_binds_tile_order_and_final_composite_png() {
+    let project = tempfile::tempdir().unwrap();
+    let bytes = b"encoded detail composite";
+    std::fs::write(project.path().join("detail.png"), bytes).unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let stages = [0, 1]
+        .into_iter()
+        .map(|index| {
+            serde_json::json!({"stage":format!("detail_tile_{index}"),"execution":report.clone()})
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "generationSet":{"mode":"image_detail"},
+        "assetWrites":[{"assetId":"detail","index":0,"mediaPath":"detail.png",
+            "rawAdapterSettings":{"detail":{"tiles":2}}}],
+        "workerExecutionStages":stages,
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["stages"], result["workerExecutionStages"]);
+    assert_eq!(
+        receipt["outputs"][0]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(bytes))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn dataset_upscale_receipt_hashes_ordered_derivatives_without_gallery_writes() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("a.png"), b"first dataset png").unwrap();
+    std::fs::write(project.path().join("b.png"), b"second dataset png").unwrap();
+    let result = serde_json::json!({
+        "expectedCount":2,
+        "datasetWrites":[
+            {"assetId":"dataset:d:a","index":0,"mediaPath":"a.png"},
+            {"assetId":"dataset:d:b","index":1,"mediaPath":"b.png"}
+        ],
+        "workerExecutionReport":gen_core::generator::ExecutionIdentity::provider_default(),
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt["outputs"][0]["artifactIds"],
+        serde_json::json!(["dataset:d:a"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactIds"],
+        serde_json::json!(["dataset:d:b"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"second dataset png"))
+    );
+    let mut missing = result;
+    missing["datasetWrites"][1]["mediaPath"] = serde_json::json!("missing.png");
+    assert!(
+        unavailable_completed_receipt(missing.as_object().unwrap(), Some(project.path())).is_err()
+    );
 }
 
 pub(crate) fn progress_payload(

@@ -94,19 +94,14 @@ pub(crate) fn iris_run_memory_refusal(
     config: &sceneworks_core::training::TrainingConfig,
     devices: u64,
     capacity_gib: Option<f64>,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> Option<String> {
     use sceneworks_core::training::iris::curricula;
-    let world = curricula::iris_world_size(config);
+    let world = options.iris.dist_topology.world_size;
     let ranks = curricula::ranks_per_device(world, devices);
-    let network_type = config
-        .advanced
-        .get("networkType")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("lora");
+    let network_type = options.common.network_type.as_str();
     let floor = curricula::iris_run_memory_floor(lane, config, devices);
-    let repa = sceneworks_core::training::iris::iris_options(config)
-        .map(|options| curricula::iris_repa_enabled(&options))
-        .unwrap_or(false);
+    let repa = options.iris.repa_enabled();
     let mut shape = run_shape(network_type, config.resolution);
     if repa {
         shape.push_str(" with REPA (+ the DINOv2 teacher)");
@@ -117,7 +112,7 @@ pub(crate) fn iris_run_memory_refusal(
             device_noun(lane)
         ));
     }
-    let advice = match activation_checkpointing_hint(lane, config, devices, capacity_gib) {
+    let advice = match activation_checkpointing_hint(lane, config, devices, capacity_gib, options) {
         Some(hint) => format!("{hint} Otherwise: {GENERATION_ADVICE}"),
         None => GENERATION_ADVICE.to_owned(),
     };
@@ -144,16 +139,11 @@ fn activation_checkpointing_hint(
     config: &sceneworks_core::training::TrainingConfig,
     devices: u64,
     capacity_gib: Option<f64>,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> Option<String> {
-    use sceneworks_core::training::iris::{
-        curricula, iris_full_activation_checkpointing, IRIS_OPTIONS_KEY,
-    };
-    let full = config
-        .advanced
-        .get("networkType")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|network| network.trim().eq_ignore_ascii_case("full"));
-    if !full || iris_full_activation_checkpointing(config) {
+    use sceneworks_core::training::iris::{curricula, IRIS_OPTIONS_KEY};
+    let full = options.common.network_type.eq_ignore_ascii_case("full");
+    if !full || options.iris.full_activation_checkpointing {
         return None;
     }
     let mut checkpointed = config.clone();
@@ -298,7 +288,15 @@ pub(crate) fn iris_plan_memory_refusal(
     if objective == IrisObjective::Generation {
         // sc-25689: the whole run — one rank's floor (+ the REPA teacher) times the ranks sharing
         // the busiest of `devices`.
-        return iris_run_memory_refusal(lane, config, devices, capacity_gib);
+        let options = match sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+            config,
+            sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+            base_model,
+        ) {
+            Ok(options) => options,
+            Err(message) => return Some(message),
+        };
+        return iris_run_memory_refusal(lane, config, devices, capacity_gib, &options);
     }
     // sc-25690: the shared gradient-checkpointing toggle is honoured only on the lanes whose task
     // trainer implements it; elsewhere it is refused here, before load, never after the weights
@@ -334,11 +332,16 @@ fn task_checkpointing_hint(
     capacity_gib: Option<f64>,
 ) -> Option<String> {
     use sceneworks_core::training::iris::{
-        iris_gradient_checkpointing, iris_gradient_checkpointing_lanes, iris_objective_memory_floor,
+        iris_gradient_checkpointing_lanes, iris_objective_memory_floor,
     };
-    if iris_gradient_checkpointing(config)
-        || !iris_gradient_checkpointing_lanes(objective).contains(&lane)
-    {
+    let checkpointing = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        objective.base_model(),
+    )
+    .map(|options| options.common.gradient_checkpointing)
+    .unwrap_or(false);
+    if checkpointing || !iris_gradient_checkpointing_lanes(objective).contains(&lane) {
         return None;
     }
     let mut checkpointed = config.clone();

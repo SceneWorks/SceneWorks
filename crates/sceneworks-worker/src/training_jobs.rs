@@ -23,27 +23,25 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
-use sceneworks_core::training::body_losses::{
-    body_loss_combination_refusal, body_loss_settings, BodyLoss,
-};
+use sceneworks_core::training::body_losses::{body_loss_combination_refusal_resolved, BodyLoss};
 use sceneworks_core::training::depth_anchoring::{
-    depth_anchoring_combination_refusal, depth_anchoring_settings, x0_decoder_for_trainer,
+    depth_anchoring_combination_refusal_resolved, x0_decoder_for_trainer,
     DEPTH_ANCHORING_WEIGHT_KEY,
 };
 use sceneworks_core::training::face_losses::{
-    face_landmark_loss_settings, face_loss_combination_refusal, identity_loss_settings,
-    FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
+    face_loss_combination_refusal_resolved, FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
 };
 use sceneworks_core::training::latent_perceptual::{
-    latent_loss_combination_refusal, latent_loss_settings, latent_lpips_model_for_trainer,
-    LATENT_LPIPS, VAE_ANCHOR,
+    latent_loss_combination_refusal_resolved, latent_lpips_model_for_trainer, LATENT_LPIPS,
+    VAE_ANCHOR,
 };
 use sceneworks_core::training::{
-    parse_resolution_bucket_config, parse_training_bucket_config, subject_mask_loss_weights,
-    ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
-    GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
-    RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
-    WEIGHT_NOISE_SIGMA_MAX,
+    ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, RESOLUTION_BUCKETS_KEY,
+    SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
+};
+#[cfg(test)]
+use sceneworks_core::training::{
+    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
@@ -250,6 +248,34 @@ pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
     })?;
     serde_json::from_value(plan.clone())
         .map_err(|error| WorkerError::InvalidPayload(format!("Invalid training plan: {error}")))
+}
+
+/// Bind archived plans through the same catalog-backed portable policy as a submitted job.
+/// Callers with only a `TrainingPlan` (rank processes and pre-launch checks) reconstruct its
+/// envelope here, so native execution receives owner-resolved option facts once per preflight.
+fn resolved_plan_options(
+    plan: &TrainingPlan,
+) -> WorkerResult<sceneworks_core::resolved_options::TrainingExecutionOptions> {
+    let envelope = serde_json::json!({ "plan": plan });
+    let authored = envelope
+        .as_object()
+        .expect("training envelope is an object");
+    let control = plan.target.kernel == "krea_control";
+    let job_type = if control {
+        JobType::ControlTraining
+    } else {
+        JobType::LoraTrain
+    };
+    let facts = sceneworks_core::request_validation::facts_for_job(&job_type, authored);
+    let kind = if control {
+        "control_training"
+    } else {
+        "lora_train"
+    };
+    let resolved = sceneworks_core::request_validation::resolve_request(kind, authored, &facts)
+        .map_err(WorkerError::Validation)?;
+    sceneworks_core::resolved_options::TrainingExecutionOptions::bind(authored, &resolved)
+        .map_err(WorkerError::InvalidPayload)
 }
 
 /// Validate a resolved plan the way the Python `validate_training_plan` does:
@@ -996,12 +1022,18 @@ fn preflight_training_run_with_inputs(
     #[cfg(native_lane)]
     {
         validate_training_plan(settings, plan)?;
-        let engine_id = validate_training_target_config(plan)?;
-        let request =
-            match training_request_from_plan(settings, plan, &mut prepared_inputs, masks_pending) {
-                Ok(request) => request,
-                Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
-            };
+        let options = resolved_plan_options(plan)?;
+        let engine_id = validate_training_target_config_resolved(plan, &options)?;
+        let request = match training_request_from_plan_resolved(
+            settings,
+            plan,
+            &mut prepared_inputs,
+            masks_pending,
+            &options,
+        ) {
+            Ok(request) => request,
+            Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
+        };
         if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
             drop(request);
             return finish_prepared_input_operation(Err(error), prepared_inputs);
@@ -1015,8 +1047,9 @@ fn preflight_training_run_with_inputs(
     #[cfg(not(native_lane))]
     {
         validate_training_plan(settings, plan)?;
-        validate_training_target_config(plan)?;
-        preflight_subject_mask_paths(settings, plan, masks_pending)?;
+        let options = resolved_plan_options(plan)?;
+        validate_training_target_config_resolved(plan, &options)?;
+        preflight_subject_mask_paths_resolved(settings, plan, masks_pending, &options)?;
         // This build cannot construct a typed engine request, but it still verifies each stored
         // prepared-bundle receipt exactly once before accepting a dry-run plan.
         let operation = (|| {
@@ -1153,33 +1186,21 @@ async fn preflight_training_run_async_using(
     }
 }
 
+#[cfg(test)]
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
-    let advanced = &plan.config.advanced;
-    for key in [
-        "networkType",
-        "lrScheduler",
-        "timestepType",
-        "timestepBias",
-        "lossType",
-        "mixedPrecision",
-    ] {
-        preflight_string(advanced, key, "")?;
-    }
-    for key in [
-        "gradientCheckpointing",
-        "resume",
-        "cacheLatents",
-        "cacheTextEmbeddings",
-    ] {
-        preflight_bool(advanced, key, false)?;
-    }
-    for key in ["lrWarmupSteps", "sampleEvery", "sampleSteps", "sampleCount"] {
-        preflight_u32(advanced, key, 0)?;
-    }
-    for key in ["weightDecay", "sampleGuidanceScale"] {
-        preflight_f32(advanced, key, 0.0)?;
-    }
-    preflight_i32(advanced, "decomposeFactor", -1)?;
+    let options = test_plan_options(plan)?;
+    validate_training_target_config_resolved(plan, &options)
+}
+
+fn validate_training_target_config_resolved(
+    plan: &TrainingPlan,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
+) -> WorkerResult<&'static str> {
+    let common = &options.common;
+    let ltx_workflow = options
+        .ltx_workflow
+        .as_ref()
+        .map(|field| field.value.as_str());
     // Keep the f64 JSON contract and native f32 execution boundary explicit: values
     // that would overflow or underflow during conversion refuse before a request is built.
     sceneworks_core::training::training_alpha_f32(&plan.config.alpha)
@@ -1209,15 +1230,12 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
             "Native trainer '{engine_id}' is not registered in this worker runtime."
         ))
     })?;
-    let advanced = &plan.config.advanced;
     if plan.target.kernel == "moss_image_lora" {
         sceneworks_core::training::moss_training_seed(plan.config.seed)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-        sceneworks_core::training::validate_moss_training_field_shapes(advanced)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     }
     let base_model = plan.target.base_model.as_str();
-    let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
+    let network_type = common.network_type.to_ascii_lowercase();
     let supported = match network_type.as_str() {
         "lora" => descriptor.supports_lora,
         "lokr" => descriptor.supports_lokr,
@@ -1234,7 +1252,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // Epic 2123 weight noising (sc-24826): perturbs adapter factors only, so it is refused for a
     // full base fine-tune (E5), and refused for any trainer whose descriptor does not declare it
     // (E3) — before any load, on both the dry and the real path.
-    let weight_noise_sigma = preflight_weight_noise_sigma(advanced)?;
+    let weight_noise_sigma = common.weight_noise_sigma;
     if weight_noise_sigma > 0.0 {
         if network_type == "full" {
             return Err(WorkerError::InvalidPayload(format!(
@@ -1253,18 +1271,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // Epic 2123 gradient noise (sc-24827): same contract — adapter gradients only (refused for a
     // full base fine-tune, E5) and only on a trainer that declares it (E3). Gamma is read strictly
     // even while eta is off, so a malformed value never silently maps to the default.
-    let gradient_noise_eta = preflight_bounded_f64(
-        advanced,
-        GRADIENT_NOISE_ETA_KEY,
-        GRADIENT_NOISE_ETA_MAX,
-        0.0,
-    )?;
-    preflight_bounded_f64(
-        advanced,
-        GRADIENT_NOISE_GAMMA_KEY,
-        GRADIENT_NOISE_GAMMA_MAX,
-        GRADIENT_NOISE_GAMMA_DEFAULT,
-    )?;
+    let gradient_noise_eta = common.gradient_noise_eta;
     if gradient_noise_eta > 0.0 {
         if network_type == "full" {
             return Err(WorkerError::InvalidPayload(format!(
@@ -1285,9 +1292,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // family has no cataloged tiny x0 decoder — before any load, on both the dry and the real path.
     // Whether the auxiliary weights are installed is checked where the request is built
     // (`apply_depth_anchoring`), which has the data dir.
-    let depth = depth_anchoring_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    if depth.is_some() {
+    if options.depth_anchoring.is_some() {
         if !descriptor.techniques.depth_anchoring {
             return Err(WorkerError::InvalidPayload(format!(
                 "Native trainer '{engine_id}' does not support depth anchoring \
@@ -1300,7 +1305,11 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                  ({DEPTH_ANCHORING_WEIGHT_KEY})."
             )));
         }
-        if let Some(reason) = depth_anchoring_combination_refusal(base_model, &plan.config) {
+        if let Some(reason) = depth_anchoring_combination_refusal_resolved(
+            base_model,
+            common.full_finetune,
+            ltx_workflow,
+        ) {
             return Err(combination_refused(DEPTH_ANCHORING_WEIGHT_KEY, reason));
         }
     }
@@ -1310,8 +1319,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // cataloged tiny x0 decoder, or whose frozen model is not cataloged — before any load, on both
     // the dry and the real path. Installation is checked where the request is built
     // (`apply_body_losses`).
-    let body = body_loss_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let body = &options.body_losses;
     for loss in BodyLoss::ALL {
         if body.schedule(loss).is_none() {
             continue;
@@ -1340,7 +1348,9 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                 loss.label()
             )));
         }
-        if let Some(reason) = body_loss_combination_refusal(base_model, &plan.config) {
+        if let Some(reason) =
+            body_loss_combination_refusal_resolved(base_model, common.full_finetune, ltx_workflow)
+        {
             return Err(combination_refused(&key, reason));
         }
     }
@@ -1348,10 +1358,8 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // same decoded-x0 path as depth anchoring, so they are refused the same way — strictly parsed
     // (the API's parser), refused for a trainer that does not declare them (E3) or whose latent
     // family has no cataloged tiny x0 decoder. Installation is checked by `apply_face_losses`.
-    let identity = identity_loss_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    let landmark = face_landmark_loss_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let identity = &options.identity_loss;
+    let landmark = &options.face_landmark_loss;
     for (enabled, declared, name, label, key) in [
         (
             identity.is_some(),
@@ -1381,7 +1389,12 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                 "Native trainer '{engine_id}' has no x0 decoder for {name} ({key})."
             )));
         }
-        if let Some(reason) = face_loss_combination_refusal(base_model, &plan.config, label) {
+        if let Some(reason) = face_loss_combination_refusal_resolved(
+            base_model,
+            common.full_finetune,
+            ltx_workflow,
+            label,
+        ) {
             return Err(combination_refused(key, reason));
         }
     }
@@ -1389,15 +1402,13 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // refused for a trainer whose descriptor does not declare the technique (E3), and — VAE anchor
     // — for a family with no cataloged tiny x0 decoder / — E-LatentLPIPS — for a family with no
     // published weights. Installed weights are checked in `apply_latent_perceptual`.
-    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques)?;
+    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques, &options)?;
 
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
     // refuses it (E3) — before any load, on both the dry and the real path.
-    let buckets = parse_resolution_bucket_config(advanced).map_err(|message| {
-        WorkerError::InvalidPayload(format!("Training config field {message}"))
-    })?;
-    if matches!(&buckets, Some(ResolutionBucketConfig::AspectRatio(_)))
+    let buckets = &options.buckets;
+    if matches!(buckets, Some(ResolutionBucketConfig::AspectRatio(_)))
         && plan.target.kernel != "moss_image_lora"
     {
         return Err(WorkerError::InvalidPayload(
@@ -1416,11 +1427,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // submit time (one shared reader), and a trainer whose descriptor does not declare the
     // technique is refused before any load (E3). Per-image mask coverage is checked by
     // `preflight_subject_mask_paths`, which needs the dataset on disk.
-    if subject_mask_loss_weights(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-        .is_some()
-        && !descriptor.techniques.subject_mask_loss
-    {
+    if options.subject_mask_loss_weights.is_some() && !descriptor.techniques.subject_mask_loss {
         return Err(WorkerError::InvalidPayload(format!(
             "Native trainer '{engine_id}' does not support subject-masked loss \
              ({SUBJECT_MASK_LOSS_KEY})."
@@ -1437,15 +1444,15 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     ) {
         return Ok(engine_id);
     }
-    let dtype = preflight_string(advanced, "mixedPrecision", "bf16")?.to_ascii_lowercase();
+    let dtype = common.train_dtype.to_ascii_lowercase();
     if !matches!(dtype.as_str(), "bf16" | "f32") {
         return Err(WorkerError::InvalidPayload(format!(
             "Candle trainer '{engine_id}' supports mixedPrecision bf16 or f32, not '{dtype}'."
         )));
     }
-    let checkpointing = preflight_bool(advanced, "gradientCheckpointing", false)?;
-    let resume = preflight_bool(advanced, "resume", false)?;
-    let sample_every = preflight_u32(advanced, "sampleEvery", 0)?;
+    let checkpointing = common.gradient_checkpointing;
+    let resume = common.resume;
+    let sample_every = common.sample_every;
     if resume {
         return Err(WorkerError::InvalidPayload(format!(
             "Candle trainer '{engine_id}' does not support resume."
@@ -1479,12 +1486,24 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     Ok(engine_id)
 }
 
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 fn training_request_from_plan(
     settings: &Settings,
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
     masks_pending: bool,
+) -> WorkerResult<TrainingRequest> {
+    let options = test_plan_options(plan)?;
+    training_request_from_plan_resolved(settings, plan, prepared_inputs, masks_pending, &options)
+}
+
+#[cfg(native_lane)]
+fn training_request_from_plan_resolved(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    prepared_inputs: &mut PreparedTrainingInputs,
+    masks_pending: bool,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<TrainingRequest> {
     let moss_seed = if plan.target.kernel == "moss_image_lora" {
         Some(
@@ -1517,9 +1536,13 @@ fn training_request_from_plan(
             .collect::<WorkerResult<Vec<_>>>()?;
         return Ok(TrainingRequest {
             items,
-            config: crate::iris_task_training::shape_task_config(
-                finalize_training_config(map_training_config(&plan.config)?, plan),
+            config: crate::iris_task_training::shape_task_config_resolved(
+                finalize_training_config(
+                    map_training_config_resolved(&plan.config, options)?,
+                    plan,
+                ),
                 objective,
+                &options.model_options_wire,
             ),
             output_dir: resolve_training_output_dir(
                 settings,
@@ -1533,7 +1556,7 @@ fn training_request_from_plan(
     }
     // Subject-masked loss (sc-24828): one mask path per item when on (refused here, naming the
     // images, when any lacks a non-empty mask); `None` keeps every item mask-free.
-    let mask_paths = preflight_subject_mask_paths(settings, plan, masks_pending)?;
+    let mask_paths = preflight_subject_mask_paths_resolved(settings, plan, masks_pending, options)?;
     let items = plan
         .dataset
         .items
@@ -1584,7 +1607,7 @@ fn training_request_from_plan(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let mut config = engine_training_config(plan)?;
+    let mut config = engine_training_config_resolved(plan, options)?;
     if let Some(seed) = moss_seed {
         config.seed = seed;
         match settings.requested_gpu_memory_limit()? {
@@ -1598,15 +1621,15 @@ fn training_request_from_plan(
             }
         }
     }
-    apply_depth_anchoring(settings, plan, &mut config)?;
-    apply_body_losses(settings, plan, &mut config)?;
-    apply_face_losses(settings, plan, &mut config)?;
-    apply_latent_perceptual(settings, plan, &mut config)?;
-    apply_training_adapter(settings, plan, &mut config)?;
+    apply_depth_anchoring_resolved(settings, plan, &mut config, options)?;
+    apply_body_losses_resolved(settings, plan, &mut config, options)?;
+    apply_face_losses_resolved(settings, plan, &mut config, options)?;
+    apply_latent_perceptual_resolved(settings, plan, &mut config, options)?;
+    apply_training_adapter_resolved(settings, &mut config, options)?;
     // The weights were validated by `validate_training_target_config` (same reader), so a
     // malformed value is already refused; this propagates rather than defaulting regardless.
-    config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+    config.subject_mask_loss = options
+        .subject_mask_loss_weights
         .map(|(background, subject)| gen_core::SubjectMaskLoss {
             background_weight: background as f32,
             subject_weight: subject as f32,
@@ -1718,15 +1741,8 @@ fn validate_new_family_request(
     ) {
         return Ok(());
     }
-    for (key, default) in [
-        ("timestepType", "sigmoid"),
-        ("timestepBias", "balanced"),
-        ("lossType", "mse"),
-    ] {
-        // `map_training_config` intentionally defaults absent/blank legacy values. A present value
-        // of the wrong JSON type is not legacy absence and must not be silently collapsed.
-        preflight_string(&plan.config.advanced, key, default)?;
-    }
+    // The owner-resolved training options were bound before this engine request was built.
+    // Present wrong-type values are refused at that boundary, including legacy plans.
     if request
         .items
         .iter()
@@ -1781,26 +1797,31 @@ fn validate_new_family_request(
     .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
+#[cfg(test)]
 fn preflight_string(advanced: &JsonObject, key: &str, default: &str) -> WorkerResult<String> {
     sceneworks_core::training::preflight_string(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
+#[cfg(test)]
 fn preflight_bool(advanced: &JsonObject, key: &str, default: bool) -> WorkerResult<bool> {
     sceneworks_core::training::preflight_bool(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
+#[cfg(test)]
 fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult<u32> {
     sceneworks_core::training::preflight_u32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
+#[cfg(test)]
 fn preflight_f32(advanced: &JsonObject, key: &str, default: f32) -> WorkerResult<f32> {
     sceneworks_core::training::preflight_f32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
+#[cfg(test)]
 fn preflight_i32(advanced: &JsonObject, key: &str, default: i32) -> WorkerResult<i32> {
     sceneworks_core::training::preflight_i32(advanced, key, default)
         .map_err(|error| WorkerError::InvalidPayload(error.detail))
@@ -1815,16 +1836,15 @@ fn preflight_i32(advanced: &JsonObject, key: &str, default: i32) -> WorkerResult
 /// install; nothing is downloaded mid-job. Off (the default) leaves the config untouched, so a
 /// legacy plan maps exactly as before.
 #[cfg(native_lane)]
-fn apply_depth_anchoring(
+fn apply_depth_anchoring_resolved(
     settings: &Settings,
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
     use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
 
-    let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-    else {
+    let Some(depth) = &options.depth_anchoring else {
         return Ok(());
     };
     let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
@@ -1863,15 +1883,15 @@ fn apply_depth_anchoring(
 /// library. A missing or uncataloged checkpoint is refused naming the model; nothing is downloaded
 /// mid-job. All off (the default) leaves the config untouched.
 #[cfg(native_lane)]
-fn apply_body_losses(
+fn apply_body_losses_resolved(
     settings: &Settings,
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
     use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
 
-    let body = body_loss_settings(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let body = &options.body_losses;
     if !body.any_enabled() {
         return Ok(());
     }
@@ -1961,18 +1981,23 @@ fn preflight_latent_perceptual(
     plan: &TrainingPlan,
     engine_id: &str,
     techniques: &gen_core::TrainingTechniques,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
-    let parse = |spec| {
-        latent_loss_settings(spec, &plan.config.advanced)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
-    };
     let refused = |spec| {
-        latent_loss_combination_refusal(spec, &plan.target.base_model, &plan.config)
-            .map_or(Ok(()), |reason| {
-                Err(combination_refused(spec.weight_key, reason))
-            })
+        latent_loss_combination_refusal_resolved(
+            spec,
+            &plan.target.base_model,
+            options.common.full_finetune,
+            options
+                .ltx_workflow
+                .as_ref()
+                .map(|field| field.value.as_str()),
+        )
+        .map_or(Ok(()), |reason| {
+            Err(combination_refused(spec.weight_key, reason))
+        })
     };
-    if parse(&VAE_ANCHOR)?.is_some() {
+    if options.vae_anchor.is_some() {
         if !techniques.vae_anchor_loss {
             return Err(WorkerError::InvalidPayload(format!(
                 "Native trainer '{engine_id}' does not support the VAE anchor loss ({}).",
@@ -1987,7 +2012,7 @@ fn preflight_latent_perceptual(
         }
         refused(&VAE_ANCHOR)?;
     }
-    if parse(&LATENT_LPIPS)?.is_some() {
+    if options.latent_lpips.is_some() {
         if !techniques.latent_lpips_loss {
             return Err(WorkerError::InvalidPayload(format!(
                 "Native trainer '{engine_id}' does not support the E-LatentLPIPS loss ({}).",
@@ -2014,20 +2039,16 @@ fn preflight_latent_perceptual(
 /// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the
 /// config untouched.
 #[cfg(native_lane)]
-fn apply_latent_perceptual(
+fn apply_latent_perceptual_resolved(
     settings: &Settings,
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
     use sceneworks_core::training::latent_perceptual::{
         LatentLossSettings, FLUX2_VAE_MODEL, FLUX2_VAE_TIER_DIRS,
     };
-    let advanced = &plan.config.advanced;
-    let parse = |spec| {
-        latent_loss_settings(spec, advanced)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
-    };
-    let (vae_anchor, latent_lpips) = (parse(&VAE_ANCHOR)?, parse(&LATENT_LPIPS)?);
+    let (vae_anchor, latent_lpips) = (&options.vae_anchor, &options.latent_lpips);
     if vae_anchor.is_none() && latent_lpips.is_none() {
         return Ok(());
     }
@@ -2148,15 +2169,12 @@ fn not_installed(
 /// is refused naming the catalog model to install — never a silent bare-base run; nothing is
 /// downloaded mid-job. No adapter keys (the default) leaves the config untouched.
 #[cfg(native_lane)]
-fn apply_training_adapter(
+fn apply_training_adapter_resolved(
     settings: &Settings,
-    plan: &TrainingPlan,
     config: &mut TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
-    use sceneworks_core::training::training_adapter::training_adapter_model;
-    let Some(model) = training_adapter_model(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-    else {
+    let Some(model) = options.training_adapter else {
         return Ok(());
     };
     let dir = installed_aux_model_dir(settings, model, "The de-distill training adapter")?;
@@ -2173,20 +2191,18 @@ fn apply_training_adapter(
 /// `sceneworks_core::training::face_losses`) and, for the landmark loss, the rehosted FaceMesh-v2.
 /// A missing checkpoint is refused naming the catalog model; off leaves the config untouched.
 #[cfg(native_lane)]
-fn apply_face_losses(
+fn apply_face_losses_resolved(
     settings: &Settings,
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
 ) -> WorkerResult<()> {
     use sceneworks_core::training::face_losses::{
         FaceLossSchedule, FACEMESH_V2_MODEL, FACE_STACK_ARCFACE, FACE_STACK_SCRFD,
     };
 
-    let advanced = &plan.config.advanced;
-    let identity = identity_loss_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    let landmark = face_landmark_loss_settings(advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let identity = &options.identity_loss;
+    let landmark = &options.face_landmark_loss;
     if identity.is_none() && landmark.is_none() {
         return Ok(());
     }
@@ -2253,17 +2269,25 @@ const MISSING_SUBJECT_MASK_NAME_CAP: usize = 10;
 /// silently drop the image from the loss — else the job is refused with a payload error naming the
 /// images (the first [`MISSING_SUBJECT_MASK_NAME_CAP`], then "and N more"). Masks are matched by
 /// the SHA-256 of each image's current bytes (the key the mask job stored them under).
+#[cfg(test)]
 fn preflight_subject_mask_paths(
     settings: &Settings,
     plan: &TrainingPlan,
     masks_pending: bool,
 ) -> WorkerResult<Option<Vec<PathBuf>>> {
-    let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-        .is_some();
+    let options = test_plan_options(plan)?;
+    preflight_subject_mask_paths_resolved(settings, plan, masks_pending, &options)
+}
+
+fn preflight_subject_mask_paths_resolved(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    masks_pending: bool,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
+) -> WorkerResult<Option<Vec<PathBuf>>> {
+    let masked_loss = options.subject_mask_loss_weights.is_some();
     // sc-24832: the normal loss restricted to the subject reads the same per-image masks.
-    let body = body_loss_settings(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let body = &options.body_losses;
     let restricted_normals = body.normal.is_some() && body.normal_restrict_to_subject;
     if !masked_loss && !restricted_normals {
         return Ok(None);
@@ -2333,36 +2357,12 @@ fn preflight_subject_mask_paths(
     )))
 }
 
-/// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
-/// submit-time bound `0..=WEIGHT_NOISE_SIGMA_MAX`, else a typed payload error — never a silent 0.
-fn preflight_weight_noise_sigma(advanced: &JsonObject) -> WorkerResult<f64> {
-    preflight_bounded_f64(
-        advanced,
-        WEIGHT_NOISE_SIGMA_KEY,
-        WEIGHT_NOISE_SIGMA_MAX,
-        0.0,
-    )
-}
-
 /// The payload error for a decoded-x0 / latent aux loss whose target + config combination the
 /// engine refuses (a full base fine-tune, a no-video LTX-2.5 workflow) — the reason comes from the
 /// same core `*_combination_refusal` helper submit-time validation uses, so a plan that bypassed
 /// the API is refused here before any load with the identical reason.
 fn combination_refused(key: &str, reason: String) -> WorkerError {
     WorkerError::InvalidPayload(format!("{reason} ({key})"))
-}
-
-/// Strictly read an optional `advanced[key]` (absent or JSON null ⇒ `default`, the epic 2123 null
-/// policy): a finite number within the submit-time bound `0..=max`, else a typed payload error —
-/// never a silent default.
-fn preflight_bounded_f64(
-    advanced: &JsonObject,
-    key: &str,
-    max: f64,
-    default: f64,
-) -> WorkerResult<f64> {
-    sceneworks_core::training::preflight_bounded_f64(advanced, key, max, default)
-        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 /// Dry-run: validate the plan and active trainer descriptor, then report what a real run would
@@ -2658,9 +2658,18 @@ fn normalize_train_dtype(value: &str) -> String {
 fn map_training_config(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> WorkerResult<TrainingConfig> {
-    let advanced = &config.advanced;
-    let resolved =
-        sceneworks_core::training::resolve_advanced(advanced).map_err(WorkerError::Validation)?;
+    let options =
+        sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(config, "", "")
+            .map_err(WorkerError::InvalidPayload)?;
+    map_training_config_resolved(config, &options)
+}
+
+#[cfg(native_lane)]
+fn map_training_config_resolved(
+    config: &sceneworks_core::training::TrainingConfig,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
+) -> WorkerResult<TrainingConfig> {
+    let resolved = &options.common;
     Ok(TrainingConfig {
         rank: config.rank,
         alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
@@ -2679,10 +2688,10 @@ fn map_training_config(
         lr_scheduler: LrSchedule::parse(&resolved.lr_scheduler),
         network_type: NetworkType::parse(&resolved.network_type),
         trigger_word: config.trigger_word.clone(),
-        // The untouched authored options remain the family/provider's input snapshot.
-        model_options: advanced.clone(),
-        resolution_buckets: map_resolution_buckets(advanced),
-        aspect_ratio_buckets: map_aspect_ratio_buckets(advanced),
+        // The portable owner validates this opaque engine ABI before native execution.
+        model_options: options.model_options_wire.as_json_for_engine().clone(),
+        resolution_buckets: map_resolution_buckets(options.buckets.as_ref()),
+        aspect_ratio_buckets: map_aspect_ratio_buckets(options.buckets.as_ref()),
         // Installed auxiliary models and provider-native structures remain local.
         depth_anchoring: Default::default(),
         perceptual_decoder_dir: None,
@@ -2697,11 +2706,11 @@ fn map_training_config(
         weight_decay: resolved.weight_decay,
         lr_warmup_steps: resolved.lr_warmup_steps,
         decompose_factor: resolved.decompose_factor,
-        lora_target_modules: resolved.lora_target_modules,
-        timestep_type: resolved.timestep_type,
-        timestep_bias: resolved.timestep_bias,
-        loss_type: resolved.loss_type,
-        train_dtype: resolved.train_dtype,
+        lora_target_modules: resolved.lora_target_modules.clone(),
+        timestep_type: resolved.timestep_type.clone(),
+        timestep_bias: resolved.timestep_bias.clone(),
+        loss_type: resolved.loss_type.clone(),
+        train_dtype: resolved.train_dtype.clone(),
         gradient_checkpointing: resolved.gradient_checkpointing,
         full_finetune: resolved.full_finetune,
         sample_every: resolved.sample_every,
@@ -2715,53 +2724,43 @@ fn map_training_config(
         cache_text_embeddings: resolved.cache_text_embeddings,
         memory_limit_bytes: resolved.memory_limit_bytes,
         memory_limit_fraction: resolved.memory_limit_fraction,
-        control_type: resolved.control_type,
-        sample_prompts: resolved.sample_prompts,
+        control_type: resolved.control_type.clone(),
+        sample_prompts: resolved.sample_prompts.clone(),
     })
 }
 
-/// Map `advanced.resolutionBuckets` onto the engine's typed list (absent ⇒ empty ⇒ off). The shared
-/// dry/real preflight refuses a malformed list before this runs; should one ever reach here anyway
-/// it maps **fail-closed** to a zero bucket, which the engine's technique floor refuses
-/// (`resolution_buckets[0] needs a resolution and a repeat count >= 1`) instead of silently
-/// training at one resolution.
+/// Map the owner's validated square buckets onto the engine ABI.
 #[cfg(native_lane)]
-fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
-    match parse_training_bucket_config(advanced) {
-        Ok(None | Some(ResolutionBucketConfig::AspectRatio(_))) => Vec::new(),
-        Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
-            .into_iter()
+fn map_resolution_buckets(
+    buckets: Option<&ResolutionBucketConfig>,
+) -> Vec<gen_core::ResolutionBucket> {
+    match buckets {
+        None | Some(ResolutionBucketConfig::AspectRatio(_)) => Vec::new(),
+        Some(ResolutionBucketConfig::Legacy(buckets)) => buckets
+            .iter()
             .map(|bucket| gen_core::ResolutionBucket {
                 resolution: bucket.resolution,
                 repeats: bucket.repeats,
             })
             .collect(),
-        Err(_) => vec![gen_core::ResolutionBucket {
-            resolution: 0,
-            repeats: 0,
-        }],
     }
 }
 
-/// Keep the additive rectangular list separate from the legacy square list. Invalid
-/// data fails closed even if a caller bypasses the shared plan preflight.
+/// Keep the additive rectangular list separate from the legacy square list.
 #[cfg(native_lane)]
-fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioBucket> {
-    match parse_training_bucket_config(advanced) {
-        Ok(None | Some(ResolutionBucketConfig::Legacy(_))) => Vec::new(),
-        Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
-            .into_iter()
+fn map_aspect_ratio_buckets(
+    buckets: Option<&ResolutionBucketConfig>,
+) -> Vec<gen_core::AspectRatioBucket> {
+    match buckets {
+        None | Some(ResolutionBucketConfig::Legacy(_)) => Vec::new(),
+        Some(ResolutionBucketConfig::AspectRatio(buckets)) => buckets
+            .iter()
             .map(|bucket| gen_core::AspectRatioBucket {
                 width: bucket.width,
                 height: bucket.height,
                 repeats: bucket.repeats,
             })
             .collect(),
-        Err(_) => vec![gen_core::AspectRatioBucket {
-            width: 0,
-            height: 0,
-            repeats: 0,
-        }],
     }
 }
 
@@ -2810,11 +2809,12 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
 /// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B run impossible to configure
 /// into a dense-backward OOM. Those safety overrides are Candle-only. Both backends receive the
-/// same strict MOSS options bag and adapter-training sampler default.
+/// same owner-resolved MOSS options bag and adapter-training sampler default.
 #[cfg(native_lane)]
-fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
+fn finalize_training_config(config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
+        let mut config = config;
         if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
             tracing::info!(
                 event = "candle_training_force_gradient_checkpointing",
@@ -2829,15 +2829,13 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
         if plan.target.kernel == "ltx_mlx_lora" {
             config.train_dtype = "f32".to_owned();
         }
+        return config;
     }
-    if plan.target.kernel == "moss_image_lora" {
-        config.timestep_type = sceneworks_core::training::moss_timestep_type(
-            &plan.config.advanced,
-            config.timestep_type,
-        );
-        config.model_options = sceneworks_core::training::moss_model_options(&plan.config.advanced);
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        let _ = plan;
+        config
     }
-    config
 }
 
 /// The shared plan-to-engine config mapping of a bare SceneWorks config (no backend finalization):
@@ -2854,31 +2852,17 @@ pub(crate) fn map_engine_config(
 /// every rank process (sc-25689).
 #[cfg(native_lane)]
 pub(crate) fn engine_training_config(plan: &TrainingPlan) -> WorkerResult<TrainingConfig> {
-    let flux3 = sceneworks_core::training::flux3::KERNELS.contains(&plan.target.kernel.as_str());
-    let mapped = if flux3 {
-        // Legacy clients may omit advanced fields. Seed this family's actual source profile,
-        // rather than inheriting the generic mapper's sigmoid/zero-decay defaults.
-        let mut source = plan.config.clone();
-        let mut defaults =
-            sceneworks_core::training::flux3::target(plan.target.kernel == "flux3_klein_edit_lora")
-                .defaults
-                .advanced;
-        defaults.extend(source.advanced);
-        source.advanced = defaults;
-        map_training_config(&source)?
-    } else {
-        map_training_config(&plan.config)?
-    };
-    let mut config =
-        crate::iris_curricula::apply_iris_train_dtype(finalize_training_config(mapped, plan), plan);
-    if flux3 {
-        // Common host fields have already been mapped to typed fields. In particular, copying
-        // advanced.resume into the opaque bag changes the native configuration hash on retry even
-        // though native identity deliberately normalizes the typed resume flag. Only source-owned
-        // intent belongs in this namespace; product/provenance keys must not strand checkpoints.
-        config.model_options.retain(|key, _| key == "flux3");
-    }
-    Ok(config)
+    let options = resolved_plan_options(plan)?;
+    engine_training_config_resolved(plan, &options)
+}
+
+#[cfg(native_lane)]
+fn engine_training_config_resolved(
+    plan: &TrainingPlan,
+    options: &sceneworks_core::resolved_options::TrainingExecutionOptions,
+) -> WorkerResult<TrainingConfig> {
+    let mapped = map_training_config_resolved(&plan.config, options)?;
+    Ok(finalize_training_config(mapped, plan))
 }
 
 /// One progress event streamed from the blocking training thread to the async side.
@@ -4110,7 +4094,7 @@ pub(crate) async fn consume_training_events(
                         samples.cfg.sample_steps,
                         samples.cfg.sample_guidance_scale,
                         backend,
-                    );
+                    )?;
                     result.extend(run_notes.clone());
                     if plan.target.kernel == "moss_image_lora" {
                         result.insert(
@@ -4169,7 +4153,7 @@ pub(crate) async fn consume_training_events(
                     samples.cfg.sample_steps,
                     samples.cfg.sample_guidance_scale,
                     backend,
-                );
+                )?;
                 result.extend(run_notes);
                 result.insert("trainedArtifactExported".to_owned(), Value::Bool(true));
                 (
@@ -4386,15 +4370,18 @@ fn training_result(
     sample_steps: u32,
     sample_guidance_scale: f32,
     backend: &str,
-) -> JsonObject {
+) -> WorkerResult<JsonObject> {
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let mut result = JsonObject::new();
     result.insert("mode".to_owned(), json!("train"));
     result.insert("kernel".to_owned(), json!(plan.target.kernel));
     result.insert("outputKind".to_owned(), json!(plan.target.output_kind));
-    result.insert(
-        "networkType".to_owned(),
-        json!(optional_payload_string(&plan.config.advanced, "networkType").unwrap_or("lora")),
-    );
+    result.insert("networkType".to_owned(), json!(options.common.network_type));
     result.insert("loraId".to_owned(), json!(plan.output.lora_id));
     result.insert("outputId".to_owned(), json!(plan.output.lora_id));
     result.insert("outputDir".to_owned(), json!(plan.output.output_dir));
@@ -4424,7 +4411,7 @@ fn training_result(
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
     // Keep the validated wire form and row order in provenance: legacy squares train every
     // item at every row, whereas MOSS rectangles assign each item to one geometry.
-    if let Ok(Some(buckets)) = parse_resolution_bucket_config(&plan.config.advanced) {
+    if let Some(buckets) = &options.buckets {
         let rows = match buckets {
             ResolutionBucketConfig::Legacy(buckets) => buckets
                 .iter()
@@ -4455,7 +4442,7 @@ fn training_result(
     ) {
         result.insert(key, value);
     }
-    result
+    Ok(result)
 }
 
 /// With no native trainer backend linked (not macOS/mlx-gen, and `backend-candle` off) the
@@ -4474,6 +4461,65 @@ async fn run_training_execution(
          worker has neither linked and cannot execute it."
             .to_owned(),
     ))
+}
+
+// Direct unit fixtures still exercise the plan-shaped entrypoints. Production binds the
+// owner-issued options once in preflight and calls the resolved variants above.
+#[cfg(test)]
+fn test_plan_options(
+    plan: &TrainingPlan,
+) -> WorkerResult<sceneworks_core::resolved_options::TrainingExecutionOptions> {
+    sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(WorkerError::InvalidPayload)
+}
+
+#[cfg(all(test, native_lane))]
+fn apply_depth_anchoring(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    apply_depth_anchoring_resolved(settings, plan, config, &test_plan_options(plan)?)
+}
+
+#[cfg(all(test, native_lane))]
+fn apply_body_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    apply_body_losses_resolved(settings, plan, config, &test_plan_options(plan)?)
+}
+
+#[cfg(all(test, native_lane))]
+fn apply_training_adapter(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    apply_training_adapter_resolved(settings, config, &test_plan_options(plan)?)
+}
+
+#[cfg(all(test, native_lane))]
+fn apply_face_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    apply_face_losses_resolved(settings, plan, config, &test_plan_options(plan)?)
+}
+
+#[cfg(all(test, native_lane))]
+fn apply_latent_perceptual(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    apply_latent_perceptual_resolved(settings, plan, config, &test_plan_options(plan)?)
 }
 
 #[cfg(test)]
@@ -8755,7 +8801,8 @@ mod tests {
                     let backend = crate::inference_runtime::trainer_descriptor(engine)
                         .expect("actual selected native trainer")
                         .backend;
-                    let result = training_result(&plan, &output, &[], &[], &[], 0, 0., backend);
+                    let result =
+                        training_result(&plan, &output, &[], &[], &[], 0, 0., backend).unwrap();
                     assert_eq!(result["backend"], json!(backend));
                     assert_eq!(result["baseModel"], json!(base));
                     assert_eq!(result["networkType"], json!(network));
@@ -10170,7 +10217,7 @@ mod tests {
             steps: 1,
             final_loss: 0.25,
         };
-        let result = training_result(&plan, &output, &[], &[], &[], 0, 0.0, "candle");
+        let result = training_result(&plan, &output, &[], &[], &[], 0, 0.0, "candle").unwrap();
 
         assert_eq!(result["outputKind"], json!("base_checkpoint"));
         assert_eq!(result["networkType"], json!("full"));
@@ -10185,7 +10232,7 @@ mod tests {
             "resolutionBuckets".to_owned(),
             json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }]),
         );
-        let result = training_result(&bucketed, &output, &[], &[], &[], 0, 0.0, "candle");
+        let result = training_result(&bucketed, &output, &[], &[], &[], 0, 0.0, "candle").unwrap();
         assert_eq!(
             result["resolutionBuckets"],
             json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }])

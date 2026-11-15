@@ -124,9 +124,7 @@ pub(crate) const INT8_CONVROT_TIER: &str = "int8-convrot";
 /// SELECTED only when all three hold — see [`nvfp4_selected`].
 pub(super) fn nvfp4_requested(request: &ImageRequest) -> bool {
     request
-        .advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
+        .advanced_text("quantTier")
         .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(NVFP4_TIER))
 }
 
@@ -431,7 +429,7 @@ pub(super) fn standard_tier_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
     // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
     // no weights, and reporting otherwise routes the loader at a tier it cannot load
@@ -552,19 +550,31 @@ pub(super) fn qwen_control_tier_subdir(
 ) -> &'static str {
     // Portable dispatch writes this private field only after verifying the route binding.
     // It fixes the source tier across hosts instead of clamping to this worker's cache.
-    if let Some(tier) = request
-        .advanced
-        .get("__portableBoundTier")
-        .and_then(Value::as_str)
-    {
-        return match tier {
+    let selection = sceneworks_core::payload_util::resolved_quant_selection(
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .mlx_quantize
+            .as_ref(),
+        request.portable_aux.bound_tier(),
+    );
+    if matches!(
+        selection,
+        sceneworks_core::payload_util::ResolvedQuantSelection::Bound(_)
+    ) {
+        return match request
+            .portable_aux
+            .bound_tier()
+            .expect("bound selection has a tier")
+        {
             "q4" => "q4",
             "q8" => "q8",
             "bf16" => "bf16",
             _ => "q8", // the verified guard rejects any other tier before dispatch
         };
     }
-    request.quant_bits().map_or_else(
+    request.resolved_quant_bits().map_or_else(
         || qwen_control_installed_default_tier(snapshot),
         |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
     )
@@ -611,7 +621,7 @@ pub(super) fn control_raw_settings(
     guidance: Option<f32>,
     engine: Option<&str>,
 ) -> sceneworks_core::contracts::JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".into(), Value::Bool(true));
     raw.insert("repo".into(), Value::String(repo.into()));
     raw.insert("numInferenceSteps".into(), serde_json::json!(steps));

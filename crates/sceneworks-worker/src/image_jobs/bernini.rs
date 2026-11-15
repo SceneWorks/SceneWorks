@@ -101,7 +101,7 @@ pub(super) fn bernini_image_engine_task(mode: &str) -> &'static str {
 /// default, not the generic image `resolve_quant`'s Q8 default — the snapshot is ~93 GB at bf16).
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
-    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "q4") {
         "bf16" => (None, None),
         "q4" => (Some(Quant::Q4), Some(4)),
         _ => (Some(Quant::Q8), Some(8)),
@@ -122,7 +122,7 @@ fn bernini_image_raw_settings(
     guidance: Option<f32>,
     task: &str,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -285,7 +285,7 @@ pub(super) async fn generate_bernini_image_stream(
     // Fetch the requested tier subdir (q8/bf16) if not the shipped q4 default, then descend into it: a
     // pre-packed tier loads with `quant = None` (config sidecars authoritative); a legacy flat snapshot
     // keeps load-time quant (`quant` above).
-    let tier_bits = request.quant_bits();
+    let tier_bits = request.resolved_quant_bits();
     crate::video_jobs::bernini::ensure_bernini_tier_present(api, settings, job, tier_bits).await?;
     // Image lane keeps the epic-10721 app-wide Q8 default on a no-explicit-pick (sc-10726); only the
     // video lane reverts to q4-first (sc-10859), so pass the image default order explicitly.
@@ -660,7 +660,7 @@ pub(super) async fn generate_candle_bernini_image_stream(
     // (`bf16/`|`q8/`|`q4/`) the candle lane loads and the matching load-time quant (sc-11003). No
     // explicit pick ⇒ bf16 dense (the off-Mac validated baseline); `mlxQuantize:4`|`:8` opt into the
     // packed tiers (validated clean on sm_120, sc-11003).
-    let tier_bits = request.quant_bits();
+    let tier_bits = request.resolved_quant_bits();
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     // sc-20799: the evidence/manifest axes the shared evaluator is keyed by. `tier_key` names the
     // tier the disk-probing resolver ACTUALLY landed on (via its load quant), not a manifest

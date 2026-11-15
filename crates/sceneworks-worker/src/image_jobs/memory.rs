@@ -11,7 +11,7 @@ use super::nvfp4_host_eligible;
 #[cfg(not(target_os = "macos"))]
 use super::nvfp4_selected;
 #[cfg(not(target_os = "macos"))]
-use super::quantization::gate_tier_key;
+use super::quantization::gate_tier_key_resolved;
 #[cfg(not(target_os = "macos"))]
 use super::quantization::resolve_quant;
 use super::quantization::resolve_tier_dir;
@@ -821,11 +821,10 @@ pub(crate) fn candle_resolved_tier_key(
     weights_dir: &Path,
     convrot_resolved: bool,
 ) -> &'static str {
-    gate_tier_key(
+    gate_tier_key_resolved(
         convrot_resolved,
         weights_dir,
-        &request.advanced,
-        &request.model_manifest_entry,
+        request,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(weights_dir)),
     )
 }

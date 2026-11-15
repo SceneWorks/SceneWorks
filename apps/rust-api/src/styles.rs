@@ -207,20 +207,12 @@ pub(crate) async fn apply_appearance_to_payload(
         selection,
     )
     .map_err(ApiError::bad_request)?;
-    if let Some(inputs) = job_payload
-        .get("advanced")
-        .and_then(|value| value.get("mossImageAdvanced"))
-    {
-        if ["positive", "negative"]
-            .iter()
-            .any(|key| inputs.get(*key).is_some_and(|value| !value.is_null()))
-            || inputs
-                .get("negativePrompts")
-                .and_then(Value::as_array)
-                .is_some_and(|values| !values.is_empty())
-        {
-            return Err(ApiError::bad_request("Appearance recipes cannot replace supplied MOSS embedding or per-prompt negative inputs."));
-        }
+    let authored_appearance =
+        sceneworks_core::resolved_options::AppearanceAuthoredInputs::from_payload_syntax(
+            job_payload,
+        );
+    if authored_appearance.has_embedding_or_per_prompt_negative {
+        return Err(ApiError::bad_request("Appearance recipes cannot replace supplied MOSS embedding or per-prompt negative inputs."));
     }
 
     // Validate model/IDs even on already composed web requests; skip only the text fold.
@@ -265,13 +257,7 @@ pub(crate) async fn apply_appearance_to_payload(
         "negativePrompt".into(),
         Value::String(compose_negative_prompt(
             &raw_negative,
-            if job_payload
-                .get("advanced")
-                .and_then(|value| value.get("mossImage"))
-                .and_then(|value| value.get("acceleration"))
-                .and_then(Value::as_str)
-                .is_some_and(|mode| mode != "off")
-            {
+            if authored_appearance.moss_accelerated {
                 ""
             } else {
                 &resolved.negative

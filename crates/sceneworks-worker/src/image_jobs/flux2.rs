@@ -3,10 +3,8 @@ use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
 use super::artifact_resolution::resolved_mlx_artifact_tier_for_model;
 use super::conditioning::augment_prompt_for_angle;
-use super::conditioning::edit_grouping;
 use super::conditioning::edit_reference_ids;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_identity_init;
@@ -67,7 +65,6 @@ use super::PromptEnhance;
 use super::Quant;
 use super::ResolvedModel;
 use super::WeightsSource;
-use crate::advanced;
 use crate::safe_weight_filename;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -124,6 +121,7 @@ pub(super) struct EditBatch {
 #[cfg(target_os = "macos")]
 pub(super) fn plan_edit_batch(
     request: &ImageRequest,
+    execution: &super::conditioning::ResolvedImageExecution,
     grouping: &EditGrouping,
     mut raw_settings: JsonObject,
 ) -> EditBatch {
@@ -131,7 +129,7 @@ pub(super) fn plan_edit_batch(
     let (seeds, prompts, pose_inputs): (Vec<i64>, Vec<String>, Option<Vec<PoseInput>>) =
         match grouping {
             EditGrouping::Poses(count) => {
-                let poses = parse_poses(request);
+                let poses = execution.poses().to_vec();
                 let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
                 (vec![set_seed; *count], prompts, Some(poses))
             }
@@ -374,13 +372,7 @@ pub(super) fn flux2_edit_image_guidance(engine_id: &str, request: &ImageRequest)
         return None;
     }
     let scale = request
-        .advanced
-        .get("ipAdapterScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("ipAdapterScale")
         .map(|value| value as f32)
         .unwrap_or(DEFAULT_EDIT_IMAGE_GUIDANCE)
         .clamp(1.0, 2.5);
@@ -397,13 +389,7 @@ pub(super) fn flux2_edit_text_guidance(
         return None;
     }
     request
-        .advanced
-        .get("trueCfgScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("trueCfgScale")
         .map(|value| value as f32)
         .or_else(|| resolve_guidance(request, model))
 }
@@ -713,7 +699,7 @@ fn flux2_edit_raw_settings(
     guidance: Option<f32>,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -738,6 +724,7 @@ pub(super) async fn generate_flux2_edit_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -819,7 +806,7 @@ pub(super) async fn generate_flux2_edit_stream(
     // plain With-Character) applies to EVERY character_image generation on this FLUX.2 edit lane,
     // which produces the FINAL image directly (no face-restore pass), so scoring the generated
     // image scores what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     let EditBatch {
         seeds,
         prompts,
@@ -828,6 +815,7 @@ pub(super) async fn generate_flux2_edit_stream(
         score_likeness,
     } = plan_edit_batch(
         request,
+        execution,
         &grouping,
         flux2_edit_raw_settings(
             request,
@@ -851,6 +839,7 @@ pub(super) async fn generate_flux2_edit_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -863,7 +852,7 @@ pub(super) async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+    let enhance = PromptEnhance::from_resolved(request)?;
     #[cfg(target_os = "macos")]
     let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
     #[cfg(not(target_os = "macos"))]
@@ -1171,9 +1160,24 @@ const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 /// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
 /// downloads, then errors loudly only on a real failure — never silently drops the poses).
 pub(super) fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux2_dev_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux2_dev_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux2_dev_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn flux2_dev_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX2_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -1181,15 +1185,15 @@ pub(super) fn flux2_dev_control_available(request: &ImageRequest, settings: &Set
 /// overrides, else the `-2602` Fun-Controlnet-Union default (parity with the Z-Image resolver).
 /// The payload filename must be a plain component (sc-8821 / F-019).
 pub(super) fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick(
         "repo",
@@ -1217,8 +1221,11 @@ async fn ensure_flux2_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -1266,7 +1273,7 @@ async fn ensure_flux2_control_weights(
 /// The Fun-Controlnet-Union README recommends 0.65–0.80 for the dev branch, so the default sits at the
 /// mid-point (Z-Image's strict-pose default is 0.9; the dev branch over-locks above ~0.8).
 pub(super) fn flux2_control_scale(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(&request.advanced, "controlScale", 0.75, 0.0..=2.0)
+    super::sampling::resolved_f32_clamped(request, "controlScale", 0.75, 0.0..=2.0)
 }
 
 /// Generate one FLUX.2-dev strict-pose image: the pre-built `conditioning` (the required `Control` plus an
@@ -1346,7 +1353,7 @@ pub(super) fn flux2_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -1413,6 +1420,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -1452,11 +1460,11 @@ pub(super) async fn generate_flux2_dev_control_stream(
     // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
     // first depth job (sc-8242).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = flux2_control_raw_settings(
         request,
@@ -1482,6 +1490,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
@@ -1713,11 +1722,22 @@ mod flux2_dev_admission_tests {
     use serde_json::json;
 
     fn advanced_request(advanced: Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "flux2_dev", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let value = json!({ "model": "flux2_dev", "advanced": advanced });
+        let authored = value.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some("true") = effective
+            .get("advanced")
+            .and_then(|value| value.get("usePid"))
+            .and_then(Value::as_str)
+        {
+            effective
+                .get_mut("advanced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("usePid".to_owned(), Value::Bool(true));
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// The exact edit contract shape the pinned engine builds

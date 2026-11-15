@@ -15,17 +15,17 @@ use super::{
         mochi_vram_precheck, resolve_mochi_model_dir, validate_mochi_mode, MOCHI_REPO,
     },
     scail2::{scail2_engine_video_mode, scail2_raw_settings, SCAIL2_REPO, SCAIL2_REVISION},
-    svd::{svd_f32, svd_i32, svd_raw_settings, svd_steps, SVD_REPO},
+    svd::{resolved_svd_f32, resolved_svd_i32, svd_raw_settings, svd_steps, SVD_REPO},
     vace::{
         build_extend_bridge_vace_conditioning, build_vace_conditioning, extend_anchor_frames,
         load_clip_anchor_frames, load_source_video_frames, replacement_mode_from,
         replacement_status_value, resolve_character_references,
     },
     wan::{
-        advanced_opt_f32, advanced_opt_u32, ensure_wan_lightning_present, generate_video,
-        generate_video_using, resolve_scail2_adapters, resolve_wan_adapters,
-        resolve_wan_conditioning, scail2_sampling, video_load_spec, wan_lightning_on, wan_sampling,
-        ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
+        ensure_wan_lightning_present, generate_video, generate_video_using,
+        resolve_scail2_adapters, resolve_wan_adapters, resolve_wan_conditioning,
+        resolved_video_f32, resolved_video_u32, scail2_sampling, video_load_spec, wan_lightning_on,
+        wan_sampling, ClipFramePosition, ComfyuiWanExperts, VideoGenInput,
     },
 };
 
@@ -190,7 +190,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
     } else {
         "linux"
     };
-    let order: &[&str] = match request.quant_bits() {
+    let order: &[&str] = match request.resolved_quant_bits() {
         None => &["q8", "q4"],
         Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
         Some(bits) if bits >= 8 => &["q8", "q4"],
@@ -291,7 +291,11 @@ enum CandleLtxTier {
 /// `mlxQuantize <= 0`, q4 as 4, and q8 as 8; all other explicit values fail closed.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
-    match candle_ltx_tier_key(&request.advanced)? {
+    let selection = sceneworks_core::payload_util::resolved_quant_selection(
+        request.options().mlx_quantize.as_ref(),
+        request.portable_aux.bound_tier(),
+    );
+    match candle_ltx_tier_key(selection)? {
         "bf16" => Some(CandleLtxTier::Bf16),
         "q8" => Some(CandleLtxTier::Q8),
         _ => Some(CandleLtxTier::Q4),
@@ -301,18 +305,22 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
 /// Portable core of [`candle_ltx_requested_tier`]: an explicit value, else the verified binding's
 /// frozen tier, else the q4 default. A present malformed or unhosted value is `None` (refused).
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) fn candle_ltx_tier_key(advanced: &JsonObject) -> Option<&'static str> {
-    use sceneworks_core::payload_util::QuantSelection;
-    match sceneworks_core::payload_util::quant_selection(advanced) {
-        QuantSelection::Unselected => Some("q4"),
+pub(crate) fn candle_ltx_tier_key(
+    selection: sceneworks_core::payload_util::ResolvedQuantSelection,
+) -> Option<&'static str> {
+    use sceneworks_core::payload_util::ResolvedQuantSelection;
+    match selection {
+        ResolvedQuantSelection::Unselected => Some("q4"),
         // A present `null` was never "no override" here: it fails closed, as it always has.
-        QuantSelection::Null | QuantSelection::Malformed(_) => None,
-        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => match bits {
-            i64::MIN..=0 => Some("bf16"),
-            4 => Some("q4"),
-            8 => Some("q8"),
-            _ => None,
-        },
+        ResolvedQuantSelection::Null => None,
+        ResolvedQuantSelection::Explicit(bits) | ResolvedQuantSelection::Bound(bits) => {
+            match bits {
+                i64::MIN..=0 => Some("bf16"),
+                4 => Some("q4"),
+                8 => Some("q8"),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -436,7 +444,7 @@ pub(super) fn candle_wan_tier_subdir(
     // No explicit pick → q8
     // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
     // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
-    let order: &[&str] = match request.quant_bits() {
+    let order: &[&str] = match request.resolved_quant_bits() {
         None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
@@ -569,8 +577,9 @@ pub(super) fn svd_vram_preflight(
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<SvdVramPreflight> {
-    let frames = svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32;
-    let decode_chunk_size = svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32;
+    let frames = resolved_svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32;
+    let decode_chunk_size =
+        resolved_svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32;
     let steps = svd_steps(request);
     match crate::vram_gate::svd_fit_error(
         frames,
@@ -613,17 +622,24 @@ pub(super) fn candle_svd_input(
         fps: request.fps,
         steps: Some(preflight.steps),
         seed: resolve_video_seed(request) as u64,
-        motion_bucket_id: Some(
-            svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
-        ),
-        noise_aug_strength: Some(svd_f32(
+        motion_bucket_id: Some(resolved_svd_i32(
+            request,
+            "motionBucketId",
+            "motionBucketId",
+            127,
+            1,
+            255,
+        ) as f32),
+        noise_aug_strength: Some(resolved_svd_f32(
             request,
             "noiseAugStrength",
             "noiseAugStrength",
             0.02,
         )),
         decode_chunk_size: Some(preflight.decode_chunk_size),
-        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
+        conditioning_fps: Some(
+            resolved_svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32,
+        ),
         offload_policy: candle_video_offload_policy(engine_id),
         ..VideoGenInput::default()
     }
@@ -1428,7 +1444,8 @@ async fn execute_candle_svd_route(
         settings,
         job,
         backend,
-        &request.advanced,
+        request.options(),
+        &request.portable_aux,
         input,
         load_generator,
     )
@@ -1541,11 +1558,11 @@ async fn execute_candle_registry_video_route(
             non_empty_negative_prompt(request),
         )
     } else if is_ltx {
-        (advanced_opt_u32(request, "steps"), None, None)
+        (resolved_video_u32(request, "steps"), None, None)
     } else if is_mochi {
         (
-            advanced_opt_u32(request, "steps"),
-            advanced_opt_f32(request, "guidanceScale"),
+            resolved_video_u32(request, "steps"),
+            resolved_video_f32(request, "guidanceScale"),
             non_empty_negative_prompt(request),
         )
     } else {
@@ -1608,7 +1625,8 @@ async fn execute_candle_registry_video_route(
         settings,
         job,
         backend,
-        &request.advanced,
+        request.options(),
+        &request.portable_aux,
         input,
         load_generator,
     )
@@ -2065,7 +2083,7 @@ pub(super) async fn generate_candle_wan_comfyui(
         fps: request.fps,
         // Non-Lightning base: honor a requested step count, else the engine default; per-expert CFG
         // defaults (guidance `None`). No adapters — the ComfyUI base lane does not fold LoRAs.
-        steps: advanced_opt_u32(request, "steps"),
+        steps: resolved_video_u32(request, "steps"),
         guidance: None,
         seed: resolve_video_seed(request) as u64,
         conditioning: Vec::new(),
@@ -2076,7 +2094,16 @@ pub(super) async fn generate_candle_wan_comfyui(
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, WAN_COMFYUI_SNAPSHOT_REPO);
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((decoded, WAN_COMFYUI_CANDLE_ADAPTER, raw_settings))
 }
 
@@ -2143,12 +2170,15 @@ pub(super) fn resolve_candle_scail2_tier(
     request: &VideoRequest,
     has_adapters: bool,
 ) -> WorkerResult<Scail2CandleTier> {
-    let tier =
-        match candle_scail2_tier_key(&request.advanced).map_err(WorkerError::InvalidPayload)? {
-            "q4" => Scail2CandleTier::Q4,
-            "q8" => Scail2CandleTier::Q8,
-            _ => Scail2CandleTier::Bf16,
-        };
+    let selection = sceneworks_core::payload_util::resolved_quant_selection(
+        request.options().mlx_quantize.as_ref(),
+        request.portable_aux.bound_tier(),
+    );
+    let tier = match candle_scail2_tier_key(selection).map_err(WorkerError::InvalidPayload)? {
+        "q4" => Scail2CandleTier::Q4,
+        "q8" => Scail2CandleTier::Q8,
+        _ => Scail2CandleTier::Bf16,
+    };
     if has_adapters && tier != Scail2CandleTier::Bf16 {
         return Err(WorkerError::InvalidPayload(format!(
             "scail2 (candle): packed {} cannot merge adapters; select the bf16 tier (advanced.mlxQuantize <= 0).",
@@ -2164,18 +2194,14 @@ pub(super) fn resolve_candle_scail2_tier(
 /// whose verified binding froze a tier runs exactly that tier: the package is served in place from
 /// the hub snapshot, where a sibling tier the guard did not verify may be installed.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(crate) fn candle_scail2_tier_key(advanced: &JsonObject) -> Result<&'static str, String> {
-    use sceneworks_core::payload_util::QuantSelection;
-    let bits = match sceneworks_core::payload_util::quant_selection(advanced) {
+pub(crate) fn candle_scail2_tier_key(
+    selection: sceneworks_core::payload_util::ResolvedQuantSelection,
+) -> Result<&'static str, String> {
+    use sceneworks_core::payload_util::ResolvedQuantSelection;
+    let bits = match selection {
         // A present `null` has always meant "no tier named" here: the dense baseline.
-        QuantSelection::Unselected | QuantSelection::Null => return Ok("bf16"),
-        QuantSelection::Malformed(_) => {
-            return Err(
-                "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
-                    .to_owned(),
-            );
-        }
-        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => bits,
+        ResolvedQuantSelection::Unselected | ResolvedQuantSelection::Null => return Ok("bf16"),
+        ResolvedQuantSelection::Explicit(bits) | ResolvedQuantSelection::Bound(bits) => bits,
     };
     match bits {
         ..=0 => Ok("bf16"),
@@ -2522,7 +2548,16 @@ pub(super) async fn generate_candle_scail2(
         cold_load_admission: Some(admission),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((
         decoded,
         CANDLE_SCAIL2_ADAPTER,
@@ -2703,7 +2738,16 @@ pub(super) async fn generate_candle_scail2_replace(
         cold_load_admission: Some(admission),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((decoded, status, lightning))
 }
 
@@ -2836,7 +2880,12 @@ async fn generate_candle_wan_vace_engine(
     let reference_count = references.len();
     let frame_total = frames.len();
 
-    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
+    let masking_strength = request
+        .options()
+        .masking_strength
+        .as_ref()
+        .map(|v| v.value as f32)
+        .unwrap_or(1.0);
     let conditioning = build_vace_conditioning(
         frames,
         masks,
@@ -2867,10 +2916,17 @@ async fn generate_candle_wan_vace_engine(
         height: request.height,
         frames: frame_count as u32,
         fps: request.fps,
-        steps: advanced_opt_u32(request, "steps"),
-        guidance: advanced_opt_f32(request, "guidanceScale"),
+        steps: resolved_video_u32(request, "steps"),
+        guidance: resolved_video_f32(request, "guidanceScale"),
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        control_scale: Some(
+            request
+                .options()
+                .conditioning_scale
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
+        ),
         offload_policy: if engine_id == "wan2_2_vace_fun_14b" {
             OffloadPolicy::Sequential
         } else {
@@ -2879,7 +2935,16 @@ async fn generate_candle_wan_vace_engine(
         cold_load_admission,
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -2976,13 +3041,29 @@ pub(super) async fn generate_candle_wan_vace_extend_bridge(
         height: request.height,
         frames: frame_count as u32,
         fps: request.fps,
-        steps: advanced_opt_u32(request, "steps"),
-        guidance: advanced_opt_f32(request, "guidanceScale"),
+        steps: resolved_video_u32(request, "steps"),
+        guidance: resolved_video_f32(request, "guidanceScale"),
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        control_scale: Some(
+            request
+                .options()
+                .conditioning_scale
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
+        ),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }
 
 /// sc-20644 review minor 10 — the behavioural test for `checkpoint_plan_bespoke_roles`, the

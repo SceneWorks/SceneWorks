@@ -410,6 +410,7 @@ pub fn registered_digest_member_claim_id(
     member: &PortableArtifactMember,
     payload: &Value,
 ) -> Result<String, ArtifactContractError> {
+    use crate::resolved_options::{RouteField, RouteOptionFacts};
     if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
         return Err(error("registered digest claim requires a Digest member"));
     }
@@ -447,10 +448,15 @@ pub fn registered_digest_member_claim_id(
             let selected = payload
                 .pointer("/modelManifestEntry/resolvedTextEncoder")
                 .ok_or_else(|| error("selected text encoder has no private resolution"))?;
-            let selected_id = payload
-                .pointer("/advanced/textEncoderModel")
-                .and_then(Value::as_str)
-                .filter(|id| *id != "default" && !id.is_empty())
+            let options = payload
+                .as_object()
+                .map(RouteOptionFacts::from_payload_syntax);
+            let selected_id = options
+                .as_ref()
+                .and_then(|options| match &options.text_encoder_model {
+                    RouteField::Valid(id) if id != "default" && !id.is_empty() => Some(id.as_str()),
+                    _ => None,
+                })
                 .ok_or_else(|| error("selected text encoder is no longer authored"))?;
             if selected.get("selectionId").and_then(Value::as_str) != Some(selected_id)
                 || selected
@@ -481,25 +487,38 @@ pub fn registered_digest_member_claim_id(
             .map_err(error);
         }
         ArtifactMemberRole::Control if member.component_id.as_deref() == Some("strict_control") => {
-            let selected = payload
-                .pointer("/advanced/controlWeights")
-                .ok_or_else(|| error("registered control overlay is no longer selected"))?;
-            let id = selected
-                .get("overlayId")
-                .and_then(Value::as_str)
+            let options = payload
+                .as_object()
+                .map(RouteOptionFacts::from_payload_syntax);
+            let weights = match options.as_ref().map(|options| &options.control_weights) {
+                Some(RouteField::Valid(weights)) => weights,
+                Some(RouteField::Null | RouteField::Invalid) => {
+                    return Err(error("registered control overlay has no logical id"));
+                }
+                _ => return Err(error("registered control overlay is no longer selected")),
+            };
+            let id = weights
+                .overlay_id
+                .valid()
+                .map(String::as_str)
                 .filter(|id| !id.trim().is_empty() && *id == id.trim())
                 .ok_or_else(|| error("registered control overlay has no logical id"))?;
-            if selected.get("_catalogAuthorized").and_then(Value::as_bool) != Some(true)
-                || selected
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
+            if !matches!(
+                weights.catalog_authorized,
+                crate::image_request::ControlWeightField::Valid(true)
+            ) || weights.path.valid().is_none_or(String::is_empty)
             {
                 return Err(error(
                     "registered control overlay is not locally authorized",
                 ));
             }
-            ("control", id, None)
+            return crate::portable_sources::registered_digest_claim_id(
+                "control",
+                id,
+                None,
+                &portable_file_ledger_sha256(&member.files)?,
+            )
+            .map_err(error);
         }
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control => {
             let slot = member
@@ -651,6 +670,18 @@ pub struct PortableRouteBinding {
     pub backend: String,
     pub platform: String,
     pub models: Vec<PortableModelBinding>,
+    /// Server-selected execution identity. Older bindings omit this and cannot authorize replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_provider: Option<PortableExpectedProvider>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortableExpectedProvider {
+    pub model_slot: String,
+    pub model_id: String,
+    pub operation: String,
+    pub provider_id: String,
 }
 
 /// Private admission envelope. Every permitted backend/platform route is frozen once, and a
@@ -1209,6 +1240,7 @@ impl PortableRouteBinding {
             backend: backend.into(),
             platform: platform.into(),
             models,
+            expected_provider: None,
         };
         route.validate()?;
         Ok(route)
@@ -1216,6 +1248,15 @@ impl PortableRouteBinding {
 
     pub fn key(&self) -> String {
         format!("{}:{}", self.backend, self.platform)
+    }
+
+    pub fn with_expected_provider(
+        mut self,
+        expected: PortableExpectedProvider,
+    ) -> Result<Self, ArtifactContractError> {
+        self.expected_provider = Some(expected);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), ArtifactContractError> {
@@ -1227,6 +1268,9 @@ impl PortableRouteBinding {
         let mut previous = None;
         for model in &self.models {
             model.validate()?;
+            if model.backend != self.backend {
+                return Err(error("portable model backend differs from its route"));
+            }
             if previous
                 .as_deref()
                 .is_some_and(|slot| slot >= model.slot.as_str())
@@ -1236,6 +1280,23 @@ impl PortableRouteBinding {
                 ));
             }
             previous = Some(model.slot.clone());
+        }
+        if let Some(expected) = &self.expected_provider {
+            for (label, value) in [
+                ("provider model slot", expected.model_slot.as_str()),
+                ("provider model id", expected.model_id.as_str()),
+                ("provider id", expected.provider_id.as_str()),
+            ] {
+                validate_logical_name(label, value)?;
+            }
+            if !matches!(expected.operation.as_str(), "image_generate" | "image_edit") {
+                return Err(error("portable provider operation is unsupported"));
+            }
+            if !self.models.iter().any(|model| {
+                model.slot == expected.model_slot && model.model_id == expected.model_id
+            }) {
+                return Err(error("portable provider has no matching frozen model slot"));
+            }
         }
         Ok(())
     }
@@ -2080,9 +2141,28 @@ mod tests {
             backend: "mlx".into(),
             platform: "macos".into(),
             models: vec![model],
+            expected_provider: Some(PortableExpectedProvider {
+                model_slot: "modelManifestEntry".into(),
+                model_id: "example".into(),
+                operation: "image_generate".into(),
+                provider_id: "provider".into(),
+            }),
         };
         let routes = BTreeMap::from([(route.key(), route)]);
         let before = route_map_sha256(&routes).unwrap();
+        let mut changed_provider = routes.clone();
+        changed_provider
+            .get_mut("mlx:macos")
+            .unwrap()
+            .expected_provider
+            .as_mut()
+            .unwrap()
+            .provider_id = "other".into();
+        assert_ne!(before, route_map_sha256(&changed_provider).unwrap());
+        let mut changed_source = routes.clone();
+        changed_source.get_mut("mlx:macos").unwrap().models[0].members[0].files[0].sha256 =
+            format!("sha256:{}", "f".repeat(64));
+        assert_ne!(before, route_map_sha256(&changed_source).unwrap());
         let mut stored = serde_json::to_value(&routes).unwrap();
         stored.sort_all_objects();
         let restored: BTreeMap<String, PortableRouteBinding> =

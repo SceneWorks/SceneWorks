@@ -4,26 +4,56 @@ use super::memory::scrub_untrusted_memory_strategy_disclosure;
 use super::CancelFlag;
 use super::ImageRequest;
 use super::ResolvedModel;
-use crate::advanced;
 use crate::emit_event;
 use crate::JsonObject;
 use crate::Path;
 use crate::Value;
 use crate::WorkerResult;
 use serde_json::json;
+
+/// Apply an existing lane bound to a canonical effective number. The shared resolver owns
+/// parsing and static compatibility; this only retains the provider's historical range.
+pub(super) fn resolved_f32_clamped(
+    request: &ImageRequest,
+    key: &'static str,
+    default: f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    request
+        .advanced_f64(key)
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .clamp(*range.start(), *range.end())
+}
+
+pub(super) fn resolved_u32_clamped(
+    request: &ImageRequest,
+    key: &'static str,
+    default: u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> u32 {
+    request
+        .advanced_i64(key)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(default)
+        .clamp(*range.start(), *range.end())
+}
+
+pub(super) fn resolved_text(request: &ImageRequest, key: &'static str, default: &str) -> String {
+    request
+        .advanced_text(key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_owned())
+}
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=max(80, family default)) else the family
 /// default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(native_lane)]
 pub(super) fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     request
-        .advanced
-        .get("steps")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_i64("steps")
+        .and_then(|value| u32::try_from(value).ok())
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
@@ -33,7 +63,7 @@ pub(super) fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u3
             let ceiling =
                 sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
                     .unwrap_or_else(|| max_requested_steps(model.default_steps()));
-            (steps as u32).clamp(1, ceiling)
+            steps.clamp(1, ceiling)
         })
         .unwrap_or(model.default_steps())
 }
@@ -53,13 +83,7 @@ pub(super) fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) ->
         return None;
     }
     let scale = request
-        .advanced
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance());
     Some(scale)
@@ -75,28 +99,28 @@ pub(super) fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) ->
 /// so the drifting steps bounds (1..=80 / 1..=50 / 1..=100) are preserved byte-for-byte — this is a
 /// dedup-of-mechanism refactor, not a policy change.
 #[cfg(native_lane)]
-pub(super) fn resolve_advanced_or_manifest_u32(
+pub(super) fn resolved_option_or_manifest_u32(
     request: &ImageRequest,
-    key: &str,
+    key: &'static str,
     default: u32,
     range: std::ops::RangeInclusive<u32>,
 ) -> u32 {
-    resolve_advanced_or_manifest_u32_with(request, key, || default, range)
+    resolved_option_or_manifest_u32_with(request, key, || default, range)
 }
 
 /// Resolve an advanced float with manifest fallback. Guidance remains uncapped; other
 /// knobs retain their existing mathematical bounds.
 #[cfg(native_lane)]
-pub(super) fn resolve_advanced_or_manifest_f32(
+pub(super) fn resolved_option_or_manifest_f32(
     request: &ImageRequest,
-    key: &str,
+    key: &'static str,
     default: f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> f32 {
-    resolve_advanced_or_manifest_f32_with(request, key, || default, range)
+    resolved_option_or_manifest_f32_with(request, key, || default, range)
 }
 
-/// Closure-default twin of [`resolve_advanced_or_manifest_u32`] (sc-8825). Identical mechanism —
+/// Closure-default twin of [`resolved_option_or_manifest_u32`] (sc-8825). Identical mechanism —
 /// `advanced[key]` → manifest `[key]` (parsed, clamped to `range`) — except the fallback is a
 /// per-lane `default_fn` closure evaluated **only** when both advanced and manifest are absent (and,
 /// like the const twin, returned **unclamped**). This covers the lanes whose default is model-dependent
@@ -104,9 +128,9 @@ pub(super) fn resolve_advanced_or_manifest_f32(
 /// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
 ///
 #[cfg(any(native_lane, test))]
-pub(super) fn resolve_advanced_or_manifest_u32_with(
+pub(super) fn resolved_option_or_manifest_u32_with(
     request: &ImageRequest,
-    key: &str,
+    key: &'static str,
     default_fn: impl FnOnce() -> u32,
     range: std::ops::RangeInclusive<u32>,
 ) -> u32 {
@@ -116,23 +140,21 @@ pub(super) fn resolve_advanced_or_manifest_u32_with(
             .or_else(|| value.as_str()?.trim().parse().ok())
     };
     request
-        .advanced
-        .get(key)
-        .and_then(parse)
+        .advanced_i64(key)
+        .and_then(|value| u64::try_from(value).ok())
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
         .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
         .unwrap_or_else(default_fn)
 }
 
-/// Closure-default twin of [`resolve_advanced_or_manifest_f32`] (sc-8825). Identical mechanism —
-/// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
-/// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
-/// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
+/// Closure-default twin of [`resolved_option_or_manifest_f32`] (sc-8825). Identical mechanism —
+/// the resolved option wins over the manifest value or per-lane `default_fn` closure; the selected
+/// value is clamped to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
 /// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
 #[cfg(any(native_lane, test))]
-pub(super) fn resolve_advanced_or_manifest_f32_with(
+pub(super) fn resolved_option_or_manifest_f32_with(
     request: &ImageRequest,
-    key: &str,
+    key: &'static str,
     default_fn: impl FnOnce() -> f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> f32 {
@@ -150,17 +172,14 @@ pub(super) fn resolve_advanced_or_manifest_f32_with(
         // Guidance recommendations are defaults, not experiment bounds. Native validation
         // owns finite values and the provider's actual mathematical restrictions.
         request
-            .advanced
-            .get(key)
-            .and_then(|value| {
-                value
-                    .as_f64()
-                    .or_else(|| value.as_str()?.trim().parse().ok())
-            })
+            .advanced_f64(key)
             .map(|value| value as f32)
             .unwrap_or(manifest_default)
     } else {
-        advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+        request
+            .advanced_f64(key)
+            .map(|value| (value as f32).clamp(*range.start(), *range.end()))
+            .unwrap_or(manifest_default)
     }
 }
 
@@ -250,13 +269,7 @@ pub(super) fn resolve_true_cfg(request: &ImageRequest, model: &ResolvedModel) ->
         return None;
     }
     let scale = request
-        .advanced
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("guidanceScale")
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance());
     Some(scale)
@@ -305,9 +318,9 @@ pub(super) fn mlx_raw_settings_for_bundle(
     guidance: Option<f32>,
 ) -> JsonObject {
     let mut raw = if sceneworks_core::image_request::flux3::is_model(&request.model) {
-        flux3_references::caller_raw_settings(&request.advanced)
+        flux3_references::resolved_output_settings(request)
     } else {
-        request.advanced.clone()
+        request.effective_advanced_wire()
     };
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
@@ -442,6 +455,7 @@ pub(crate) fn emit_sampling_knob_unsupported(
 /// numeric string. Shared by the MLX (`generate_stream`) + candle (`generate_candle_stream`) image lanes
 /// — the result is then realvisxl-forced (the lightning checkpoint) and N3-guarded via
 /// [`normalize_sampling_knob`]. Returns `(sampler, scheduler, scheduler_shift)`.
+#[cfg(test)]
 pub(crate) fn read_advanced_sampling_knobs(
     advanced: &JsonObject,
 ) -> (Option<String>, Option<String>, Option<f32>) {
@@ -470,6 +484,7 @@ pub(crate) fn read_advanced_sampling_knobs(
 /// knobs. Strips the `"default"` sentinel + blanks to `None` so the engine default (the N1 no-op) is
 /// the ABSENCE of a method. The result is then N3-guarded via [`normalize_sampling_knob`] against the
 /// model descriptor's `supported_guidance_methods` and threaded onto `GenerationRequest.guidance_method`.
+#[cfg(test)]
 pub(crate) fn read_advanced_guidance_method(advanced: &JsonObject) -> Option<String> {
     advanced
         .get("guidanceMethod")
@@ -477,6 +492,31 @@ pub(crate) fn read_advanced_guidance_method(advanced: &JsonObject) -> Option<Str
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "default")
         .map(str::to_owned)
+}
+
+/// Read only the shared validator's effective image options. Provider capability checks still
+/// decide whether the requested names can be forwarded to the selected engine.
+pub(crate) fn read_resolved_image_sampling_knobs(
+    request: &ImageRequest,
+) -> (Option<String>, Option<String>, Option<f32>) {
+    let name = |key| {
+        request
+            .advanced_text(key)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && value != "default")
+    };
+    let shift = request
+        .advanced_f64("schedulerShift")
+        .or_else(|| request.advanced_f64("timestepShift"))
+        .map(|value| value as f32);
+    (name("sampler"), name("scheduler"), shift)
+}
+
+pub(crate) fn read_resolved_image_guidance_method(request: &ImageRequest) -> Option<String> {
+    request
+        .advanced_text("guidanceMethod")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && value != "default")
 }
 
 /// The curated sampler/scheduler menu (epic 7114 decision 2) the **bespoke** conditioned image paths
@@ -514,12 +554,10 @@ mod sampling_knob_tests;
 /// the selected base checkpoint. Its adapter supplies those only when an override is absent.
 #[cfg(any(native_lane, test))]
 pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::GenerationRequest {
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
-    let guidance = sceneworks_core::image_sampling_controls::effective_guidance(
-        &request.advanced,
-        &JsonObject::new(),
-    )
-    .map(|value| value as f32);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
+    let guidance = request
+        .advanced_f64("guidanceScale")
+        .map(|value| value as f32);
     gen_core::GenerationRequest {
         sampler,
         scheduler,
@@ -528,5 +566,42 @@ pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::Gen
         negative_prompt: (!request.negative_prompt.trim().is_empty())
             .then(|| request.negative_prompt.clone()),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod resolved_sampling_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sampling_reads_canonical_values_without_reinterpreting_authored_strings() {
+        let authored = json!({"advanced": {
+            "sampler": " euler ", "scheduler": "default", "schedulerShift": "0.5",
+            "guidanceScale": "4.25"
+        }});
+        let effective = json!({"advanced": {
+            "sampler": " euler ", "scheduler": "default", "schedulerShift": 0.5,
+            "guidanceScale": 4.25
+        }});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_resolved_image_sampling_knobs(&request),
+            (Some("euler".to_owned()), None, Some(0.5))
+        );
+        assert_eq!(explicit_sampling_request(&request).guidance, Some(4.25));
+
+        let malformed = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            authored.as_object().unwrap(),
+        );
+        assert!(matches!(
+            malformed,
+            Err(sceneworks_core::resolved_options::BindingError::InvalidEffectiveValue { .. })
+        ));
     }
 }

@@ -8,19 +8,23 @@ use crate::error::ApiError;
 use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
 use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
+#[cfg(test)]
+use sceneworks_core::model_artifacts::artifact_selection::selected_portable_model_artifact_closure;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, is_supported_model_download, requested_runtime_variant,
-    safe_download_dir, selected_portable_model_artifact_closure,
+    is_co_requisite_download, is_supported_model_download, requested_runtime_variant_typed,
+    safe_download_dir, selected_portable_model_artifact_closure_resolved,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
     registered_digest_member_claim_id, resolve_pinned_hf_files, PortableArtifactFile,
-    PortableArtifactMember, PortableCheckpointPlan, PortableJobBinding, PortableModelBinding,
-    PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity, PortableSourceProvenance,
+    PortableArtifactMember, PortableCheckpointPlan, PortableExpectedProvider, PortableJobBinding,
+    PortableModelBinding, PortableRouteBinding, PortableSourceClaim, PortableSourceIdentity,
+    PortableSourceProvenance,
 };
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
 };
+use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts, TrainingRouteFacts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +49,103 @@ pub(crate) struct PortableSourceChallenge {
 }
 
 const SOURCE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
+/// Preserve authored syntax for omission-sensitive source choices, then bind execution choices
+/// only from the shared resolver's owner-issued effective request.
+pub(crate) fn route_option_facts(
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(RouteOptionFacts, RouteOptionFacts), ApiError> {
+    let authored = RouteOptionFacts::from_payload_syntax(payload);
+    let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) else {
+        // Catalog and converter probes do not have a generation option contract.
+        return Ok((authored.clone(), authored));
+    };
+    let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
+    let effective = sceneworks_core::request_validation::resolve_request(kind, payload, &facts)
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok((
+        authored,
+        RouteOptionFacts::from_payload_syntax(effective.as_payload()),
+    ))
+}
+
+/// Resolve the provider from server-owned route facts, never from an authored provider string.
+/// Unknown or route-dependent providers remain unbound and cannot authorize exact replay.
+fn expected_image_provider(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    backend: &str,
+    sources: &[SelectedRouteSource],
+) -> Option<PortableExpectedProvider> {
+    if !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        return None;
+    }
+    let (slot, entry) = entries
+        .iter()
+        .find(|(slot, _)| slot == "modelManifestEntry")?;
+    let model_id = entry.get("id")?.as_str()?;
+    let builtin = sceneworks_core::registry::builtin_model_spec(model_id)?;
+    let strict_control = sources
+        .iter()
+        .any(|source| source.model_slot == *slot && source.component_id == "strict_control");
+    let provider_id = if strict_control {
+        if *job_type != JobType::ImageGenerate
+            || payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+        {
+            return None;
+        }
+        let trusted_entry = builtin.project(None);
+        sceneworks_core::control_weights::default_control_weight_for_request(
+            model_id,
+            &trusted_entry,
+            backend,
+            payload,
+        )?
+        .engine_id
+    } else {
+        match (model_id, job_type) {
+            ("instantid_realvisxl", JobType::ImageGenerate)
+                if matches!(backend, "candle" | "mlx") =>
+            {
+                "instantid"
+            }
+            ("pulid_flux_dev", JobType::ImageGenerate) if matches!(backend, "candle" | "mlx") => {
+                "pulid_flux"
+            }
+            _ => {
+                // A primary descriptor route is sufficient only for ordinary text-to-image.
+                // Edit, reference and character lanes may select a different provider.
+                if *job_type != JobType::ImageGenerate
+                    || payload.get("mode").and_then(Value::as_str) != Some("text_to_image")
+                    || payload
+                        .get("referenceAssetId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty())
+                    || payload
+                        .get("referenceAssetIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| !values.is_empty())
+                    || payload
+                        .get("advanced")
+                        .and_then(|advanced| advanced.get("poses"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|poses| !poses.is_empty())
+                {
+                    return None;
+                }
+                builtin.routes.get(backend)?.id.as_str()
+            }
+        }
+    };
+    Some(PortableExpectedProvider {
+        model_slot: slot.clone(),
+        model_id: model_id.to_owned(),
+        operation: job_type.as_str().to_owned(),
+        provider_id: provider_id.to_owned(),
+    })
+}
 
 pub(crate) fn pending_portable_source_challenges(
     state: &AppState,
@@ -676,12 +777,16 @@ pub(crate) fn portable_authored_options(payload: &JsonObject) -> Value {
                 selected.insert(authored_key.to_owned(), Value::String(value.to_owned()));
             }
         }
-        if let Some(weight) = payload
+        let repa_selected = payload
             .get("plan")
-            .and_then(|plan| plan.pointer("/config/advanced/iris/repa/weight"))
-            .and_then(Value::as_f64)
-        {
-            selected.insert("irisRepaSelected".to_owned(), Value::Bool(weight > 0.0));
+            .and_then(Value::as_object)
+            .map(TrainingRouteFacts::from_plan_syntax)
+            .and_then(|facts| match facts.repa_weight {
+                RouteField::Valid(weight) => Some(weight > 0.0),
+                _ => None,
+            });
+        if let Some(repa_selected) = repa_selected {
+            selected.insert("irisRepaSelected".to_owned(), Value::Bool(repa_selected));
         }
     }
     options
@@ -857,25 +962,21 @@ fn replay_from_frozen_policy(
             "replay source-affecting choices differ from frozen admission",
         ));
     }
-    if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("modelPath"))
-        .and_then(Value::as_str)
-        .is_some_and(|path| !path.trim().is_empty())
-    {
+    let (authored_options, route_options) = route_option_facts(job_type, payload)?;
+    if matches!(&authored_options.model_path, RouteField::Valid(path) if !path.trim().is_empty()) {
         return Err(incomplete(
             "unregistered modelPath cannot be replayed from a remote worker root",
         ));
     }
     let entries = payload_model_entries(payload)?;
     let mut routes = BTreeMap::new();
-    for (backend, platform) in crate::portable_routes::eligible_portable_routes(
+    for (backend, platform) in crate::portable_routes::eligible_portable_routes_resolved(
         job_type,
         payload,
         &entries,
         requested_gpu,
         data_dir,
+        &route_options,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(route) = frozen.routes.get(&key) else {
@@ -901,8 +1002,13 @@ fn replay_from_frozen_policy(
                 )));
             }
         }
-        let selected = crate::portable_routes::selected_route_source_rows(
-            job_type, payload, &entries, &backend, &platform,
+        let selected = crate::portable_routes::selected_route_source_rows_resolved(
+            job_type,
+            payload,
+            &entries,
+            &backend,
+            &platform,
+            &route_options,
         )
         .map_err(incomplete)?;
         for source in selected {
@@ -1052,13 +1158,15 @@ pub(crate) async fn derive_vector_raster_child_binding(
     let authored = portable_authored_options(child_payload);
     let authored_hash = canonical_authored_options_sha256(&authored)
         .map_err(|error| incomplete(error.to_string()))?;
+    let (_, route_options) = route_option_facts(child_type, child_payload)?;
     let mut routes = BTreeMap::new();
-    for (backend, platform) in crate::portable_routes::eligible_portable_routes(
+    for (backend, platform) in crate::portable_routes::eligible_portable_routes_resolved(
         child_type,
         child_payload,
         &entries,
         requested_gpu,
         &state.settings.data_dir,
+        &route_options,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(parent_route) =
@@ -1102,8 +1210,15 @@ pub(crate) async fn derive_vector_raster_child_binding(
                 .with_checkpoint_plan(plan.clone())
                 .map_err(|error| incomplete(error.to_string()))?;
         }
-        let route = PortableRouteBinding::new(&backend, &platform, vec![model])
+        let mut route = PortableRouteBinding::new(&backend, &platform, vec![model])
             .map_err(|error| incomplete(error.to_string()))?;
+        if let Some(expected) =
+            expected_image_provider(child_type, child_payload, &entries, &backend, &[])
+        {
+            route = route
+                .with_expected_provider(expected)
+                .map_err(|error| incomplete(error.to_string()))?;
+        }
         routes.insert(key, route);
     }
     if routes.is_empty() {
@@ -1186,6 +1301,7 @@ async fn capture_portable_model_binding_inner(
             "model-backed job has no canonical model source carrier",
         ));
     }
+    let (authored_option_facts, route_options) = route_option_facts(job_type, payload)?;
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let base = payload
             .get("plan")
@@ -1211,12 +1327,13 @@ async fn capture_portable_model_binding_inner(
         .map_err(|error| incomplete(error.to_string()))?;
     let mut routes = BTreeMap::new();
     let mut last_route_error = None;
-    for (backend, platform) in crate::portable_routes::eligible_portable_routes(
+    for (backend, platform) in crate::portable_routes::eligible_portable_routes_resolved(
         job_type,
         payload,
         &entries,
         requested_gpu,
         &state.settings.data_dir,
+        &route_options,
     )? {
         let frozen_route = frozen
             .map(|frozen| {
@@ -1226,8 +1343,13 @@ async fn capture_portable_model_binding_inner(
                     .ok_or_else(|| incomplete("replay route was not admitted originally"))
             })
             .transpose()?;
-        let selected_sources = crate::portable_routes::selected_route_source_rows(
-            job_type, payload, &entries, &backend, &platform,
+        let selected_sources = crate::portable_routes::selected_route_source_rows_resolved(
+            job_type,
+            payload,
+            &entries,
+            &backend,
+            &platform,
+            &route_options,
         )
         .map_err(incomplete)?;
         for source in &selected_sources {
@@ -1325,6 +1447,8 @@ async fn capture_portable_model_binding_inner(
                     &backend,
                     &platform,
                     &authored_hash,
+                    &authored_option_facts,
+                    &route_options,
                     index == 0,
                     &selected_sources,
                     source_claims,
@@ -1343,8 +1467,15 @@ async fn capture_portable_model_binding_inner(
                 last_route_error = Some(error);
                 continue;
             }
-            let route = PortableRouteBinding::new(&backend, &platform, models)
+            let mut route = PortableRouteBinding::new(&backend, &platform, models)
                 .map_err(|error| incomplete(error.to_string()))?;
+            if let Some(expected) =
+                expected_image_provider(job_type, payload, &entries, &backend, &selected_sources)
+            {
+                route = route
+                    .with_expected_provider(expected)
+                    .map_err(|error| incomplete(error.to_string()))?;
+            }
             let has_digest = route
                 .models
                 .iter()
@@ -1563,10 +1694,23 @@ fn slot_requested_variant(
     slot: &str,
     entry: &Value,
     training: Option<&TrainingBaseSelection>,
+    options: &RouteOptionFacts,
 ) -> Option<String> {
     training
         .map(|selection| selection.tier.clone())
-        .or_else(|| requested_runtime_variant(payload))
+        .or_else(|| {
+            requested_runtime_variant_typed(
+                payload.get("variant").and_then(Value::as_str),
+                match &options.quant_tier {
+                    RouteField::Valid(tier) => Some(tier.as_str()),
+                    _ => None,
+                },
+                match &options.mlx_quantize {
+                    RouteField::Valid(bits) => Some(*bits),
+                    _ => None,
+                },
+            )
+        })
         .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))
 }
 
@@ -1632,6 +1776,8 @@ async fn capture_model_slot(
     backend: &str,
     platform: &str,
     authored_hash: &str,
+    authored_options: &RouteOptionFacts,
+    route_options: &RouteOptionFacts,
     owns_request_overlays: bool,
     selected_sources: &[SelectedRouteSource],
     source_claims: &[PortableSourceClaim],
@@ -1643,14 +1789,25 @@ async fn capture_model_slot(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| incomplete(format!("{slot} has no canonical model id")))?;
     let training = training_base_selection(job_type, payload, model_id)?;
-    let requested_variant =
-        slot_requested_variant(state, job_type, payload, slot, entry, training.as_ref());
-    let selected = selected_portable_model_artifact_closure(
+    let requested_variant = slot_requested_variant(
+        state,
+        job_type,
+        payload,
+        slot,
+        entry,
+        training.as_ref(),
+        route_options,
+    );
+    let artifact_options = route_options
+        .artifact_selection(authored_options, Some(model_id))
+        .map_err(incomplete)?;
+    let selected = selected_portable_model_artifact_closure_resolved(
         entry,
         backend,
         platform,
         requested_variant.as_deref(),
         payload,
+        &artifact_options,
     )
     .map_err(incomplete)?;
     let downloads = selected
@@ -1821,9 +1978,12 @@ async fn capture_model_slot(
             }
         }
     }
-    if let Some(path) =
-        selected_primary_override(payload, entry, owns_request_overlays, training.is_some())
-    {
+    if let Some(path) = selected_primary_override(
+        authored_options,
+        entry,
+        owns_request_overlays,
+        training.is_some(),
+    ) {
         let files =
             capture_local_source_files_offloaded(&path, &allowed_local_roots(state)).await?;
         let primary = members
@@ -2816,7 +2976,7 @@ fn selected_utility_model_path(state: &AppState, selection: &str) -> Result<Path
 /// Loader precedence for a request-owned source override. The chosen path is captured as a
 /// content digest before enqueue, rather than silently retaining the catalog's HF primary.
 fn selected_primary_override(
-    payload: &JsonObject,
+    authored_options: &RouteOptionFacts,
     entry: &Value,
     owns_request_overlays: bool,
     is_training_base: bool,
@@ -2824,12 +2984,16 @@ fn selected_primary_override(
     if is_training_base {
         return None;
     }
-    owns_request_overlays
-        .then(|| payload.get("advanced").and_then(Value::as_object))
-        .flatten()
-        .and_then(|advanced| advanced.get("modelPath"))
-        .or_else(|| entry.get("modelPath"))
-        .and_then(Value::as_str)
+    let selected_path =
+        if owns_request_overlays && !matches!(authored_options.model_path, RouteField::Absent) {
+            match &authored_options.model_path {
+                RouteField::Valid(path) => Some(path.as_str()),
+                _ => None,
+            }
+        } else {
+            entry.get("modelPath").and_then(Value::as_str)
+        };
+    selected_path
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
@@ -3735,6 +3899,120 @@ mod tests {
     use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
 
+    #[test]
+    fn server_route_provider_pairs_ignore_authored_provider_strings() {
+        for (model_id, backend, expected) in [
+            ("pulid_flux_dev", "candle", "pulid_flux"),
+            ("instantid_realvisxl", "candle", "instantid"),
+            ("realvisxl", "candle", "sdxl"),
+            ("realvisxl_lightning", "candle", "sdxl"),
+            ("illustrious_xl_v1", "mlx", "sdxl"),
+            ("illustrious_xl_v2", "candle", "sdxl"),
+        ] {
+            let entry = json!({"id":model_id,"providerId":"client_spoof"});
+            let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+            let payload =
+                json!({"model":model_id,"mode":"text_to_image","providerId":"client_spoof"})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            let bound =
+                expected_image_provider(&JobType::ImageGenerate, &payload, &entries, backend, &[])
+                    .unwrap();
+            assert_eq!(bound.provider_id, expected, "{model_id}/{backend}");
+            assert_eq!(bound.model_id, model_id);
+            assert_eq!(bound.model_slot, "modelManifestEntry");
+        }
+    }
+
+    #[test]
+    fn strict_control_provider_is_selected_from_finite_server_source_map() {
+        for (model_id, backend, expected) in [
+            ("flux_dev", "candle", "flux1_dev_control"),
+            ("flux2_dev", "mlx", "flux2_dev_control"),
+            ("z_image_turbo", "candle", "z_image_turbo_control"),
+            ("z_image", "candle", "z_image_control"),
+            ("qwen_image", "mlx", "qwen_image_control"),
+            ("kolors", "candle", "kolors_control"),
+            ("krea_2_turbo", "candle", "krea_2_turbo_control"),
+            ("realvisxl", "candle", "sdxl"),
+        ] {
+            let entry = json!({"id":model_id,"baseModel":"z_image","providerId":"client_spoof"});
+            let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+            let payload = json!({"model":model_id,"advanced":{"poses":[{"pose":"x"}]}})
+                .as_object()
+                .unwrap()
+                .clone();
+            let sources = vec![SelectedRouteSource {
+                model_slot: "modelManifestEntry".into(),
+                component_id: "strict_control".into(),
+                role: ArtifactMemberRole::Control,
+                source: SelectedSourceLocation::ManifestDownload(json!({})),
+                selected_tier: None,
+            }];
+            assert_eq!(
+                expected_image_provider(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &entries,
+                    backend,
+                    &sources,
+                )
+                .unwrap()
+                .provider_id,
+                expected,
+                "{model_id}/{backend}"
+            );
+            assert!(expected_image_provider(
+                &JobType::ImageEdit,
+                &payload,
+                &entries,
+                backend,
+                &sources,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_and_conditioned_routes_do_not_infer_a_primary_provider() {
+        let entry = json!({"id":"realvisxl","providerId":"client_spoof"});
+        let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+        for payload in [
+            json!({"model":"realvisxl","mode":"character_image","providerId":"sdxl"}),
+            json!({"model":"realvisxl","mode":"text_to_image","referenceAssetId":"ref"}),
+            json!({"model":"realvisxl","mode":"text_to_image","referenceAssetIds":["ref"]}),
+        ] {
+            assert!(expected_image_provider(
+                &JobType::ImageGenerate,
+                payload.as_object().unwrap(),
+                &entries,
+                "candle",
+                &[],
+            )
+            .is_none());
+        }
+        let plain = json!({"model":"realvisxl","mode":"text_to_image"});
+        assert!(expected_image_provider(
+            &JobType::ImageEdit,
+            plain.as_object().unwrap(),
+            &entries,
+            "candle",
+            &[],
+        )
+        .is_none());
+        let bespoke = json!({"id":"pulid_flux_dev","providerId":"client_spoof"});
+        let bespoke_entries = vec![("modelManifestEntry".to_owned(), &bespoke)];
+        assert!(expected_image_provider(
+            &JobType::ImageGenerate,
+            plain.as_object().unwrap(),
+            &bespoke_entries,
+            "unregistered",
+            &[],
+        )
+        .is_none());
+    }
+
     /// SW-7031 AC4 / Codex 4541859826: presentation is not source identity. A rename, UI copy,
     /// defaults, limits, capabilities, tags, visibility, license display text or memory evidence
     /// change must still bind an unchanged historical source; the authored text encoder stays
@@ -4137,6 +4415,7 @@ mod tests {
                 backend: "candle".to_owned(),
                 platform: "linux".to_owned(),
                 models: Vec::new(),
+                expected_provider: None,
             },
         )]);
         let eligible = ["candle:linux", "candle:windows", "mlx:macos"];
@@ -4514,7 +4793,8 @@ mod tests {
         let unselected = json!({"model":"flux_dev","mode":"text_to_image","prompt":"p"});
         let unselected = unselected.as_object().unwrap();
         let variant = |job_type: &JobType, payload: &JsonObject, slot: &str| {
-            slot_requested_variant(&state, job_type, payload, slot, &entry, None)
+            let options = RouteOptionFacts::from_payload_syntax(payload);
+            slot_requested_variant(&state, job_type, payload, slot, &entry, None, &options)
         };
         let image = JobType::ImageGenerate;
 
@@ -4808,17 +5088,18 @@ mod tests {
     #[test]
     fn request_model_override_precedes_manifest_path_only_for_primary_slot() {
         let payload = json!({"advanced":{"modelPath":"/new/root/model"}});
+        let options = RouteOptionFacts::from_payload_syntax(payload.as_object().unwrap());
         let entry = json!({"modelPath":"/old/root/model"});
         assert_eq!(
-            selected_primary_override(payload.as_object().unwrap(), &entry, true, false),
+            selected_primary_override(&options, &entry, true, false),
             Some(PathBuf::from("/new/root/model"))
         );
         assert_eq!(
-            selected_primary_override(payload.as_object().unwrap(), &entry, false, false),
+            selected_primary_override(&options, &entry, false, false),
             Some(PathBuf::from("/old/root/model"))
         );
         assert_eq!(
-            selected_primary_override(payload.as_object().unwrap(), &entry, true, true),
+            selected_primary_override(&options, &entry, true, true),
             None,
             "a training plan's verified base path cannot be replaced by a generation override"
         );
@@ -4856,6 +5137,29 @@ mod tests {
         assert_eq!(options["trainingKernel"], "iris_mlx_lora");
         assert_eq!(options["irisRepaSelected"], true);
         assert!(!options.to_string().contains("/host/private"));
+    }
+
+    #[test]
+    fn archived_training_repa_projection_preserves_numeric_presence() {
+        let project = |repa: Value| {
+            let payload = json!({"plan":{
+                "target":{"baseModel":"iris_3b"},
+                "config":{"advanced":{"iris":{"repa":repa}}}
+            }});
+            portable_authored_options(payload.as_object().unwrap())
+        };
+        assert_eq!(project(json!({"weight":0.5}))["irisRepaSelected"], true);
+        assert_eq!(project(json!({"weight":0}))["irisRepaSelected"], false);
+        assert_eq!(project(json!({"weight":-0.5}))["irisRepaSelected"], false);
+        for repa in [
+            json!({}),
+            json!({"weight":null}),
+            json!({"weight":"0.5"}),
+            json!({"weight":[]}),
+            json!("malformed"),
+        ] {
+            assert!(project(repa).get("irisRepaSelected").is_none());
+        }
     }
 
     #[test]

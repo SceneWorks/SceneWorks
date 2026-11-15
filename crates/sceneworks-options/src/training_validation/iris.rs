@@ -425,14 +425,18 @@ pub fn iris_training_memory_floor_gib(
 /// `selective_op`, which natively enters and recomputes every region too) — the shape the
 /// `full_ac` floor rows were measured at. `selective_layer` and `none` read the plain rows.
 pub fn iris_full_activation_checkpointing(config: &TrainingConfig) -> bool {
-    matches!(
+    iris_full_activation_checkpointing_mode(
         config
             .advanced
             .get(IRIS_OPTIONS_KEY)
             .and_then(|options| options.get("activation_checkpointing"))
             .and_then(Value::as_str),
-        Some("full" | "selective_op")
     )
+}
+
+/// The same full-recomputation policy over an already-bound Iris control.
+pub fn iris_full_activation_checkpointing_mode(mode: Option<&str>) -> bool {
+    matches!(mode, Some("full" | "selective_op"))
 }
 
 /// The floor row (GiB + provenance) of a generation run, with the run's activation checkpointing:

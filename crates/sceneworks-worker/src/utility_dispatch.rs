@@ -217,6 +217,46 @@ async fn run_utility_job_inner(
         })?;
         validate_static_job_options(&job.job_type, &job.payload)
             .map_err(|error| ("Invalid generation options.", error))?;
+        if let Some(expected) = EXACT_REPLAY_EXPECTED.try_with(Clone::clone).ok().flatten() {
+            use sceneworks_core::execution_receipt::{
+                require_deterministic_scope, require_image_seed_binding, ReplayUnavailable,
+                SAME_DEVICE_PINNED_RUNTIME_SCOPE,
+            };
+            let unavailable = |reason, field| {
+                (
+                    "Exact replay unavailable.",
+                    WorkerError::ReplayUnavailable(ReplayUnavailable::new(reason, field)),
+                )
+            };
+            if expected.worker_id != settings.worker_id
+                || expected.accepted_device != settings.gpu_id
+                || expected.accepted_backend != crate::portable_runtime_backend(settings)
+                || expected.inference_revision
+                    != sceneworks_core::inference_provenance::INFERENCE_REVISION
+                || expected.accepted_source_route
+                    != portable_model_binding
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|_| unavailable("source_route_changed", "source"))?
+            {
+                return Err(unavailable("replay_binding_changed", "source"));
+            }
+            require_deterministic_scope(&expected, SAME_DEVICE_PINNED_RUNTIME_SCOPE).map_err(
+                |reason| {
+                    (
+                        "Exact replay unavailable.",
+                        WorkerError::ReplayUnavailable(reason),
+                    )
+                },
+            )?;
+            require_image_seed_binding(&expected, &job.payload).map_err(|reason| {
+                (
+                    "Exact replay unavailable.",
+                    WorkerError::ReplayUnavailable(reason),
+                )
+            })?;
+        }
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
@@ -321,6 +361,7 @@ async fn run_utility_job_inner(
             http_client,
             &dispatch_job,
             &shutdown,
+            source_guard.portable_aux(),
         )
         .await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
@@ -362,6 +403,7 @@ async fn dispatch_utility_job(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
     shutdown: &gen_core::CancelFlag,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> Result<(), (&'static str, WorkerError)> {
     match job.job_type {
         JobType::Placeholder => run_placeholder_job(api, settings, job, shutdown)
@@ -370,7 +412,7 @@ async fn dispatch_utility_job(
         // Native MLX image generation, served in-process by the linked mlx-gen
         // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
         // capability is never advertised, so this arm is unreachable there.
-        JobType::ImageGenerate => run_image_generate_job(api, settings, job)
+        JobType::ImageGenerate => run_image_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Image generation failed.", error)),
         // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
@@ -378,7 +420,7 @@ async fn dispatch_utility_job(
         // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
         // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
         // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-        JobType::ImageEdit => run_image_generate_job(api, settings, job)
+        JobType::ImageEdit => run_image_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Image edit failed.", error)),
         JobType::VectorGenerate => run_vector_job(api, settings, job)
@@ -413,7 +455,7 @@ async fn dispatch_utility_job(
         // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
         // unreachable there (the procedural stub would otherwise ignore the conditioning).
         JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
-            run_video_generate_job(api, settings, job)
+            run_video_generate_job(api, settings, job, portable_aux)
                 .await
                 .map_err(|error| ("Video generation failed.", error))
         }
@@ -424,7 +466,7 @@ async fn dispatch_utility_job(
         // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`). The
         // off-Mac candle lane serves eligible Wan-VACE/SCAIL-2 replacement; unsupported models
         // are refused and remain queued.
-        JobType::PersonReplace => run_video_generate_job(api, settings, job)
+        JobType::PersonReplace => run_video_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Person replacement failed.", error)),
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS (and
@@ -433,7 +475,7 @@ async fn dispatch_utility_job(
         // that links the audio registry (the macOS mlx worker, whose `runtime-macos` bundle ships
         // it default-on); a worker without the lane never advertises `audio_generate`, so this arm
         // is unreachable there and the job stays queued for a capable worker.
-        JobType::AudioGenerate => run_audio_generate_job(api, settings, job)
+        JobType::AudioGenerate => run_audio_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Audio generation failed.", error)),
         // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
@@ -468,15 +510,17 @@ async fn dispatch_utility_job(
         JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, job)
             .await
             .map_err(|error| ("Dataset analysis failed.", error)),
-        JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, job)
+        JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Catalog analysis failed.", error)),
         // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
         // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
         // the candle lane; off both the handler returns a precise unsupported error.
-        JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, job)
-            .await
-            .map_err(|error| ("Dataset face analysis failed.", error)),
+        JobType::DatasetFaceAnalysis => {
+            run_dataset_face_analysis_job(api, settings, job, portable_aux)
+                .await
+                .map_err(|error| ("Dataset face analysis failed.", error))
+        }
         // Training subject masks (sc-2126): SAM3 "person" segmentation of every dataset image,
         // POSTed to the mask sidecar. Routed by the `image_segment` capability; MLX on Mac, candle
         // off-Mac; off both the handler returns a precise unsupported error.
@@ -488,9 +532,11 @@ async fn dispatch_utility_job(
         // candle off-Mac; off both the handler returns a precise unsupported error. Like the
         // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
         // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
-        JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, job)
-            .await
-            .map_err(|error| ("Face likeness compare failed.", error)),
+        JobType::FaceLikenessCompare => {
+            run_face_likeness_compare_job(api, settings, job, portable_aux)
+                .await
+                .map_err(|error| ("Face likeness compare failed.", error))
+        }
         // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
         // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
         // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
@@ -517,7 +563,7 @@ async fn dispatch_utility_job(
         JobType::ModelImport => run_model_import_job(api, settings, http_client, job)
             .await
             .map_err(|error| ("Model import failed.", error)),
-        JobType::ModelConvert => run_model_convert_job(api, settings, job)
+        JobType::ModelConvert => run_model_convert_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Model conversion failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, job)
@@ -544,7 +590,7 @@ async fn dispatch_utility_job(
         // `KpsExtract` is never advertised, so the job remains queued and this falls to the `_` arm
         // only if called defensively.
         #[cfg(native_lane)]
-        JobType::KpsExtract => run_kps_extract_job(api, settings, job)
+        JobType::KpsExtract => run_kps_extract_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Keypoint extraction failed.", error)),
         // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
@@ -614,6 +660,47 @@ async fn handle_job_failure(
     message: &'static str,
     error: WorkerError,
 ) {
+    let replay_active = EXACT_REPLAY_EXPECTED
+        .try_with(|expected| expected.is_some())
+        .unwrap_or(false);
+    let replay_reason = if matches!(error, WorkerError::Canceled(_)) {
+        None
+    } else if replay_active {
+        use sceneworks_core::execution_receipt::ReplayUnavailable;
+        Some(match &error {
+            WorkerError::ReplayUnavailable(reason) => reason.clone(),
+            WorkerError::ExternalLibraryUnavailable(_) => {
+                ReplayUnavailable::new("source_unavailable", "source")
+            }
+            WorkerError::Api {
+                code: Some(code), ..
+            } if code == "replay_unavailable" => {
+                ReplayUnavailable::new("completed_execution_changed", "executionReceipt")
+            }
+            _ => ReplayUnavailable::new("execution_failed", "execution"),
+        })
+    } else {
+        None
+    };
+    if let Some(reason) = replay_reason {
+        let result = json!({"replayUnavailable": reason}).as_object().cloned();
+        let _ = update_job(
+            api,
+            &job.id,
+            progress_payload(
+                JobStatus::Failed,
+                ProgressStage::Failed,
+                1.0,
+                "Exact replay unavailable.",
+                Some("The recorded execution cannot be replayed exactly.".into()),
+                result,
+                None,
+            ),
+        )
+        .await;
+        tracing::error!(event = "exact_replay_unavailable", jobId = %job.id, reason = %reason.reason, cause = %error);
+        return;
+    }
     match error {
         WorkerError::Canceled(_) => {}
         WorkerError::Validation(error) => {

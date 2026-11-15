@@ -1186,6 +1186,15 @@ pub struct ClaimResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_model_binding:
         Option<crate::model_artifacts::portable_binding::PortableRouteBinding>,
+    /// Private per-claim capability. Present only when the claiming worker proved
+    /// its derived key; never included in a public job snapshot or SSE event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_claim_capability: Option<String>,
+    /// Private expected identity for an exact replay claim. The worker checks
+    /// resolved execution choices before launch; the store checks the completed
+    /// report again in the terminal transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_replay_expected: Option<crate::execution_receipt::TrustedExecutionReceipt>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

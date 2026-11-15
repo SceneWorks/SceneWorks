@@ -139,19 +139,28 @@ pub fn latent_loss_combination_refusal(
     base_model: &str,
     config: &TrainingConfig,
 ) -> Option<String> {
+    latent_loss_combination_refusal_resolved(
+        spec,
+        base_model,
+        super::config_is_full_finetune(config),
+        config.advanced.get("ltxWorkflow").and_then(Value::as_str),
+    )
+}
+
+pub fn latent_loss_combination_refusal_resolved(
+    spec: &LatentLossSpec,
+    base_model: &str,
+    full_finetune: bool,
+    ltx_workflow: Option<&str>,
+) -> Option<String> {
     let label = capitalized(spec.label);
-    if super::config_is_full_finetune(config) {
+    if full_finetune {
         return Some(format!(
             "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
         ));
     }
     if spec.weight_key == VAE_ANCHOR.weight_key && base_model == "ltx_2_5" {
-        let workflow = config
-            .advanced
-            .get("ltxWorkflow")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
+        let workflow = ltx_workflow.map(str::trim).unwrap_or_default();
         if super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
             return Some(format!(
                 "{label} decodes the generated video stream; the LTX-2.5 workflow '{workflow}' \

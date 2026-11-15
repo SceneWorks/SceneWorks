@@ -14963,6 +14963,25 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     assert_eq!(body["payload"]["hiresFix"]["steps"], 12);
     assert_eq!(body["payload"]["hiresFix"]["denoisingStrength"], 0.6);
     assert_eq!(body["payload"]["hiresFix"]["upscaleBy"], 1.5);
+    // The created job must also bind through the worker's resolved execution view. The endpoint
+    // stores authored JSON; this checks that the enabled second pass survives typed lowering.
+    let stored = body["payload"]
+        .as_object()
+        .expect("created payload")
+        .clone();
+    let facts = sceneworks_core::request_validation::facts_for_job(
+        &sceneworks_core::contracts::JobType::ImageGenerate,
+        &stored,
+    );
+    let effective = sceneworks_core::request_validation::resolve_request("image", &stored, &facts)
+        .expect("created image options resolve");
+    let bound = sceneworks_core::image_request::ImageRequest::from_resolved(
+        &stored,
+        effective.as_payload(),
+    )
+    .expect("created image options bind");
+    assert!(bound.hires_fix.enabled);
+    assert_eq!(bound.hires_fix.steps, 12);
     assert!(
         body["payload"]["hiresFix"].get("cfgScale").is_none(),
         "an omitted optional control is not minted: {body}"

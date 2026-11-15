@@ -38,7 +38,6 @@ use super::Progress;
 #[cfg(target_os = "macos")]
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::cancel_requested_peek;
 use crate::first_safetensors_path;
 use crate::fresh_asset_id;
@@ -105,14 +104,18 @@ enum DetailEvent {
 
 fn resolve_detail_params(request: &ImageRequest) -> DetailParams {
     DetailParams {
-        strength: advanced::f32_clamped(&request.advanced, "strength", 0.55, 0.2..=1.0),
-        cn_scale: advanced::f32_clamped(&request.advanced, "cnScale", 0.7, 0.1..=1.5),
-        steps: advanced::u32_clamped(&request.advanced, "steps", 24, 1..=60),
-        guidance: advanced::f32_clamped(&request.advanced, "guidanceScale", 5.0, 1.0..=15.0),
-        tile: advanced::u32_clamped(&request.advanced, "tile", 1024, 512..=1536),
-        overlap: advanced::u32_clamped(&request.advanced, "overlap", 128, 0..=512),
-        prompt: advanced::str(&request.advanced, "prompt", DETAIL_DEFAULT_PROMPT),
-        negative: advanced::str(&request.advanced, "negativePrompt", DETAIL_DEFAULT_NEGATIVE),
+        strength: super::sampling::resolved_f32_clamped(request, "strength", 0.55, 0.2..=1.0),
+        cn_scale: super::sampling::resolved_f32_clamped(request, "cnScale", 0.7, 0.1..=1.5),
+        steps: super::sampling::resolved_u32_clamped(request, "steps", 24, 1..=60),
+        guidance: super::sampling::resolved_f32_clamped(request, "guidanceScale", 5.0, 1.0..=15.0),
+        tile: super::sampling::resolved_u32_clamped(request, "tile", 1024, 512..=1536),
+        overlap: super::sampling::resolved_u32_clamped(request, "overlap", 128, 0..=512),
+        prompt: super::sampling::resolved_text(request, "prompt", DETAIL_DEFAULT_PROMPT),
+        negative: super::sampling::resolved_text(
+            request,
+            "negativePrompt",
+            DETAIL_DEFAULT_NEGATIVE,
+        ),
         // Python defaults the detail seed to 7 when the payload omits one.
         seed: request.seed.unwrap_or(7),
     }
@@ -202,7 +205,7 @@ pub(super) trait DetailTileRefiner {
         seed: i64,
         preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
-    ) -> WorkerResult<Vec<u8>>;
+    ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)>;
 }
 
 // A cached MLX generator is borrowed only for the duration of `with_cached_generator`'s callback.
@@ -218,7 +221,7 @@ impl DetailTileRefiner for dyn Generator + '_ {
         seed: i64,
         preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
-    ) -> WorkerResult<Vec<u8>> {
+    ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
         detail_refine_tile_generator(self, tile, eng_w, eng_h, params, seed, preview, cancel)
     }
 }
@@ -234,7 +237,7 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
         seed: i64,
         preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
-    ) -> WorkerResult<Vec<u8>> {
+    ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
         let request = runtime_cuda::providers::sdxl::SdxlDetailRequest {
             prompt: params.prompt.clone(),
             negative: params.negative.clone(),
@@ -248,9 +251,17 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
             cancel: cancel.clone(),
             preview: preview.clone(),
         };
-        self.generate(&request, &tile, &tile, &mut |_| {})
-            .map(|image| image.pixels)
-            .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))
+        let completed = self
+            .generate_with_execution_report(&request, &tile, &tile, &mut |_| {})
+            .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))?;
+        match completed.generation.output {
+            Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                Ok((images.remove(0).pixels, completed.execution))
+            }
+            _ => Err(WorkerError::Engine(
+                "detail tile returned an incomplete image".into(),
+            )),
+        }
     }
 }
 
@@ -266,7 +277,7 @@ fn detail_refine_tile_generator(
     seed: i64,
     preview: &gen_core::PreviewSink,
     cancel: &CancelFlag,
-) -> WorkerResult<Vec<u8>> {
+) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
     let mut noop = |_progress: Progress| {};
     let request = GenerationRequest {
         prompt: params.prompt.clone(),
@@ -293,14 +304,13 @@ fn detail_refine_tile_generator(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, &mut noop)
+    let completed = generator
+        .generate_with_execution_report(&request, &mut noop)
         .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))?;
-    match output {
-        GenerationOutput::Images(mut images) => Ok(images
-            .pop()
-            .ok_or_else(|| WorkerError::Engine("detail tile produced no image".to_owned()))?
-            .pixels),
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+            Ok((images.remove(0).pixels, completed.execution))
+        }
         _ => Err(WorkerError::Engine(
             "detail tile returned non-image output".to_owned(),
         )),
@@ -316,7 +326,11 @@ pub(super) fn refine_tiled_detail(
     preview: &gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_tile: &mut dyn FnMut(usize, usize),
-) -> WorkerResult<(image::RgbImage, usize)> {
+) -> WorkerResult<(
+    image::RgbImage,
+    usize,
+    Vec<gen_core::generator::ExecutionIdentity>,
+)> {
     use image::imageops::FilterType::Lanczos3;
     let (width, height) = (source.width(), source.height());
     let step = params.tile.saturating_sub(params.overlap).max(1);
@@ -330,6 +344,7 @@ pub(super) fn refine_tiled_detail(
     let mut acc = vec![0.0f32; (width * height * 3) as usize];
     let mut wsum = vec![0.0f32; (width * height) as usize];
     let mut done = 0usize;
+    let mut tile_reports = Vec::with_capacity(total);
     for &y in &ys {
         for &x in &xs {
             if cancel.is_cancelled() {
@@ -356,7 +371,7 @@ pub(super) fn refine_tiled_detail(
                 height: eng_h,
                 pixels: eng_crop.into_raw(),
             };
-            let refined_px = generator.refine_tile(
+            let (refined_px, execution) = generator.refine_tile(
                 tile_img,
                 eng_w,
                 eng_h,
@@ -365,6 +380,7 @@ pub(super) fn refine_tiled_detail(
                 preview,
                 cancel,
             )?;
+            tile_reports.push(execution);
             let refined = image::RgbImage::from_raw(eng_w, eng_h, refined_px).ok_or_else(|| {
                 WorkerError::InvalidPayload("detail refined tile size mismatch".to_owned())
             })?;
@@ -391,7 +407,11 @@ pub(super) fn refine_tiled_detail(
             on_tile(done, total);
         }
     }
-    Ok((compose_feathered(&acc, &wsum, width, height), total))
+    Ok((
+        compose_feathered(&acc, &wsum, width, height),
+        total,
+        tile_reports,
+    ))
 }
 
 /// Normalize the feather-weighted accumulator back to an RGB8 image.
@@ -450,6 +470,7 @@ fn detail_result(
     height: u32,
     adapter: &str,
     memory_receipt: Option<&(String, String)>,
+    tile_reports: &[gen_core::generator::ExecutionIdentity],
 ) -> JsonObject {
     let source_asset_id = request.source_asset_id.clone().unwrap_or_default();
     let detail_settings = json!({
@@ -511,6 +532,16 @@ fn detail_result(
         "count": 1,
         "createdAt": created_at,
     });
+    let stages = tile_reports
+        .iter()
+        .enumerate()
+        .map(
+            |(index, execution)| sceneworks_core::execution_receipt::ExecutionStageBinding {
+                stage: format!("detail_tile_{index}"),
+                execution: serde_json::to_value(execution).expect("execution identity serializes"),
+            },
+        )
+        .collect::<Vec<_>>();
     json!({
         "generationSetId": genset_id,
         "expectedCount": 1,
@@ -518,6 +549,7 @@ fn detail_result(
         "model": model,
         "generationSet": generation_set,
         "assetWrites": [fact],
+        "workerExecutionStages": stages,
     })
     .as_object()
     .cloned()
@@ -606,11 +638,8 @@ pub(crate) async fn run_image_detail_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (_quant, _) = resolve_quant(&request, Some(&weights_dir));
     let adapters = resolve_adapters(&request, settings)?;
-    let control_repo = advanced::str(
-        &request.advanced,
-        "tileControlNetRepo",
-        TILE_CONTROLNET_REPO,
-    );
+    let control_repo =
+        super::sampling::resolved_text(&request, "tileControlNetRepo", TILE_CONTROLNET_REPO);
     // `tileControlNetRepo` is a public advanced control that accepted any repo before this epic,
     // and the MLX detail route still loads whatever it resolves. Refusing an override here removed
     // a previously-working user control to protect a memory identity that is already protected by
@@ -633,11 +662,14 @@ pub(crate) async fn run_image_detail_job(
              admission falls back to the uncertified resident estimate"
         );
     }
-    let control_file = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        crate::portable_aux_sources::bound_aux_path(&request.advanced, "sdxl_detail_tile_control")
+    let control_file = if request.portable_aux.has_paths() {
+        request
+            .portable_aux
+            .path("sdxl_detail_tile_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
-            WorkerError::InvalidPayload("portable Detail tile source is not bound".to_owned())
-        })?
+                WorkerError::InvalidPayload("portable Detail tile source is not bound".to_owned())
+            })?
     } else {
         let control_dir =
             huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
@@ -959,7 +991,7 @@ pub(crate) async fn run_image_detail_job(
         .await?;
         return Err(WorkerError::Canceled(message.to_owned()));
     }
-    let (refined, tiles) = join?;
+    let (refined, tiles, tile_reports) = join?;
     let (out_w, out_h) = (refined.width(), refined.height());
     let media_path = project_path.join(&media_rel);
     let temp_path = media_path.with_extension("tmp.png");
@@ -1009,6 +1041,7 @@ pub(crate) async fn run_image_detail_job(
             "candle_sdxl_detail"
         },
         detail_memory_receipt.as_ref(),
+        &tile_reports,
     );
     // Before the terminal post, so a late tick cannot re-advertise a finished worker as busy.
     drop(preload_heartbeat);

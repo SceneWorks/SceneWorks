@@ -7,7 +7,7 @@ use super::checkpoint_plan::checkpoint_plan_operation;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
-use super::conditioning::parse_poses;
+#[cfg(test)]
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_img2img_init_generic;
@@ -34,7 +34,6 @@ use super::krea_control::KREA_CONTROL_ENGINE_ID;
 use super::krea_control_candle;
 use super::krea_multiphase::build_generation_phases;
 use super::krea_multiphase::ensure_multiphase_job_shape;
-use super::krea_multiphase::parse_multiphase_specs;
 use super::krea_multiphase::request_has_multiphase;
 use super::load_spec::attach_selected_decoder_unprepared;
 use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
@@ -51,7 +50,7 @@ use super::resolve_seed;
 #[cfg(all(native_lane, all(not(target_os = "macos"), feature = "backend-candle")))]
 use super::routing::imported_base_snapshot_companions;
 use super::routing::PreparedFileDispatch;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::drive_gen_items_scored;
 #[cfg(not(target_os = "macos"))]
@@ -84,7 +83,6 @@ use super::LoadSpec;
 use super::Progress;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::ApiClient;
 use crate::JobSnapshot;
@@ -310,16 +308,22 @@ pub(super) fn resolve_imported_krea_dit_pin(
     // An explicit `modelPath` (a future assembler could pin the file directly) wins; otherwise the
     // import job's recorded install dir (`paths.model`), which holds the single-file checkpoint.
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -441,7 +445,15 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// Deliberately does NOT gate on base-tier presence: a missing base surfaces as the loud
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
+#[cfg(test)]
 pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
+    krea_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
+}
+
+fn krea_imported_request_shape_available_with_pose_count(
+    request: &ImageRequest,
+    pose_count: usize,
+) -> bool {
     let operation = krea_imported_operation(request);
     if krea_imported_native_nvfp4(request) {
         #[cfg(target_os = "macos")]
@@ -458,13 +470,17 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
             }
         }
     }
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    if sceneworks_core::jobs_store::imported_control_intent_is_material_resolved(options)
         && operation != gen_core::ImportedModelOperation::Pose
     {
         return false;
     }
     if operation == gen_core::ImportedModelOperation::Pose
-        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(&request.advanced)
+        && !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported_resolved(options)
     {
         return false;
     }
@@ -488,7 +504,7 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     }
     if request_has_multiphase(request) {
         return request.mode != "edit_image"
-            && pose_entries(request).is_empty()
+            && pose_count == 0
             && request.reference_asset_ids.is_empty()
             && request.reference_asset_id.is_none()
             && request.source_asset_id.is_none();
@@ -499,12 +515,12 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     // generate_one` threads the request conditioning into the first pass before refining it, so the
     // source is honored rather than dropped (this is why the guard is narrower than the shape gate
     // that preceded the two-pass rework).
-    if request.hires_fix.enabled && !pose_entries(request).is_empty() {
+    if request.hires_fix.enabled && pose_count > 0 {
         return false;
     }
     // A pose set inside edit mode is no lane anywhere (the builtin edit lane rejects it too), and
     // outside edit mode it requires a registered provider accepting Control conditioning.
-    if !pose_entries(request).is_empty() {
+    if pose_count > 0 {
         if request.mode == "edit_image"
             || !caps
                 .conditioning
@@ -590,9 +606,33 @@ pub(super) fn krea_imported_img2img_requested(request: &ImageRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn krea_imported_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_imported_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn krea_imported_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_imported_control_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+#[cfg(any(
+    all(target_os = "macos", test),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn krea_imported_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
-        && krea_imported_request_shape_available(request)
+        && pose_count > 0
+        && krea_imported_request_shape_available_with_pose_count(request, pose_count)
         && matches!(
             resolve_imported_krea_dit_pin(request, settings),
             Ok(Some(_))
@@ -739,11 +779,32 @@ pub(super) fn resolve_krea_imported_control_overlay(
 /// Prepare every File identity the ordinary imported route selects, once, before the async job
 /// preamble. The returned tokens are moved through dispatch and finalized on the eventual `LoadSpec`;
 /// handlers must not resolve the same source again.
+#[cfg(test)]
 pub(super) fn prepare_krea_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedKreaImportedSources>> {
-    if !krea_imported_request_shape_available(request) || !pose_entries(request).is_empty() {
+    prepare_krea_imported_sources_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn prepare_krea_imported_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedKreaImportedSources>> {
+    prepare_krea_imported_sources_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn prepare_krea_imported_sources_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> WorkerResult<Option<PreparedKreaImportedSources>> {
+    if !krea_imported_request_shape_available_with_pose_count(request, pose_count) || pose_count > 0
+    {
         return Ok(None);
     }
     let Some(dit_pin) = resolve_imported_krea_dit_pin(request, settings)? else {
@@ -759,13 +820,39 @@ pub(super) fn prepare_krea_imported_sources(
 /// Prepared strict-pose counterpart: primary DiT, control overlay, and the complete ordered adapter
 /// stack are all selected exactly once and carried through dispatch.
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn prepare_krea_imported_control_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
+    prepare_krea_imported_control_sources_with_pose_count(
+        request,
+        settings,
+        pose_entries(request).len(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn prepare_krea_imported_control_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
+    prepare_krea_imported_control_sources_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_krea_imported_control_sources_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
     if request.mode == "edit_image"
-        || pose_entries(request).is_empty()
-        || !krea_imported_request_shape_available(request)
+        || pose_count == 0
+        || !krea_imported_request_shape_available_with_pose_count(request, pose_count)
     {
         return Ok(None);
     }
@@ -890,6 +977,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedControlSources>,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -918,8 +1006,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     } = prepared_adapters;
 
     let steps = krea_control_steps(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_IMPORTED_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_IMPORTED_CONTROL_SCALE_CAP,
@@ -933,7 +1021,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     let user_control = resolve_user_control_map(request, settings, project_path)?;
     let control_source = resolve_control_source(request, settings, project_path)?;
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let mut raw_settings = krea_imported_control_raw_settings(
         request,
@@ -1154,6 +1242,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -1197,9 +1286,9 @@ pub(super) async fn generate_krea_imported_control_stream(
     }
 
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+        resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_IMPORTED_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_IMPORTED_CONTROL_SCALE_CAP,
@@ -1213,7 +1302,7 @@ pub(super) async fn generate_krea_imported_control_stream(
     let user_control = resolve_user_control_map(request, settings, project_path)?;
     let control_source = resolve_control_source(request, settings, project_path)?;
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = krea_imported_control_raw_settings(
         request,
@@ -1294,7 +1383,8 @@ pub(super) async fn generate_krea_imported_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
+            let facts_tx = tx.clone();
+            drive_gen_items_scored(tx, poses, move |index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -1323,14 +1413,31 @@ pub(super) async fn generate_krea_imported_control_stream(
                     cancel: cancel.clone(),
                     preview,
                 };
-                let (out_w, out_h, pixels) = model
-                    .generate(&control_request, &control, on_progress)
-                    .map(|image| (image.width, image.height, image.pixels))
+                let completed = model
+                    .generate_with_execution_report(&control_request, &control, on_progress)
                     .map_err(|error| {
                         WorkerError::Engine(format!(
                             "Krea imported pose generation failed: {error}"
                         ))
                     })?;
+                let image = match completed.generation.output {
+                    Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                        images.remove(0)
+                    }
+                    _ => {
+                        return Err(WorkerError::Engine(
+                            "Krea imported pose returned an incomplete image".into(),
+                        ))
+                    }
+                };
+                let mut facts = crate::JsonObject::new();
+                facts.insert(
+                    "workerExecutionReport".into(),
+                    serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                );
+                let _ =
+                    facts_tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                let (out_w, out_h, pixels) = (image.width, image.height, image.pixels);
                 let face_likeness = scorer.as_ref().and_then(|scorer| {
                     crate::face_likeness::score_generated_image(
                         Some(scorer),
@@ -1390,13 +1497,11 @@ pub(super) fn imported_model_quant(
     label: &str,
 ) -> WorkerResult<(Option<Quant>, Option<i64>)> {
     let named = request
-        .advanced
-        .get("quantTier")
-        .or_else(|| request.advanced.get("quant"))
-        .and_then(Value::as_str)
+        .advanced_text("quantTier")
+        .or_else(|| request.advanced_text("quant"))
         .map(str::trim)
         .map(str::to_ascii_lowercase);
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     let selected = if krea_imported_native_nvfp4(request) {
         // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
         // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
@@ -1482,7 +1587,7 @@ pub(super) fn krea_imported_raw_settings(
     adapter_count: usize,
     dit: Option<&Path>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
         &mut raw,
         crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
@@ -1497,7 +1602,7 @@ pub(super) fn krea_imported_raw_settings(
     raw.insert(
         "resolvedSampler".to_owned(),
         Value::String(
-            super::sampling::read_advanced_sampling_knobs(&request.advanced)
+            super::sampling::read_resolved_image_sampling_knobs(request)
                 .0
                 .unwrap_or_else(|| KREA_IMPORTED_SAMPLER.to_owned()),
         ),
@@ -2058,6 +2163,7 @@ pub(super) async fn generate_krea_imported_stream(
     settings: &Settings,
     job: &JobSnapshot,
     dispatch: PreparedFileDispatch<'_, PreparedKreaImportedSources>,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -2100,8 +2206,15 @@ pub(super) async fn generate_krea_imported_stream(
 
     let phase_specs = request_has_multiphase(request)
         .then(|| {
-            ensure_multiphase_job_shape(request)?;
-            parse_multiphase_specs(request)
+            ensure_multiphase_job_shape(execution)?;
+            execution
+                .phases()
+                .map(|phases| phases.to_vec())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "Krea multi-phase job is missing 'advanced.phases'.".to_owned(),
+                    )
+                })
         })
         .transpose()?;
     let phases = phase_specs.as_deref().map(build_generation_phases);
@@ -2113,7 +2226,7 @@ pub(super) async fn generate_krea_imported_stream(
 
     let (width, height) = (request.width, request.height);
     let steps = phase_specs.as_ref().map_or_else(
-        || resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
+        || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
         |specs| specs.iter().map(|phase| phase.steps).sum(),
     );
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);

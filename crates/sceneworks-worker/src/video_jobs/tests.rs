@@ -3631,6 +3631,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let clip = EncodedClip::measure(&decoded);
     assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
@@ -3653,6 +3654,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let clip = EncodedClip::measure(&zero_fps);
     assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
@@ -3678,6 +3680,7 @@ fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
         audio,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let track = AudioTrack {
         samples: vec![0.0; 64],
@@ -4706,18 +4709,25 @@ fn minimax_h3_reference_resize_mode_maps_onto_the_engine_enum() {
             .cloned()
             .expect("object")
     };
-    assert_eq!(parse(&serde_json::Map::new()).unwrap(), None);
+    let parse_advanced = |advanced: serde_json::Map<String, Value>| -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
+        let payload = json!({ "advanced": advanced });
+        let payload = payload.as_object().expect("request object");
+        let request = VideoRequest::from_resolved(payload, payload)
+            .map_err(|error| WorkerError::InvalidPayload(format!("{error:?}")))?;
+        parse(request.options())
+    };
+    assert_eq!(parse_advanced(serde_json::Map::new()).unwrap(), None);
     for (wire, engine) in [
         ("match", gen_core::ReferenceImageResizeMode::Match),
         ("max", gen_core::ReferenceImageResizeMode::Max),
         ("diffusers", gen_core::ReferenceImageResizeMode::Diffusers),
     ] {
-        assert_eq!(parse(&advanced(json!(wire))).unwrap(), Some(engine));
+        assert_eq!(parse_advanced(advanced(json!(wire))).unwrap(), Some(engine));
         // The wire spelling is gen-core's own serde form, so the two enums cannot drift.
         assert_eq!(serde_json::to_value(engine).unwrap(), json!(wire));
     }
     for invalid in [json!("Match"), json!("crop"), json!(1)] {
-        let error = parse(&advanced(invalid.clone())).expect_err("refused");
+        let error = parse_advanced(advanced(invalid.clone())).expect_err("refused");
         assert!(
             error.to_string().contains("referenceImageResizeMode"),
             "{invalid}: {error}"
@@ -12939,8 +12949,13 @@ fn write_complete_gemma_dir(dir: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn advanced_object(value: Value) -> JsonObject {
-    value.as_object().expect("advanced object").clone()
+fn bound_video_options(value: Value) -> sceneworks_core::video_request::VideoOptions {
+    let payload = json!({ "advanced": value });
+    let payload = payload.as_object().expect("video payload");
+    sceneworks_core::video_request::VideoOptions::bind(
+        &sceneworks_core::resolved_options::BindingInput::new(payload, payload),
+    )
+    .expect("canonical video options")
 }
 
 /// sc-13800: the public option list is generic/stable, but the operator-staged alternate is only
@@ -12975,18 +12990,18 @@ fn ltx_text_encoder_options_hide_unstaged_alternate() {
 #[test]
 fn ltx_text_encoder_selector_is_strict_and_legacy_compatible() {
     assert_eq!(
-        selected_ltx_text_encoder(&advanced_object(json!({}))).unwrap(),
+        selected_ltx_text_encoder(&bound_video_options(json!({}))).unwrap(),
         LtxTextEncoderSelection::Default
     );
     assert_eq!(
-        selected_ltx_text_encoder(&advanced_object(json!({
+        selected_ltx_text_encoder(&bound_video_options(json!({
             "textEncoderModel": AMORAL_TEXT_ENCODER_ID
         })))
         .unwrap(),
         LtxTextEncoderSelection::Amoral
     );
     assert_eq!(
-        selected_ltx_text_encoder(&advanced_object(json!({
+        selected_ltx_text_encoder(&bound_video_options(json!({
             "useUncensoredEnhancer": true
         })))
         .unwrap(),
@@ -13006,11 +13021,17 @@ fn ltx_text_encoder_selector_is_strict_and_legacy_compatible() {
         }),
         json!({ "useUncensoredEnhancer": "true" }),
     ] {
+        let payload = json!({ "advanced": bad });
+        let payload = payload.as_object().unwrap();
+        let options = sceneworks_core::video_request::VideoOptions::bind(
+            &sceneworks_core::resolved_options::BindingInput::new(payload, payload),
+        );
         assert!(
-            matches!(
-                selected_ltx_text_encoder(&advanced_object(bad)),
-                Err(WorkerError::InvalidPayload(_))
-            ),
+            options.is_err()
+                || matches!(
+                    selected_ltx_text_encoder(options.as_ref().unwrap()),
+                    Err(WorkerError::InvalidPayload(_))
+                ),
             "invalid selector input must fail as a user-facing payload error"
         );
     }
@@ -13022,7 +13043,7 @@ fn ltx_text_encoder_selector_is_strict_and_legacy_compatible() {
 #[cfg(target_os = "macos")]
 #[test]
 fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
-    let advanced = advanced_object(json!({
+    let advanced = bound_video_options(json!({
         "enhancePrompt": true,
         "textEncoderModel": AMORAL_TEXT_ENCODER_ID
     }));
@@ -13037,7 +13058,7 @@ fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
     assert!(matches!(missing, WorkerError::InvalidPayload(_)));
     assert!(missing.to_string().contains("not staged"));
 
-    let disabled = advanced_object(json!({
+    let disabled = bound_video_options(json!({
         "enhancePrompt": false,
         "textEncoderModel": AMORAL_TEXT_ENCODER_ID
     }));
@@ -13046,7 +13067,7 @@ fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
     assert!(error.to_string().contains("prompt enhancement is off"));
 
     let (use_alternate, resolved) =
-        resolve_selected_ltx_text_encoder(&advanced_object(json!({})), None).unwrap();
+        resolve_selected_ltx_text_encoder(&bound_video_options(json!({})), None).unwrap();
     assert!(!use_alternate);
     assert!(resolved.is_none());
 }
@@ -13056,7 +13077,7 @@ fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx25_rejects_inherited_alternate_text_encoder_selection() {
-    let stock = advanced_object(json!({ "enhancePrompt": true }));
+    let stock = bound_video_options(json!({ "enhancePrompt": true }));
     let (use_alternate, staged) =
         resolve_ltx_text_encoder_for_model("ltx_2_5", &stock, None).unwrap();
     assert!(!use_alternate);
@@ -13071,7 +13092,7 @@ fn ltx25_rejects_inherited_alternate_text_encoder_selection() {
     ] {
         let error = resolve_ltx_text_encoder_for_model(
             "ltx_2_5",
-            &advanced_object(alternate),
+            &bound_video_options(alternate),
             Some(PathBuf::from("/operator/staged/amoral-gemma")),
         )
         .expect_err("LTX-2.5 must reject the inherited alternate encoder");
@@ -13301,64 +13322,54 @@ fn ltx_gemma_override_path_requires_complete_dir() {
 #[cfg(native_lane)]
 #[test]
 fn candle_video_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
-    let advanced = |value: Value| value.as_object().unwrap().clone();
-    let bound_q4 = advanced(json!({"__portableBoundTier": "q4"}));
-    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
-    let unselected = advanced(json!({}));
-    let malformed = advanced(json!({"mlxQuantize": "eight", "__portableBoundTier": "q4"}));
+    use sceneworks_core::payload_util::ResolvedQuantSelection as Selection;
 
     // SCAIL-2: the unselected baseline is dense bf16; a binding frozen at q4 runs q4.
     assert_eq!(
-        super::candle::candle_scail2_tier_key(&unselected),
+        super::candle::candle_scail2_tier_key(Selection::Unselected),
         Ok("bf16")
     );
-    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q4), Ok("q4"));
-    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q8), Ok("q8"));
-    assert!(super::candle::candle_scail2_tier_key(&malformed).is_err());
-    assert!(super::candle::candle_scail2_tier_key(&advanced(json!({"mlxQuantize": 6}))).is_err());
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(Selection::Bound(4)),
+        Ok("q4")
+    );
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(Selection::Bound(8)),
+        Ok("q8")
+    );
+    assert!(super::candle::candle_scail2_tier_key(Selection::Explicit(6)).is_err());
 
     // LTX: the unselected default is q4; a binding frozen at q8 runs q8.
-    assert_eq!(super::candle::candle_ltx_tier_key(&unselected), Some("q4"));
-    assert_eq!(super::candle::candle_ltx_tier_key(&bound_q8), Some("q8"));
     assert_eq!(
-        super::candle::candle_ltx_tier_key(&advanced(json!({"__portableBoundTier": "bf16"}))),
+        super::candle::candle_ltx_tier_key(Selection::Unselected),
+        Some("q4")
+    );
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(Selection::Bound(8)),
+        Some("q8")
+    );
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(Selection::Bound(0)),
         Some("bf16")
     );
-    assert_eq!(super::candle::candle_ltx_tier_key(&malformed), None);
 
     // An explicit `null` keeps each selector's original meaning and never takes the bound tier:
     // SCAIL-2 reads it as "no tier named" (dense bf16); LTX fails it closed.
-    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"}));
     assert_eq!(
-        super::candle::candle_scail2_tier_key(&null_with_binding),
+        super::candle::candle_scail2_tier_key(Selection::Null),
         Ok("bf16")
     );
-    assert_eq!(super::candle::candle_ltx_tier_key(&null_with_binding), None);
-    assert_eq!(
-        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": null}))),
-        None
-    );
+    assert_eq!(super::candle::candle_ltx_tier_key(Selection::Null), None);
     // Every value the Candle LTX source resolver test refuses still refuses (tests.rs, the
     // `unsupported LTX Candle tier ... must fail closed` loop), except bits <= 0, which select bf16
     // here and are refused by the bundle lookup, which has no bf16 tier.
-    for invalid in [
-        json!(5),
-        json!(7),
-        json!(9),
-        json!("bf16"),
-        json!("8.0"),
-        json!(8.0),
-    ] {
+    for invalid in [5, 7, 9] {
         assert_eq!(
-            super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": invalid.clone()}))),
+            super::candle::candle_ltx_tier_key(Selection::Explicit(invalid)),
             None,
             "{invalid}"
         );
     }
-    assert_eq!(
-        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": {"bits": 8}}))),
-        None
-    );
 }
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
@@ -13784,18 +13795,24 @@ fn svd_engine_id_maps_only_svd() {
 fn svd_knobs_resolve_advanced_over_manifest_over_default() {
     // Bare request → builtin defaults.
     let bare = request(json!({ "projectId": "p", "model": "svd", "sourceAssetId": "a" }));
-    assert_eq!(svd_i32(&bare, "numFrames", "numFrames", 25, 1, 25), 25);
     assert_eq!(
-        svd_i32(&bare, "motionBucketId", "motionBucketId", 127, 1, 255),
+        resolved_svd_i32(&bare, "numFrames", "numFrames", 25, 1, 25),
+        25
+    );
+    assert_eq!(
+        resolved_svd_i32(&bare, "motionBucketId", "motionBucketId", 127, 1, 255),
         127
     );
-    assert_eq!(svd_i32(&bare, "conditioningFps", "condFps", 7, 1, 30), 7);
     assert_eq!(
-        svd_i32(&bare, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+        resolved_svd_i32(&bare, "conditioningFps", "condFps", 7, 1, 30),
+        7
+    );
+    assert_eq!(
+        resolved_svd_i32(&bare, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
         8
     );
     assert_eq!(
-        svd_f32(&bare, "noiseAugStrength", "noiseAugStrength", 0.02),
+        resolved_svd_f32(&bare, "noiseAugStrength", "noiseAugStrength", 0.02),
         0.02
     );
     assert_eq!(svd_steps(&bare), 25); // balanced
@@ -13811,17 +13828,20 @@ fn svd_knobs_resolve_advanced_over_manifest_over_default() {
     }));
     // advanced wins for motionBucketId; manifest wins for condFps + noiseAug.
     assert_eq!(
-        svd_i32(&layered, "motionBucketId", "motionBucketId", 127, 1, 255),
+        resolved_svd_i32(&layered, "motionBucketId", "motionBucketId", 127, 1, 255),
         200
     );
-    assert_eq!(svd_i32(&layered, "conditioningFps", "condFps", 7, 1, 30), 6);
     assert_eq!(
-        svd_f32(&layered, "noiseAugStrength", "noiseAugStrength", 0.02),
+        resolved_svd_i32(&layered, "conditioningFps", "condFps", 7, 1, 30),
+        6
+    );
+    assert_eq!(
+        resolved_svd_f32(&layered, "noiseAugStrength", "noiseAugStrength", 0.02),
         0.1
     );
     // numeric string parses.
     assert_eq!(
-        svd_i32(&layered, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+        resolved_svd_i32(&layered, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
         16
     );
     // steps from manifest's quality ladder (fast).
@@ -13833,12 +13853,15 @@ fn svd_knobs_resolve_advanced_over_manifest_over_default() {
         "advanced": { "motionBucketId": 999, "numFrames": 99, "decodeChunkSize": 0 }
     }));
     assert_eq!(
-        svd_i32(&extreme, "motionBucketId", "motionBucketId", 127, 1, 255),
+        resolved_svd_i32(&extreme, "motionBucketId", "motionBucketId", 127, 1, 255),
         255
     );
-    assert_eq!(svd_i32(&extreme, "numFrames", "numFrames", 25, 1, 25), 25);
     assert_eq!(
-        svd_i32(&extreme, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
+        resolved_svd_i32(&extreme, "numFrames", "numFrames", 25, 1, 25),
+        25
+    );
+    assert_eq!(
+        resolved_svd_i32(&extreme, "decodeChunkSize", "decodeChunkSize", 8, 1, 64),
         1
     );
 }
@@ -15447,6 +15470,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
             }),
             adapter_apply_reports: Vec::new(),
             veda_execution: None,
+            execution_report: None,
         };
         let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
         encode_media(&media_path, decoded, None, None)
@@ -15492,6 +15516,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
         }),
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     let media_path = dir_guard.path().join("long_audio.mp4");
     encode_media(&media_path, decoded, None, None)
@@ -16374,6 +16399,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         audio: None,
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
 
     let error = encode_media(&media_path, decoded, None, None)
@@ -20730,6 +20756,7 @@ async fn stage_minimax_h3_clip_asset(
         }),
         adapter_apply_reports: Vec::new(),
         veda_execution: None,
+        execution_report: None,
     };
     encode_media(&media_path, decoded, None, None)
         .await
