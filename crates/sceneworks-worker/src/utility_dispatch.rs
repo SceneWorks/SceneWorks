@@ -217,6 +217,7 @@ async fn run_utility_job_inner(
         })?;
         validate_static_job_options(&job.job_type, &job.payload)
             .map_err(|error| ("Invalid generation options.", error))?;
+
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
