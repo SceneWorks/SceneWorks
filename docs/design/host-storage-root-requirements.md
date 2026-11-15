@@ -53,8 +53,8 @@ LensWorks runner exists any more. A stale, unloaded
 | Host | Root (`DEV_HOST_ROOT`) | Budgets (E9) |
 |---|---|---|
 | This Mac (runner `nax-macos`; labels incl. `rw-starvector`, `nax`, `signing`) and agent sessions on it | `/Volumes/Models/dev-host` | full |
-| `nax-macos-2` (labels incl. `rw-mage`, `rw-llm`) | `/Volumes/Models/dev-host`. Its current external drive is already `/Volumes/Models`. It hosts a temporary root until the new 8 TB drive arrives (about 2026-11-20), which then takes over the same mount name | half until the new drive, then full |
-| Windows CUDA runners (`[self-hosted, Windows, X64, cuda]`) | `E:\dev-host` | full, unless `E:` is smaller |
+| `nax-macos-2` (labels incl. `rw-mage`, `rw-llm`) | `/Volumes/Models/dev-host` on the new 8 TB drive (about 2026-11-20), which takes over the `/Volumes/Models` mount name. The current drive has no room for a root (Michael, 2026-11-15), so the host has none until then | full |
+| Windows CUDA runners (`[self-hosted, Windows, X64, cuda]`) | `D:\dev-host` | full, unless `D:` is smaller |
 | GitHub-hosted runners (`ubuntu-latest`, `macos-*`, `windows-*`) | none: disposable, out of scope | — |
 
 Both Macs mount their dev volume at `/Volumes/Models`, so the fixed lock
@@ -103,8 +103,8 @@ The system drive holds only source code, apps, toolchains, personal files
     never derived from `DEV_HOST_ROOT`, `%PUBLIC%` or any other overridable
     variable:
     - Macs: `/Volumes/Models/dev-host/locks/apple-metal.lock`
-    - Windows: `E:\dev-host\locks\gpu\<UUID>.lock` and
-      `E:\dev-host\locks\service\…`
+    - Windows: `D:\dev-host\locks\gpu\<UUID>.lock` and
+      `D:\dev-host\locks\service\…`
   - **No mkdir on a missing volume.** Before opening a lock, the helper
     runs the E5 check. It never creates any folder above `locks/`. Today's
     `mkdir(parents=True)` calls in `metal_execution_lock.py` and
@@ -217,7 +217,7 @@ The system drive holds only source code, apps, toolchains, personal files
   - **`dev-host check`** verifies three things:
     - `DEV_HOST_ROOT` is set.
     - The root sits on the intended volume. On macOS its device ID differs
-      from `/`'s; on Windows `E:` is a mounted fixed volume.
+      from `/`'s; on Windows `D:` is a mounted fixed volume.
     - The `.dev-host-root` marker, written once at setup, is present.
 
     If any check fails, it exits non-zero within 10 s, naming the missing
@@ -276,9 +276,8 @@ The system drive holds only source code, apps, toolchains, personal files
     - `cache/` ≤ 50 GB
     - `campaigns/*/work` ≤ 100 GB
     - `docker/` ≤ 120 GB
-  - `nax-macos-2` gets half of each on its temporary root, and the full
-    figures on its new drive. Windows uses the Mac figures without
-    `docker/`, scaled down if `E:` is smaller.
+  - `nax-macos-2` gets the full figures on its new drive. Windows uses the Mac figures without
+    `docker/`, scaled down if `D:` is smaller.
   - `weights/` is sized by its manifest.
   - The cleanup job reports any folder over budget. In `build/` and `t/` it
     deletes the least recently used idle entries until under budget, using
@@ -306,10 +305,10 @@ The system drive holds only source code, apps, toolchains, personal files
     6. Move data.
     7. Delete the old copies.
 
-    `nax-macos-2` does steps 1–2 on its temporary root before any workflow
-    cut-over (step 4), so its jobs never meet an unset `DEV_HOST_ROOT`.
-    Once the new drive arrives it moves to the new drive, using the same
-    data-move rules.
+    `nax-macos-2` does steps 1–2 on its new drive before any workflow
+    cut-over on main (step 4), so its jobs never meet an unset
+    `DEV_HOST_ROOT`. Until the drive arrives, nobody dispatches a
+    repointed workflow to it, and the cut-over on main waits.
   - **Data that moves:**
     - test and campaign weights, including StarVector's
     - evidence
@@ -384,7 +383,7 @@ The system drive holds only source code, apps, toolchains, personal files
      same way;
    - nothing is created under the plain folder or in `<repo>/target`.
 
-   Repeat on Windows with `E:` offline, for the pre-job hook and the lock
+   Repeat on Windows with `D:` offline, for the pre-job hook and the lock
    helper.
 3. **Locks stay exclusive across the transition.** Using the CPU-only test
    seams of each implementation:
@@ -468,15 +467,16 @@ The system drive holds only source code, apps, toolchains, personal files
 ## Decided (2026-11-13)
 
 - One shared root for all projects: `dev-host` on each host's external or
-  `E:` storage. Both Macs mount at `/Volumes/Models`.
+  `D:` storage. Both Macs mount at `/Volumes/Models`.
 - Builds go on the external drive.
 - Cleanup age: 7 days.
 - `nax-macos-2` gets a new 8 TB drive matching this Mac's (ordered; about
-  one week out). It uses a temporary root on its current external drive
-  until then, so it isn't blocked and doesn't block others.
+  one week out). Its current drive has no room for a temporary root
+  (2026-11-15), so it gets its root on the new drive, and the cut-over on
+  main waits for it.
 - Docker's disk image moves. Docker Desktop isn't in regular use, so the
   restart costs nothing.
-- The Windows CUDA runners are in scope, and consolidate on `E:`.
+- The Windows CUDA runners are in scope, and consolidate on `D:` (changed from `E:` on 2026-11-15).
 - The `dev-host` tool lives in DevWorks.
 - `~/SceneWorks` is user app data:
   - `data/models/imports` (166 GB) holds Michael's own kreamania fine-tune

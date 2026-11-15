@@ -25,8 +25,9 @@ requirements and don't restate them.
   - MERGE puts SceneWorks and inference on main with the new pin.
   - SWITCH turns on the build redirection for everyone, re-registers the
     runners, and deletes old copies once active branches have caught up.
-- **After that:** `nax-macos-2`'s drive swap, inference's old-lock
-  retirement, and one terminal item.
+- **After that:** inference's old-lock retirement and one terminal item.
+- **`nax-macos-2`** gets its root when its new drive arrives (HOST-3),
+  before MERGE.
 
 **Branches** follow `FEATURE_DEVELOPMENT.md`:
 - SceneWorks and inference items target mirrored integration branches
@@ -56,8 +57,7 @@ No two items share both a mechanism and a repo.
   - Each host has a verified root (marker present, device differs from the
     system volume) with `locks/`:
     - this Mac: `/Volumes/Models/dev-host`
-    - `nax-macos-2`: a temporary root on its current `/Volumes/Models`
-    - Windows CUDA: `E:\dev-host`
+    - Windows CUDA: `D:\dev-host`
   - Runner wiring is in place:
     - the pinned `dev-host` binary is installed;
     - each runner `.env` sets `DEV_HOST_ROOT` and
@@ -325,7 +325,7 @@ No two items share both a mechanism and a repo.
 - **Touches:** both repos' main branches; SceneWorks pin sites (root and
   crate `Cargo.toml`s, `Cargo.lock`, `config/*closures*/third-party-source.json`,
   catalog-baseline fixtures)
-- **Blocked by:** SW-1, SW-3, SW-4a, SW-4b, INF-1, INF-2b
+- **Blocked by:** SW-1, SW-3, SW-4a, SW-4b, INF-1, INF-2b, HOST-3
 
 ### SWITCH — Turn on redirection, move runners, delete old copies (task, ops)
 - **Goal:** Once main is root-aware, makes everyone build on the root, and
@@ -365,18 +365,19 @@ No two items share both a mechanism and a repo.
   inference hotfix branch from `2b09938e`
 - **Blocked by:** SW-1, INF-1
 
-### HOST-3 — `nax-macos-2` moves to its new 8 TB drive (task, ops)
-- **Goal:** Replaces `nax-macos-2`'s temporary root with the new drive, at
-  full budgets.
+### HOST-3 — `nax-macos-2` gets its root on its new 8 TB drive (task, ops)
+- **Goal:** Gives `nax-macos-2` the root and runner wiring HOST-1 gives the
+  other hosts. Its current drive has no room for one (2026-11-15).
 - **Acceptance:**
-  - The new drive is mounted as `/Volumes/Models` with the marker. The
-    temporary root's contents are copied and verified, and the budget
-    config is set to full.
-  - A real-weights job passes on `nax-macos-2` after the swap.
+  - The new drive is mounted as `/Volumes/Models` with a verified root,
+    the full budget config and the cleanup schedule.
+  - The SceneWorks runner on it has HOST-1's wiring; the devworks-mac
+    runners on the same machine are unchanged.
+  - A real-weights job passes on `nax-macos-2` after MERGE.
 - **Inherits:** E5, E9, E11
 - **Touches:** `nax-macos-2` filesystems and runner config
-- **Blocked by:** SWITCH, and the drive's arrival (about 2026-11-20; a
-  hardware dependency)
+- **Blocked by:** DW-2, DW-3, and the drive's arrival (about 2026-11-20;
+  a hardware dependency). It blocks MERGE.
 
 ### INF-3 — inference retires the old locks (task, inference, targets main)
 - **Goal:** inference stops taking the old lock paths once no old-only
@@ -400,7 +401,7 @@ No two items share both a mechanism and a repo.
   - `dev-host guard --all` and `--docs` pass in all five repos.
 - **Inherits:** all
 - **Touches:** SceneWorks lock helpers and pin; `/Users/Shared/SceneWorks`
-- **Blocked by:** INF-3, HOST-3
+- **Blocked by:** INF-3
 
 ## Dependencies
 
@@ -411,10 +412,10 @@ DW-1 ─ DW-3 ─ DW-2 ─┐
    start earlier)   │       ├─ SW-2 ─┬─ SW-3 ───────────┤
                     │       │        ├─ SW-4a ──────────┤
                     │       │        └─ SW-4b ──────────┤
-                    │       ├─ INF-2a ─ INF-2b ─────────┴─ MERGE ─┐
+                    │       ├─ INF-2a ─ INF-2b ─────────┤
+DW-2 + new drive ─ HOST-3 ──────────────────────────────┴─ MERGE ─┐
                     │       ├─ CW-1 ──────────────────────────────┤
-                    │       └─ LW-1 ──────────────────────────────┴─ SWITCH ─┬─ HOST-3 ─┐
-                    │                                                        └─ INF-3 ──┴─ FINAL
+                    │       └─ LW-1 ──────────────────────────────┴─ SWITCH ─ INF-3 ─ FINAL
 SW-1 + INF-1 ─ RELNEXT ─ INF-3
 ```
 
