@@ -232,4 +232,7 @@ apps/rust-api/src/training.rs sceneworks_worker::installed_aux_training_model_di
 apps/rust-api/src/training.rs sceneworks_worker::iris_plan_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::iris_task_objective
 apps/rust-api/src/training.rs sceneworks_worker::iris_training_install_refusal
+apps/rust-api/src/training/continuation.rs sceneworks_worker::fork_completed_training_checkpoint
+apps/rust-api/src/training/continuation.rs sceneworks_worker::iris_checkpoint_root
+apps/rust-api/src/training/continuation.rs sceneworks_worker::resolve_training_output_dir_under
 apps/rust-api/src/validators.rs sceneworks_worker::prompt_enhancement_max_tokens
