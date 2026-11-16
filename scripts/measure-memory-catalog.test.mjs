@@ -6677,6 +6677,35 @@ test("HF_TOKEN reaches only catalog walks and the bounded SDXL endpoint step tha
   }
 });
 
+// CI_IMPACT: static workflow assertion only; the provisioning step runs on dispatch, never in PR CI.
+test("the mlx lane provisions an hf CLI only under download_missing and only into RUNNER_TEMP", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  const start = workflow.indexOf("\n  mlx:");
+  const end = workflow.indexOf("\n  candle:");
+  assert.ok(start > -1 && end > start, "mlx job located");
+  const job = workflow.slice(start, end);
+  const steps = [...job.matchAll(/      - name: Provide a Hugging Face CLI for --download-missing\n([\s\S]*?)(?=\n      - |$)/g)];
+  assert.equal(steps.length, 1, "exactly one provisioning step");
+  const step = steps[0][1];
+  assert.match(step, /^        if: \$\{\{ inputs\.download_missing \}\}$/m, "gated on download_missing alone");
+  assert.match(step, /if command -v hf >\/dev\/null \|\| command -v huggingface-cli >\/dev\/null; then\n[^\n]*\n\s*exit 0/,
+    "an hf CLI already on PATH skips the install");
+  assert.match(step, /python3\.12 -m venv "\$RUNNER_TEMP\/hf-cli-venv"/);
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/python" -m pip install \\\n\s*--disable-pip-version-check --no-input -r \.github\/requirements-hf\.txt/,
+    "installs the repo-pinned client into the venv");
+  assert.match(step, /echo "\$RUNNER_TEMP\/hf-cli-venv\/bin" >> "\$GITHUB_PATH"/);
+  // huggingface_hub 0.36's `hf` has a `version` subcommand and REFUSES `--version` (exit 2), so the
+  // smoke check must use the subcommand or the step fails on every runner it provisions.
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/hf" version$/m, "smoke-checks with `hf version`");
+  assert.doesNotMatch(step, /bin\/hf" --version/, "`hf --version` exits 2 on huggingface_hub 0.36");
+  // Nothing outside the job-private venv: no bare pip, no --user, no brew, no HF cache touch.
+  const installs = step.match(/pip install/g) ?? [];
+  assert.equal(installs.length, 1);
+  assert.doesNotMatch(step, /--user|\bbrew\b|pipx|sudo|\brm\b|HF_HOME|huggingface\/hub|DEFAULT_HF_CACHE/);
+  assert.ok(job.indexOf("Provide a Hugging Face CLI") < job.indexOf("      - name: Walk the catalog"), "before the walk");
+  assert.match(await readFile(path.join(ROOT, ".github/requirements-hf.txt"), "utf8"), /^huggingface_hub==\d+\.\d+\.\d+$/m);
+});
+
 test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_9000.0s"), 9000);
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_3s"), 3);
