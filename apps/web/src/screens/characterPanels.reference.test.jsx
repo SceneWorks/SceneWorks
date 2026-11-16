@@ -1,8 +1,9 @@
 const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
 vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CharacterGenerationPanel } from "./characterPanels.jsx";
 
