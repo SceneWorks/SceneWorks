@@ -82,6 +82,38 @@ concurrency:
 
 jobs:
 
+  # SW-7148: inventory the private Windows host before requesting a real-model window.
+  # This job never builds or starts the API/worker and never loads a model.
+  sdxl-exact-replay-prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'prepare' && fromJSON(inputs.campaign_run_id).ownerGo == false }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 10
+    env:
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Gather metadata without starting inference
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-prepare-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_PREPARATION_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata preparation failed' }
+      - name: Upload sanitized metadata report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-preparation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_PREPARATION_REPORT }}
+          if-no-files-found: error
+
   # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
   # on main; reuse its existing standard (compile-only) choice plus an exact marker so dispatch does
   # not depend on GitHub accepting a newly added branch-only choice value.

@@ -65,7 +65,18 @@ route bypasses the feature PR/CI contract or turns proof work into PR/push-trigg
 
 ## Approval and phases
 
-Before dispatch, inform the owner and obtain an explicit Windows real-model go window.
+Before any GPU window, dispatch the metadata-only `prepare` phase on the reviewed feature ref:
+`JSON.stringify({proof:"sdxl-exact-replay",phase:"prepare",ownerGo:false})` in the existing
+`campaign_run_id` input with `starvector_terminal_operation: "standard"`. This Windows job
+does not build or start the API or worker. It writes a version-0 private preparation record
+under the runner user's local app-data directory and uploads a bounded metadata report with
+the record path, source/pin, GPU UUIDs, candidate cache names and driver hash. A version-0
+record is **not** an approved proof plan and cannot pass `validatePlan`; use its host evidence
+to complete the server-issued binding, selected files, provider schedule and loaded runtime
+DLL census before the `qualify` phase. If the cache is absent, stage the approved model and
+repeat metadata preparation; do not download weights during the proof.
+
+Before a `qualify` or `replay` dispatch, inform the owner and obtain an explicit Windows real-model go window.
 CodeGraph rule `9fdbfea4-e2fc-4854-8342-79f5b831737f` applies even when a runner is idle.
 Discover both organization and repository runner registrations and group access; select a
 runner with Windows/X64/cuda/**real-weights** labels. Do not infer physical GPU capacity

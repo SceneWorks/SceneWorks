@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch, validatePlan, verifyMembers,
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
   finalizeEvidence } from './sdxl-exact-replay-proof.mjs';
+import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40), uuid = 'GPU-00000000-0000-0000-0000-000000000001';
@@ -133,6 +134,8 @@ test('task DB uses supported read-only SQLite and cannot mutate worker/receipt r
 test('workflow only dispatches manually and uploads bounded evidence, never private state', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/server-candle-linux.yml', import.meta.url), 'utf8');
   assert.match(workflow, /on:\n  workflow_dispatch:/);
+  assert.match(workflow, /  sdxl-exact-replay-prepare:\n    if:.*phase == 'prepare'.*ownerGo == false/);
+  assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-prepare.mjs/);
   assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*ownerGo == true/);
   assert.match(workflow, /  build-candle:\n    if:.*!startsWith/);
   assert.match(workflow, /cancel-in-progress:.*!startsWith/);
@@ -141,6 +144,13 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0/);
   assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_OUTPUT \}\}\/evidence.json/);
+});
+
+test('metadata preparation cannot inherit a real-model approval or command input', () => {
+  const marker = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'prepare', ownerGo: false });
+  validatePreparationDispatch(marker);
+  assert.throws(() => validatePreparationDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'prepare', ownerGo: true })));
+  assert.throws(() => validatePreparationDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'prepare', ownerGo: false, command: 'run' })));
 });
 
 test('accepted queued request preserves the fixed controls before claims are released', () => {
