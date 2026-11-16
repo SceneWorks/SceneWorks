@@ -31201,6 +31201,11 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
     let restored = asset_writes[1].as_object().unwrap();
     assert_eq!(restored["workerChildExecutionReport"]["state"], "resolved");
     assert_eq!(
+        restored["workerChildExecutionReport"]["identity"]["quality_policy"]["value"]["numeric"]
+            ["device"],
+        "cpu"
+    );
+    assert_eq!(
         restored["workerChildExecutionReport"]["identity"]["provider_id"],
         "iris_3b_restore"
     );

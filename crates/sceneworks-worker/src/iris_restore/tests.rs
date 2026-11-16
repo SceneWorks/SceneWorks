@@ -641,10 +641,48 @@ mod job_tests {
                 "iris-restore-test@1",
                 500.0,
                 0.5,
-                json!({"fixture":"completed-transform"}),
+                json!({"device":"cpu", "fixture":"completed-transform"}),
             )?;
             gen_core::CompletedTransform::new(image, execution, self.descriptor())
         }
+    }
+
+    #[test]
+    fn restoration_receipt_without_device_remains_unavailable() {
+        let request = transform_request(
+            Image {
+                width: 32,
+                height: 32,
+                pixels: vec![128; 32 * 32 * 3],
+            },
+            &params(Some(1.0), RestoreInputSizing::Original, Some(false)),
+            CancelFlag::default(),
+        );
+        let plan =
+            restoration::plan_request(&request, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID)
+                .unwrap();
+        let image = Image {
+            width: plan.output.width,
+            height: plan.output.height,
+            pixels: vec![128; (plan.output.width * plan.output.height * 3) as usize],
+        };
+        let report = restoration::completed_execution_identity(
+            &plan,
+            &image,
+            "stub",
+            "iris-restore-test@1",
+            500.0,
+            0.5,
+            json!({"fixture":"completed-transform"}),
+        )
+        .unwrap();
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["state"], "unavailable");
+        assert_eq!(report["reason"]["code"], "restoration_device_unavailable");
+        assert_eq!(
+            report["reason"]["missing_facts"],
+            json!(["selected_execution_device"])
+        );
     }
 
     pub(crate) fn reporting_stub_loader(
@@ -926,6 +964,11 @@ mod job_tests {
         );
         assert_eq!(asset["model"], json!("iris_3b_restore"));
         assert_eq!(asset["workerExecutionReport"]["state"], "resolved");
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["quality_policy"]["value"]["numeric"]
+                ["device"],
+            "cpu"
+        );
         assert_eq!(
             asset["workerExecutionReport"]["identity"]["provider_id"],
             IRIS_RESTORE_MODEL_ID
