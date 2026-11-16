@@ -8042,6 +8042,52 @@ test("--download-missing fetches an EMPTY snapshot too: the hub CLI resumes an i
   assert.equal((await stub.invocations()).length, 1, "the already-staged anchor is never re-fetched");
 });
 
+test("--download-missing completes a PARTIAL snapshot whose shard index names a missing shard, without touching present files", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // Run 43946963737's shape: the pinned tier root EXISTS and holds its index and some shards, but
+  // an earlier fetch was cut short, so a shard its own index names is absent.
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4");
+  await mkdir(tierRoot, { recursive: true });
+  await writeFile(path.join(tierRoot, "model.safetensors.index.json"), JSON.stringify({
+    weight_map: { "a.weight": "present-00001-of-00002.safetensors", "b.weight": "weights.safetensors" },
+  }));
+  const present = path.join(tierRoot, "present-00001-of-00002.safetensors");
+  await writeFile(present, "already here");
+  const presentBefore = await stat(present);
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-partial", hfCache: [hub],
+  };
+
+  // Without the flag: today's weights_missing naming the shard, and no fetch.
+  const idle = await stubHuggingFaceCli();
+  const before = await withStubCli(idle, () => planRun({ ...args, downloadMissing: false }, root));
+  const planned = before.rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(planned.status, "weights_missing");
+  assert.match(planned.reason, /is missing weights\.safetensors, which its own safetensors shard index names beside it/);
+  assert.deepEqual(await idle.invocations(), [], "no fetch without --download-missing");
+
+  // With the flag: one fetch of that pinned repo@revision and tier glob into the same hub, then a
+  // re-probe that finds the completed mirror.
+  const stub = await stubHuggingFaceCli();
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const invocations = await stub.invocations();
+  assert.equal(invocations.length, 1, JSON.stringify(invocations));
+  const [argv] = invocations;
+  assert.equal(argv[1], PROVIDER_FAMILIES.qwen_image.repo);
+  assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION);
+  assert.equal(argv[argv.indexOf("--include") + 1], "q4/*");
+  assert.equal(argv[argv.indexOf("--cache-dir") + 1], hub);
+  const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(fetched.status, "runnable", fetched.reason);
+  assert.equal(fetched.tierRoot, tierRoot);
+  const presentAfter = await stat(present);
+  assert.equal(await readFile(present, "utf8"), "already here", "a present shard is never rewritten");
+  assert.equal(presentAfter.mtimeMs, presentBefore.mtimeMs);
+});
+
 test("with no Hugging Face CLI on PATH, --download-missing says so ONCE and on every cell it silenced", { skip: skipWithoutShebang }, async () => {
   const { anchors, models } = downloadFixture();
   const root = await fakePlanRoot(anchors, models);
