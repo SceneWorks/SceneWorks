@@ -272,6 +272,36 @@ fn resolve_dirs_for_os(
     })
 }
 
+/// Stage the cached image generator out before the expander loads cold. The 27B expander and the
+/// MiniMax-H3-Image generator it serves do not fit together on most hosts, and the generator stays
+/// in `generator_cache` for its idle window after a render; the expansion's own refine-cache load
+/// evicts only a previous refiner. A warm expander (already resident, so the generator was staged
+/// out when it loaded, or the render after it evicted the expander) needs no new memory, so
+/// nothing is evicted for it — the same order as the Qwen3.8 describer's cold-load admission. The
+/// cache probe and the eviction are injected so the order is testable without weights. Returns
+/// whether a generator was evicted.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) async fn evict_generator_before_cold_load<Access, Evict>(
+    access: impl FnOnce() -> Access,
+    evict_generator: impl FnOnce() -> Evict,
+) -> WorkerResult<bool>
+where
+    Access: std::future::Future<Output = WorkerResult<crate::cache_thread::CacheAccess>>,
+    Evict: std::future::Future<Output = WorkerResult<bool>>,
+{
+    if access().await? == crate::cache_thread::CacheAccess::Warm {
+        return Ok(false);
+    }
+    let evicted = evict_generator().await?;
+    if evicted {
+        tracing::info!(
+            event = "minimax_h3_image_expander_evicted_cached_generator",
+            "MiniMax-H3-Image prompt expansion: evicted the cached generator before loading the expander"
+        );
+    }
+    Ok(evicted)
+}
+
 /// The edit target-ratio selection from the payload's `aspectRatio`: absent or `adaptive` lets
 /// the model choose; a positive-integer `W:H` must come back unchanged.
 pub(crate) fn aspect_selection(value: Option<&str>) -> WorkerResult<pe::AspectSelection> {
@@ -619,6 +649,40 @@ mod tests {
                 );
                 assert_eq!(dirs.tier, Some("q4"), "{os}");
             }
+        }
+    }
+
+    /// PR #3418 review: render then expand. A cold expander load evicts the cached generator
+    /// FIRST (before the load), and a warm expander evicts nothing. Weights-free: the cache probe
+    /// and the eviction are recording stubs.
+    #[tokio::test]
+    async fn a_cold_expander_load_evicts_the_cached_generator_first() {
+        use crate::cache_thread::CacheAccess;
+        use std::sync::{Arc, Mutex};
+        for (access, expect_evict) in [(CacheAccess::Cold, true), (CacheAccess::Warm, false)] {
+            let log = Arc::new(Mutex::new(Vec::<&str>::new()));
+            let (probe_log, evict_log) = (log.clone(), log.clone());
+            let evicted = evict_generator_before_cold_load(
+                move || async move {
+                    probe_log.lock().unwrap().push("probe");
+                    Ok(access)
+                },
+                move || async move {
+                    evict_log.lock().unwrap().push("evict");
+                    Ok(true)
+                },
+            )
+            .await
+            .unwrap();
+            // The load runs after this returns.
+            log.lock().unwrap().push("load");
+            assert_eq!(evicted, expect_evict, "{access:?}");
+            let expected: &[&str] = if expect_evict {
+                &["probe", "evict", "load"]
+            } else {
+                &["probe", "load"]
+            };
+            assert_eq!(*log.lock().unwrap(), expected, "{access:?}");
         }
     }
 

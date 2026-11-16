@@ -197,7 +197,7 @@ async fn evict_resident_refiner_on(worker: &mpsc::Sender<RefineJob>) -> WorkerRe
 /// new memory), else [`CacheAccess::Cold`] with the weights source of a different resident
 /// refiner, which the load's own evict-before-load drops first. A memory check credits what that
 /// drop frees; a job it refuses leaves the resident refiner in place.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn refiner_admission_access(
     spec: &LoadSpec,
     reqs: &ModelRequirements,

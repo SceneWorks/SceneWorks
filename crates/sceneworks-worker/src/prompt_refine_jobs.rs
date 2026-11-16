@@ -985,6 +985,23 @@ pub(crate) async fn run_prompt_refine_job(
     if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
     }
+    // SW-7102: render then expand. The MiniMax-H3-Image generator a render just used stays in the
+    // generator cache for its idle window, and the 27B expander does not fit beside it on most
+    // hosts; a cold expander load stages it out first (the render stages the expander out the
+    // other way round, in `image_jobs`).
+    #[cfg(native_lane)]
+    if task == RefineTask::MiniMaxH3ImageExpand {
+        let (probe_spec, probe_reqs) = (refine_spec.clone(), refine_reqs.clone());
+        crate::minimax_h3_image_prompt_expand::evict_generator_before_cold_load(
+            || async move {
+                crate::refine_model_cache::refiner_admission_access(&probe_spec, &probe_reqs)
+                    .await
+                    .map(|(access, _)| access)
+            },
+            crate::generator_cache::evict_cached_generator,
+        )
+        .await?;
+    }
     let blocking = crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
         refine_spec,
         refine_reqs,

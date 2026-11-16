@@ -753,6 +753,146 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
     );
 }
 
+/// PR #3418 review: a request admitted at q4 by name (`advanced.quantTier`), with the denser q8 also
+/// installed, loads q4 — and so does a request whose only selection is the tier the worker's
+/// portable guard verified and froze into the dispatch (`advanced.__portableBoundTier`). Before,
+/// the render loader read only `mlxQuantize` and took the densest installed tier (q8).
+#[tokio::test]
+async fn a_named_or_bound_h3_image_tier_is_the_tier_the_loader_loads() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_entry();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let snapshot = |repo: &str, revision: &str| {
+        let root = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+            .unwrap();
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs").join("main"), revision).unwrap();
+        root.join("snapshots").join(revision)
+    };
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    };
+    let upstream = snapshot(
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    for file in [
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+        "processor/processor_config.json",
+    ] {
+        touch(upstream.join(file));
+    }
+    let rehost = snapshot(
+        "SceneWorks/minimax-h3-image-mlx",
+        "6f62669b919bccdbf51b08c696fbb84542000a87",
+    );
+    let text_encoder = snapshot(
+        "SceneWorks/minimax-h3-mlx",
+        "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+    );
+    for tier in ["q8", "q4"] {
+        touch(rehost.join(format!("{tier}/transformer_diffusers/config.json")));
+        touch(text_encoder.join(format!("{tier}/text_encoder/config.json")));
+    }
+    let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 named").await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project["id"], "model": "minimax_h3_image", "prompt": "a lighthouse",
+            "width": 2048, "height": 2048, "advanced": { "quantTier": "q4" },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let stored = state
+        .jobs_store
+        .get_job(created["id"].as_str().unwrap())
+        .expect("job reads");
+    // A named tier is the user's: nothing is frozen over it.
+    assert!(
+        stored.payload["advanced"].get("mlxQuantize").is_none(),
+        "{}",
+        stored.payload["advanced"]
+    );
+    let binding = state
+        .jobs_store
+        .portable_model_binding(created["id"].as_str().unwrap())
+        .expect("binding reads")
+        .expect("the render is bound");
+    assert_eq!(
+        assert_worker_guard_accepts(
+            &JobType::ImageGenerate,
+            &stored.payload,
+            &binding,
+            "minimax_h3_image"
+        ),
+        "q4"
+    );
+    let q4 = std::fs::canonicalize(rehost.join("q4")).unwrap();
+    let loads = |payload: &JsonObject| {
+        std::fs::canonicalize(
+            sceneworks_worker::minimax_h3_image_render_tier_dir(&settings.data_dir, payload)
+                .expect("the loader resolves")
+                .expect("an installed tier"),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        loads(&stored.payload),
+        q4,
+        "the named tier is loaded, not the denser q8"
+    );
+
+    // The guard writes the binding's verified tier into the dispatch as `__portableBoundTier`; a
+    // request that carries only that selection loads it too.
+    let bound_tier = binding["routes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .and_then(|route| route["models"].as_array())
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|model| model["slot"] == "modelManifestEntry")
+        })
+        .and_then(|model| model["tier"].as_str())
+        .expect("the bound tier")
+        .to_owned();
+    let mut dispatch = stored.payload.clone();
+    dispatch.insert(
+        "advanced".to_owned(),
+        json!({ "__portableBoundTier": bound_tier }),
+    );
+    assert_eq!(loads(&dispatch), q4, "the verified bound tier is loaded");
+    // Nothing named and nothing bound: the densest installed tier.
+    dispatch.insert("advanced".to_owned(), json!({}));
+    assert_eq!(
+        loads(&dispatch),
+        std::fs::canonicalize(rehost.join("q8")).unwrap()
+    );
+}
+
 /// SW-7106: the job door keeps MiniMax-H3-Image's sampler block on the payload the worker reads,
 /// and refuses an invalid block by its wire field before a job exists.
 #[tokio::test]

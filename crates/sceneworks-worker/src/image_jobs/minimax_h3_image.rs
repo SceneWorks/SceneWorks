@@ -168,22 +168,44 @@ fn snapshot_names(snapshot: &Path, repo: &str, revision: &str) -> bool {
         )
 }
 
-/// The tier an explicit `advanced.mlxQuantize` names (`<= 0` or `>= 9` ⇒ bf16, `1..=4` ⇒ q4,
-/// `5..=8` ⇒ q8), or `None` when the request names none.
+/// The tier this request was admitted with, read the way admission reads it
+/// (`requested_runtime_variant`): a named `advanced.quantTier` first, then the `advanced.mlxQuantize`
+/// bit count (`<= 0` or `>= 9` ⇒ bf16, `1..=4` ⇒ q4, `5..=8` ⇒ q8), else — the key absent — the tier
+/// the worker's portable guard verified and froze (`advanced.__portableBoundTier`). `None` only when
+/// none of them names a tier, which leaves the densest installed tier.
 fn explicit_tier(request: &ImageRequest) -> WorkerResult<Option<&'static str>> {
     explicit_tier_in(&request.advanced)
 }
 
 /// [`explicit_tier`] over a request's `advanced` object.
 fn explicit_tier_in(advanced: &JsonObject) -> WorkerResult<Option<&'static str>> {
-    let Some(value) = advanced.get("mlxQuantize").filter(|value| !value.is_null()) else {
-        return Ok(None);
+    use sceneworks_core::payload_util::QuantSelection;
+    if let Some(name) = advanced
+        .get("quantTier")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return TIERS
+            .into_iter()
+            .find(|tier| tier.eq_ignore_ascii_case(name))
+            .map(Some)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{MODEL_ID} has no `{name}` tier; its tiers are {}",
+                    TIERS.join(", ")
+                ))
+            });
+    }
+    let bits = match sceneworks_core::payload_util::quant_selection(advanced) {
+        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => bits,
+        QuantSelection::Unselected | QuantSelection::Null => return Ok(None),
+        QuantSelection::Malformed(value) => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{MODEL_ID} advanced.mlxQuantize must be an integer bit count, got {value}"
+            )))
+        }
     };
-    let bits = sceneworks_core::payload_util::json_integer(value).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "{MODEL_ID} advanced.mlxQuantize must be an integer bit count, got {value}"
-        ))
-    })?;
     Ok(Some(match bits {
         bits if bits <= 0 || bits >= 9 => "bf16",
         bits if bits <= 4 => "q4",
