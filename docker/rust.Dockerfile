@@ -215,7 +215,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # — the Windows host build uses schannel instead, so this only surfaces here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config libssl-dev procps \
+        ca-certificates curl git build-essential pkg-config libssl-dev procps python3 \
     && rm -rf /var/lib/apt/lists/*
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
@@ -267,6 +267,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo fetch --locked
 
 COPY crates ./crates
+COPY scripts/fetch-flash-prebuilt.py ./scripts/fetch-flash-prebuilt.py
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
@@ -291,7 +292,8 @@ COPY docs/calibration/sc-24217/ ./docs/calibration/sc-24217/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
-# nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
+# nvcc compiles the other candle providers' CUDA kernels here (compiling needs no GPU);
+# FlashAttention links the verified Linux archive when the exact source/toolchain matches.
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in
 # libmoe.a need explicit cubins. Inspect the exact executable copied to /out
 # (rather than a Cargo build-directory candidate) so a stale cache entry cannot
@@ -301,6 +303,7 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 # apps/desktop/scripts/build-sidecar.mjs).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/root/.cache/sceneworks/flash-attn \
     --mount=type=cache,target=/app/target \
     set -eu; \
     (while sleep 120; do \
@@ -309,6 +312,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     done) & monitor=$!; \
     trap 'kill "$monitor" 2>/dev/null || true' EXIT; \
     cargo fetch --locked \
+    && flash_dir="$(python3 scripts/fetch-flash-prebuilt.py)" \
+    && if [ -n "$flash_dir" ]; then export CANDLE_FLASH_ATTN_PREBUILT_DIR="$flash_dir"; fi \
     && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \

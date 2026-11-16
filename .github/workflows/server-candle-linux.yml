@@ -339,7 +339,7 @@ jobs:
       - name: Select the existing listener-isolated Cargo dependency cache
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated Cargo cache selection failed' }
       - name: Fetch source dependencies only, never model weights
         shell: cmd
@@ -412,6 +412,17 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+      - name: Fetch verified FlashAttention archive when published
+        run: |
+          set +e
+          node scripts/fetch-flash-prebuilt.mjs --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=FlashAttention prebuilt unavailable::compiling kernels from source"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       # The candle-gen single-rev invariant the default skew gate is blind to: with
       # `--features backend-candle` the optional candle-gen providers are pulled, so
       # a candle-gen pin that resolves a different gen-core rev would split contract
