@@ -12,7 +12,7 @@
 
 # Immutable CUDA worker base for the RunPod target. Its source inputs are
 # checked by scripts/check-runpod-prebuilt-inputs.mjs before publication.
-ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:371e8b7c2a6b08ad3248ed0db9a4fba9614597bc6b35490992296af150031d21
+ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:cab97ba4931374744f48ee41f6d1c9614b8310915bbcf1bb49c903775f408ee4
 
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
