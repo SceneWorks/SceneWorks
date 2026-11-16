@@ -14,6 +14,8 @@ import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const PIN = '101975c301686467f089cf8c0e3c4a9e33846b6d';
 let stage = 'dispatch';
+let idleObservation = 'not observed';
+let idleLogSignals = [];
 const publicReasons = new Set([
   'binding escaped private directory', 'inference pin changed', 'bound runtime source changed',
   'runtime binary changed', 'physical host changed', 'physical index zero unavailable',
@@ -91,7 +93,8 @@ async function main() {
 
   const state = path.join(process.env.RUNNER_TEMP, 'sdxl-exact-replay-census-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT);
   await mkdir(state);
-  const log = await open(path.join(privateDir, 'census-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT + '.log'), 'wx');
+  const logPath = path.join(privateDir, 'census-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT + '.log');
+  const log = await open(logPath, 'wx');
   const port = await freePort();
   const workerId = 'sdxl-census-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT;
   const master = randomBytes(32).toString('hex');
@@ -148,10 +151,18 @@ async function main() {
         assert(!worker.spawnFailed && worker.exitCode === null && worker.signalCode === null, 'worker exited');
         const workers = await api('/api/v1/workers');
         const owned = workers.find((entry) => entry.id === workerId);
-        registered = owned?.status === 'idle' && owned.gpuId === String(device.physicalIndex)
-          && db.prepare('select source_proof_authenticated from workers where id=?').get(workerId)?.source_proof_authenticated === 1;
+        const authenticated = db.prepare('select source_proof_authenticated from workers where id=?').get(workerId)?.source_proof_authenticated === 1;
+        const gpuMatch = owned?.gpuId === String(device.physicalIndex);
+        const status = ['idle', 'busy', 'offline', 'unhealthy'].includes(owned?.status) ? owned.status : 'absent';
+        idleObservation = `present=${Boolean(owned)},status=${status},gpuMatch=${gpuMatch},authenticated=${authenticated}`;
+        registered = status === 'idle' && gpuMatch && authenticated;
         if (registered) break;
         await delay(500);
+      }
+      if (!registered) {
+        const privateLog = await readFile(logPath, 'utf8').catch(() => '');
+        idleLogSignals = ['cuda_preflight_failed', 'cuda_preflight_transient', 'rust_worker_register_failed']
+          .filter((signal) => privateLog.includes(signal));
       }
       assert(registered, 'idle worker did not register');
       assert.equal(db.prepare('select count(*) as n from jobs').get().n, 0, 'census created a job');
@@ -202,7 +213,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       ? ` (${[error?.name, error?.code, error?.syscall].filter((value) => typeof value === 'string')
         .map((value) => value.replace(/[^A-Za-z0-9_]/g, '')).filter(Boolean).join('/') || 'unknown error'})`
       : '';
-    console.error('SDXL runtime census failed at ' + stage + (reason || fileError) + '. No job or model was started.');
+    const idleDetail = stage === 'idle-worker' ? ` (${idleObservation}; logSignals=${idleLogSignals.join(',') || 'none'})` : '';
+    console.error('SDXL runtime census failed at ' + stage + reason + fileError + idleDetail + '. No job or model was started.');
     process.exitCode = 1;
   });
 }
