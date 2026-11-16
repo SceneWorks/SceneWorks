@@ -46,6 +46,17 @@ test("a failed walk prints the wrapper diagnostics, the walk log tail and every 
     "the receipt is copied into the uploaded work dir");
 });
 
+test("a truncated summary keeps the walk log tail and says why the cases are missing", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "walk-report-"));
+  const workDir = path.join(dir, "work");
+  await mkdir(workDir);
+  await writeFile(path.join(workDir, "campaign.log"), "walk line 1\nENOSPC: no space left on device\n");
+  await writeFile(path.join(workDir, "summary-2026-11-16T05-00-00-000Z.json"), '{"results": [{"key": "minimax_h3_image:q4", "sta');
+  const output = report("--work-dir", workDir);
+  assert.match(output, /ENOSPC: no space left on device/);
+  assert.match(output, /summary-2026-11-16T05-00-00-000Z\.json is not valid JSON/);
+});
+
 test("a wrapper that never launched the walk reports its own error", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "walk-report-"));
   const workDir = path.join(dir, "work");

@@ -72,7 +72,16 @@ export async function walkReport({ workDir, receipt, tailLines = DEFAULT_TAIL_LI
     out.push("no summary JSON: the walk did not finish any anchor");
   } else {
     const newest = summaries.at(-1);
-    const summary = JSON.parse(await readFile(path.join(workDir, newest), "utf8"));
+    const raw = await readFile(path.join(workDir, newest), "utf8");
+    let summary;
+    try {
+      summary = JSON.parse(raw);
+    } catch (error) {
+      // A walk killed mid-write (disk full, owned process terminated) leaves a truncated summary;
+      // keep the receipt and log tail already gathered above and say why the cases are missing.
+      out.push(`${newest} is not valid JSON (${error.message}); the walk likely died while writing it`);
+      return `${out.join("\n")}\n`;
+    }
     const failed = (summary.results ?? []).filter((result) => !PASSING.has(result.status));
     out.push(`${newest}: ${summary.results?.length ?? 0} result(s), ${failed.length} failing`);
     for (const result of failed) out.push(`- ${result.key}: ${result.status}${result.reason ? ` (${result.reason})` : ""}`);
