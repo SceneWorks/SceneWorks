@@ -179,6 +179,61 @@ impl IrisObjective {
     }
 }
 
+/// Remove API-resolved checkpoint paths before validating a persisted plan for continuation.
+/// The continuation resolves the immediate parent from its trusted job identity instead.
+pub fn strip_api_owned_paths_for_continuation(
+    config: &mut TrainingConfig,
+    objective: IrisObjective,
+) {
+    let options = match objective {
+        IrisObjective::Generation | IrisObjective::Depth => {
+            config.advanced.get_mut(IRIS_OPTIONS_KEY)
+        }
+        IrisObjective::Restoration => config.advanced.get_mut(restore::RESTORE_OPTIONS_KEY),
+    };
+    if let Some(options) = options.and_then(Value::as_object_mut) {
+        for key in IRIS_API_OWNED_OPTION_KEYS {
+            options.remove(key);
+        }
+    }
+}
+
+/// Keep a continuation on the same data walk while extending its step limit.
+pub fn prepare_iris_continuation_options(
+    config: &mut TrainingConfig,
+    objective: IrisObjective,
+) -> Result<(), TrainingPlanError> {
+    let entry = match objective {
+        IrisObjective::Generation | IrisObjective::Depth => config.advanced.entry(IRIS_OPTIONS_KEY),
+        IrisObjective::Restoration => config.advanced.entry(restore::RESTORE_OPTIONS_KEY),
+    };
+    let options = entry.or_insert_with(|| json!({}));
+    let options = options
+        .as_object_mut()
+        .ok_or_else(|| invalid("Invalid Iris training options."))?;
+    options.remove("num_epochs");
+    options.insert("resume_data_policy".into(), json!("exact"));
+    Ok(())
+}
+
+/// Pin the trusted immediate parent checkpoint after the API resolves its job identity.
+pub fn pin_iris_continuation_checkpoint(
+    config: &mut TrainingConfig,
+    objective: IrisObjective,
+    checkpoint: &str,
+) -> Result<(), TrainingPlanError> {
+    let options = match objective {
+        IrisObjective::Generation | IrisObjective::Depth => {
+            config.advanced.get_mut(IRIS_OPTIONS_KEY)
+        }
+        IrisObjective::Restoration => config.advanced.get_mut(restore::RESTORE_OPTIONS_KEY),
+    }
+    .and_then(Value::as_object_mut)
+    .ok_or_else(|| invalid("Invalid Iris training options."))?;
+    options.insert("resume_from".into(), Value::String(checkpoint.to_owned()));
+    Ok(())
+}
+
 /// The objective of an Iris training target, `None` for a non-Iris target.
 pub fn iris_objective(target: &TrainingTarget) -> Option<IrisObjective> {
     if !is_iris_training_kernel(&target.kernel) {
@@ -1103,6 +1158,31 @@ pub fn validate_iris_dataset_captions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restoration_continuation_replaces_only_its_trusted_checkpoint_path() {
+        let mut config = iris_generation_target().defaults;
+        config.advanced.insert(
+            IRIS_OPTIONS_KEY.into(),
+            json!({"resume_from":"generation-parent","num_epochs":3}),
+        );
+        config.advanced.insert(
+            restore::RESTORE_OPTIONS_KEY.into(),
+            json!({"resume_from":"old-parent","load_from":"old-load","num_epochs":2}),
+        );
+        strip_api_owned_paths_for_continuation(&mut config, IrisObjective::Restoration);
+        prepare_iris_continuation_options(&mut config, IrisObjective::Restoration).unwrap();
+        pin_iris_continuation_checkpoint(&mut config, IrisObjective::Restoration, "trusted-parent")
+            .unwrap();
+        assert_eq!(
+            config.advanced[restore::RESTORE_OPTIONS_KEY],
+            json!({"resume_from":"trusted-parent","resume_data_policy":"exact"})
+        );
+        assert_eq!(
+            config.advanced[IRIS_OPTIONS_KEY],
+            json!({"resume_from":"generation-parent","num_epochs":3})
+        );
+    }
 
     #[test]
     fn the_client_allow_list_is_the_engine_list_minus_the_path_options() {

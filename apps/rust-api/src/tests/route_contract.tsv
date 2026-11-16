@@ -108,6 +108,7 @@ POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/strip-exif	token
 POST	/api/v1/projects/:project_id/training/jobs	token
 GET	/api/v1/training/jobs/:job_id/iris-metrics	token
 HEAD	/api/v1/training/jobs/:job_id/iris-metrics	token
+POST	/api/v1/training/jobs/:job_id/continue	token
 GET	/api/v1/projects/:project_id/files/*relative_path	token
 HEAD	/api/v1/projects/:project_id/files/*relative_path	token
 GET	/api/v1/projects/:project_id/voices	token

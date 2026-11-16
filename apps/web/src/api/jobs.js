@@ -15,6 +15,9 @@ export function submitJobRequest(path, token, options) {
   return apiFetch(path, token, options);
 }
 export function jobActionRequest(jobId, action, token, options) {
+  if (action === "continue-training") {
+    return apiFetch(`/api/v1/training/jobs/${encodeURIComponent(jobId)}/continue`, token, options);
+  }
   return apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/${encodeURIComponent(action)}`, token, options);
 }
 export function jobEventsUrl(ticket) {

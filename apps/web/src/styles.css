@@ -15663,6 +15663,26 @@ input.dataset-name-input.boxed:focus {
   to { transform: translateX(350%); }
 }
 
+.training-continue-form {
+  display: grid;
+  gap: 8px;
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.training-continue-form label {
+  display: grid;
+  gap: 4px;
+  max-width: 240px;
+}
+
+.training-continue-form p,
+.worker-progress-card__continuation {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 .worker-progress-card__actions {
   display: flex;
   flex-wrap: wrap;

@@ -1841,6 +1841,18 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "fresh_flux3_training_duplicate",
             "computed expression",
         ),
+        // An Iris continuation creates its objective's options bag in portable policy
+        // before it pins the trusted parent checkpoint in that same bag.
+        (
+            "crates/sceneworks-options/src/training_validation/iris.rs",
+            "prepare_iris_continuation_options",
+            "IRIS_OPTIONS_KEY",
+        ),
+        (
+            "crates/sceneworks-options/src/training_validation/iris.rs",
+            "prepare_iris_continuation_options",
+            "RESTORE_OPTIONS_KEY",
+        ),
         (
             "crates/sceneworks-core/src/moss_image.rs",
             "scrub_reports",

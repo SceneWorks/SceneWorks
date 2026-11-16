@@ -592,6 +592,7 @@ fn completed_receipt_for(
     }
     MossImageExecutionReport::new(MossImageExecutionData {
         execution_device: MossImageExecutionDevice::Cpu,
+        selected_stream_device: None,
         resolved,
         assets,
         sampling,

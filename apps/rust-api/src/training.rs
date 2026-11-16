@@ -1,5 +1,7 @@
 use super::*;
 use sceneworks_core::training::CaptionMode;
+mod continuation;
+pub(crate) use continuation::continue_training_job;
 
 async fn portable_training_binding(
     state: &AppState,
@@ -2655,6 +2657,7 @@ struct PreparedTrainingSubmission {
     job_payload: JsonObject,
     requested_gpu: String,
     training_job_type: JobType,
+    source_job_id: Option<String>,
 }
 
 async fn prepare_training_submission(
@@ -3170,6 +3173,7 @@ async fn prepare_training_submission(
         job_payload,
         requested_gpu,
         training_job_type,
+        source_job_id: None,
     })
 }
 
@@ -3184,6 +3188,7 @@ async fn enqueue_training_submission(
         job_payload,
         requested_gpu,
         training_job_type,
+        source_job_id,
     } = prepared;
     let portable_binding =
         portable_training_binding(&state, &training_job_type, &job_payload, &requested_gpu).await?;
@@ -3196,7 +3201,7 @@ async fn enqueue_training_submission(
                 project_name: Some(project_name),
                 payload: job_payload,
                 requested_gpu,
-                source_job_id: None,
+                source_job_id,
                 duplicate_of_job_id: None,
                 attempts: 1,
                 initial_status: None,
