@@ -45,9 +45,8 @@ pub(crate) use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID as PE_MO
 const PROMPT_COMPONENT: &str = "prompt";
 /// The prompt manifest inside a snapshot.
 const PROMPT_MANIFEST: &str = "prompt/manifest.json";
-/// Tiers in preference order: the published NVFP4 original first (where the device can run it),
-/// then the converted tiers densest first.
-const TIERS: [&str; 4] = ["nvfp4", "bf16", "q8", "q4"];
+/// Tiers in preference order, shared with the API's tier selection.
+use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS as TIERS;
 
 /// Whether the expander applies to `model` (MiniMax-H3-Image only).
 pub(crate) fn is_expand_target_model(model: &str) -> bool {
@@ -182,12 +181,39 @@ pub(crate) fn resolve_dirs(
     explicit_tier: Option<&str>,
     override_dir: Option<PathBuf>,
 ) -> WorkerResult<ExpanderDirs> {
+    resolve_dirs_for_os(
+        settings,
+        entry,
+        explicit_tier,
+        override_dir,
+        std::env::consts::OS,
+    )
+}
+
+/// [`resolve_dirs`] for a worker running on `os`.
+fn resolve_dirs_for_os(
+    settings: &Settings,
+    entry: &JsonObject,
+    explicit_tier: Option<&str>,
+    override_dir: Option<PathBuf>,
+    os: &str,
+) -> WorkerResult<ExpanderDirs> {
     if entry.get("id").and_then(Value::as_str) != Some(PE_MODEL_ID) {
         return Err(WorkerError::InvalidPayload(format!(
             "prompt expansion needs the `{PE_MODEL_ID}` catalog entry on the job payload \
              (`modelManifestEntry`)"
         )));
     }
+    // The API forwards the complete cross-platform entry, and each converted tier has one row per
+    // layout (`q8/` for MLX on macOS, `candle-q8/` for Candle on Windows/Linux) under the same
+    // variant name. Narrow it to this host's rows first, so the tier lookup below cannot pick
+    // another platform's layout.
+    let mut narrowed = Value::Object(entry.clone());
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut narrowed,
+        os,
+    );
+    let entry = narrowed.as_object().unwrap_or(entry);
     let data_dir = settings.data_dir.as_path();
     if let Some(weights) = override_dir {
         let prompt_root = if weights.join(PROMPT_MANIFEST).is_file() {
@@ -545,9 +571,49 @@ mod tests {
                 std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
             }
             synthetic_prompt_tree(&snapshot(data.path(), PE_REPO, PE_REVISION));
-            let dirs = resolve_dirs(&settings(data.path()), &entry, Some("q8"), None).unwrap();
+            let dirs =
+                resolve_dirs_for_os(&settings(data.path()), &entry, Some("q8"), None, os).unwrap();
             assert_eq!(dirs.weights, tier_snapshot.join(q8_dir), "{os}");
             assert_eq!(dirs.tier, Some("q8"));
+        }
+    }
+
+    /// The API forwards the expander's COMPLETE cross-platform entry (`resolve_model_manifest_entry`
+    /// keeps every platform's rows), where each converted tier lists the macOS `{tier}/` row before
+    /// the Candle `candle-{tier}/` row under the same variant. A Windows/Linux worker must still
+    /// load its own layout, so the worker narrows the entry to its OS before choosing a row.
+    #[test]
+    fn an_unnarrowed_entry_resolves_the_executing_hosts_layout() {
+        for (os, q4_dir) in [
+            ("macos", "q4"),
+            ("windows", "candle-q4"),
+            ("linux", "candle-q4"),
+        ] {
+            let (data, _cache) = isolated();
+            let entry = catalog_entry();
+            let mut host = Value::Object(entry.clone());
+            sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+                &mut host, os,
+            );
+            let row = model_download_for_variant(&host, "q4").expect("q4 row");
+            let (repo, revision) = row_identity(&row).unwrap();
+            let tier_snapshot = snapshot(data.path(), repo, revision);
+            // A shared cache holding both layouts: only the host's own may be chosen.
+            for directory in ["q4", "candle-q4"] {
+                std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
+                std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
+            }
+            synthetic_prompt_tree(&snapshot(data.path(), PE_REPO, PE_REVISION));
+            for explicit in [Some("q4"), None] {
+                let dirs = resolve_dirs_for_os(&settings(data.path()), &entry, explicit, None, os)
+                    .unwrap();
+                assert_eq!(
+                    dirs.weights,
+                    tier_snapshot.join(q4_dir),
+                    "{os} {explicit:?}"
+                );
+                assert_eq!(dirs.tier, Some("q4"), "{os}");
+            }
         }
     }
 

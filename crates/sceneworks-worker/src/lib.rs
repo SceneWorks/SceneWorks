@@ -123,13 +123,20 @@ pub fn minimax_h3_image_training_install_refusal(
     data_dir: &Path,
     config: &sceneworks_core::training::TrainingConfig,
 ) -> Option<String> {
-    let tier = match sceneworks_core::training::minimax_h3_image_base_tier(&config.advanced) {
-        Ok(tier) => tier,
-        Err(message) => return Some(message),
-    };
-    image_jobs::minimax_h3_image::training_load_spec(data_dir, tier)
-        .err()
-        .map(|error| error.to_string())
+    minimax_h3_image_training_base(data_dir, config).err()
+}
+
+/// The DiT tier a MiniMax-H3-Image LoRA/LoKr run trains over on this host's installs, and that
+/// tier's directory: the plan's `advanced.baseTier` (absent / `auto` = densest installed) resolved
+/// exactly as the trainer resolves it, or the refusal [`minimax_h3_image_training_install_refusal`]
+/// reports. The API freezes both into the plan so its portable source binding names the tier the
+/// trainer loads rather than the bf16 snapshot.
+pub fn minimax_h3_image_training_base(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<(&'static str, PathBuf), String> {
+    let tier = sceneworks_core::training::minimax_h3_image_base_tier(&config.advanced)?;
+    image_jobs::minimax_h3_image::training_base(data_dir, tier).map_err(|error| error.to_string())
 }
 
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.

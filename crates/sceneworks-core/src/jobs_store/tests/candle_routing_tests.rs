@@ -6094,6 +6094,33 @@ fn flux3_publisher_tiers_require_the_worker_device_marker() {
     }
 }
 
+/// SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier needs the NVFP4
+/// device marker, so a pre-Blackwell worker never claims it; every other tier (and every other
+/// refine task) keeps the ordinary `prompt_refine` capability.
+#[test]
+fn an_nvfp4_prompt_expansion_requires_the_nvfp4_worker_marker() {
+    let refine = |payload: Value| {
+        let mut job = image_generate_job(payload);
+        job.job_type = JobType::PromptRefine;
+        job
+    };
+    let expand = |tier: &str| {
+        refine(json!({"task": "minimax_h3_image_expand", "prompt": "p", "peTier": tier}))
+    };
+    let plain = gpu_worker(&["gpu", "candle", "prompt_refine"]);
+    let blackwell = gpu_worker(&["gpu", "candle", "prompt_refine", "nvfp4"]);
+    assert!(!worker_supports_job(&plain, &expand("nvfp4")));
+    assert!(worker_supports_job(&blackwell, &expand("nvfp4")));
+    for tier in ["q4", "q8", "bf16"] {
+        assert!(worker_supports_job(&plain, &expand(tier)), "{tier}");
+    }
+    // `peTier` means nothing to another refine task.
+    assert!(worker_supports_job(
+        &plain,
+        &refine(json!({"task": "refine", "prompt": "p", "peTier": "nvfp4"}))
+    ));
+}
+
 /// sc-26235: one public request contract, two native lanes. Removing either the Candle catalog
 /// row or its family-specific refusal must fail this test.
 #[test]

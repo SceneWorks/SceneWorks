@@ -8706,6 +8706,121 @@ async fn minimax_h3_image_real_training_needs_an_installed_tier_and_records_the_
     }
 }
 
+/// Seed a complete MiniMax-H3-Image q4 install WITHOUT the bf16 DiT: the upstream snapshot's
+/// tier-agnostic image VAE, tokenizer and processor, the re-host's `q4/transformer_diffusers/`, and
+/// MiniMax-H3's q4 text encoder, at the shipped catalog pins.
+fn seed_minimax_h3_image_q4_only_install(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        std::fs::write(path, b"{}").expect("write marker");
+    };
+    let root = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    for file in [
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+        "processor/processor_config.json",
+    ] {
+        touch(root.join(file));
+    }
+    let rehost = seed_hf_snapshot(
+        data_dir,
+        "SceneWorks/minimax-h3-image-mlx",
+        "6f62669b919bccdbf51b08c696fbb84542000a87",
+    );
+    touch(rehost.join("q4/transformer_diffusers/config.json"));
+    let text_encoder = seed_hf_snapshot(
+        data_dir,
+        "SceneWorks/minimax-h3-mlx",
+        "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+    );
+    touch(text_encoder.join("q4/text_encoder/config.json"));
+    rehost.join("q4")
+}
+
+/// SW-7103 review: a run over a packed tier freezes that tier into the plan — `advanced.baseTier`
+/// and its directory as `target.baseModelPath` — so portable admission binds and verifies the q4
+/// sources the trainer loads. With only q4 installed (no bf16 DiT), an `auto` run is admitted and
+/// trains q4; before the fix admission bound the bf16 snapshot and refused the run.
+#[tokio::test]
+async fn minimax_h3_image_training_freezes_the_installed_packed_tier_into_the_plan() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = crate::create_app_with_state(settings.clone()).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"H3 q4", request).await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let assets = upload_distinct_assets(&app, &project_id, "Portrait", 1).await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "H3 set",
+            "items": [{ "assetId": assets[0], "caption": { "text": "h3style portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let tier_dir = seed_minimax_h3_image_q4_only_install(&settings.data_dir);
+    // The trainer's directory is verified against the pinned publisher ledger of the q4 row, so
+    // that ledger names the seeded bytes; every other repository keeps the offline fixture ledger.
+    *state.test_hooks.pinned_metadata_override.lock() = Some(std::sync::Arc::new(
+        |repo: &str, revision: &str, selectors: &[String]| {
+            if repo == "SceneWorks/minimax-h3-image-mlx" {
+                return vec![
+                    sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                        relative_path: "q4/transformer_diffusers/config.json".into(),
+                        size_bytes: 2,
+                        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"{}")),
+                    },
+                ];
+            }
+            crate::portable_admission::test_network::offline_pinned_files(repo, revision, selectors)
+                .expect("offline ledger")
+        },
+    ));
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    for base_tier in [None, Some("q4")] {
+        let mut config = serde_json::to_value(&target.defaults).expect("defaults serialize");
+        if let Some(tier) = base_tier {
+            config["advanced"]["baseTier"] = json!(tier);
+        }
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &jobs_path,
+            json!({
+                "targetId": target.id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "H3 Style",
+                "dryRun": false,
+                "licenseAcknowledged": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{base_tier:?}: {job}");
+        // The public snapshot redacts host paths; read the stored plan.
+        let stored = state
+            .jobs_store
+            .get_job(job["id"].as_str().unwrap())
+            .expect("job reads");
+        let plan = &stored.payload["plan"];
+        assert_eq!(plan["config"]["advanced"]["baseTier"], "q4", "{plan}");
+        assert_eq!(
+            std::fs::canonicalize(plan["target"]["baseModelPath"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&tier_dir).unwrap(),
+            "{plan}"
+        );
+    }
+}
+
 /// SW-7103: an H3-Image edit-pair dataset trains on the edit target with its ordered references
 /// (up to the model's 16), recorded as an edit adapter; a 17th reference is refused naming the cap,
 /// and the T2I target refuses an edit dataset.

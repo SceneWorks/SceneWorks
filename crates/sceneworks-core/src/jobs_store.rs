@@ -6115,8 +6115,25 @@ fn required_capability(job: &JobSnapshot) -> &str {
         JobType::ImageGenerate | JobType::ImageEdit => {
             flux3_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
         }
+        // SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier runs only on
+        // a Blackwell CUDA worker, which advertises the NVFP4 marker; any other worker would claim
+        // it and refuse the tier at load.
+        JobType::PromptRefine if prompt_expansion_needs_nvfp4(job) => {
+            crate::contracts::NVFP4_WORKER_CAPABILITY
+        }
         _ => job.job_type.as_str(),
     }
+}
+
+/// Whether a prompt-refine job is a MiniMax-H3-Image expansion frozen to the NVFP4 tier.
+fn prompt_expansion_needs_nvfp4(job: &JobSnapshot) -> bool {
+    job.payload.get("task").and_then(Value::as_str)
+        == Some(crate::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK)
+        && job
+            .payload
+            .get(crate::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY)
+            .and_then(Value::as_str)
+            .is_some_and(|tier| tier.trim().eq_ignore_ascii_case("nvfp4"))
 }
 
 /// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).

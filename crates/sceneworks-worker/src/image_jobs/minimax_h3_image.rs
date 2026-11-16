@@ -351,6 +351,51 @@ pub(crate) fn training_load_spec(
     training_load_spec_in(&entry, data_dir, explicit)
 }
 
+/// The tier a MiniMax-H3-Image training run trains over, and that tier's directory (bf16: the
+/// upstream snapshot root; q8/q4: `<re-host>/{tier}`): exactly what [`training_load_spec`] loads
+/// for `explicit`, refused the same way when that tier or one of its components is not installed.
+/// The API freezes both into the plan (`advanced.baseTier`, `target.baseModelPath`) so its source
+/// binding names the tier the trainer loads.
+pub(crate) fn training_base(
+    data_dir: &Path,
+    explicit: Option<&str>,
+) -> WorkerResult<(&'static str, PathBuf)> {
+    let mut entry =
+        crate::training_jobs::builtin_model_manifest_entry(MODEL_ID).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("{MODEL_ID} has no builtin catalog entry"))
+        })?;
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut entry,
+        std::env::consts::OS,
+    );
+    let entry = entry.as_object().cloned().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{MODEL_ID} catalog entry is not an object"))
+    })?;
+    training_base_in(&entry, data_dir, explicit)
+}
+
+/// [`training_base`] against an already-narrowed catalog entry.
+fn training_base_in(
+    entry: &JsonObject,
+    data_dir: &Path,
+    explicit: Option<&str>,
+) -> WorkerResult<(&'static str, PathBuf)> {
+    training_load_spec_in(entry, data_dir, explicit)?;
+    let dir = resolve_tier_dir(entry, data_dir, explicit)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{MODEL_ID} training needs an installed tier — install {MODEL_ID} from the Model \
+             Manager"
+        ))
+    })?;
+    let tier = tier_of_dir(entry, &dir).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{MODEL_ID}: {} is not one of this model's declared tier directories",
+            dir.display()
+        ))
+    })?;
+    Ok((tier, dir))
+}
+
 /// [`training_load_spec`] against an already-narrowed catalog entry.
 fn training_load_spec_in(
     entry: &JsonObject,

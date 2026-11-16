@@ -76,14 +76,29 @@ export function resolveH3ImageSampler({ model, options }) {
 // noiseClipStd 0. Only a recipe with NO sampler block at all predates this feature recording it:
 // it ran Euler, so it replays as Euler, and the LCM fields keep their defaults (1.1 / 0.9 / 0) for
 // when the control is switched to LCM.
+// Each restored number is shown as the shortest decimal with the same f32 value: the worker
+// records the scales as f32, so a UI 0.01 comes back as 0.009999999776482582, which the number
+// input's native `min="0.01"` would flag as out of range and the form would refuse to submit.
 export function h3ImageSamplerFromRecipe(recorded) {
   const defaults = h3ImageSamplerDefaults();
   if (recorded?.sampler !== "lcm") return { ...defaults, sampler: "euler" };
-  const sNoise = recorded.sNoise ?? defaults.sNoise;
+  const sNoise = f32Decimal(recorded.sNoise ?? defaults.sNoise);
   return {
     sampler: "lcm",
     sNoise,
-    sNoiseEnd: recorded.sNoiseEnd ?? (recorded.sNoise == null ? defaults.sNoiseEnd : sNoise),
-    noiseClipStd: recorded.noiseClipStd ?? defaults.noiseClipStd,
+    sNoiseEnd: f32Decimal(recorded.sNoiseEnd ?? (recorded.sNoise == null ? defaults.sNoiseEnd : sNoise)),
+    noiseClipStd: f32Decimal(recorded.noiseClipStd ?? defaults.noiseClipStd),
   };
+}
+
+// The shortest decimal whose f32 value equals `value`'s; anything that is not a finite number is
+// returned unchanged for the resolver to refuse.
+function f32Decimal(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return value;
+  const target = Math.fround(value);
+  for (let digits = 1; digits <= 17; digits += 1) {
+    const candidate = Number(value.toPrecision(digits));
+    if (Math.fround(candidate) === target) return candidate;
+  }
+  return value;
 }

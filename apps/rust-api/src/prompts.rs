@@ -334,8 +334,45 @@ async fn prepare_h3_image_expand(
             ))
         })?;
     crate::models::ensure_run_license_acknowledged(state, object).await?;
+    // Freeze the tier the worker will load BEFORE admission binds the job's sources. The request
+    // names no tier, and portable admission has no implicit expander choice of its own, so without
+    // this it would bind the catalog's default download (the unpublished bf16 row on macOS, NVFP4
+    // on Windows/Linux) while the worker loaded whichever tier is actually installed.
+    let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
+    let nvfp4_worker = workers.iter().any(|worker| {
+        !matches!(
+            worker.status,
+            WorkerStatus::Offline | WorkerStatus::Unhealthy
+        ) && worker.capabilities.iter().any(|capability| {
+            capability.as_str() == sceneworks_core::contracts::NVFP4_WORKER_CAPABILITY
+        })
+    });
+    if let Some(tier) = expander_tier(&entry, &state.settings.data_dir, nvfp4_worker) {
+        job_payload.insert(
+            sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY.to_owned(),
+            Value::String(tier.to_owned()),
+        );
+    }
     job_payload.insert("modelManifestEntry".to_owned(), entry);
     Ok(())
+}
+
+/// The expander tier an unselected expansion runs: the worker's own order
+/// ([`sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS`]) over the tiers installed for this
+/// host's platform, with NVFP4 only when a registered worker can run it. `None` when no tier is
+/// installed, which leaves the worker's "install the expander" refusal to explain it.
+fn expander_tier(
+    entry: &Value,
+    data_dir: &std::path::Path,
+    nvfp4_worker: bool,
+) -> Option<&'static str> {
+    let mut host = entry.clone();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let installed = crate::models::installed_variant_keys(&host, data_dir);
+    sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS
+        .into_iter()
+        .filter(|tier| *tier != "nvfp4" || nvfp4_worker)
+        .find(|tier| installed.iter().any(|variant| variant == tier))
 }
 
 /// Whether `value` is a positive-integer `W:H`.

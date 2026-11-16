@@ -248,6 +248,40 @@ pub(crate) async fn ensure_run_license_acknowledged(
     })
 }
 
+/// [`ensure_run_license_acknowledged`] for every model carrier a job payload holds
+/// (`modelManifestEntry`, `baseModelManifestEntry`, `modelManifestEntries[]`). Portable admission
+/// runs it on every fresh admission and every replay, so retry, duplicate (including one whose
+/// `payloadChanges` switch the model) and every other creation route reach the same run gate as
+/// the typed image and prompt-expansion routes. Training jobs keep their own gate: the typed
+/// training route and its raw/replay twin (`raw_training_payload_license_error`) require the
+/// user's `licenseAcknowledged` assertion on the run itself.
+pub(crate) async fn ensure_payload_run_licenses_acknowledged(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(());
+    }
+    let carriers = [
+        payload.get("modelManifestEntry"),
+        payload.get("baseModelManifestEntry"),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(
+        payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    for entry in carriers.filter_map(Value::as_object) {
+        ensure_run_license_acknowledged(state, entry).await?;
+    }
+    Ok(())
+}
+
 /// A conditional component a catalog entry declares as `blocked` (sc-22998).
 #[derive(Clone)]
 pub(crate) struct BlockedComponent {

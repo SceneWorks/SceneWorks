@@ -227,7 +227,9 @@ pub(super) async fn parse_refine_request(
         Some(crate::minimax_h3_image_prompt_expand::resolve_dirs(
             settings,
             &entry,
-            crate::payload::trimmed_string(payload.get("peTier")),
+            crate::payload::trimmed_string(
+                payload.get(sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY),
+            ),
             override_dir,
         )?)
     } else {

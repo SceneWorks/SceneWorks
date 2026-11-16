@@ -820,6 +820,7 @@ pub(crate) async fn capture_portable_model_binding(
     payload: &JsonObject,
     requested_gpu: &str,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
+    crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
     capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, None).await
 }
 
@@ -833,6 +834,7 @@ pub(crate) async fn validate_frozen_replay_binding(
     requested_gpu: &str,
     frozen: &PortableJobBinding,
 ) -> Result<PortableJobBinding, ApiError> {
+    crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
@@ -1501,6 +1503,19 @@ fn training_base_selection(
         .ok_or_else(|| incomplete("training plan has no resolved base model path"))?;
     let tier = if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
         "q4"
+    } else if sceneworks_core::training::is_minimax_h3_image_training_kernel(kernel) {
+        // MiniMax-H3-Image trains over the tier the API froze into `advanced.baseTier`, whose
+        // directory is the plan's `baseModelPath` (bf16: the upstream snapshot; q8/q4: the
+        // re-host's tier directory). A plan without one trains the upstream bf16 checkpoint.
+        let advanced = payload
+            .get("plan")
+            .and_then(|plan| plan.pointer("/config/advanced"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        sceneworks_core::training::minimax_h3_image_base_tier(&advanced)
+            .map_err(incomplete)?
+            .unwrap_or("bf16")
     } else {
         "bf16"
     };
@@ -1592,8 +1607,23 @@ fn slot_requested_variant(
 ) -> Option<String> {
     training
         .map(|selection| selection.tier.clone())
+        .or_else(|| prompt_expander_variant(job_type, payload, slot))
         .or_else(|| requested_runtime_variant(payload))
         .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))
+}
+
+/// The expander tier the API froze on a MiniMax-H3-Image prompt expansion (`peTier`), which the
+/// worker loads by name. The expander's carrier is the job's `modelManifestEntry`.
+fn prompt_expander_variant(job_type: &JobType, payload: &JsonObject, slot: &str) -> Option<String> {
+    if *job_type != JobType::PromptRefine || slot != "modelManifestEntry" {
+        return None;
+    }
+    payload
+        .get(sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// The tier an image request that names none runs, so the binding freezes that tier rather than

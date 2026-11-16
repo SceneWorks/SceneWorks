@@ -771,6 +771,18 @@ pub const MINIMAX_H3_IMAGE_PE_MODEL_ID: &str = "minimax_h3_image_pe";
 /// Catalog id of the image model the prompt expander serves.
 pub const MINIMAX_H3_IMAGE_MODEL_ID: &str = "minimax_h3_image";
 
+/// Payload key naming the expander tier a `minimax_h3_image_expand` job runs. The API freezes the
+/// tier it selects here before admission binds the job's sources, and the worker honours it by
+/// name (never substituting another tier), so the binding and the load agree on one tier.
+pub const MINIMAX_H3_IMAGE_PE_TIER_KEY: &str = "peTier";
+
+/// The expander's tiers in selection order: the published NVFP4 original first (only where a
+/// worker can run it: Blackwell CUDA), then the converted tiers densest first.
+pub const MINIMAX_H3_IMAGE_PE_TIERS: [&str; 4] = ["nvfp4", "bf16", "q8", "q4"];
+
+/// The worker capability a CUDA worker advertises when its GPU can run NVFP4 (sm_120 or newer).
+pub const NVFP4_WORKER_CAPABILITY: &str = "nvfp4";
+
 /// The most edit references one expansion may carry (`core_llm::minimax_h3_image_pe::MAX_REFERENCES`).
 pub const MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES: usize = 16;
 

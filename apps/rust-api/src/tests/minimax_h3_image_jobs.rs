@@ -68,6 +68,92 @@ async fn minimax_h3_image_runs_only_after_its_license_is_accepted_and_admits_its
     assert_eq!(status, StatusCode::BAD_REQUEST, "{over}");
 }
 
+/// SW-7100 review: retry and duplicate reach the same run-licence gate as the typed image route.
+/// A duplicate that switches another model's job to `minimax_h3_image` through `payloadChanges`,
+/// and a retry or duplicate of an H3-Image job whose acceptance is no longer on record, are refused
+/// with 403 before a job exists.
+#[tokio::test]
+async fn minimax_h3_image_retry_and_duplicate_need_the_run_licence() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_entry();
+    let other = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("z_image_turbo")
+            .expect("z_image_turbo is registered")
+            .clone(),
+    );
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry.clone(), other] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    let ack_path =
+        sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+    let app = create_app(settings).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Replay").await;
+    let job = |model: &str| {
+        json!({
+            "projectId": project["id"], "model": model, "prompt": "a lighthouse",
+            "width": 1024, "height": 1024,
+        })
+    };
+    let refused = |status: StatusCode, body: &Value| {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "license_acknowledgment_required", "{body}");
+    };
+
+    // A duplicate that switches another model's job to H3-Image is refused like a fresh one.
+    let (status, plain) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job("z_image_turbo"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{plain}");
+    let plain_id = plain["id"].as_str().unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{plain_id}/duplicate"),
+        json!({ "payloadChanges": { "model": "minimax_h3_image" } }),
+    )
+    .await;
+    refused(status, &body);
+
+    // An admitted H3-Image job replays only while its acceptance is on record.
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &ack_path,
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let (status, h3) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job("minimax_h3_image"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{h3}");
+    let h3_id = h3["id"].as_str().unwrap();
+    std::fs::remove_file(&ack_path).unwrap();
+    for action in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{h3_id}/{action}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        refused(status, &body);
+    }
+}
+
 fn shipped_pe_entry() -> Value {
     let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
@@ -222,6 +308,149 @@ async fn minimax_h3_image_expansion_is_licence_gated_and_carries_its_entry_and_r
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{other}");
+}
+
+/// SW-7102 review (P1): an expansion that names no tier freezes the tier the worker will load.
+/// With only the converted q4 expander installed, the job carries `peTier: "q4"` and its source
+/// binding names that tier's files, not the catalog's default download (the unpublished bf16 row
+/// on macOS, the NVFP4 original on Windows/Linux).
+#[tokio::test]
+async fn an_unselected_expansion_freezes_the_installed_expander_tier() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_pe_entry();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [shipped_entry(), entry.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Expand").await;
+    let body = json!({
+        "task": "minimax_h3_image_expand",
+        "prompt": "a lighthouse in fog",
+        "modelId": "minimax_h3_image",
+        "projectId": project["id"],
+    });
+
+    // Nothing installed: no tier is frozen, and the worker explains the missing install.
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("peTier").is_none(), "{job}");
+
+    // Install this host's q4 layout and the upstream prompt files.
+    let mut host = entry.clone();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let q4 = sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+        &host, "q4",
+    )
+    .expect("q4 row");
+    let q4_dir = q4["files"][0]
+        .as_str()
+        .unwrap()
+        .trim_end_matches("/*")
+        .to_owned();
+    let snapshot = |repo: &str, revision: &str| {
+        let root = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+            .unwrap();
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs").join("main"), revision).unwrap();
+        root.join("snapshots").join(revision)
+    };
+    let tier_root = snapshot(
+        q4["repo"].as_str().unwrap(),
+        q4["revision"].as_str().unwrap(),
+    );
+    for file in ["config.json", "model.safetensors"] {
+        let path = tier_root.join(&q4_dir).join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    }
+    let upstream = snapshot(
+        "MiniMaxAI/MiniMax-H3-Image-PE",
+        "35603d4b63949afa12cb098227fffefedf081afa",
+    );
+    for file in [
+        "prompt/manifest.json",
+        "prompt/t2i/system_prompt.txt",
+        "prompt/t2i/task_prompt.txt",
+        "prompt/t2i/request_params.json",
+        "prompt/edit/task_prompt.txt",
+    ] {
+        let path = upstream.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    }
+
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["peTier"], "q4", "{job}");
+    let binding = state
+        .jobs_store
+        .portable_model_binding(job["id"].as_str().unwrap())
+        .expect("binding reads")
+        .expect("the expansion is bound");
+    let routes = binding["routes"].as_object().expect("bound routes");
+    assert!(!routes.is_empty(), "{binding}");
+    for (key, route) in routes {
+        let expander = route["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slot"] == "modelManifestEntry")
+            .unwrap_or_else(|| panic!("{key} binds the expander: {binding}"));
+        assert_eq!(expander["modelId"], "minimax_h3_image_pe", "{key}");
+        assert_eq!(expander["variant"], "q4", "{key}: {expander}");
+        assert_eq!(expander["tier"], "q4", "{key}: {expander}");
+        let primary = expander["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["role"] == "primary")
+            .unwrap_or_else(|| panic!("{key} binds a primary: {expander}"));
+        assert_eq!(
+            primary["source"]["identity"]["repository"], "SceneWorks/minimax-h3-image-pe",
+            "{key}: {primary}"
+        );
+    }
+    // This host's route names the q4 layout the worker on this OS loads.
+    let local = &routes[&format!(
+        "{}:{}",
+        if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        },
+        std::env::consts::OS
+    )];
+    let files = local["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slot"] == "modelManifestEntry")
+        .and_then(|model| model["members"].as_array())
+        .and_then(|members| members.iter().find(|member| member["role"] == "primary"))
+        .and_then(|primary| primary["files"].as_array())
+        .expect("primary files");
+    assert!(
+        !files.is_empty()
+            && files.iter().all(|file| {
+                file["relativePath"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with(&format!("{q4_dir}/")))
+            }),
+        "{local}"
+    );
 }
 
 /// SW-7106: the job door keeps MiniMax-H3-Image's sampler block on the payload the worker reads,

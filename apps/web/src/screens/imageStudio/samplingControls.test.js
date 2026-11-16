@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  H3_IMAGE_LCM_FIELDS,
   h3ImageSamplerDefaults,
   h3ImageSamplerFromRecipe,
   promptBatchSize,
@@ -115,6 +116,19 @@ describe("MiniMax-H3-Image sampler", () => {
     expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoiseEnd: 0.5 })).toEqual({
       sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.5, noiseClipStd: 0,
     });
+  });
+
+  it("restores f32-recorded scales as their decimal form, inside each input's native bounds", () => {
+    const f32 = (value) => Math.fround(value);
+    const restored = h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: f32(0.01), sNoiseEnd: f32(1.9), noiseClipStd: f32(0.3) });
+    expect(restored).toEqual({ sampler: "lcm", sNoise: 0.01, sNoiseEnd: 1.9, noiseClipStd: 0.3 });
+    // The value the number input shows satisfies its own `min`/`max`, so native form validation
+    // lets Generate submit.
+    for (const { key, min, max } of H3_IMAGE_LCM_FIELDS) {
+      expect(restored[key] >= min && restored[key] <= max).toBe(true);
+    }
+    // A value that differs at f32 precision keeps its difference and is still refused.
+    expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: 0.0099 }).sNoise).toBe(0.0099);
   });
 
   it("replays a job or preset recorded with no block as Euler, which is how it ran", () => {
