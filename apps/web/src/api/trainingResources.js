@@ -63,4 +63,6 @@ export const trainingApi = {
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/strip-exif`, token, options),
   jobs: (projectId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/jobs`, token, options),
+  completedRuns: (projectId, token, { offset = 0, limit = 25 } = {}, options = {}) =>
+    apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/runs?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`, token, options),
 };

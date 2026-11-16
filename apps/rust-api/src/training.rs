@@ -1,7 +1,7 @@
 use super::*;
 use sceneworks_core::training::CaptionMode;
 mod continuation;
-pub(crate) use continuation::continue_training_job;
+pub(crate) use continuation::{continue_training_job, list_completed_training_runs};
 
 async fn portable_training_binding(
     state: &AppState,
