@@ -3585,3 +3585,36 @@ test("a failing guarded capture completes the guard's handshake and exits with i
   assert.match(stderr, /memory-strategy calibration:/);
   assert.deepEqual(await readdir(path.dirname(output)), [], "the private completion evidence is removed");
 });
+
+// SW-F363, campaign run 43794810762: a `:lora` capture writes `artifact.overlay` (the LoRA's
+// repository, revision and file) into its RECORD. The property must be admitted by the record
+// schema the bundle validator runs — it had landed on the exceededBound def instead, and every
+// `:lora` capture died on `$.records[0].artifact.overlay: unexpected property`.
+test("a :lora regime record carrying artifact.overlay passes the real bundle schema", () => {
+  const record = complete({
+    status: "gated",
+    artifact: {
+      repository: "SceneWorks/minimax-h3-image-mlx", resolvedRevision: "c".repeat(40), variant: "q4",
+      overlay: {
+        repository: "syntaxdiffusion/tanaami-style-h3-image-lora",
+        resolvedRevision: "3804b381526a3e537c7961942ba4861a831b2d39",
+        file: "tanaami_h3_image_lora_2000.safetensors",
+      },
+    },
+    target: {
+      modelId: "minimax_h3_image", provider: "minimax_h3_image", tier: "q4",
+      mode: "text_to_image", overlay: "lora", anchorRegime: "lora",
+      geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
+    },
+  });
+  const bundle = { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [record] };
+  validateBundle(bundle);
+  // An undeclared field inside the overlay object is still refused.
+  const stray = structuredClone(record);
+  stray.artifact.overlay.extra = 1;
+  stray.id = recordId(stray);
+  assert.throws(
+    () => validateBundle({ ...bundle, records: [stray] }),
+    /artifact\.overlay\.extra: unexpected property/,
+  );
+});

@@ -51,6 +51,8 @@ import {
   familyFor,
   hubRoots,
   failureReason,
+  withoutTrailingLiteral,
+  stderrTail,
   FAILURE_REASON_LIMIT,
   extractSeedingNewAnchors,
   SEED_DIGEST,
@@ -5571,6 +5573,40 @@ test("every shipped tiered model is measurable", async () => {
       `${gap.key}: excused with status ${gap.status}, which an unregistered provider cannot cause`,
     );
   }
+});
+
+// SW-F363, campaign run 43794810762: four `ingest_failed` rows quoted a bare `}`, because Node
+// prints a thrown error's own properties after its message as an object literal. The reason is the
+// error line before that literal; the step log gets the whole stderr tail.
+test("a failure reason skips the object literal Node prints after an error", () => {
+  const stderr = [
+    "file:///x/extract-memory-anchors.mjs:612",
+    "    throw new Error(",
+    "          ^",
+    "Error: anchor regime:m:mlx:q4:base:base:optimized:fp:imc-1 has no recorded loader-closure digest",
+    "    at loaderClosureDigestFor (file:///x/extract-memory-anchors.mjs:612:11)",
+    "{",
+    "  code: 'ERR_X',",
+    "  detail: [ 1, 2 ]",
+    "}",
+    "Node.js v24.15.0",
+  ].join("\n");
+  assert.equal(
+    failureReason({ stderr }),
+    "Error: anchor regime:m:mlx:q4:base:base:optimized:fp:imc-1 has no recorded loader-closure digest",
+  );
+  // AssertionError prints its properties on the same line as the opening brace's owner.
+  assert.equal(
+    failureReason({ stderr: "AssertionError [ERR_ASSERTION]: a != b {\n  operator: '=='\n}" }),
+    "AssertionError [ERR_ASSERTION]: a != b",
+  );
+  // Nothing to strip: unchanged, and a stderr that is ONLY a literal still reports something.
+  assert.deepEqual(withoutTrailingLiteral(["Error: x"]), ["Error: x"]);
+  assert.equal(failureReason({ stderr: "{\n}" }), "}");
+  // The step-log tail is bounded and keeps the end.
+  const long = Array.from({ length: 100 }, (_, index) => `line ${index}`).join("\n");
+  assert.equal(stderrTail({ stderr: long }, 3), "line 97\nline 98\nline 99");
+  assert.equal(stderrTail({ message: "plain" }), "plain");
 });
 
 test("failure reasons name the thrown error, not the Node banner after it", () => {

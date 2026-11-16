@@ -663,16 +663,7 @@
           "properties": {
             "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
             "variant": { "type": "string", "minLength": 1 },
-            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "overlay": {
-              "$comment": "SW-F363: the overlay artifact a `lora` capture installed beside the base artifact — its repository, revision and file — so the record names which LoRA its overlay bytes are. Absent on every overlay-free capture.",
-              "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "file"],
-              "properties": {
-                "repository": { "type": "string", "minLength": 1 },
-                "resolvedRevision": { "type": "string", "minLength": 1 },
-                "file": { "type": "string", "minLength": 1 }
-              }
-            }
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         },
         "target": { "$ref": "#/$defs/target" },
@@ -773,7 +764,16 @@
           "properties": {
             "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
             "variant": { "type": "string", "minLength": 1 },
-            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "overlay": {
+              "$comment": "SW-F363: the overlay artifact a `lora` capture installed beside the base artifact — its repository, revision and file — so the record names which LoRA its overlay bytes are. Absent on every overlay-free capture.",
+              "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "file"],
+              "properties": {
+                "repository": { "type": "string", "minLength": 1 },
+                "resolvedRevision": { "type": "string", "minLength": 1 },
+                "file": { "type": "string", "minLength": 1 }
+              }
+            }
           }
         },
         "target": { "$ref": "#/$defs/target" },

@@ -4521,7 +4521,42 @@ export function failureReason(error) {
   // Informational lines are not outcomes: skip them and quote the last line that is one. Falling
   // back to the last line overall keeps a stderr that is ONLY notes from reporting nothing.
   const outcome = lines.filter((line) => !INFORMATIONAL_LINE_PATTERN.test(line));
-  return ((outcome.at(-1) ?? lines.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+  // SW-F363 (campaign run 43794810762): Node prints a thrown error's own properties AFTER the
+  // message as an object literal — `{`, `code: '…'`, `}` — so a child that died on such an error
+  // ended stderr on a bare `}`, and four `ingest_failed` rows quoted just that. A trailing
+  // object/array literal is not the outcome: skip it (balanced from its closing line back to the
+  // line that opens it, keeping any message text on that opening line) and quote what precedes it.
+  const kept = withoutTrailingLiteral(outcome);
+  return ((kept.at(-1) ?? outcome.at(-1) ?? lines.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+}
+
+/** `lines` minus a trailing object/array literal (see `failureReason`). Unchanged when there is none. */
+export function withoutTrailingLiteral(lines) {
+  if (lines.length === 0 || !/^[\]})]+[,;]?$/.test(lines.at(-1))) return lines;
+  let depth = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    depth += (line.match(/[\]}]/g) ?? []).length - (line.match(/[[{]/g) ?? []).length;
+    if (depth <= 0) {
+      const opener = line.replace(/[[{]\s*$/, "").trim();
+      return opener ? [...lines.slice(0, index), opener] : lines.slice(0, index);
+    }
+  }
+  return lines;
+}
+
+/** How many trailing stderr lines of a failed ingest the walk prints into the step log. */
+export const INGEST_STDERR_TAIL_LINES = 60;
+
+/**
+ * The last `limit` lines of a failed child's stderr (or its message when it had none), for the
+ * job's step log. SW-F363: the per-anchor log lives in the work dir — an artifact — and the
+ * one-line summary row cannot hold a multi-line error, so without this the CI log carried nothing
+ * but the summary for four `ingest_failed` rows.
+ */
+export function stderrTail(error, limit = INGEST_STDERR_TAIL_LINES) {
+  const text = String(error?.stderr ?? "").trim() || String(error?.message ?? "unknown failure");
+  return text.split("\n").slice(-limit).join("\n");
 }
 
 export async function measureAnchor(row, context) {
@@ -4654,6 +4689,11 @@ export async function measureAnchor(row, context) {
       } catch (rollbackError) {
         state.halt = `rollback failed for ${row.key}: ${rollbackError.message}`;
       }
+      // SW-F363: the step log is the only window a CI run gives into an ingest failure.
+      process.stdout.write(
+        `--- ${row.key}: ingest failed (${subject}); last ${INGEST_STDERR_TAIL_LINES} stderr lines:\n`
+          + `${stderrTail(error)}\n--- end ${row.key} ingest stderr\n`,
+      );
       return finish("ingest_failed", failureReason(error));
     }
   };
