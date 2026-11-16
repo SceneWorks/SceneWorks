@@ -13,6 +13,7 @@ import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 import { validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
 import { validatePlanDispatch } from './sdxl-exact-replay-plan.mjs';
+import { makeReplayPlan } from './sdxl-exact-replay-seal.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40), uuid = 'GPU-00000000-0000-0000-0000-000000000001';
@@ -121,6 +122,24 @@ test('qualification is immutable and cannot manufacture a deterministic support 
   qualification.jobs[0].support.kind = 'deterministic';
   assert.throws(() => requireReplayQualification(plan, qualification), /evidence changed/);
 });
+test('a completed deterministic qualification seals a separate bounded replay plan', () => {
+  const { first, second, plan } = pair();
+  plan.physicalIndex = 0;
+  const support = { kind: 'deterministic', scope: SCOPE };
+  const qualification = { accepted: true, phase: 'qualify', sourceSha: sha, inferenceRevision: pin,
+    deviceUuid: uuid, physicalIndex: 0, requestSha256: plan.requestSha256,
+    sourceIdentitySha256: plan.sourceIdentitySha256, scheduleSha256: plan.scheduleSha256,
+    loadedRuntimeLibrariesSha256: hash('loaded-runtime'),
+    jobs: [{ ...first, support }, { ...second, support }] };
+  const now = Date.parse('2026-11-14T01:00:00Z');
+  const replayPlan = makeReplayPlan(plan, qualification, sha, pin, now);
+  assert.equal(replayPlan.qualificationSha256, digest(qualification));
+  assert.equal(replayPlan.declaration.reviewUrl, 'https://github.com/SceneWorks/inference/pull/1464');
+  assert.equal(Date.parse(replayPlan.goExpiresAt) - Date.parse(replayPlan.goStartsAt), 120 * 60 * 1000);
+  assert.throws(() => makeReplayPlan(plan, { ...qualification, accepted: false }, sha, pin, now));
+  assert.throws(() => makeReplayPlan(plan, { ...qualification, jobs: [first, second] }, sha, pin, now),
+    /provider did not declare/);
+});
 test('physical ordinal zero, NVML worker label and final guard UUID must agree', () => {
   const { plan } = fixture();
   const metadata = { context_created: false, devices: [{ ordinal: 0, uuid }] };
@@ -162,6 +181,9 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]/);
   assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0/);
+  assert(workflow.indexOf('sdxl-exact-replay-proof.mjs finalize') < workflow.indexOf('sdxl-exact-replay-seal.mjs'));
+  assert.match(workflow, /name: Seal the reviewed qualification into a private replay plan\n        if: \$\{\{ success\(\) && fromJSON\(inputs.campaign_run_id\).phase == 'qualify' \}\}/);
+  assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_SEAL_REPORT \}\}/);
   assert.equal((workflow.match(/\$targetDirectory = \(cargo metadata --format-version 1 --no-deps \| ConvertFrom-Json\)\.target_directory/g) ?? []).length, 3);
   assert.equal((workflow.match(/\$env:SDXL_REPLAY_BINARY = Join-Path \$targetDirectory 'release\\sceneworks-rust-api\.exe'/g) ?? []).length, 3);
   assert.equal((workflow.match(/Compiled SDXL API binary missing/g) ?? []).length, 3);

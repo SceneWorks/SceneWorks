@@ -296,6 +296,21 @@ jobs:
       - name: Require physical cleanup before accepting evidence
         if: ${{ always() }}
         run: node scripts/ci/sdxl-exact-replay-proof.mjs finalize
+      - name: Seal the reviewed qualification into a private replay plan
+        if: ${{ success() && fromJSON(inputs.campaign_run_id).phase == 'qualify' }}
+        shell: powershell
+        run: |
+          $env:SDXL_REPLAY_SEAL_REPORT = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-seal-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_SEAL_REPORT=$env:SDXL_REPLAY_SEAL_REPORT"
+          node scripts/ci/sdxl-exact-replay-seal.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL replay plan seal failed' }
+      - name: Upload bounded replay plan metadata
+        if: ${{ success() && fromJSON(inputs.campaign_run_id).phase == 'qualify' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-seal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_SEAL_REPORT }}
+          if-no-files-found: error
       - name: Upload only bounded public hashes and identities
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -83,6 +83,18 @@ try {
         });
       });
     }
+    // The shared verification fixture restores Models by default. Start on Image
+    // so observed network bytes describe this route, not a prior Models visit.
+    await page.route("**/api/v1/ui-preferences", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const response = await fetch(`${fixtureOrigin ?? origin}/api/v1/ui-preferences`);
+      if (!response.ok) throw new Error(`UI preferences unavailable (${response.status})`);
+      await route.fulfill({
+        status: response.status,
+        headers: { "content-type": "application/json", "access-control-allow-origin": origin },
+        body: JSON.stringify({ ...await response.json(), activeView: "Image" }),
+      });
+    });
     await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 10000 });
     await page.getByRole("button", { name: "Image", exact: true }).first().click();
     await page.locator(".advanced-section-toggle").first().click();
