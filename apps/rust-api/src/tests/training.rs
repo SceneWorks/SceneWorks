@@ -1,6 +1,148 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[tokio::test]
+async fn training_continuation_creates_independent_linked_outputs_and_keeps_source_unchanged() {
+    let _env = isolate_hf_cache();
+    let temporary = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temporary);
+    let app = create_app(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"Continue training",
+        request,
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (id, directory, adapter) =
+        submit_real_training_job(app.clone(), project_id, &settings.data_dir).await;
+    let payload = private_training_payload(&settings.data_dir, &id);
+    let steps = payload["plan"]["config"]["steps"].as_u64().unwrap();
+    let path = format!("/api/v1/training/jobs/{id}/continue");
+    let (status, _) = request(app.clone(), "POST", &path, json!({"additionalSteps":1000})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "queued runs cannot be continued"
+    );
+    claim_training_job(&app, &id).await;
+    std::fs::create_dir_all(&directory).unwrap();
+    write_test_safetensors(&adapter);
+    let (status, completed) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/progress"), json!({
+        "status":"completed", "stage":"completed", "progress":1, "message":"Training completed.", "workerId":TEST_TRAINING_WORKER_ID,
+        "result":{"outputPath":adapter.display().to_string()}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let (_, original_snapshot) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
+    for invalid in [
+        json!({"additionalSteps":0}),
+        json!({"additionalSteps":-1}),
+        json!({"additionalSteps":1.5}),
+        json!({"additionalSteps":4294967295u64}),
+        json!({"additionalSteps":1,"outputDir":"elsewhere"}),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &path, invalid).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "{error}"
+        );
+    }
+    let (status, missing) =
+        request(app.clone(), "POST", &path, json!({"additionalSteps":1000})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    assert!(
+        missing.to_string().contains("no recovery checkpoint"),
+        "{missing}"
+    );
+    let stem = adapter.file_stem().unwrap().to_str().unwrap();
+    let checkpoint = directory.join(format!("{stem}-step{steps:06}.resume.safetensors"));
+    let header = serde_json::to_vec(&json!({
+        "__metadata__":{"format":"candle-gen-resume-v1","step":steps.to_string(),"update_idx":steps.to_string(),
+            "training_config":format!("steps={steps};accum=1;scheduler=Cosine"),"request_fingerprint":"dataset-identity"},
+        "factor.test":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}
+    })).unwrap();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header);
+    bytes.extend(1.25f32.to_le_bytes());
+    std::fs::write(&checkpoint, &bytes).unwrap();
+    let adapter_before = std::fs::read(&adapter).unwrap();
+    let manifest = directory.parent().unwrap().join("manifest.jsonc");
+    let manifest_before = std::fs::read(&manifest).unwrap();
+    let loras_path = format!("/api/v1/loras?projectId={project_id}");
+    let (_, original_loras) = request(app.clone(), "GET", &loras_path, Value::Null).await;
+    let mut outputs = Vec::new();
+    let mut continued_ids = Vec::new();
+    // Siblings may be queued concurrently: each has its own independent state.
+    for additional in [1000, 2000] {
+        let (status, continued) = request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({"additionalSteps":additional}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{continued}");
+        assert_eq!(continued["sourceJobId"], id);
+        assert_eq!(continued["status"], "queued");
+        assert_ne!(continued["id"], id);
+        let new_id = continued["id"].as_str().unwrap();
+        let next = private_training_payload(&settings.data_dir, new_id);
+        assert_eq!(next["plan"]["config"]["steps"], steps + additional);
+        assert_eq!(next["plan"]["config"]["advanced"]["resume"], true);
+        assert_eq!(next["continuation"]["sourceJobId"], id);
+        assert_eq!(next["continuation"]["initialStep"], steps);
+        assert_ne!(
+            next["plan"]["output"]["loraId"],
+            payload["plan"]["output"]["loraId"]
+        );
+        assert_eq!(next["manifestEntry"]["provenance"]["trainingJobId"], new_id);
+        assert_eq!(next["plan"]["provenance"]["sourceJobId"], new_id);
+        assert_eq!(next["plan"]["dataset"], payload["plan"]["dataset"]);
+        let output =
+            std::path::PathBuf::from(next["plan"]["output"]["outputDir"].as_str().unwrap());
+        assert_ne!(output, directory);
+        assert!(output.join(checkpoint.file_name().unwrap()).exists());
+        assert!(!output.join(adapter.file_name().unwrap()).exists());
+        outputs.push(output);
+        continued_ids.push(new_id.to_owned());
+    }
+    assert_ne!(outputs[0], outputs[1]);
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), bytes);
+    assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+    // Registering the continued export must add an adapter, preserving the parent's entry.
+    let first = &continued_ids[0];
+    claim_training_job(&app, first).await;
+    let new_adapter = outputs[0].join(adapter.file_name().unwrap());
+    write_test_safetensors(&new_adapter);
+    let (status, finished) = request(app.clone(), "POST", &format!("/api/v1/jobs/{first}/progress"), json!({
+        "status":"completed", "stage":"completed", "progress":1, "message":"Continued LoRA saved.",
+        "workerId":TEST_TRAINING_WORKER_ID, "result":{"outputPath":new_adapter.display().to_string()}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    assert_eq!(finished["result"]["loraRegistered"], true, "{finished}");
+    let (_, loras_after) = request(app.clone(), "GET", &loras_path, Value::Null).await;
+    for original_entry in original_loras.as_array().unwrap() {
+        assert!(loras_after.as_array().unwrap().contains(original_entry));
+    }
+    assert_eq!(
+        loras_after.as_array().unwrap().len(),
+        original_loras.as_array().unwrap().len() + 1
+    );
+    assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
+    let (_, source_after) = request(app, "GET", &format!("/api/v1/jobs/{id}"), Value::Null).await;
+    assert_eq!(source_after, original_snapshot);
+}
+
 // Training endpoint fixtures use small staged snapshots; bind their exact local bytes as the
 // test publisher metadata instead of querying the real multi-gigabyte model repositories.
 fn create_app(
