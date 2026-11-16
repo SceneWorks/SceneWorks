@@ -112,6 +112,13 @@ describe("TrainingStudio — Iris", () => {
       .find((label) => label.textContent.startsWith("Resume a previous run"))
       ?.querySelector("select");
     expect([...resume.options].map((option) => option.value)).toEqual(["", "job_prev"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(resume), "value").set.call(resume, "job_prev");
+      resume.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(resume.value).toBe("job_prev");
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "New training").click());
+    expect(resume.value).toBe("");
     const captionField = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.startsWith("Caption field"))
       ?.querySelector("select");
@@ -128,6 +135,7 @@ describe("TrainingStudio — Iris", () => {
     expect(config.advanced.iris).toMatchObject({ text_conditioning: "cached", ema_enabled: true, export_dtype: "fp32" });
     expect(config.advanced.iris).not.toHaveProperty("resume_from");
     expect(config.advanced.iris).not.toHaveProperty("load_from");
+    expect(config.advanced).not.toHaveProperty("resumeFromJobId");
     expect(config.advanced.gradientCheckpointing).toBe(false);
   });
 

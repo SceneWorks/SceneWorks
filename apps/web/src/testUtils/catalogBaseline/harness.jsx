@@ -209,7 +209,13 @@ export async function mount(catalog, row, saved = {}, overrides = {}) {
 }
 export async function observe(catalog, row) {
   const mounted = await mount(catalog, row);
-  const { container, persistenceKey, calls, close, getPersisted } = mounted;
+  const { persistenceKey, calls, close, getPersisted } = mounted;
+  // The frozen training catalog describes the target configuration form. The new run/history
+  // chooser is covered by TrainingStudio.history tests and must not renumber these old controls.
+  // If the form disappears, observe the whole screen so the original contract still fails.
+  const container = row.studio === "training"
+    ? mounted.container.querySelector(".training-config-panel") ?? mounted.container
+    : mounted.container;
   try {
     // Open native advanced disclosures instead of mounting mock controls.
     for (const toggle of [...container.querySelectorAll(".advanced-section-toggle")]) {

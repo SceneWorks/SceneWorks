@@ -6,7 +6,7 @@ async fn training_continuation_creates_independent_linked_outputs_and_keeps_sour
     let _env = isolate_hf_cache();
     let temporary = tempfile::tempdir().unwrap();
     let settings = test_settings(&temporary);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
         &"Continue training",
@@ -75,6 +75,60 @@ async fn training_continuation_creates_independent_linked_outputs_and_keeps_sour
     bytes.extend(1.25f32.to_le_bytes());
     std::fs::write(&checkpoint, &bytes).unwrap();
     let adapter_before = std::fs::read(&adapter).unwrap();
+    // A saved run remains discoverable and continuable after both queue clearing and retention.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/clear"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    state
+        .jobs_store
+        .purge_terminal_jobs_completed_before("2999-01-01T00:00:00Z")
+        .unwrap();
+    let (_, queue) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(queue.as_array().unwrap().is_empty(), "{queue}");
+    let runs_path = format!("/api/v1/projects/{project_id}/training/runs?limit=1");
+    let (status, history) = request(app.clone(), "GET", &runs_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history["jobs"][0]["id"], id);
+    assert!(history["nextOffset"].is_null());
+    assert!(
+        history["jobs"][0]["payload"]["plan"]["output"]
+            .get("outputDir")
+            .is_none(),
+        "private paths stay redacted"
+    );
+    let (_, other_project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"Other training workspace",
+        request,
+    )
+    .await;
+    let (_, other_history) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{}/training/runs",
+            other_project["id"].as_str().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    assert!(other_history["jobs"].as_array().unwrap().is_empty());
+    let (_, cleared_snapshot) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(cleared_snapshot["payload"], original_snapshot["payload"]);
+    assert_eq!(cleared_snapshot["result"], original_snapshot["result"]);
+    assert_eq!(private_training_payload(&settings.data_dir, &id), payload);
+    let original_snapshot = cleared_snapshot;
     let manifest = directory.parent().unwrap().join("manifest.jsonc");
     let manifest_before = std::fs::read(&manifest).unwrap();
     let loras_path = format!("/api/v1/loras?projectId={project_id}");
@@ -130,6 +184,18 @@ async fn training_continuation_creates_independent_linked_outputs_and_keeps_sour
     })).await;
     assert_eq!(status, StatusCode::OK, "{finished}");
     assert_eq!(finished["result"]["loraRegistered"], true, "{finished}");
+    let (_, first_page) = request(app.clone(), "GET", &runs_path, Value::Null).await;
+    assert_eq!(first_page["jobs"][0]["id"], first.as_str());
+    assert_eq!(first_page["nextOffset"], 1);
+    let (_, older_page) = request(
+        app.clone(),
+        "GET",
+        &format!("{runs_path}&offset=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(older_page["jobs"][0]["id"], id);
+    assert!(older_page["nextOffset"].is_null());
     let (_, loras_after) = request(app.clone(), "GET", &loras_path, Value::Null).await;
     for original_entry in original_loras.as_array().unwrap() {
         assert!(loras_after.as_array().unwrap().contains(original_entry));
