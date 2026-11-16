@@ -1,12 +1,12 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "775c7febdcbeaca5e20cd728358842a2cba9b10e",
+  "inferenceRevision": "4effdfb58e3fded8f77dd19dc35a199ef23b5d86",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
-      "digest": "9a1ab488bee447ed3e503459d23653f19acbc04abb23ce8009a601a5f2e38987",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "bd0930fa1886aa1d40d634df24e83702c088fd3c53f2dfb8a391452adbaeb957",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -14,6 +14,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -38,14 +39,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 565,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 253
+      "sourceFileCount": 569,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 254
     },
     "candle:chroma1_base": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "35bf1c91e42aca499b6cf78988c9f3df3bda04cc4cb66279fbe7c8fadcb1a17e",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "336f42da50bde2c462be90b92724b387aa5d883a7efb444f85e33f4b10a27203",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -53,6 +54,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -79,14 +81,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 595,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 263
+      "sourceFileCount": 599,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 264
     },
     "candle:chroma1_flash": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "2938c457727341fbbc1b78304dc336a4efe66afc99fc547e14509970c0184445",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "52233b2e208bb6b0f0100fc79c239550a4d33ab72af6ccd77eb961c64cffb2fe",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -94,6 +96,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -120,14 +123,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 595,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 263
+      "sourceFileCount": 599,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 264
     },
     "candle:chroma1_hd": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "b70805d4dedd7371066c7c8a9b9a0100f57ec7faf75154008a9e78fe971da368",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "44a8ac74a11384902ee57d401c7f0ef5a9c74066dcf387b6ac562214613cdd8b",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -135,6 +138,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -161,14 +165,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 595,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 263
+      "sourceFileCount": 599,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 264
     },
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "0c3cd54e525d91159335094ab4223759483c7b29ba3237fb49f6baaf6eea1a73",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "081f50cb0d7aa38670ae0b820be8c95b647b2865e528bfc91a14db77042e158f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -176,6 +180,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -201,14 +206,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 583,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 262
+      "sourceFileCount": 587,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 263
     },
     "candle:flux1_schnell": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "413bdc457254cd4357e860024c75feadfbde7c88d451bf66cc48b5ca5b24f0bc",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "c67854aa8e6a1fc4e9ceca4f9b402d9fe77928d89633217130b1db8dc643b288",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -216,6 +221,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -241,20 +247,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 583,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 262
+      "sourceFileCount": 587,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 263
     },
     "candle:flux2_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "a7f34ad880b74c4f45a308600716109631047d1eb8b1198e989f82dc183665cb",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "0278a72226ef5d519459c02f6fd42722b104ffd8136f5e92b0886b034482da43",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -276,20 +283,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 583,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 258
+      "sourceFileCount": 587,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 259
     },
     "candle:flux2_klein_9b": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "ddd7dbaf89247b83538b0b61a8c8e7879be06391a9bd3ceca4eca35edbc80821",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "636b4195f05b98d8647fde40bf04ab727ded222f8696733e94ff86e849bad058",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -311,14 +319,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 583,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 258
+      "sourceFileCount": 587,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 259
     },
     "candle:flux3_klein": {
       "crate": "crates/media/candle-gen/candle-gen-flux3",
-      "digest": "881e8793e3e52c3b26f7d5b9a708f2cf454f028968a42356b16e73e4f25f1479",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "7d896f168eb10dc1daa2deac216d2ce47e8e31a5439d74df0a8ca03abff175b5",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -326,6 +334,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -346,14 +355,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 601,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 250
+      "sourceFileCount": 605,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 251
     },
     "candle:flux3_klein_base": {
       "crate": "crates/media/candle-gen/candle-gen-flux3",
-      "digest": "adbcfb1b4b01a05c971c82277c258366e72ba2dfe31e5c01b402f15f7c35e593",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "8ab252b8044d4863ebb54ec06ba69ac247735449435cc901095fd0d9ed363ee0",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -361,6 +370,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -381,14 +391,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 601,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 250
+      "sourceFileCount": 605,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 251
     },
     "candle:ideogram_4": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "f72d6a5ad65f432ef9ad5c9bb6721ac5bce264e335eaf2e8c207574fd8acb2f9",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "b4c9adc4c974b0025709d70860cca7ec481735b2f2657067ebe4874b6389aa37",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -396,6 +406,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -418,14 +429,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 615,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 260
+      "sourceFileCount": 619,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 261
     },
     "candle:ideogram_4_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "54848ede35598dcba46facc9d87b7ee6474c0113ed987b39211da9e66698b850",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "0bfee0d34810ea9af9b50ce6b8aba8002c54b53749d7e53cb1af94a2f60364cb",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -433,6 +444,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -455,14 +467,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 615,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 260
+      "sourceFileCount": 619,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 261
     },
     "candle:instantid": {
       "crate": "crates/media/candle-gen/candle-gen-instantid",
-      "digest": "24a807599ca262f82b097906e88e30c1cba44270d553dd2c7aaf4eed3d5f4b1b",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3ea6a56c27d6ba620107c1e3e475196c9cd47c75320c28b1c5ee341b71c5d10b",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -470,6 +482,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -495,14 +508,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 571,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 262
+      "sourceFileCount": 575,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 263
     },
     "candle:iris_3b": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "667a7fc864589785f4a1b6473d7982c8ece295227818d56879ff72b3e10e9a18",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ea0abae4ca061b50c127cd12e5d246fd60e15499c79a681b2009c855ac5d7a7f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -511,6 +524,7 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -531,14 +545,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 596,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 251
+      "sourceFileCount": 600,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 252
     },
     "candle:iris_3b_depth": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "93bb10ce6005878d822a9c52c29ead56e51e66d340115a2b1dea3b8c88f498b2",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "0dabea34e5a46296f56e9773e84378db56479386247af8e1313eb5810308c821",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -547,6 +561,7 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -567,14 +582,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 596,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 251
+      "sourceFileCount": 600,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 252
     },
     "candle:iris_3b_restore": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "0065be3bc15d8a5e833ab7df1be6968735536c7e3765ba519826440ced5613f8",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "fb226b7b81530c347f3dab89c40dca7dcceb41284a1aca84f4fb1ef464b4480e",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -583,6 +598,7 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -603,14 +619,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 596,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 251
+      "sourceFileCount": 600,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 252
     },
     "candle:kolors": {
       "crate": "crates/media/candle-gen/candle-gen-kolors",
-      "digest": "a464dc841d6d04795af40be7897e8b04bf259d9b61b62c91a3cb6cbbd91a4468",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "80fde6830d564dee6478b46cdc603f785f9badf1f783c6c458109ddec9222fed",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -618,6 +634,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -643,14 +660,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 579,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 262
+      "sourceFileCount": 583,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 263
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "328dc2ae994ad0e29dec7c6b475576079499b80237a663f853f463f37f222626",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d5b14da6c8c1389e6ccfc5785750b5f45e94ea0891e802603b299e8cb9531438",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -658,6 +675,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -686,14 +704,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 651,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 265
+      "sourceFileCount": 655,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 266
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "e0e1486107817d1d71c59a8e5d51ad1ae17dedc7f935c7ad65cc542e68afc14d",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "fe52fae962c4161860bc4e45a469847af85e0f6ab8303f9cc62ea93adee4f426",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -701,6 +719,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -729,14 +748,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 651,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 265
+      "sourceFileCount": 655,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 266
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "24f3376a1c258cbbf6d98c152b7e6f663cbcb11e720397e72e68740d768cebda",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e4503d93b7d4d33199cadfb10ada5749cc9bc7ce0dc7d9a787274c8d21afc6b5",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -744,6 +763,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -772,14 +792,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 651,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 265
+      "sourceFileCount": 655,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 266
     },
     "candle:lens": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "c83f7a069f21813c57dbb22c58505da989fcb16bee542a2e4d4c6aa532f611b8",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "52b93974b77c7911543a48ee6e0099b9eb0ffcebb62268b83eb812e17f8d2d3c",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -787,6 +807,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -813,14 +834,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 646,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 650,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:lens_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "ab381f49b9b51ae2c33cf1f3640ac76b7b55126ca567cf67235f015810e35fd1",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "7cb18303b94feadc96adfb36f8e63ae6b842a65fd9ef5bcbded4d271941e684f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -828,6 +849,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -854,14 +876,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 646,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 650,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:ltx_2_3_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "d6afb69790824e401d414e76e5b664a8e92e4a712c55f6e39668f2feae3bfb9a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "570469c8255164e18735aa3416860f0151e2f4f0455c2892544cc1d1b3aa3136",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -870,6 +892,7 @@
         "crates/contracts/gen-core-ltx",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -894,14 +917,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 637,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 255
+      "sourceFileCount": 641,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 256
     },
     "candle:ltx_2_5_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "686c6e242314977d0fa2b43cc48b9ec91e7f46d3b16bb1ff090ff3894113938a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "28cf0c0841964f918bc2186bb0f9b7383319ae79849bc17b914a922c8a2a53cf",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -910,6 +933,7 @@
         "crates/contracts/gen-core-ltx",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -934,14 +958,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 637,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 255
+      "sourceFileCount": 641,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 256
     },
     "candle:mage_flow": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "5f8c7e6684ec354a1aac1bfc991eac7c99c1ecb9cb533c6f6987cd4c3eaed562",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "547a0d2c07e136dfb0ddb25b6ac115574b27d713148e190970d2789c06711d42",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -949,6 +973,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -976,14 +1001,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:mage_flow_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "498516e1e9c7417f4d65f73d2caba0e065de9b689785cad23c9d902fbf15df98",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ffa39dc83ea2871e5764330c9f00b2e55e523c0092e4f311a3a13784c56be851",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -991,6 +1016,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1018,14 +1044,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:mage_flow_edit": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "8ab06f1fb00df4c5f9ae067d317b57db7419463d74c1f316acc550525785a5d5",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "f16fc6d7a6c01d6557998666c7a727da75a7adfc2afa0c2f12b0ecde73deaa64",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1033,6 +1059,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1060,14 +1087,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:mage_flow_edit_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "cd31067ccf2180771dc7953d67145195535caa4689b6594ff32c7bb390ff93ff",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "7cb8eec37047e1330d88f2e3e062e07affeb950b96932678ad0247c0bf19831d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1075,6 +1102,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1102,14 +1130,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:mage_flow_edit_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "e8e6151acaa2f8e846cac1a88cc89fa680504b4720c9fba60b8653d769008eba",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "a12f3f2d153e376f6bb2d22c4baaa0c9b61c103125fe764d0b9d682407f1980d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1117,6 +1145,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1144,14 +1173,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:mage_flow_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "dec1107e99980d745ba6401bdacd16ce939c88cdb5c5ad0fa90f4d15d4478be9",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "0302d82736ca9b39582abb9fb680de22d9bda0ef4d29286a9ff230cb7b26c8f7",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1159,6 +1188,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1186,14 +1216,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 613,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 264
+      "sourceFileCount": 617,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:minimax_h3": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "8b33fb17d1387ff9fa3a7616ea8124fc008eb07bf4ed6f7d09993a4355673041",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "335f6e403af22d84f47d60052c0e9f75575c245d5cbeda82a9b8e95f1fc2b828",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1201,6 +1231,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-telemetry",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
@@ -1229,14 +1260,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 672,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 265
+      "sourceFileCount": 676,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 266
     },
     "candle:minimax_h3_image": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "ae464f007512b2b22cf2e3f904bc45375c5f8b90f36b20fc99281d3c9227b4ee",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "8a7c6820e63ba4fda43f36010cf5c78eaa34696a4a04fce8508379beaa5a907a",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1244,6 +1275,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-telemetry",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
@@ -1272,14 +1304,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 672,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 265
+      "sourceFileCount": 676,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 266
     },
     "candle:pulid_flux": {
       "crate": "crates/media/candle-gen/candle-gen-pulid",
-      "digest": "65147a0b65d5714f4ef8620306efb144706b6e80f718e622258ead7a1bef045d",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "9bbd81c7000b6fd49ae750d9787f7299ca60ea4138874af007a64250590dd237",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1287,6 +1319,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1313,20 +1346,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 598,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 263
+      "sourceFileCount": 602,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 264
     },
     "candle:qwen_image": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "c1aba95bd2a733714ff0fe66f923f7a6d233ed0856f5136b7eaac7ce5c7603e7",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d472048ddd255d1784c82666e19ece2be30b1a5ef937f7d6dffec46214283cd4",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1347,14 +1381,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 507,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 511,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:qwen_image_2_1": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
-      "digest": "d3f3a18dbe6fd205822da5786544d93e9d88743ae10d92df56a84e903846cf34",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "78aac2976244df72dd861fe521987f9ecc05113c0d42d7f7019443b50016a4d4",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1362,6 +1396,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1386,14 +1421,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 606,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 254
+      "sourceFileCount": 610,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 255
     },
     "candle:qwen_image_2_1_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
-      "digest": "2b0e85206d60e0f1a0bd8052dab04b1cba021eceeca640f2c0b7feef24f3d0c8",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ac0eb5f38a99901e4ff53dee9a7469f733d2f110c49ab461337b7b1492341a68",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1401,6 +1436,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1425,20 +1461,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 606,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 254
+      "sourceFileCount": 610,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 255
     },
     "candle:qwen_image_edit": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "f3f70743b52fdee03d6549f47a177e003c4f713051f87d56586c9679a5efdbfb",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "9a955ea2f94ad1fde342ae7b721a4ee4f2bc6ee44e69f8d21cfa9a778ab5bdde",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1459,20 +1496,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 507,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 511,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:sana_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "3801ef14322368d1d34ec5729a955d0c4a1fa12e8c90ad7a4dd36b17ead893a0",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "bd084b89f72275a84c5469dd20ba110e8491562de1285744c1f22e7b3c2d91dd",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1493,20 +1531,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 494,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 498,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:sana_sprint_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "ffec04d738ab305ac7d655054d261a86c41e0d17ad5f9bd70fc528965d72d4e4",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "f41f1c1a4db2bc3590a81a416dd064cec4236e23b0cd95f91c04c3e3f3be123d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1527,14 +1566,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 494,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 498,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:scail2_14b": {
       "crate": "crates/media/candle-gen/candle-gen-scail2",
-      "digest": "a2f966ecc522ee4a1f60727de15f2c56182b12daa09e1fedebb920b59c0a8b6a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "9aadb0513e54463d03c1fbc636a52038bc0aef7b3b44e3040188c4b1953e59e6",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1542,6 +1581,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1566,14 +1606,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 554,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 253
+      "sourceFileCount": 558,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 254
     },
     "candle:sd3_5_large": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "21062d80cc7b523ac5bd4a546ca05f06c38f7ebeda7ec048bfb763347876bc42",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "973942905a48356b63a19d98abf7fa0edb447a0fd3085c8a4ef1ffe569f19994",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1581,6 +1621,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-train",
         "crates/contracts/load-progress",
@@ -1603,14 +1644,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 526,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 259
+      "sourceFileCount": 530,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 260
     },
     "candle:sd3_5_large_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "c18ef93efc9127680ed1b0914f1c6da418575335729e9498bdc1ed57a7edb8a7",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "60ecba43623951abada888c71b1d001ed198f573742833fb4dc24c167f0c42c2",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1618,6 +1659,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-train",
         "crates/contracts/load-progress",
@@ -1640,14 +1682,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 526,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 259
+      "sourceFileCount": 530,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 260
     },
     "candle:sd3_5_medium": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "19500bd792403fa1396fea4341f27ce7d5a97ef743ca4ce4a72ff95dcf983ab7",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ca7789ffd046a167f358c7c1a7b45797f7124fe099d1e19ee9b391ece6c88897",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1655,6 +1697,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-train",
         "crates/contracts/load-progress",
@@ -1677,14 +1720,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 526,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 259
+      "sourceFileCount": 530,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 260
     },
     "candle:sdxl": {
       "crate": "crates/media/candle-gen/candle-gen-sdxl",
-      "digest": "9b00255fe9cbdaaeef7f2a8f408a9f575a325a440f2d8239088fbbae45736036",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "a6658c814e8aba890184b9bf190fdc4b718301546a7f2bdd23c28dad16557598",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1692,6 +1735,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1716,20 +1760,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 563,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 261
+      "sourceFileCount": 567,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 262
     },
     "candle:sensenova_u1_8b": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "f2478bc796a55608db931619ef669e80a0e9d03d767e7099f37648d5060f1f53",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "357ec0b5006df67deb7698195f2fe7e6b6de41159dc552a67b75c4c957853687",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-train",
         "crates/contracts/load-progress",
@@ -1749,20 +1794,21 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 556,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 560,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:sensenova_u1_8b_fast": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "c6754f6736629b346c4dfe43a7b7b435908f96e1cd6fe12e1ac1af58bda42a76",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "4a2732b7e655f2f72fd191b567339c6d53df251d083cd6a3bd5c6181c5474c34",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-train",
         "crates/contracts/load-progress",
@@ -1782,14 +1828,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 556,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 248
+      "sourceFileCount": 560,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 249
     },
     "candle:supra2_img": {
       "crate": "crates/media/candle-gen/candle-gen-supra2",
-      "digest": "2af70159c17874a792f0e09dc032cca90a28d6a836cdab93921e1565b625ec73",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ccca8753ff1fdadd9747c68cbea24f6c62da9c6131e7fcdd4ac92079486a9b44",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1798,6 +1844,8 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1823,14 +1871,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 573,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 263
+      "sourceFileCount": 579,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 265
     },
     "candle:wan2_2_i2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "d3993d893692f1787000cff916a6153b057857bd949e75a263577f662b3a8a35",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "61603dea437394d570389744c38f2b1ccd0f674bf3a7abdfe16ceda55e23da62",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1838,6 +1886,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1861,14 +1910,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 541,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 252
+      "sourceFileCount": 545,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 253
     },
     "candle:wan2_2_t2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "cbb636201f30eeec57c6f628f9926eee235a796e5b73dab2d02fe2f450e7ee1a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "0e0196506d549268ee810a154f9aedef714d40a19feb49c04681f58b3ddfcade",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1876,6 +1925,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1899,14 +1949,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 541,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 252
+      "sourceFileCount": 545,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 253
     },
     "candle:wan2_2_ti2v_5b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "e4cb396ecc4585a07fac1ba5c8a2a946e3e8070d7ffe71bd80ebaf32bfd29077",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e178359e684700bf72719e7f54f2b02c41815ea8585839dc4fbe68f2e632643e",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1914,6 +1964,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -1937,19 +1988,20 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 541,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 252
+      "sourceFileCount": 545,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 253
     },
     "candle:yue2": {
       "crate": "crates/audio/candle-audio-yue2",
-      "digest": "5aa749eaac997171102bde11cad205f46d43bb770601572a130bb3aa16fb62ea",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "658c8ee88eaaff7ae3343eb43394756c600a950e850be53d956cf38a80bcb957",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/audio/candle-audio",
         "crates/audio/candle-audio-yue2",
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/load-progress",
         "crates/kernels/candle-quant-kernels",
         "crates/llm/candle-llm",
@@ -1965,14 +2017,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 455,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 237
+      "sourceFileCount": 458,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 238
     },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "33513c65fc015be4c29cfa64754a3bed50004d1b9a4efe2e8673e6105217bec7",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "20123e095385aff761d204ec76607b24bdb7b9cd5b3df929a344b4e16fd29c14",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -1980,6 +2032,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2004,14 +2057,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 551,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 261
+      "sourceFileCount": 555,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 262
     },
     "candle:z_image_control": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "c66a322a2da8dab85fa729a745f0c40fbef21f4efec5e95ea12c8cc1f6bb4755",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "40a27709e994d121004e05845f7bc9b7242891c2c8cb96bf2c127625d1d53cf8",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2019,6 +2072,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2043,14 +2097,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 551,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 261
+      "sourceFileCount": 555,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 262
     },
     "candle:z_image_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "774524e786689b902c0fe88b6afb0cd45c4ba115239cb97dc08f1865fdc18a52",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "2f381a92f47877e8b77d69102df8e1969a4addc8205fef8c9bc1723ad6d833d3",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2058,6 +2112,7 @@
         "crates/contracts/gen-core-h3",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2082,14 +2137,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 551,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 261
+      "sourceFileCount": 555,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 262
     },
     "mlx:bernini": {
       "crate": "crates/media/mlx-gen/mlx-gen-bernini",
-      "digest": "4062c697d69ba9f7b370d7ec60bfb5a7acefb6103ca006efe93c6c88262eded3",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e1ab7b1743df6a3e8953ee21d89d74f68372e5980f8caa49f6e9779229f0f12c",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2099,6 +2154,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2119,14 +2176,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 566,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 573,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:chroma1_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "b8e4c948a622164f626287cb238168b9793cf5a595098c3f10b3fa18d165c8ca",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "b511acb9516f7ff50ca61fb62c6c45ffc7d3f284d72537bd363dda2d3087f7ec",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2136,6 +2193,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2159,14 +2218,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 652,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 659,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:chroma1_flash": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "2a47bbdfa698b8f23c6c5348f6364a88ae281f19095e429e6908b591a9353ec5",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d6cead2b93416bbeb7c3a042b75617225c6350eaca13672605d2a7e41ba48e1f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2176,6 +2235,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2199,14 +2260,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 652,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 659,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:chroma1_hd": {
       "crate": "crates/media/mlx-gen/mlx-gen-chroma",
-      "digest": "fe330b60bcb62e539b9105882a61ff3241be15f2c8ec86beb400259b088ade85",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "8537dca11a75330f29ec1f4f2e50024a5b4438c4f86bca3bece4ea69c49d9e13",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2216,6 +2277,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2239,14 +2302,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 652,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 659,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:flux1_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux",
-      "digest": "af46dc61cb1409d395ca620fd5fae07bb63eb3e9365b214d5ee856a4ef674459",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "5f0c0b853e3b0d11ef910d9f389cb6621ffb809ed516e2b943642ac4f1ff8bbe",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2256,6 +2319,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2278,14 +2343,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 639,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 646,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:flux1_schnell": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux",
-      "digest": "f6323e4f864df88c403f2489c22d994f2cc590dd32796ae7b970aa3c02493699",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "c720ac02e559f6ac8cc2febea643df829b376b6e953b5241f293e73b9f7434d5",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2295,6 +2360,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2317,14 +2384,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 639,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 646,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "a54609f3add31a4707411c727a45879191a78dff7b4bef3249ce6942cdd36838",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "03979db0550ebbd6cffaf71df3a18905024a58ff98446e67c6e0ba3b5e89c048",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2333,6 +2400,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2349,14 +2418,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 493,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 500,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:flux2_klein_9b": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "b6d41c5cd720abcbd8ec0a02e5ca0960c57ddce9475905f469e84389f8742fc5",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "2e83a6188c8a55f1b7f898120b1ff4f48829a8dd070236160b09c4ba07eb47f1",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2365,6 +2434,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2381,14 +2452,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 493,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 500,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:flux3_klein": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux3",
-      "digest": "f0a340bd12ee6f392aeb9eb1a1d5583d1af082d123af23de29c403bbc1074e86",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "6a5209688ae31231c805aaff192ff6e01b8f87e976432776d9b4c9394582ecc7",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2398,6 +2469,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2413,14 +2486,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 489,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 496,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:flux3_klein_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux3",
-      "digest": "1dd38c5c81354a78d1292617c8be17d3f0ad13a86a5869300a3ffcf0b63babea",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "742e71e547dab18b6e606e988345c613f8521f794261565b9b0cdc4ebeb69093",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2430,6 +2503,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2445,14 +2520,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 489,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 496,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:ideogram_4": {
       "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
-      "digest": "1ebfcad817cab7e6cea8f1d1394ab3964e8ced7f3d15e18eb19a39db421081e1",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d5fec3042e2204bc2aafbeaddb6f8bebcf9dd0df6666ef4fbfb04d32701e5b8b",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2462,6 +2537,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2479,14 +2556,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 528,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 195
+      "sourceFileCount": 535,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 197
     },
     "mlx:ideogram_4_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
-      "digest": "5f5e54655af63ac2beee6ac74236d05871151125382c200a11d340bbbcf378b6",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "56448f92b3f6f7cb43d0615295911d10e8086830a51e7e55a81e702824174a26",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2496,6 +2573,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2513,14 +2592,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 528,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 195
+      "sourceFileCount": 535,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 197
     },
     "mlx:instantid": {
       "crate": "crates/media/mlx-gen/mlx-gen-instantid",
-      "digest": "99e4f225b092802242512b543b685f152e9477c74a8221bdcce46209215731a7",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "f2619ba5f49402200b1fea0f9529e27913ca8b15ad80642eae0a3b996fd12372",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2530,6 +2609,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2551,14 +2632,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 565,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 572,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:iris_3b": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "5fc5688b8859d42fc0281777bdc6730fd391aed6843ff9db4957c17eb99aaf1f",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "088dc240fe8df87e81bb6c892a4b6f5dd86264adfe95654c2dad74e17c1e5eb4",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2568,6 +2649,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2583,14 +2666,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 479,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 486,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:iris_3b_depth": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "c57386e83b8c779f498b7700d30b1f63613abbf610fcb2aaf27164e0ae0a3e96",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "eb8b0d54e614e916316e637675dd40fcf6d6470a37993891ec666b4dbef9aad5",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2600,6 +2683,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2615,14 +2700,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 479,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 486,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:iris_3b_restore": {
       "crate": "crates/media/mlx-gen/mlx-gen-iris",
-      "digest": "cb16011cd90f81b351047136c25fa3c66db2b37b1b5c92d57ff27a54761c8891",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "fca798b2aee8ef4890dc5c16eca3ac518fc7f9e13835d678346d42a4278bb7e9",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2632,6 +2717,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2647,14 +2734,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 479,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 486,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:kolors": {
       "crate": "crates/media/mlx-gen/mlx-gen-kolors",
-      "digest": "dbb2a6a7ff062ae76fa33a8f3665d7c69014cace319aab2ab75d572bfa6752da",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "35c74961748d715289f21e04577c0bf56f81666b217dd0994716b49b3b4bde7f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2664,6 +2751,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2685,14 +2774,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 572,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 579,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:krea_2_raw": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "6b1c9b1e01ef709ad3b7299847d17833d7f35ab63486a6879f898eded368a55a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e045464f87b45ca545062a326cdb4c044bc42f4a6bece1c3d6f462aff63ffa77",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2702,6 +2791,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2726,14 +2817,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 712,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 205
+      "sourceFileCount": 719,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 207
     },
     "mlx:krea_2_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "fb363fb12b11b396089700d268dfb112cf82ddc90eae6e587a6d507c9469361a",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "82830beffa13d392b9010d84969d0d55e82196f5e870eb657e262803c3fdd7ee",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2743,6 +2834,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2767,14 +2860,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 712,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 205
+      "sourceFileCount": 719,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 207
     },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "65ddd49bee48abb3677295e6a4dad3d43c7a8356ec6ec03a6c2cfaed48f1bd43",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "6e5545ed811d7b8b26a540648faeaaa1a4627419d455173b99818426c7d3df97",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2784,6 +2877,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2808,14 +2903,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 712,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 205
+      "sourceFileCount": 719,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 207
     },
     "mlx:krea_realtime_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea-realtime",
-      "digest": "ab62ed4de57ea6e3ed7b28ccae0cc95e96e6197da7da88733494cbbb5a331763",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "03565098359216dd612a632898fb01863b45a9dfab8b2449a8407ba6a03f0738",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2825,6 +2920,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2845,14 +2942,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 555,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 562,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:lens": {
       "crate": "crates/media/mlx-gen/mlx-gen-lens",
-      "digest": "c90184403a49a39549f94ac16e08c405a962cfab79ed42086d47b702937e867e",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e4259fe2b320e544be88145cf33c583e0e0ad260abba9d41dae5a3d0e866bc5a",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2862,6 +2959,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2883,14 +2982,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 569,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 576,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:lens_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-lens",
-      "digest": "d33b5116fcdab681b6bcc0af2d1caf5e00c5b86205b96b2e46b2b96787f4e7fb",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "4e9a2214b4965580439eacd105f681e9b53b387c068926b58b721b12f0a4a9f9",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2900,6 +2999,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2921,14 +3022,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 569,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 576,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:ltx_2_3": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "88f34ca27af7ffbb766da51925365362ef0502482c5f2a1e1f81f0ee5ea137d1",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "f2ce83841018f99c4dd9f156c9d4ac9d2bd78f8f2282db53fc8bebef026d20c3",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2939,6 +3040,8 @@
         "crates/contracts/gen-core-ltx",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2958,14 +3061,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 571,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 578,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     },
     "mlx:ltx_2_5": {
       "crate": "crates/media/mlx-gen/mlx-gen-ltx",
-      "digest": "6279a8a9bd7832a7f4e29be4c13621778a28b740cff03ea6d2a1b4f7b9ab3923",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "1090ada7c4f91ca3dc6b30ce704a1e8d6913ed53ecc3daa6ddc43511badccf39",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -2976,6 +3079,8 @@
         "crates/contracts/gen-core-ltx",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -2995,14 +3100,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 571,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 578,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     },
     "mlx:mage_flow": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "b2152e8996be123f4ac9098744186f36e2f6df59c3cd47fd6ead3a6cfcee42b8",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d7aae1c9723a2f8a3f025222bcfb8ffbd6ef771e54d0243e24ba2b6b1f66bad6",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3012,6 +3117,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3034,14 +3141,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:mage_flow_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "5d91ebd45b60aef8cc4d097ce8adaf3615f1b657b51d5c86f4dda4ac663ff41d",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "fb34fc8a8a85e4e38c9d91c1c427b501853e276ac58afd51444a9611780793b9",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3051,6 +3158,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3073,14 +3182,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:mage_flow_edit": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "b0f96c7815a4480e6160742e7ffeeea9fb58fa5f791ffa625797cccc42649607",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "38f37cd8a7ac52a84a068700c652ff9d056e38af77dd5b166b57437867b56370",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3090,6 +3199,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3112,14 +3223,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:mage_flow_edit_base": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "956ac581c985e55ab7055a402f17b6f96de0a80637e7fc5c98ca70e839c40659",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "e172dd7e9cb1dfa52244892ca31e0e02e1bd20597faa112c7827209e2f5042f2",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3129,6 +3240,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3151,14 +3264,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:mage_flow_edit_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "f42f447c2796c46334b1b97645d97cfcd80bf39d78599143d180cc2d47985c68",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "8abefbf20e22b001be4873427bad9c25b910f175b15c06465161fa2e6febd11c",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3168,6 +3281,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3190,14 +3305,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:mage_flow_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-mage",
-      "digest": "08e2931fcd7b79c0cdbe6051e2202cef8359ce87f693c120e517c64f202554bd",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3b4bc8729847b83c5bc6c4b52de012f2e01e6aec11ac69102198dec1ebe4843b",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3207,6 +3322,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3229,14 +3346,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 621,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 628,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:minimax_h3": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "digest": "d70930c20c6de9c2147d0424613df485db9095898a7bb43b80e058ec5a832a89",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "4813347b633c41823c6f21cb0a9dd0eedde853c4caae32025d89b42882f9921d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3246,6 +3363,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-telemetry",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
@@ -3269,14 +3388,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 672,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 679,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:minimax_h3_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "digest": "a466407ced5a37bf3929b425da682a4910e2483574617827465ab14bf17745cd",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "78a9e2a33f929981db22a76493a78c1e65493e5fc32b1fc13ecea52acbbebc0d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3286,6 +3405,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-telemetry",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
@@ -3309,14 +3430,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 672,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 679,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:pulid_flux": {
       "crate": "crates/media/mlx-gen/mlx-gen-pulid",
-      "digest": "51523993b7d0dd72a58cbdae61be0e14df3ce7ccc34e8c7c64b9acdc197c7406",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d14845b8f183232067debb2a0962d43f21c124ff426b7883bd3fb18cbc639692",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3326,6 +3447,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3349,14 +3472,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 653,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 660,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:qwen_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
-      "digest": "00e39e56888e675614cbef5e5c3ab98194c19aae2f26f0c2f6f23513c7ad6f5d",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "62900d195dab81c96bc81faeb476ccc4c5b4547f8eabbdc959ddc655282aaaf5",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3366,6 +3489,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3387,14 +3512,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 605,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 202
+      "sourceFileCount": 612,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 204
     },
     "mlx:qwen_image_2_1": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
-      "digest": "4cb67eaeb53cec7b9058e574e575a9f7d50de3a4686fc255538e4c877c444bbd",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "08a461fe52d188e3350c870f3d478d24e10f4ca6ebc77baff9be0524f603c6a6",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3404,6 +3529,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3425,14 +3552,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 595,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 602,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:qwen_image_2_1_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
-      "digest": "1e26f23e2137ca2ce8adafc31ddf2e126d3d8a74687db7c8c5a9031008ff5008",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3969fa8adb0997071f9f1c8ed0c0b75ba77c308f0b3303b22b44366c287e5c12",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3442,6 +3569,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3463,14 +3592,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 595,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 199
+      "sourceFileCount": 602,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 201
     },
     "mlx:qwen_image_edit": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
-      "digest": "08e8ba673e7e6768cf85d7806d8774c3be28c167f1d681a8303fced5fb29f940",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "aa742a72fb0bace014ceb3edbc6ecf6f0e01b33883952b4fa7d1a14547bcf993",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3480,6 +3609,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3501,14 +3632,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 605,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 202
+      "sourceFileCount": 612,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 204
     },
     "mlx:sana_1600m": {
       "crate": "crates/media/mlx-gen/mlx-gen-sana",
-      "digest": "f21489959457b6448a682218e7a2805057b3ac605d1a86b86295adfd2e81b390",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "ff817aeeccfd92dbef77d3548ce23e820d6cb8baad158de2cb45691b758d4cb8",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3517,6 +3648,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3533,14 +3666,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 492,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 499,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:sana_sprint_1600m": {
       "crate": "crates/media/mlx-gen/mlx-gen-sana",
-      "digest": "e7022e45660eacea22d93ae610e9b7c5c7a44b53a12dc803f2593e4ab94539ee",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "20491c7a83f6801a1847c64bfdd1bb9b497bd1611af281d390049f8b1a65d675",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3549,6 +3682,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3565,14 +3700,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 492,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 193
+      "sourceFileCount": 499,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 195
     },
     "mlx:scail2_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-scail2",
-      "digest": "d66f9cdc93320f7703a2ce6e89c222ab6bb82abc4ca047b759e2b4ee456e5dfe",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "f8aff1ee84f966d0ad47de7226883d6784a5b955c594df833b7e95691c904db2",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3582,6 +3717,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3602,14 +3739,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 556,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 563,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:sd3_5_large": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "1d12b500948bb795ac4f7b8824f368af792ac8f1919f8d2c415ac594b088940b",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "7b7fa894a39021c6e686103089a4ef97c64444eb23b8af0f7dbb3d295b665dba",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3619,6 +3756,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3642,14 +3781,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 656,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 663,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:sd3_5_large_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "bd581e8509c4f59ee7c24abcd544c13a31f28ca96a23f3b6d593bb5b46866f96",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3d17947251b4468ba5565a09f969a02287655933e2e8d434dafecd4b1efde1fe",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3659,6 +3798,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3682,14 +3823,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 656,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 663,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:sd3_5_medium": {
       "crate": "crates/media/mlx-gen/mlx-gen-sd3",
-      "digest": "a1a13b6497337f5d142049cca8ae428478ce19b67c5f2f5d7906236a44ad8ca6",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "85c18d81f05801c72bd82eeb1073c5797ac639cb20553acf43cfbbd97566d958",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3699,6 +3840,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3722,14 +3865,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 656,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 663,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:sdxl": {
       "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
-      "digest": "171511c14f7cb1283bf276de4f1e04d594a2518654b636610365ae7478f2fa68",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "eea8b388199eda19d42d3a0f47c3883ff71a1f8b454d70086ff6405cbffc6527",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3739,6 +3882,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3759,14 +3904,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 558,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 565,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     },
     "mlx:sensenova_u1_8b": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "f2a3938cdfb9346f265cb4fc38e82a15703d3167084d7005f66d105078a82c62",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3ef4ae3913c6f1367cf809d4868a97314f500ad5c290f1ef3d9265a04c05148f",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3775,6 +3920,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3790,14 +3937,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 454,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 192
+      "sourceFileCount": 461,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 194
     },
     "mlx:sensenova_u1_8b_fast": {
       "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
-      "digest": "60c99f6bc7f18a3218cc76ca32a88cc4ef09a573d29a685c6965d48462ac19d1",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "641aa8c0b55da8b5ab039db883d8896c857f3c7cf2a635d8edd2a718e5d8fa31",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3806,6 +3953,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3821,14 +3970,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 454,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 192
+      "sourceFileCount": 461,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 194
     },
     "mlx:supra2_img": {
       "crate": "crates/media/mlx-gen/mlx-gen-supra2",
-      "digest": "f00370982cfc74ca9f0fee2bc67702e83ee891d6eabac75b0a2d1e0f46997008",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "08fabb160959bc1882485ff1b1c83af9dcdc8c919e9773b86980469554f360c7",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3838,6 +3987,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3861,14 +4012,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 645,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 201
+      "sourceFileCount": 652,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 203
     },
     "mlx:wan2_2_i2v_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "a54f34e9b75796aacd67858a99f289bde92a89b8b84cb24fa0559df39af11e36",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "666f328c8806a0a62e3b7a43b887ab469d586ee798a52a439c5a31ca77928a1d",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3878,6 +4029,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3897,14 +4050,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 542,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 549,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:wan2_2_t2v_14b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "3222ce815b5de06eabc52ac62cb46b7c19108d7381026594059e20ac39611e51",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "d72cf1e090ab30d7b8b2bba4b81b463d471666bc2f3ba08870e61cfd575f3a70",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3914,6 +4067,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3933,14 +4088,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 542,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 549,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:wan2_2_ti2v_5b": {
       "crate": "crates/media/mlx-gen/mlx-gen-wan",
-      "digest": "a65f64574767c970392e7d3a075365f12f803e926d07b66d9f37e9979aec414b",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "3f82f5c131632cca4e5b524d9c94428d3630429166dfd1a5c28ba8ed23cfe1a3",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3950,6 +4105,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -3969,14 +4126,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 542,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 200
+      "sourceFileCount": 549,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 202
     },
     "mlx:z_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "60565daeabcd7e6f030886642db2467d97be2f16968829c9172e556feff239cd",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "5e2d4c98621c3cb1fa71f837ab3501ca711b0ff33f758f5595e5cf27dd2af668",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -3986,6 +4143,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -4006,14 +4165,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 569,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 576,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     },
     "mlx:z_image_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "c8b545b8eb15ec178faff7f8cbddae8cc3441a5702aa2a41a184689e808355ce",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "25f37b6b0c781c651c8ce9b381359328a9224df041138824229411c0f19c242b",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -4023,6 +4182,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -4043,14 +4204,14 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 569,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 576,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     },
     "mlx:z_image_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "883711c6e4c2c348a3cfa2c58c0aff44a882b93f29eec6da19137d86bb2f0fca",
-      "sharedContractDigest": "9ddc7ef01d2388c2100caf1c3a7d689d65d46a48dfe8eed9f8bcf0e0aa4fadea",
+      "digest": "301a9539a9b5f2c68b70c4825a4fad5859c368a2bd70f535935029a04b07c7fb",
+      "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -4060,6 +4221,8 @@
         "crates/contracts/gen-core-iris",
         "crates/contracts/gen-core-memory-wan",
         "crates/contracts/gen-core-moss-image",
+        "crates/contracts/gen-core-moss-image-policy",
+        "crates/contracts/gen-core-supra2-policy",
         "crates/contracts/gen-core-testkit",
         "crates/contracts/gen-core-tokenizer",
         "crates/contracts/gen-core-train",
@@ -4080,9 +4243,9 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 569,
-      "sharedContractFileCount": 181,
-      "lockedPackageCount": 198
+      "sourceFileCount": 576,
+      "sharedContractFileCount": 184,
+      "lockedPackageCount": 200
     }
   }
 }
