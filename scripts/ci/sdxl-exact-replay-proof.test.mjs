@@ -11,6 +11,7 @@ import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch
   finalizeEvidence } from './sdxl-exact-replay-proof.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
+import { validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40), uuid = 'GPU-00000000-0000-0000-0000-000000000001';
@@ -140,16 +141,17 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.match(workflow, /on:\n  workflow_dispatch:/);
   assert.match(workflow, /  sdxl-exact-replay-prepare:\n    if:.*phase == 'prepare'.*ownerGo == false/);
   assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-prepare.mjs/);
-  assert.match(workflow, /  sdxl-exact-replay-bind:\n    if:.*phase == 'bind'.*ownerGo == false/);
+  assert.match(workflow, /  sdxl-exact-replay-bind:\n    if:.*phase == 'bind'.*phase == 'census'.*ownerGo == false/);
   assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-bind.mjs/);
+  assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-census.mjs/);
   assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*ownerGo == true/);
   assert.match(workflow, /  build-candle:\n    if:.*!startsWith/);
   assert.match(workflow, /cancel-in-progress:.*!startsWith/);
   assert.doesNotMatch(workflow, /options:.*sdxl-exact-replay/);
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
-  assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
+  assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]/);
   assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0/);
-  assert.equal((workflow.match(/\$env:SDXL_REPLAY_BINARY = Join-Path \$env:GITHUB_WORKSPACE 'target\\release\\sceneworks-rust-api\.exe'/g) ?? []).length, 2);
+  assert.equal((workflow.match(/\$env:SDXL_REPLAY_BINARY = Join-Path \$env:GITHUB_WORKSPACE 'target\\release\\sceneworks-rust-api\.exe'/g) ?? []).length, 3);
   assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_OUTPUT \}\}\/evidence.json/);
 });
 
@@ -176,6 +178,14 @@ test('metadata binding accepts only a private path and maps the actual cached me
     await writeFile(path.join(root, 'unet', 'model.bin'), 'abd');
     await assert.rejects(mapSelectedFiles(input.route, hub, [root]), /absent/);
   } finally { await rm(hub, { recursive: true, force: true }); }
+});
+
+test('idle-worker census accepts only a private binding and no model approval', () => {
+  const marker = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'census', bindingPath: 'C:\\private\\binding.json', ownerGo: false });
+  assert.deepEqual(validateCensusDispatch(marker), JSON.parse(marker));
+  for (const changed of [{ ownerGo: true }, { bindingPath: 'binding.json' }, { command: 'run' }, { phase: 'qualify' }]) {
+    assert.throws(() => validateCensusDispatch(JSON.stringify({ ...JSON.parse(marker), ...changed })));
+  }
 });
 
 test('accepted queued request preserves the fixed controls before claims are released', () => {

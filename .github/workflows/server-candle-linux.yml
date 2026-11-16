@@ -88,7 +88,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'prepare' && fromJSON(inputs.campaign_run_id).ownerGo == false }}
     permissions:
       contents: read
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
     timeout-minutes: 10
     env:
       SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
@@ -115,13 +115,13 @@ jobs:
           path: ${{ env.SDXL_REPLAY_PREPARATION_REPORT }}
           if-no-files-found: error
 
-  # A second metadata-only phase obtains the server-issued source route from an
-  # isolated API. No worker is started, so the queued request cannot execute.
+  # Metadata phases bind a queued source without a worker, then census DLLs with
+  # an idle worker in fresh empty state. Neither phase can execute a model job.
   sdxl-exact-replay-bind:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'bind' && fromJSON(inputs.campaign_run_id).ownerGo == false }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && (fromJSON(inputs.campaign_run_id).phase == 'bind' || fromJSON(inputs.campaign_run_id).phase == 'census') && fromJSON(inputs.campaign_run_id).ownerGo == false }}
     permissions:
       contents: read
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
     timeout-minutes: 180
     env:
       CUDA_COMPUTE_CAP: '120'
@@ -151,6 +151,7 @@ jobs:
           cargo build --locked --release -p sceneworks-rust-api --no-default-features --features backend-candle
           if errorlevel 1 exit /b 1
       - name: Bind queued source and hash selected cached files without a worker
+        if: ${{ fromJSON(inputs.campaign_run_id).phase == 'bind' }}
         shell: powershell
         run: |
           $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
@@ -160,11 +161,28 @@ jobs:
           node scripts/ci/sdxl-exact-replay-bind.mjs
           if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata binding failed' }
       - name: Upload sanitized binding report
-        if: ${{ always() }}
+        if: ${{ always() && fromJSON(inputs.campaign_run_id).phase == 'bind' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sdxl-exact-replay-binding-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SDXL_REPLAY_BIND_REPORT }}
+          if-no-files-found: warn
+      - name: Census loaded DLLs from an idle worker with zero jobs
+        if: ${{ fromJSON(inputs.campaign_run_id).phase == 'census' }}
+        shell: powershell
+        run: |
+          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-census-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_CENSUS_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_CENSUS_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-census.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata census failed' }
+      - name: Upload sanitized runtime census
+        if: ${{ always() && fromJSON(inputs.campaign_run_id).phase == 'census' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-census-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_CENSUS_REPORT }}
           if-no-files-found: warn
 
   # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
@@ -177,7 +195,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).ownerGo == true }}
     permissions:
       contents: read
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
     timeout-minutes: 180
     concurrency:
       group: sdxl-exact-replay-${{ github.run_id }}-${{ github.run_attempt }}

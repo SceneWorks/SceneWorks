@@ -86,6 +86,16 @@ source identity, file map and the pinned provider schedule digest; the public ar
 contains only hashes, counts and the private record path. It still cannot pass `validatePlan`:
 the loaded runtime DLL census and an explicit owner GPU window remain outstanding.
 
+The metadata-only `census` phase takes that binding record's absolute path:
+`JSON.stringify({proof:"sdxl-exact-replay",phase:"census",bindingPath,ownerGo:false})`.
+It runs on the same labelled Windows host, checks that the binding's app/runtime sources and
+binary are unchanged, and starts an isolated API plus an idle worker with an empty jobs
+database. It verifies zero jobs before and after registration, hashes the worker's loaded
+runtime DLLs, and stops both processes. It never queues a request or loads weights. The
+private version-0 census record includes the selected file map, physical UUID/index,
+driver and loaded DLL paths/hashes. Its public artifact exposes only counts and digests.
+The record still has `ownerGo:false` and cannot authorize a qualification run.
+
 Before a `qualify` or `replay` dispatch, inform the owner and obtain an explicit Windows real-model go window.
 CodeGraph rule `9fdbfea4-e2fc-4854-8342-79f5b831737f` applies even when a runner is idle.
 Discover both organization and repository runner registrations and group access; select a
