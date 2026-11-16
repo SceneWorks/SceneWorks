@@ -445,6 +445,7 @@ export function QueueScreen() {
                   onClear={clearJob ? (j) => clearJob(j) : undefined}
                   onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                   onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
+                  onContinueTraining={(j, additionalSteps) => jobAction(j, "continue-training", { body: { additionalSteps } })}
                   onDuplicate={(j, computePolicy) => jobAction(j, "duplicate", {
                     body: computePolicy ? {
                       payloadChanges: { yue2: { ...j.payload.yue2, computePolicy, precision: undefined } },

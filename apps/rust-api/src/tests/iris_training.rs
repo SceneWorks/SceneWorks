@@ -670,6 +670,50 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     assert_eq!(entry["networkType"], "lora");
     assert_eq!(entry["installState"], "installed");
 
+    // The completed-run action requires terminal state and allocates a separate adapter.
+    let continue_path = format!("/api/v1/training/jobs/{job_id}/continue");
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &continue_path,
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.to_string().contains("completed step"), "{refused}");
+    let total = config["steps"].as_u64().unwrap();
+    let accumulation = config["gradientAccumulation"].as_u64().unwrap().max(1);
+    let terminal = output_dir.join(format!(
+        "{stem}.checkpoints/step_{:08}",
+        total / accumulation
+    ));
+    std::fs::create_dir_all(&terminal).unwrap();
+    std::fs::write(terminal.join("state.json"), b"{}").unwrap();
+    let (status, continued) = request(
+        app.clone(),
+        "POST",
+        &continue_path,
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{continued}");
+    assert_eq!(continued["sourceJobId"], job_id);
+    let next = private_training_payload(&settings.data_dir, continued["id"].as_str().unwrap());
+    assert_eq!(next["plan"]["config"]["steps"], total + 1000);
+    assert_eq!(
+        next["plan"]["config"]["advanced"]["resumeFromJobId"],
+        job_id
+    );
+    assert_ne!(next["plan"]["output"]["loraId"], plan["output"]["loraId"]);
+    assert_eq!(
+        next["plan"]["provenance"]["configSnapshot"],
+        next["plan"]["config"]
+    );
+    assert_eq!(
+        next["manifestEntry"]["provenance"]["configSnapshot"],
+        next["plan"]["config"]
+    );
+
     // Resume: the second run names the first; SceneWorks hands the trainer its checkpoint root.
     let mut resume = config.clone();
     resume["advanced"]["resumeFromJobId"] = json!(job_id);

@@ -149,4 +149,8 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/v1/training/jobs/:job_id/iris-metrics",
             get(iris_curricula::iris_training_metrics),
         )
+        .route(
+            "/api/v1/training/jobs/:job_id/continue",
+            post(crate::training::continue_training_job),
+        )
 }

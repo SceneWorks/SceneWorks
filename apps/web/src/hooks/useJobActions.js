@@ -24,8 +24,10 @@ export function useJobActions({
         const updatedJob = await jobActionRequest(job.id, action, token, { method: "POST", body: JSON.stringify(body) });
         setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
+        return updatedJob;
       } catch (err) {
         setError(err.message);
+        if (action === "continue-training") throw err;
       }
     },
     [setError, setJobs, token],

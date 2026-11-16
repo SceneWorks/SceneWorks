@@ -541,7 +541,9 @@ pub mod voice_register;
 mod person_replace;
 #[cfg(all(feature = "test-support", native_lane))]
 pub mod test_support;
+mod training_continuation;
 mod training_jobs;
+pub use training_continuation::fork_completed_training_checkpoint;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
