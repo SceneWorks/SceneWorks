@@ -175,7 +175,19 @@ async function main() {
     failureHint = '';
     const route = routes[0];
     stage = 'verify-source-identity';
-    const sourceIdentitySha256 = digest(sourceIdentity(route));
+    let sourceIdentitySha256;
+    try {
+      sourceIdentitySha256 = digest(sourceIdentity(route));
+    } catch (error) {
+      const publicReasons = new Set([
+        'backend fallback', 'unexpected model/adapter slots', 'model substitution',
+        'model backend substitution', 'model slot substitution', 'provider substitution',
+        'source members missing', 'adapter/optional source outside witness',
+        'member bytes missing', 'invalid member digest',
+      ]);
+      failureHint = publicReasons.has(error?.message) ? error.message : 'invalid source identity';
+      throw error;
+    }
     stage = 'members';
     const files = await mapSelectedFiles(route, prior.hub, roots);
     assert.deepEqual(await api('GET', '/api/v1/workers'), [], 'worker appeared during binding');
