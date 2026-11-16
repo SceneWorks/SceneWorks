@@ -104,6 +104,7 @@ jobs:
         shell: powershell
         run: |
           $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-prepare-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_PREPARATION_REPORT = $output
           Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_PREPARATION_REPORT=$output"
           node scripts/ci/sdxl-exact-replay-prepare.mjs
           if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata preparation failed' }

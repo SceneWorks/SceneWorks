@@ -9,6 +9,7 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+let stage = 'dispatch';
 export function validatePreparationDispatch(raw) {
   assert(raw?.startsWith('{"proof":"sdxl-exact-replay",'), 'canonical SDXL marker required');
   const value = JSON.parse(raw);
@@ -23,14 +24,17 @@ async function main() {
   assert.equal(process.platform, 'win32', 'Windows runner required');
   assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'manual dispatch required');
   validatePreparationDispatch(process.env.SDXL_REPLAY_DISPATCH);
+  stage = 'source';
   const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
   assert.equal(sourceSha, process.env.GITHUB_SHA, 'checkout changed');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim(), '', 'checkout dirty');
   const inferencePin = await inferenceRevision(ROOT);
+  stage = 'cache';
   const hub = path.resolve(process.env.HF_HUB_CACHE?.trim() || process.env.HUGGINGFACE_HUB_CACHE?.trim() || 'E:\\huggingface\\hub');
   const hubExists = (await stat(hub).catch(() => null))?.isDirectory() === true;
   const allCacheEntries = hubExists ? (await readdir(hub)).filter((name) => /^models--/i.test(name) && /sdxl|clip|vae/i.test(name)).sort() : [];
   const cacheEntries = allCacheEntries.slice(0, 50);
+  stage = 'device';
   const gpuLines = execFileSync('nvidia-smi', ['--query-gpu=index,uuid,name,driver_version,pci.bus_id', '--format=csv,noheader,nounits'], { encoding: 'utf8' }).trim().split(/\r?\n/);
   const devices = gpuLines.map((line) => {
     const cells = line.split(',').map((value) => value.trim());
@@ -40,8 +44,10 @@ async function main() {
     return { physicalIndex: Number(index), uuid, name, driverVersion, busId };
   });
   assert(devices.length > 0 && new Set(devices.map((device) => device.uuid)).size === devices.length, 'ambiguous GPUs');
+  stage = 'driver';
   const driver = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'nvcuda.dll');
   const driverSha256 = await fileSha256(driver);
+  stage = 'write';
   assert(process.env.LOCALAPPDATA && path.win32.isAbsolute(process.env.LOCALAPPDATA), 'private user profile missing');
   assert(process.env.SDXL_REPLAY_PREPARATION_REPORT && path.win32.isAbsolute(process.env.SDXL_REPLAY_PREPARATION_REPORT), 'owned report path missing');
   const privateDir = path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay');
@@ -61,5 +67,5 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => { console.error('SDXL metadata preparation failed. No model was started.'); process.exitCode = 1; });
+  main().catch(() => { console.error(`SDXL metadata preparation failed at ${stage}. No model was started.`); process.exitCode = 1; });
 }
