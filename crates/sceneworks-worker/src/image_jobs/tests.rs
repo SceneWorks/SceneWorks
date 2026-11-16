@@ -13381,7 +13381,7 @@ fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
         );
     }
 
-    // Control wins before edit/IP and retains malformed carriers so the handler rejects conflicts.
+    // Control wins before edit/IP for well-formed carriers.
     for conflict in [
         json!({
             "projectId": "p", "model": "sdxl", "mode": "edit_image", "sourceAssetId": "source",
@@ -13391,13 +13391,15 @@ fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
             "projectId": "p", "model": "realvisxl", "referenceAssetId": "reference",
             "advanced": { "poses": [{}] }
         }),
-        json!({ "projectId": "p", "model": "sdxl", "advanced": { "poses": "malformed" } }),
     ] {
         assert_eq!(
             resolve_candle_image_route(&request(conflict), &settings),
             Some(CandleImageRoute::SdxlControl),
         );
     }
+    assert_invalid_effective_options(json!({
+        "projectId": "p", "model": "sdxl", "advanced": { "poses": "malformed" }
+    }));
 
     // A non-candle model → None (stubs / MLX-only elsewhere).
     let unknown = request(json!({ "projectId": "p", "model": "not_a_candle_engine", "count": 1 }));
@@ -14243,18 +14245,14 @@ fn sensenova_q8_floor_keeps_the_capability_downtier_off_q4() {
     settings.data_dir = root.path().to_path_buf();
 
     let req = |advanced: serde_json::Value| {
-        ImageRequest::from_payload(
-            json!({
-                "model": "sensenova_u1_8b_fast",
-                "advanced": advanced,
-                "modelManifestEntry": {
-                    "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
-                    "mlx": { "standardTierLayout": true, "minQualityTier": "q8" }
-                }
-            })
-            .as_object()
-            .unwrap(),
-        )
+        request(json!({
+            "model": "sensenova_u1_8b_fast",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "repo": "SceneWorks/sensenova-u1-8b-fast-mlx",
+                "mlx": { "standardTierLayout": true, "minQualityTier": "q8" }
+            }
+        }))
     };
 
     // A DEFAULT job: the downtier may consider bf16 and q8, never q4 — so a card that cannot fit
@@ -14591,19 +14589,23 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
             Some(CandleImageRoute::Flux2Edit)
         );
     }
-    for malformed in [json!({}), json!(false), json!([{}, null])] {
-        let malformed_pose = request(json!({
+    for malformed in [json!({}), json!(false)] {
+        assert_invalid_effective_options(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
             "mode": "character_image", "referenceAssetId": "identity", "count": 1,
             "advanced": { "modelPath": model_path.clone(), "poses": malformed }
         }));
-        assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
-        assert_eq!(
-            resolve_candle_image_route(&malformed_pose, &settings),
-            Some(CandleImageRoute::PoseReject),
-            "direct worker routing must reject a malformed carrier after typed parsing"
-        );
     }
+    let malformed_pose = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
+        "mode": "character_image", "referenceAssetId": "identity", "count": 1,
+        "advanced": { "modelPath": model_path.clone(), "poses": [{}, null] }
+    }));
+    assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_pose, &settings),
+        Some(CandleImageRoute::PoseReject)
+    );
 
     let qwen_pose = request(json!({
         "projectId": "p", "model": "qwen_image_edit_2511_lightning",
@@ -21242,6 +21244,17 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     native_pose
         .advanced
         .insert("quantTier".into(), json!("nvfp4"));
+    let rebind = |request: &mut ImageRequest| {
+        let value = json!({ "advanced": request.advanced.clone() });
+        let payload = value.as_object().unwrap();
+        request.resolved_advanced = Some(
+            sceneworks_core::image_request::ImageAdvanced::bind(
+                &sceneworks_core::resolved_options::BindingInput::new(payload, payload),
+            )
+            .unwrap(),
+        );
+    };
+    rebind(&mut native_pose);
     assert!(super::krea_imported::krea_imported_control_available(
         &native_pose,
         &settings
@@ -21267,6 +21280,7 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     for (tier, expected) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
         let mut dense_pose = strict_pose.clone();
         dense_pose.advanced.insert("quantTier".into(), json!(tier));
+        rebind(&mut dense_pose);
         let spec = super::krea_imported::imported_candle_control_load_spec(
             &dense_pose,
             &file,

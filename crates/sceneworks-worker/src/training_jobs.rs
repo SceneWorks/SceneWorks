@@ -236,9 +236,11 @@ pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
         )),
     )
     .expect("training catalog serializes");
+    let validation_view =
+        sceneworks_core::request_validation::trusted_training_plan_validation_view(payload);
     sceneworks_core::training::validate(
         "lora_train",
-        payload,
+        &validation_view,
         facts.as_object().expect("catalog object"),
     )
     .map_err(WorkerError::Validation)?;
@@ -5509,6 +5511,28 @@ mod tests {
         serde_json::from_value(value).expect("plan deserializes")
     }
 
+    #[test]
+    fn api_derived_iris_checkpoint_paths_survive_worker_validation_and_parse() {
+        let target = sceneworks_core::training::iris::iris_generation_target();
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = plan_json(dir.path(), &target.kernel, &target.base_model, "lora", &[]);
+        plan["config"] = serde_json::to_value(&target.defaults).unwrap();
+        for (key, path) in [
+            ("resume_from", "/managed/jobs/previous/checkpoint"),
+            ("load_from", "/managed/jobs/base/checkpoint"),
+        ] {
+            plan["config"]["advanced"]["iris"][key] = json!(path);
+        }
+        let payload = json!({ "plan": plan });
+        let payload = payload.as_object().unwrap();
+        crate::utility_dispatch::validate_static_job_options(&JobType::LoraTrain, payload)
+            .expect("trusted plan passes worker admission");
+        let parsed = super::parse_plan(payload).expect("trusted plan parses");
+        let iris = &parsed.config.advanced["iris"];
+        assert_eq!(iris["resume_from"], "/managed/jobs/previous/checkpoint");
+        assert_eq!(iris["load_from"], "/managed/jobs/base/checkpoint");
+    }
+
     #[cfg(native_lane)]
     #[test]
     fn flux3_pure_config_witness_needs_no_weights_and_binds_mapper_options() {
@@ -9389,6 +9413,9 @@ mod tests {
         ];
         for (kernel, base, network, field, value) in cases {
             let mut serialized = plan_json(dir.path(), kernel, base, network, &[&image]);
+            if kernel.starts_with("wan_") {
+                serialized["config"]["resolution"] = json!(512);
+            }
             serialized["config"]["advanced"][field] = value;
             let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("dry and real execution share this rejection before load");
@@ -9410,13 +9437,10 @@ mod tests {
             .to_string()
             .contains("No native trainer"));
 
-        let unsupported_network = parse(plan_json(
-            dir.path(),
-            "wan_lora",
-            "wan_2_2",
-            "lokr",
-            &[&image],
-        ));
+        let mut unsupported_network =
+            plan_json(dir.path(), "wan_lora", "wan_2_2", "lokr", &[&image]);
+        unsupported_network["config"]["resolution"] = json!(512);
+        let unsupported_network = parse(unsupported_network);
         assert!(
             preflight_training_run(&settings, &unsupported_network, false)
                 .expect_err("Wan TI2V-5B does not advertise LoKr")

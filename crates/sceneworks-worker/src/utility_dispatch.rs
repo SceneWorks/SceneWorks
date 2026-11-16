@@ -812,12 +812,23 @@ async fn handle_job_failure(
     }
 }
 
-/// The raw admission gate runs before source/device checks and every tolerant job parser.
-fn validate_static_job_options(job_type: &JobType, payload: &JsonObject) -> WorkerResult<()> {
+/// The static admission gate runs before source/device checks and every tolerant job parser.
+pub(crate) fn validate_static_job_options(
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> WorkerResult<()> {
     if let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) {
         let entry = sceneworks_core::request_validation::facts_for_job(job_type, payload);
-        sceneworks_core::request_validation::validate(kind, payload, &entry)
-            .map_err(WorkerError::Validation)?;
+        let validation_view = matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+            .then(|| {
+                sceneworks_core::request_validation::trusted_training_plan_validation_view(payload)
+            });
+        sceneworks_core::request_validation::validate(
+            kind,
+            validation_view.as_ref().unwrap_or(payload),
+            &entry,
+        )
+        .map_err(WorkerError::Validation)?;
     }
     Ok(())
 }

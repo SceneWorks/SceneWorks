@@ -703,7 +703,7 @@ mod control_helper_tests {
         }
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
-            assert_eq!(raw["guidanceScale"], json!(19));
+            assert_eq!(raw["guidanceScale"], json!(19.0));
             assert_eq!(raw["mlxQuantize"], json!(4));
         }
         assert!(!raw.contains_key("controlEngine"));

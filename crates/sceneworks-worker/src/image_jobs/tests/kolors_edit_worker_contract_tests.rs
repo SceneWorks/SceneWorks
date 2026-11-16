@@ -1,6 +1,5 @@
 use super::super::routing::resolve_candle_image_route;
 use super::super::routing::CandleImageRoute;
-use super::super::ImageRequest;
 use super::resolve_candle_kolors_edit_init;
 use crate::Path;
 use crate::PathBuf;
@@ -55,21 +54,17 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
         )
         .expect("source asset");
     let asset_id = asset["id"].as_str().expect("asset id");
-    let request = ImageRequest::from_payload(
-        json!({
-            "projectId": project.id,
-            "model": "kolors",
-            "mode": "edit_image",
-            "sourceAssetId": asset_id,
-            "fitMode": "stretch",
-            "advanced": {
-                "modelPath": weights,
-                "strength": "0.72"
-            }
-        })
-        .as_object()
-        .expect("request object"),
-    );
+    let request = super::request(json!({
+        "projectId": project.id,
+        "model": "kolors",
+        "mode": "edit_image",
+        "sourceAssetId": asset_id,
+        "fitMode": "stretch",
+        "advanced": {
+            "modelPath": weights,
+            "strength": "0.72"
+        }
+    }));
 
     assert_eq!(
         resolve_candle_image_route(&request, &settings),
@@ -82,16 +77,12 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
     assert_eq!(source.pixels[0..3], [180, 40, 90]);
     assert!((strength - 0.72).abs() < f32::EPSILON);
 
-    let missing_source = ImageRequest::from_payload(
-        json!({
-            "projectId": project.id,
-            "model": "kolors",
-            "mode": "edit_image",
-            "advanced": { "modelPath": weights }
-        })
-        .as_object()
-        .expect("request object"),
-    );
+    let missing_source = super::request(json!({
+        "projectId": project.id,
+        "model": "kolors",
+        "mode": "edit_image",
+        "advanced": { "modelPath": weights }
+    }));
     assert_ne!(
         resolve_candle_image_route(&missing_source, &settings),
         Some(CandleImageRoute::KolorsEdit)
@@ -110,17 +101,13 @@ fn kolors_ip_composites_refuse_before_provider_precedence() {
     let weights = data.path().join("models/kolors-test");
     std::fs::create_dir_all(&weights).expect("model path");
     let request = |advanced: Value| {
-        ImageRequest::from_payload(
-            json!({
-                "projectId": "project",
-                "model": "kolors",
-                "mode": "character_image",
-                "referenceAssetId": "identity-reference",
-                "advanced": advanced,
-            })
-            .as_object()
-            .expect("request object"),
-        )
+        super::request(json!({
+            "projectId": "project",
+            "model": "kolors",
+            "mode": "character_image",
+            "referenceAssetId": "identity-reference",
+            "advanced": advanced,
+        }))
     };
     let ip_and_pid = request(json!({"modelPath": weights, "usePid": true}));
     assert_eq!(

@@ -1432,7 +1432,13 @@ mod qwen_edit_tier_reconcile_tests {
             });
             let mut payload = value.as_object().expect("image request object").clone();
             payload.extend(references.as_object().expect("reference object").clone());
-            ImageRequest::from_resolved(&payload, &payload)
+            let mut effective = payload.clone();
+            if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+                if advanced.get("poses").is_some_and(Value::is_null) {
+                    advanced.remove("poses");
+                }
+            }
+            ImageRequest::from_resolved(&payload, &effective)
         };
         for poses in [Value::Null, json!([])] {
             let request = make(
@@ -1596,14 +1602,20 @@ mod qwen_edit_tier_reconcile_tests {
 
     #[test]
     fn qwen_candle_refuses_pid_and_phases_before_memory_admission() {
-        for advanced in [
-            json!({"usePid": true}),
-            json!({"usePid": "malformed"}),
-            json!({"phases": [{}]}),
-            json!({"phases": {"malformed": true}}),
-        ] {
+        for advanced in [json!({"usePid": true}), json!({"phases": [{}]})] {
             let request = request("qwen_image_edit_2511", live_manifest(), advanced);
             assert!(qwen_edit_candle_unsupported_request_axis(&request).is_some());
+        }
+        for advanced in [
+            json!({"usePid": "malformed"}),
+            json!({"phases": {"malformed": true}}),
+        ] {
+            let value = json!({
+                "model": "qwen_image_edit_2511", "modelManifestEntry": live_manifest(),
+                "advanced": advanced,
+            });
+            let payload = value.as_object().unwrap();
+            assert!(ImageRequest::from_resolved(payload, payload).is_err());
         }
         for advanced in [
             json!({}),

@@ -9737,16 +9737,18 @@ fn candle_scail2_tier_selector_is_exact_and_adapter_safe() {
         Scail2CandleTier::Bf16,
         "adapter-bearing default requests retain the valid dense flow"
     );
-    for value in [json!(6), json!("q8"), json!(4.0)] {
-        let error =
-            resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": value })), false)
-                .unwrap_err()
-                .to_string();
-        assert!(
-            error.contains("exact hosted tier") || error.contains("must be exactly"),
-            "{error}"
-        );
+    for value in [json!("q8"), json!(4.0)] {
+        let payload = json!({ "projectId": "p", "advanced": { "mlxQuantize": value } });
+        let payload = payload.as_object().unwrap();
+        assert!(VideoRequest::from_resolved(payload, payload).is_err());
     }
+    let error = resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 6 })), false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("exact hosted tier") || error.contains("must be exactly"),
+        "{error}"
+    );
     let adapter_error =
         resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 8 })), true)
             .unwrap_err()
@@ -16896,15 +16898,24 @@ mod candle_video_label_tests {
             json!(8.0),
             json!({ "bits": 8 }),
         ] {
-            let invalid = request(json!({
+            let value = json!({
                 "projectId": "p", "model": "ltx_2_3",
                 "advanced": { "mlxQuantize": invalid_tier.clone() }
-            }));
-            assert!(
-                candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &invalid)
-                    .is_none(),
-                "unsupported LTX Candle tier {invalid_tier} must fail closed"
-            );
+            });
+            let payload = value.as_object().unwrap();
+            match VideoRequest::from_resolved(payload, payload) {
+                Ok(invalid) => assert!(
+                    candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &invalid)
+                        .is_none(),
+                    "unsupported LTX Candle tier {invalid_tier} must fail closed"
+                ),
+                Err(_) => assert!(
+                    invalid_tier.is_string()
+                        || invalid_tier.is_object()
+                        || invalid_tier == json!(8.0),
+                    "integer and null tiers must reach the resolver: {invalid_tier}"
+                ),
+            }
         }
         assert!(
             candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3_eros", &q4_request,)
@@ -17286,9 +17297,7 @@ mod candle_video_label_tests {
     /// user override); the dense 5B has no toggle and applies the interim step default.
     #[test]
     fn candle_wan_lightning_toggle_drives_sampling() {
-        let req = |advanced: Value| {
-            VideoRequest::from_payload(json!({ "advanced": advanced }).as_object().unwrap())
-        };
+        let req = |advanced: Value| request(json!({ "advanced": advanced }));
 
         for moe in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
             // Default-on (absent flag): the 4-step / CFG-off Lightning recipe.
@@ -17349,9 +17358,7 @@ mod candle_video_label_tests {
                 std::fs::create_dir_all(root.join(tier).join(sub)).unwrap();
             }
         }
-        let req = |adv: Value| {
-            VideoRequest::from_payload(json!({ "advanced": adv }).as_object().unwrap())
-        };
+        let req = |adv: Value| request(json!({ "advanced": adv }));
 
         // Default (no mlxQuantize) → q8 when installed (sc-10726), clamped to what's on disk.
         let (d, q) = candle_wan_tier_subdir(root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();

@@ -47,15 +47,11 @@ fn flux3_shared_memory_tier_is_the_loaded_package() {
 }
 
 fn request(bits: i64) -> ImageRequest {
-    ImageRequest::from_payload(
-        json!({
-            "model": "mage_flow_base",
-            "advanced": { "mlxQuantize": bits },
-            "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
-        })
-        .as_object()
-        .expect("request object"),
-    )
+    super::request(json!({
+        "model": "mage_flow_base",
+        "advanced": { "mlxQuantize": bits },
+        "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+    }))
 }
 
 fn seed_only_tier(root: &Path, tier: &str) {
@@ -100,14 +96,10 @@ fn packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
         "ideogram_4_turbo",
     ] {
         for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
-            let request = ImageRequest::from_payload(
-                json!({
-                    "model": model,
-                    "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
-                })
-                .as_object()
-                .expect("request object"),
-            );
+            let request = super::request(json!({
+                "model": model,
+                "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+            }));
             let weights = PathBuf::from(tier);
             assert_eq!(
                 candle_quant_for_resolved_tier(&request, tier, &weights, true, false),
@@ -288,7 +280,7 @@ fn flux1_request(model: &str, quantize: Option<Value>) -> ImageRequest {
     if let Some(quantize) = quantize {
         payload["advanced"] = json!({ "mlxQuantize": quantize });
     }
-    ImageRequest::from_payload(payload.as_object().expect("request object"))
+    super::request(payload)
 }
 
 #[test]
@@ -349,10 +341,11 @@ fn flux1_candle_packed_tiers_are_exact_and_keep_the_load_receipt_truthful() {
     }
 
     for unsupported in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
-        assert!(
-            candle_flux1_packed_requested_tier(&flux1_request("flux_dev", Some(unsupported)))
-                .is_err(),
-            "bf16, q6, and malformed FLUX.1 selections must fail closed"
-        );
+        let value = json!({ "model": "flux_dev", "advanced": { "mlxQuantize": unsupported } });
+        let payload = value.as_object().unwrap();
+        match ImageRequest::from_resolved(payload, payload) {
+            Ok(request) => assert!(candle_flux1_packed_requested_tier(&request).is_err()),
+            Err(_) => assert!(unsupported.is_boolean() || unsupported.is_string()),
+        }
     }
 }
