@@ -13784,6 +13784,29 @@ fn image_dimension_cap_covers_sensenova_buckets() {
     assert!(crate::validate_dimension(255, "width", crate::MAX_IMAGE_DIMENSION).is_err());
 }
 
+/// SW-7100 (E25): the pre-model shape ceiling is exactly the largest `limits.maxDimension` any
+/// shipped image model declares (MiniMax-H3-Image's 6272), so that model's 21:9 preset reaches its
+/// own per-model check, while the per-model blanket for every undeclaring model stays 4096.
+#[test]
+fn the_shape_ceiling_covers_every_declared_image_edge() {
+    let manifest =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+    let largest = manifest["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["type"] == "image")
+        .filter_map(|model| model["limits"]["maxDimension"].as_u64())
+        .max()
+        .unwrap();
+    assert_eq!(
+        u64::from(crate::validators::SHAPE_MAX_IMAGE_DIMENSION),
+        largest
+    );
+    assert_eq!(largest, 6272);
+    assert_eq!(crate::MAX_IMAGE_DIMENSION, 4096);
+}
+
 #[test]
 fn vqa_job_validation_requires_question_and_asset() {
     let base = crate::VqaJobRequest {
@@ -18719,8 +18742,8 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
 
     let lora_dir = temp_dir.path().join("data/loras");
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
-    // Real MiniMax-H3 diffusers keys, so `detect_lora_family` reports `minimax-h3` and the
-    // detected-family check is exercised rather than skipped on a `None`.
+    // Real MiniMax-H3 diffusers keys. They are the key space H3-Image shares, so detection is
+    // inconclusive (SW-7101) and the DECLARED partition gate is what this test exercises.
     let keys: Vec<String> = ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"]
         .iter()
         .flat_map(|target| {

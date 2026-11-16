@@ -84,6 +84,46 @@ export function usePromptRunners({
     [token],
   );
 
+  // MiniMax-H3-Image prompt expansion (SW-7102): the same endpoint and contract as the Qwen
+  // rewrite above, with `task: "minimax_h3_image_expand"`. The API forwards the expander's catalog
+  // entry and refuses the run until its licence is accepted; references present select the edit
+  // workflow, and their order is the `<Picture N>` numbering. `aspectRatio` is the edit's target
+  // selection — `adaptive` lets the expander propose one.
+  //
+  // The deadline is longer than the rewrite's: a 27B checkpoint decodes up to 4096 tokens of
+  // reasoning and answer, after a cold load of ~18-55 GB of weights inside this window.
+  const h3ImageExpandPrompt = useCallback(
+    ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
+      pollJobToCompletion({
+        createPath: JOB_PATHS.refine,
+        body: {
+          prompt,
+          modelId,
+          projectId,
+          task: "minimax_h3_image_expand",
+          workflow: "image",
+          aspectRatio: "adaptive",
+          sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
+        },
+        deadlineMs: 600000,
+        resolveResult: (job) => {
+          const refinedPrompt = job.result?.refinedPrompt;
+          if (!refinedPrompt) {
+            // An empty expansion must never reach the review panel: Apply would paste it over the
+            // user's own prompt.
+            throw new Error("The prompt expander returned an empty prompt.");
+          }
+          return { refinedPrompt, rewriteSuggestion: job.result?.rewriteSuggestion ?? null };
+        },
+        signal,
+        token,
+        startError: "Could not start prompt expansion.",
+        failureError: "Prompt expansion failed.",
+        timeoutError: "Prompt expansion timed out. Is the worker running?",
+      }),
+    [token],
+  );
+
   // Magic-prompt expansion (epic 4725, sc-5997): same `prompts/refine` endpoint + native
   // utility model, but `task: "magic_prompt"` swaps in Ideogram's caption system prompt and
   // returns a JSON caption string (the caller parses + validates it). Reuses the refine job's
@@ -203,6 +243,7 @@ export function usePromptRunners({
   const context = useAppDomainValue({
     refinePrompt,
     qwenRewritePrompt,
+    h3ImageExpandPrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,

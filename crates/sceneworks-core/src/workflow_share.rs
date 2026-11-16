@@ -597,6 +597,9 @@ pub enum AdvancedShape {
     /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
     /// H3 validator refuses malformed values or unknown fields.
     H3VedaSettings,
+    /// MiniMax-H3-Image's sampler block (SW-7106), kept as the exact wire object after the shared
+    /// validator ([`crate::image_sampling_controls::requested_h3_image_sampler`]) accepts it.
+    H3ImageSampler,
     /// Canonical MOSS request options, validated by gen-core.
     MossImageOptions,
     /// Provider receipt with local adapter paths reduced to their frozen relative filename.
@@ -734,6 +737,13 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedShape::NumberPair,
         "Authored classifier-free-guidance interval [start, end] in model time (sc-25681, \
          Iris-3B): which denoise steps guidance runs on — changes the picture, names nothing local.",
+    ),
+    allow(
+        "h3ImageSampler",
+        AdvancedShape::H3ImageSampler,
+        "Authored MiniMax-H3-Image sampler (SW-7106): Euler or LCM with its noise-scale ramp and \
+         clip. It changes the denoising recipe and names nothing local; a malformed or unknown \
+         member drops the whole block rather than replaying a different sampler.",
     ),
     allow(
         "captionOverflow",
@@ -2383,6 +2393,7 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
+            AdvancedShape::H3ImageSampler => sanitize_h3_image_sampler(value),
             AdvancedShape::MossImageOptions => sanitize_moss_options(value),
             AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
             AdvancedShape::MossImageEditOptions => {
@@ -2537,6 +2548,18 @@ fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
     advanced.insert("veda".to_owned(), value.clone());
     crate::h3_veda::requested_h3_veda("minimax_h3", &advanced, MAX_H3_STEPS).ok()?;
     Some(Value::Object(object.clone()))
+}
+
+fn sanitize_h3_image_sampler(value: &Value) -> Option<Value> {
+    let mut advanced = JsonObject::new();
+    advanced.insert(
+        crate::image_sampling_controls::H3_IMAGE_SAMPLER_KEY.to_owned(),
+        value.clone(),
+    );
+    crate::image_sampling_controls::requested_h3_image_sampler(&advanced)
+        .ok()
+        .flatten()?;
+    Some(value.clone())
 }
 
 /// The prose keys inside a sanitized value that are what the user typed, and so are exempt

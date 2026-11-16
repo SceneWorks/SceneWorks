@@ -85,6 +85,10 @@ pub fn native_route_claims_request(
     };
     if backend == "candle" {
         capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
+        // A Blackwell CUDA worker advertises the NVFP4 marker; no MLX worker does.
+        capabilities.push(WorkerCapability::Unknown(
+            crate::contracts::NVFP4_WORKER_CAPABILITY.to_owned(),
+        ));
     }
     let worker = WorkerSnapshot {
         id: "portable-route-worker-probe".to_owned(),

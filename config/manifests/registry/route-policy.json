@@ -506,6 +506,14 @@
       "candleQuant": false,
       "candleLora": false,
       "candleQuantLora": false
+    },
+    {
+      "id": "minimax_h3_image",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
     }
   ],
   "video": [

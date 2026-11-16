@@ -88,6 +88,7 @@ fn the_generate_closures_image_invariant_holds_for_every_task_and_image_combinat
         RefineTask::ImageDescribe,
         RefineTask::FilmPlan,
         RefineTask::QwenImageRewrite,
+        RefineTask::MiniMaxH3ImageExpand,
     ] {
         let takes = task.takes_reference_images();
         // WITH images: legal exactly for a task that declares it takes them.
@@ -1720,7 +1721,7 @@ fn image_caption_request_carries_image_for_generate_but_resolves_json_only() {
 
     // The worker's resolution requirements: the request's output constraint ONLY, no vision filter.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     assert!(
@@ -2080,7 +2081,7 @@ fn image_caption_examines_reference_image() {
                                                // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
                                                // before any load). This exercises the real production resolution path the sc-8113 validator runs.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     let captioner = crate::inference_runtime::load_for_model_with(
@@ -2152,7 +2153,7 @@ fn image_caption_examines_reference_image_candle() {
                                                // Production resolution path: request output-constraint ONLY (no vision filter), exactly like the
                                                // mlx twin — `ModelRequirements::from_request` would derive `vision:true` and fail `select`.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     let captioner = crate::inference_runtime::load_for_model_with(
@@ -2813,4 +2814,50 @@ fn magic_prompt_bakeoff() {
         100.0 * edgy_valid as f64 / edgy_runs.max(1) as f64
     );
     eprintln!("  avg_latency        {}ms", total_ms / runs.max(1) as u128);
+}
+
+/// SW-7102: MiniMax-H3-Image's expansion is its own task — text-driven, taking optional ordered
+/// references, emitting JSON (so its reply takes the JSON cleanup), and reviewed rather than
+/// applied. A raw reply with a reasoning block and a fence still parses to the expansion.
+#[test]
+fn the_h3_image_expansion_is_a_json_task_that_takes_references_and_is_reviewed() {
+    let task = RefineTask::from_payload(Some(
+        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK,
+    ));
+    assert_eq!(task, RefineTask::MiniMaxH3ImageExpand);
+    assert!(task.emits_json());
+    assert!(task.takes_reference_images());
+    assert!(
+        !task.is_vision(),
+        "the prompt stays required; zero references is text-to-image"
+    );
+    assert!(!task.is_caption());
+    assert!(task.done_message().contains("review"));
+    // With no override the fallback is the caption ceiling, which the parse step replaces with the
+    // recipe's own budget; an override wins.
+    assert_eq!(
+        resolve_max_new_tokens(&serde_json::Map::new(), task, None),
+        DEFAULT_CAPTION_MAX_NEW_TOKENS
+    );
+    let payload = serde_json::json!({ "maxNewTokens": 512 });
+    assert_eq!(
+        resolve_max_new_tokens(payload.as_object().unwrap(), task, None),
+        512
+    );
+
+    let raw =
+        "<think>\nShort prompt, a vertical subject.\n</think>\n```json\n{\"expanded_caption\": \
+               \"A lighthouse on a basalt headland in sea fog.\", \"aspect_ratio\": \"9:16\"}\n```";
+    let expansion = crate::minimax_h3_image_prompt_expand::parse_reply(
+        &clean_json_output(raw),
+        crate::minimax_h3_image_prompt_expand::Workflow::TextToImage,
+        &["9:16".to_owned()],
+        &gen_core::core_llm::minimax_h3_image_pe::AspectSelection::Adaptive,
+    )
+    .expect("the cleaned reply parses");
+    assert_eq!(
+        expansion.expanded_caption,
+        "A lighthouse on a basalt headland in sea fog."
+    );
+    assert_eq!(expansion.aspect_ratio, "9:16");
 }

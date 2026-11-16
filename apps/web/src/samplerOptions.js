@@ -191,6 +191,17 @@ export function maxStepsForModel(model) {
   return Math.max(BASE_MAX_STEPS, stepsDefaultFromModel(model) ?? 0);
 }
 
+// The ONE step count a model runs, or `null` when steps are a real control (SW-7100). A model whose
+// declared `limits.hardMinSteps` equals its `limits.hardMaxSteps` has no step choice — MiniMax-H3-
+// Image's distilled sampler has one output head per step, so six is the only legal count — and the
+// studios hide the Steps control and leave the step count to the model default rather than offer
+// a field whose every other value the API refuses.
+export function fixedStepsForModel(model) {
+  const min = model?.limits?.hardMinSteps;
+  const max = model?.limits?.hardMaxSteps;
+  return Number.isInteger(min) && min > 0 && min === max ? min : null;
+}
+
 // Is the negative prompt inert for this model at this guidance (sc-25679)? A model declaring
 // `image.negativePromptRequiresGuidance` treats the negative prompt as the CFG unconditional, so at
 // guidance 1.0 (CFG off) its engine refuses one. `guidanceOverride` is the Studio's raw override

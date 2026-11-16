@@ -9,7 +9,7 @@ use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
 use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, is_supported_model_download, requested_runtime_variant,
+    admitted_runtime_variant, is_co_requisite_download, is_supported_model_download,
     safe_download_dir, selected_portable_model_artifact_closure,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
@@ -820,6 +820,7 @@ pub(crate) async fn capture_portable_model_binding(
     payload: &JsonObject,
     requested_gpu: &str,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
+    crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
     capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, None).await
 }
 
@@ -833,6 +834,7 @@ pub(crate) async fn validate_frozen_replay_binding(
     requested_gpu: &str,
     frozen: &PortableJobBinding,
 ) -> Result<PortableJobBinding, ApiError> {
+    crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
@@ -1490,23 +1492,20 @@ fn training_base_selection(
     if base != model_id {
         return Ok(None);
     }
-    let kernel = target
-        .get("kernel")
-        .and_then(Value::as_str)
-        .ok_or_else(|| incomplete("training plan has no native kernel"))?;
     let path = target
         .get("baseModelPath")
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| incomplete("training plan has no resolved base model path"))?;
-    let tier = if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
-        "q4"
-    } else {
-        "bf16"
-    };
+    // The base tier comes from the one selection the worker's portable guard also reads, so the
+    // admitted binding and the worker's verified closure name the same tier (MiniMax-H3-Image:
+    // the plan's frozen `advanced.baseTier`, whose directory is `baseModelPath`).
+    let tier = admitted_runtime_variant(job_type, payload, "", model_id)
+        .map_err(incomplete)?
+        .unwrap_or_else(|| "bf16".to_owned());
     Ok(Some(TrainingBaseSelection {
         path: PathBuf::from(path),
-        tier: tier.to_owned(),
+        tier,
     }))
 }
 
@@ -1542,9 +1541,21 @@ async fn verify_training_primary_path(
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
         .ok_or_else(|| incomplete("training base has no pinned primary member"))?;
-    let mut expected = remote
-        .files
+    // A base whose co-requisite components share its pinned snapshot (MiniMax-H3-Image: the DiT,
+    // VAE, tokenizer and processor under one revision) is trained from that snapshot root, so the
+    // selected directory holds those members' pinned files too. Count every member of the same
+    // repository revision; any other byte under the path still refuses the base.
+    let same_snapshot = |member: &&PortableArtifactMember| match (&member.source, &remote.source) {
+        (
+            PortableSourceIdentity::Revision { identity },
+            PortableSourceIdentity::Revision { identity: primary },
+        ) => identity.repository == primary.repository && identity.revision == primary.revision,
+        _ => false,
+    };
+    let mut expected = members
         .iter()
+        .filter(|member| member.role == ArtifactMemberRole::Primary || same_snapshot(member))
+        .flat_map(|member| member.files.iter())
         .filter_map(|file| {
             file.relative_path
                 .strip_prefix(prefix)
@@ -1559,6 +1570,7 @@ async fn verify_training_primary_path(
         })
         .collect::<Vec<_>>();
     expected.sort();
+    expected.dedup();
     if expected.is_empty() || actual != expected {
         return Err(incomplete(
             "training base bytes differ from selected pinned publisher files",
@@ -1567,8 +1579,10 @@ async fn verify_training_primary_path(
     Ok(())
 }
 
-/// The variant a model slot's binding freezes: the training plan's tier, else the request's explicit
-/// tier, else the tier the worker would run for an unselected image request.
+/// The variant a model slot's binding freezes: the job's admitted selection
+/// ([`admitted_runtime_variant`], shared with the worker's portable guard: the training plan's
+/// tier, a prompt expansion's `peTier`, else the request's explicit tier), else the tier the worker
+/// would run for an unselected image request.
 fn slot_requested_variant(
     state: &AppState,
     job_type: &JobType,
@@ -1577,9 +1591,14 @@ fn slot_requested_variant(
     entry: &Value,
     training: Option<&TrainingBaseSelection>,
 ) -> Option<String> {
+    let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
     training
         .map(|selection| selection.tier.clone())
-        .or_else(|| requested_runtime_variant(payload))
+        .or_else(|| {
+            admitted_runtime_variant(job_type, payload, slot, model_id)
+                .ok()
+                .flatten()
+        })
         .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))
 }
 

@@ -63,6 +63,8 @@ import {
   targetSupportsBodyLoss,
   trainingLicenseAckKey,
   trainingTargetLicense,
+  baseTierLabel,
+  baseTierSnapshot,
 } from "./trainingConfig.js";
 
 // sc-24159: the base-licence restriction is read from the Rust-owned target contract, never
@@ -2163,5 +2165,41 @@ describe("FLUX.3 existing training targets", () => {
       expect(configValidation(draft, { activeDataset: dataset, selectedTarget: target }).some((issue) => issue.field === "flux3")).toBe(true);
       expect(() => trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target })).not.toThrow();
     }
+  });
+});
+
+// SW-7103: MiniMax-H3-Image trains over an installed tier; the studio sends `advanced.baseTier`
+// only for targets that advertise `limits.baseTiers`, and starts at 2048 with checkpointing on.
+describe("MiniMax-H3-Image training targets", () => {
+  it.each(["minimax_h3_image_lora", "minimax_h3_image_edit_lora"])("seeds and sends the base tier for %s", (id) => {
+    const target = trainingTargets.targets.find((candidate) => candidate.id === id);
+    expect(target).toBeDefined();
+    expect(target.family).toBe("minimax-h3-image");
+    const dataset = { id: "ds_h3", name: "H3 set" };
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(draft.baseTier).toBe("auto");
+    expect(draft.resolution).toBe("2048");
+    let body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target });
+    expect(body.config.advanced.baseTier).toBe("auto");
+    expect(body.config.advanced.gradientCheckpointing).toBe(true);
+    body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: { ...draft, baseTier: "q4" }, selectedTarget: target });
+    expect(body.config.advanced.baseTier).toBe("q4");
+    expect(target.ui.requiresLicenseAcknowledgment).toBe(true);
+    expect(trainingTargetLicense(target)?.name).toBe("MiniMax-H3-Image Community License Agreement");
+  });
+
+  it("sends no base tier for targets that do not advertise one", () => {
+    const target = trainingTargets.targets.find((candidate) => candidate.id === "z_image_turbo_lora");
+    const dataset = { id: "ds_z", name: "Z set" };
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(baseTierSnapshot(target, "q4")).toBeUndefined();
+    const body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: { ...draft, baseTier: "q4" }, selectedTarget: target });
+    expect(body.config.advanced).not.toHaveProperty("baseTier");
+  });
+
+  it("labels each tier", () => {
+    expect(baseTierLabel("auto")).toMatch(/densest installed/i);
+    expect(baseTierLabel("q4")).toMatch(/Q4/);
+    expect(baseTierLabel("other")).toBe("other");
   });
 });

@@ -38,6 +38,7 @@ apps/rust-api/src/iris_training.rs sceneworks_worker::iris_data_walk_report
 apps/rust-api/src/iris_training.rs sceneworks_worker::iris_run_checkpoint_dirs
 apps/rust-api/src/jobs.rs sceneworks_worker::latest_moss_training_resume_step
 apps/rust-api/src/jobs.rs sceneworks_worker::latest_training_resume_step
+apps/rust-api/src/jobs.rs sceneworks_worker::minimax_h3_image_installed_render_tier
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_model_convert_output
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_training_output_dir_under
 apps/rust-api/src/jobs.rs sceneworks_worker::training_resume_stem
@@ -101,6 +102,9 @@ apps/rust-api/src/tests/load_progress_acceptance.rs sceneworks_worker::test_supp
 apps/rust-api/src/tests/load_progress_acceptance.rs sceneworks_worker::test_support::gen_core::moss_image::MossImageExecutionReport
 apps/rust-api/src/tests/load_progress_acceptance.rs sceneworks_worker::test_support::register_real_acceptance_worker
 apps/rust-api/src/tests/load_progress_acceptance.rs sceneworks_worker::test_support::run_acceptance_utility_job
+apps/rust-api/src/tests/minimax_h3_image_jobs.rs sceneworks_worker::minimax_h3_image_installed_render_tier
+apps/rust-api/src/tests/minimax_h3_image_jobs.rs sceneworks_worker::minimax_h3_image_render_tier_dir
+apps/rust-api/src/tests/minimax_h3_image_jobs.rs sceneworks_worker::portable_guard_runtime_variant
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::Settings
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::BoundedMossReceipt
@@ -232,6 +236,8 @@ apps/rust-api/src/training.rs sceneworks_worker::installed_aux_training_model_di
 apps/rust-api/src/training.rs sceneworks_worker::iris_plan_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::iris_task_objective
 apps/rust-api/src/training.rs sceneworks_worker::iris_training_install_refusal
+apps/rust-api/src/training.rs sceneworks_worker::minimax_h3_image_training_base
+apps/rust-api/src/training.rs sceneworks_worker::minimax_h3_image_training_install_refusal
 apps/rust-api/src/training/continuation.rs sceneworks_worker::fork_completed_training_checkpoint
 apps/rust-api/src/training/continuation.rs sceneworks_worker::iris_checkpoint_root
 apps/rust-api/src/training/continuation.rs sceneworks_worker::resolve_training_output_dir_under

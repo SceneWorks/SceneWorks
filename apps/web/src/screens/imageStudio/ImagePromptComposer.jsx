@@ -12,6 +12,7 @@ import { Flux3LayoutEditor } from "../../components/Flux3LayoutEditor.jsx";
 import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
+import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../../minimaxH3ImageExpand.js";
 
 export function ImagePromptComposer({
   mode,
@@ -102,10 +103,15 @@ export function ImagePromptComposer({
   promptGuide,
   model,
   refinePrompt,
-  handleResolutionChange,
+  handleApplyProposedSize,
   qwenRewriteReferenceIds,
   qwenRewriteModel,
   qwenRewritePrompt,
+  h3ExpandAvailable,
+  h3ExpandModel,
+  h3ExpandPrompt,
+  resolution,
+  selectedModel,
   flux3LayoutAvailable,
   flux3Layout,
   setFlux3Layout,
@@ -466,6 +472,10 @@ export function ImagePromptComposer({
             //    action all the way down, and even once it runs the result is a draft the user
             //    edits and applies.
             const qwenRewriteActive = qwenRewriteAvailable && promptTool === "qwenRewrite";
+            // SW-7102 — MiniMax-H3-Image's own prompt expander, under the same three gates: it
+            // renders only when installed, it never starts on its own, and its expansion is a draft
+            // the user accepts. Its proposed size is offered separately.
+            const h3ExpandActive = h3ExpandAvailable && promptTool === "h3Expand";
             return (
               <div className="prompt-tools">
                 <div className="prompt-tools-head">
@@ -511,6 +521,22 @@ export function ImagePromptComposer({
                       <span className="prompt-tool-desc">
                         Qwen’s own rewriter — a long descriptive prompt plus an aspect-ratio
                         suggestion you can accept or ignore
+                      </span>
+                    </button>
+                  ) : null}
+                  {h3ExpandAvailable ? (
+                    <button
+                      type="button"
+                      className={h3ExpandActive ? "prompt-tool active" : "prompt-tool"}
+                      aria-pressed={h3ExpandActive}
+                      onClick={() => togglePromptTool("h3Expand")}
+                    >
+                      <span className="prompt-tool-title">
+                        <Icon.Wand size={15} /> Expand prompt
+                      </span>
+                      <span className="prompt-tool-desc">
+                        MiniMax-H3-Image’s own expander — a long caption plus a proposed size you
+                        can accept or ignore
                       </span>
                     </button>
                   ) : null}
@@ -567,7 +593,7 @@ export function ImagePromptComposer({
                       // The aspect suggestion lands on the SAME resolution control the Aspect menu
                       // drives, and only ever with a value that menu already offers — accepting it
                       // is indistinguishable from the user picking it by hand.
-                      onApplyResolution={handleResolutionChange}
+                      onApplyResolution={handleApplyProposedSize}
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       // The ORDERED list the render will condition on. Same array, same order —
@@ -576,6 +602,24 @@ export function ImagePromptComposer({
                       referenceAssetIds={qwenRewriteReferenceIds}
                       rewriteModel={qwenRewriteModel}
                       rewritePrompt={qwenRewritePrompt}
+                    />
+                  </div>
+                ) : null}
+                {h3ExpandActive ? (
+                  <div className="prompt-tool-panel">
+                    <QwenRewritePromptControl
+                      copy={H3_IMAGE_EXPAND_COPY}
+                      modelId={model}
+                      onApply={setPromptFromUser}
+                      onApplyResolution={handleApplyProposedSize}
+                      projectId={activeProject?.id ?? ""}
+                      prompt={prompt}
+                      referenceAssetIds={qwenRewriteReferenceIds}
+                      rewriteModel={h3ExpandModel}
+                      rewritePrompt={h3ExpandPrompt}
+                      suggestedResolutionFor={(suggestion) =>
+                        h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
+                      }
                     />
                   </div>
                 ) : null}

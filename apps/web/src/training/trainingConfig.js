@@ -635,6 +635,26 @@ export function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
 }
 
+// SW-7103: the base-model tier a MiniMax-H3-Image run trains over (`advanced.baseTier`). Offered
+// only on targets that advertise `limits.baseTiers`; "auto" trains the densest installed tier.
+export const baseTierLabels = {
+  auto: "Auto (densest installed)",
+  bf16: "bf16 (full precision)",
+  q8: "Q8 (8-bit, frozen)",
+  q4: "Q4 (4-bit, frozen)",
+};
+
+export function baseTierLabel(value) {
+  return baseTierLabels[value] ?? value;
+}
+
+// The `advanced.baseTier` a snapshot sends: the draft's choice where the target advertises tiers,
+// otherwise nothing (no other target takes the key, and the API refuses it there).
+export function baseTierSnapshot(target, draftValue) {
+  if (!rangeOptions(target?.limits, "baseTiers").length) return undefined;
+  return asText(draftValue).trim() || "auto";
+}
+
 export function optimizerLabel(value) {
   return optimizerLabels[value] ?? value;
 }
@@ -777,6 +797,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     rank: numericDraft(defaults.rank),
     alpha: numericDraft(defaults.alpha),
     networkType: asText(advanced.networkType || "lora"),
+    // SW-7103: MiniMax-H3-Image's base tier ("auto" = densest installed); ignored elsewhere.
+    baseTier: asText(advanced.baseTier || "auto"),
     // LoKr block-decomposition factor; -1 = auto. Only consumed when networkType
     // is lokr (the worker ignores it otherwise).
     decomposeFactor: numericDraft(advanced.decomposeFactor ?? -1),
@@ -1355,6 +1377,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     ...defaultAdvanced,
     ...(selectedTarget?.family === "flux3" ? { flux3: flux3Value(configDraft.flux3) } : {}),
     networkType,
+    baseTier: baseTierSnapshot(selectedTarget, configDraft.baseTier),
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
     // Explicit edits override preset defaults, including an empty module list (all)

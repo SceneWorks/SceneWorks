@@ -157,11 +157,13 @@ pub(crate) fn candle_adapter_resident_bytes(
     measured_source_bytes: u64,
 ) -> u64 {
     // Krea keeps lazily merged adapter overlays on its resident host. Z-Image likewise installs
-    // forward-time residuals for dense bf16 as well as packed tiers, so both families must reserve
+    // forward-time residuals for dense bf16 as well as packed tiers, and so does MiniMax-H3-Image
+    // (SW-7096: every adapter is a residual, never a merged weight), so those families must reserve
     // the exact adapter source bytes at every precision. Other generic Candle providers fold dense
     // factors and retain residuals only on packed tiers.
     if engine_id.starts_with("krea_2_")
         || engine_id.starts_with("z_image")
+        || engine_id == "minimax_h3_image"
         || crate::candle_memory_strategy::is_sd35(engine_id)
         || tier != "bf16"
     {

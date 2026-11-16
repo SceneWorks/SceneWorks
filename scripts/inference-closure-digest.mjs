@@ -655,6 +655,13 @@ export function resolveRevision(repo, revision, { runGit = git } = {}) {
  * `crates/contracts/gen-core-<suffix>/src/<family>.rs`. Still checked, not trusted: the crate's
  * own source must spell the constant path, and the named contracts crate's `src/<family>.rs` must
  * declare that constant as exactly this provider id at the same revision.
+ *
+ * SW-F363 (inference 4effdfb5): a family module may RE-EXPORT the constant from a policy crate —
+ * `gen-core-checkpoint/src/supra2.rs` now reads `pub use gen_core_supra2_policy::PROVIDER_ID;`
+ * and the literal lives in `crates/contracts/gen-core-supra2-policy/src/lib.rs`. One hop of exactly
+ * that `pub use gen_core_<crate>::PROVIDER_ID;` spelling is followed, to that crate's own
+ * `src/lib.rs`, which must declare the constant as exactly this provider id. Still checked, not
+ * trusted: any other re-export shape, a second hop, or a different value still refuses.
  */
 export function providerNamedThroughGenCore({ repo, revision, provider, crateDir, runGit = git }) {
   let named = "";
@@ -683,6 +690,20 @@ export function providerNamedThroughGenCore({ repo, revision, provider, crateDir
       continue;
     }
     if (body.split("\n").some((line) => line.trim() === declaration)) return true;
+    const reexport = body
+      .split("\n")
+      .map((line) => /^pub use gen_core_([a-z0-9_]+)::PROVIDER_ID;$/.exec(line.trim()))
+      .find(Boolean);
+    if (!reexport) continue;
+    let policy = "";
+    try {
+      policy = runGit(repo, [
+        "show", `${revision}:crates/contracts/gen-core-${reexport[1].replaceAll("_", "-")}/src/lib.rs`,
+      ]);
+    } catch {
+      continue;
+    }
+    if (policy.split("\n").some((line) => line.trim() === declaration)) return true;
   }
   return false;
 }

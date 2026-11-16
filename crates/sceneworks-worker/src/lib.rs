@@ -114,6 +114,68 @@ pub fn flux3_receipted_snapshot(
         })
 }
 
+/// Why a MiniMax-H3-Image LoRA/LoKr training run (SW-7103) cannot start on this host's installs, or
+/// `None` when it can: the plan's `advanced.baseTier` (absent / `auto` = densest installed) must name
+/// an installed DiT tier, with the image VAE + tokenizer and MiniMax-H3's text encoder at that tier.
+/// The SAME resolution the worker hands the trainer, so the API's real-run gate cannot admit a run
+/// the worker would refuse at load. Backend-neutral (no weights are read).
+pub fn minimax_h3_image_training_install_refusal(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    minimax_h3_image_training_base(data_dir, config).err()
+}
+
+/// The tier directory a MiniMax-H3-Image render of the job `payload` loads on this host — the
+/// render loader's own resolution (an explicit `advanced.mlxQuantize` honoured by name, else the
+/// densest installed tier). Lets the API's tests prove its admitted tier is the one loaded.
+pub fn minimax_h3_image_render_tier_dir(
+    data_dir: &Path,
+    payload: &JsonObject,
+) -> Result<Option<PathBuf>, String> {
+    image_jobs::minimax_h3_image::render_tier_dir(payload, data_dir)
+        .map_err(|error| error.to_string())
+}
+
+/// The MiniMax-H3-Image tier an unselected render loads on this host (the densest installed tier,
+/// by the render loader's own installed-ness rule), or `None` when no tier is installed. The API
+/// freezes it into the request so the binding and the loader agree.
+pub fn minimax_h3_image_installed_render_tier(
+    data_dir: &Path,
+    entry: &Value,
+) -> Option<&'static str> {
+    image_jobs::minimax_h3_image::installed_render_tier(entry.as_object()?, data_dir)
+}
+
+/// The tier the worker's portable guard verifies model carrier `slot` against before any loader
+/// runs: the job's admitted selection, else (for an unselected image request of a standard-tier
+/// model) the tier the binding froze. The guard rebuilds the artifact closure from this tier and
+/// refuses a binding that names another, so the API's tests use it to prove that what admission
+/// froze is what the worker accepts.
+pub fn portable_guard_runtime_variant(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &Value,
+    binding: Option<&sceneworks_core::model_artifacts::portable_binding::PortableModelBinding>,
+) -> Result<Option<String>, String> {
+    external_library_runtime::bound_runtime_variant(job_type, payload, slot, entry, binding)
+        .map_err(|error| error.to_string())
+}
+
+/// The DiT tier a MiniMax-H3-Image LoRA/LoKr run trains over on this host's installs, and that
+/// tier's directory: the plan's `advanced.baseTier` (absent / `auto` = densest installed) resolved
+/// exactly as the trainer resolves it, or the refusal [`minimax_h3_image_training_install_refusal`]
+/// reports. The API freezes both into the plan so its portable source binding names the tier the
+/// trainer loads rather than the bf16 snapshot.
+pub fn minimax_h3_image_training_base(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<(&'static str, PathBuf), String> {
+    let tier = sceneworks_core::training::minimax_h3_image_base_tier(&config.advanced)?;
+    image_jobs::minimax_h3_image::training_base(data_dir, tier).map_err(|error| error.to_string())
+}
+
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.
 /// This is filesystem/index integrity, not whole-repository download completion or a weights
 /// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact
@@ -600,6 +662,11 @@ mod qwen_alpha;
 // a no-backend build keeps the module for its pure-function tests.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod qwen_prompt_rewrite;
+// MiniMax-H3-Image's prompt expander (SW-7102): where its tier weights and its upstream `prompt/`
+// files are on disk, and the job-result shape. The request and reply contract are the engine's
+// (`core_llm::minimax_h3_image_pe`); `prompt_refine_jobs` drives it on the same TextLlm lane.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+mod minimax_h3_image_prompt_expand;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]

@@ -29,6 +29,8 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "timestepShift",
     "cfgInterval",
     "captionOverflow",
+    // MiniMax-H3-Image's sampler block (SW-7106).
+    "h3ImageSampler",
     "enhancePrompt",
     "mlxQuantize",
     "quantTier",

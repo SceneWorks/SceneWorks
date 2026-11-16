@@ -241,3 +241,23 @@ script runs only at the pinned pre-registry SHA, and current main dumps the regi
 rows (three platforms). A one-off check observed each row with the current candidate, asserted
 that the hint was the only difference, and wrote the rows with `renderBaseline`. No other row,
 the population, `old-catalog.json` or `old-behavior.json` changed.
+
+## Deliberate change after capture: MiniMax-H3-Image (SW-F363 main merge)
+
+Merging main into the MiniMax-H3-Image feature adds one image model and three deliberate studio
+changes the pinned capture cannot record (it runs only at the pre-registry SHA):
+
+- Image Studio persists the `h3ImageSampler` control state (SW-7106) and Simple Image persists
+  `h3ExpandOpen` (SW-7102) for every model. Both are inert for any model other than
+  MiniMax-H3-Image: the request carries no H3 sampler block and no expander runs.
+- Simple Image's edit tab on a model with the ordered reference surface sends the armed reference as
+  the plural `referenceAssetIds` list, as the full studio's multi-reference picker does (SW-7101).
+  The old rows sent it as `sourceAssetId`.
+- MiniMax-H3-Image's own rows (21 across the three platforms: Image, Simple Image, Character test and
+  its two training targets) join the population.
+
+A one-off check observed every row with the current candidate. It asserted that each existing row
+either matched exactly or differed only by those two state keys and that one reference-field
+change, and that every added row belongs to `minimax_h3_image`. It then wrote the rows with
+`renderBaseline`. `old-behavior.json` changes in its 18 appearance rows, only by the restored
+`h3ImageSampler` state. `old-catalog.json` did not change.
