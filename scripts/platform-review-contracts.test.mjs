@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile, ut
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -636,7 +637,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
     assert.match(setup, /node-version: 22/);
     assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
-    assert.match(select, /node scripts\/select-windows-cargo-cache\.mjs/);
+    assert.match(select, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
     assert.match(select, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
     assert.doesNotMatch(select.split("\n").filter(line => !/^\s*#/.test(line)).join("\n"), /RUNNER_TEMP|USERPROFILE|continue-on-error/);
     assert.match(fetchStep, /CARGO_NET_OFFLINE: "false"/);
@@ -727,9 +728,12 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
 // heavy compile step must run after it, and the cold-time-sized 90 min ordinary budget is pinned below.
 test("Windows candle lanes select the FlashAttention object cache before every heavy compile step", async () => {
   const select = await source("scripts/select-windows-cargo-cache.mjs");
+  assert.equal(createHash("sha256").update(select).digest("hex"), "03ad5e8a246003bbca89db839f1788de92b8f1214d4ed9335d1db45cce2f9463",
+    "the H3 matched-resident controller requires its frozen common selector bytes");
   assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttention\}/, "the selection step exports the cache to every later compile step");
   const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
   const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
+  assert.match(selectStep, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
   for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {
     assert.ok(job.indexOf(selectStep) < job.indexOf(workflowStep(job, heavy)), `${heavy} runs after the cache is selected`);
   }
@@ -2454,6 +2458,19 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
   const skip =
     /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+
+  const selector = stepBody(workflow, "Isolate Cargo dependency checkout");
+  const cacheOnly = workflowExpression(selector, "FLASH_ATTN_CACHE_ONLY");
+  for (const [event, inputs, expected] of [
+    ["pull_request", {}, false], ["workflow_dispatch", {}, false],
+    ["workflow_dispatch", { provision_snapshot: true }, true],
+    ["workflow_dispatch", { provision_snapshot: true, run_five_rung_reference: true }, false],
+  ]) {
+    assert.equal(Boolean(evaluateWorkflow(cacheOnly, event, inputs)), expected,
+      `FlashAttention cache-only selection for ${event}: ${JSON.stringify(inputs)}`);
+  }
+  assert.match(selector, /if \(\$env:FLASH_ATTN_CACHE_ONLY -eq 'true'\) \{\s+node scripts\/prepare-windows-flash-prebuilt\.mjs --cache-only/);
+  assert.match(selector, /\} else \{\s+node scripts\/prepare-windows-flash-prebuilt\.mjs\s+\}/);
 
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five

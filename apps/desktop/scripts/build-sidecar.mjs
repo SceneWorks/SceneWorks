@@ -22,6 +22,7 @@ import {
   stageNonMacResourcePlaceholders,
 } from "./build-sidecar-platform.mjs";
 import { verifyReleaseSidecar } from "../../../scripts/release-sidecar-artifact.mjs";
+import { candleFlashSourceSha256, fetchPrebuilt } from "../../../scripts/fetch-flash-prebuilt.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, ".."); // apps/desktop
@@ -221,6 +222,12 @@ if (prebuiltRoot) {
   prebuiltBinary = await verifyReleaseSidecar(process.platform === "win32" ? "windows" : "linux", prebuiltRoot);
   console.log(`build-sidecar: verified prebuilt CUDA binary ${prebuiltBinary}`);
 } else if (buildPlan.candle) {
+  if (!process.env.CANDLE_FLASH_ATTN_PREBUILT_DIR) {
+    const sourceSha256 = await candleFlashSourceSha256();
+    const cacheRoot = process.env.CANDLE_FLASH_ATTN_PREBUILT_CACHE || join(os.homedir(), ".cache", "sceneworks", "flash-attn");
+    const prebuilt = await fetchPrebuilt({ sourceSha256, target: triple, cacheRoot });
+    if (prebuilt) process.env.CANDLE_FLASH_ATTN_PREBUILT_DIR = prebuilt;
+  }
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
   // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). That claim holds
   // for candle-kernels' dense build_ptx() kernels only: the GGUF quant/moe kernels are

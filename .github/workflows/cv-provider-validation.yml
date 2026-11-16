@@ -130,7 +130,7 @@ jobs:
         if: ${{ inputs.backend == 'cuda' }}
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'CUDA cache selection failed' }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ inputs.backend == 'mlx' }}

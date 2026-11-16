@@ -866,8 +866,14 @@ jobs:
         run: node --test --test-name-pattern="^Windows real CPU preparation" scripts/moss-native-api-validation.test.mjs
       - name: Isolate Cargo dependency checkout
         shell: powershell
+        env:
+          FLASH_ATTN_CACHE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference }}
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          if ($env:FLASH_ATTN_CACHE_ONLY -eq 'true') {
+            node scripts/prepare-windows-flash-prebuilt.mjs --cache-only
+          } else {
+            node scripts/prepare-windows-flash-prebuilt.mjs
+          }
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
       # exactly one dispatch shape -- `provision_snapshot` true AND `run_five_rung_reference` false
@@ -1617,7 +1623,7 @@ jobs:
       - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Test the fixed proof parser without running a model
         run: node --test scripts/ci/imported-nvfp4-proof.test.mjs
@@ -1712,7 +1718,7 @@ jobs:
       - name: Isolate Cargo dependency checkout for the YuE2 terminal build
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the pinned inference release for the YuE2 terminal build
         env:
@@ -1913,7 +1919,7 @@ jobs:
       - name: Isolate Cargo dependency checkout for the Iris worker smoke
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the pinned inference revision for the Iris worker smoke
         env:
@@ -2056,7 +2062,7 @@ jobs:
       - name: Isolate Cargo dependency checkout
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the pinned dependencies
         env:
@@ -2122,7 +2128,7 @@ jobs:
       - name: Isolate Cargo dependency checkout for the Supra2 worker smoke
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the pinned inference revision for the Supra2 worker smoke
         env:
@@ -2197,7 +2203,7 @@ jobs:
       - name: Select isolated persistent Cargo cache
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
       - name: Test kernel controller without CUDA execution
         run: python -I scripts/ci/test_windows_cuda_execution.py
