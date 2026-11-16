@@ -339,14 +339,7 @@ async fn prepare_h3_image_expand(
     // this it would bind the catalog's default download (the unpublished bf16 row on macOS, NVFP4
     // on Windows/Linux) while the worker loaded whichever tier is actually installed.
     let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
-    let nvfp4_worker = workers.iter().any(|worker| {
-        !matches!(
-            worker.status,
-            WorkerStatus::Offline | WorkerStatus::Unhealthy
-        ) && worker.capabilities.iter().any(|capability| {
-            capability.as_str() == sceneworks_core::contracts::NVFP4_WORKER_CAPABILITY
-        })
-    });
+    let nvfp4_worker = can_run_nvfp4_expansion(&workers);
     if let Some(tier) = expander_tier(&entry, &state.settings.data_dir, nvfp4_worker) {
         job_payload.insert(
             sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY.to_owned(),
@@ -355,6 +348,25 @@ async fn prepare_h3_image_expand(
     }
     job_payload.insert("modelManifestEntry".to_owned(), entry);
     Ok(())
+}
+
+/// Whether one available worker can run an NVFP4 expansion: it must advertise BOTH the
+/// `prompt_refine` provider and the NVFP4 device marker. The marker is derived from GPU compute
+/// capability alone, so a worker advertising it may still have no text provider linked.
+fn can_run_nvfp4_expansion(workers: &[WorkerSnapshot]) -> bool {
+    workers.iter().any(|worker| {
+        let advertises = |wanted: &str| {
+            worker
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == wanted)
+        };
+        !matches!(
+            worker.status,
+            WorkerStatus::Offline | WorkerStatus::Unhealthy
+        ) && advertises(JobType::PromptRefine.as_str())
+            && advertises(sceneworks_core::contracts::NVFP4_WORKER_CAPABILITY)
+    })
 }
 
 /// The expander tier an unselected expansion runs: the worker's own order
@@ -421,6 +433,32 @@ mod tests {
             assert!(!is_positive_ratio(value), "{value}");
         }
         assert_eq!(MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, 16);
+    }
+
+    /// NVFP4 is offered to an expansion only when ONE available worker advertises both the
+    /// text provider and the NVFP4 marker; the two on different workers, or the marker alone,
+    /// never select it.
+    #[test]
+    fn nvfp4_expansion_needs_one_worker_with_the_provider_and_the_marker() {
+        let worker = |id: &str, status: &str, capabilities: &[&str]| -> WorkerSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "gpuId": "0", "status": status, "capabilities": capabilities,
+                "loadedModels": [], "registeredAt": "2026-11-15T00:00:00Z",
+                "lastSeenAt": "2026-11-15T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let marker_only = worker("a", "idle", &["gpu", "candle", "nvfp4"]);
+        let provider_only = worker("b", "idle", &["gpu", "candle", "prompt_refine"]);
+        let both = worker("c", "idle", &["gpu", "candle", "prompt_refine", "nvfp4"]);
+        assert!(!can_run_nvfp4_expansion(std::slice::from_ref(&marker_only)));
+        assert!(!can_run_nvfp4_expansion(&[
+            marker_only.clone(),
+            provider_only.clone()
+        ]));
+        assert!(can_run_nvfp4_expansion(&[marker_only, both.clone()]));
+        let offline = worker("d", "offline", &["gpu", "candle", "prompt_refine", "nvfp4"]);
+        assert!(!can_run_nvfp4_expansion(&[offline, provider_only]));
     }
 
     #[test]

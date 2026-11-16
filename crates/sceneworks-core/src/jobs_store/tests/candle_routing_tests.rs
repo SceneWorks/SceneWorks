@@ -6094,9 +6094,10 @@ fn flux3_publisher_tiers_require_the_worker_device_marker() {
     }
 }
 
-/// SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier needs the NVFP4
-/// device marker, so a pre-Blackwell worker never claims it; every other tier (and every other
-/// refine task) keeps the ordinary `prompt_refine` capability.
+/// SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier needs BOTH the
+/// `prompt_refine` provider and the NVFP4 device marker, so neither a pre-Blackwell worker nor a
+/// Blackwell worker without the text provider claims it; every other tier (and every other refine
+/// task) needs only `prompt_refine`.
 #[test]
 fn an_nvfp4_prompt_expansion_requires_the_nvfp4_worker_marker() {
     let refine = |payload: Value| {
@@ -6109,7 +6110,11 @@ fn an_nvfp4_prompt_expansion_requires_the_nvfp4_worker_marker() {
     };
     let plain = gpu_worker(&["gpu", "candle", "prompt_refine"]);
     let blackwell = gpu_worker(&["gpu", "candle", "prompt_refine", "nvfp4"]);
+    // The NVFP4 marker comes from compute capability alone: a Blackwell worker without the
+    // linked text provider must not claim an expansion either.
+    let no_provider = gpu_worker(&["gpu", "candle", "nvfp4"]);
     assert!(!worker_supports_job(&plain, &expand("nvfp4")));
+    assert!(!worker_supports_job(&no_provider, &expand("nvfp4")));
     assert!(worker_supports_job(&blackwell, &expand("nvfp4")));
     for tier in ["q4", "q8", "bf16"] {
         assert!(worker_supports_job(&plain, &expand(tier)), "{tier}");
