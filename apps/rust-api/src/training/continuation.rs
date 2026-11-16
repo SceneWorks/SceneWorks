@@ -2,6 +2,32 @@ use super::*;
 use sceneworks_core::training::{TrainingOutputKind, TrainingPlan};
 
 #[derive(Deserialize)]
+pub(crate) struct TrainingRunsQuery {
+    offset: Option<u32>,
+    limit: Option<u32>,
+}
+
+/// This history includes queue-cleared runs; it never adds them back to the queue.
+pub(crate) async fn list_completed_training_runs(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<TrainingRunsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let mut jobs = store_call(state, move |store, _| {
+        store.list_completed_lora_runs(&project_id, offset, limit + 1)
+    })
+    .await?;
+    let has_more = jobs.len() > limit as usize;
+    jobs.truncate(limit as usize);
+    Ok(Json(json!({
+        "jobs": public_job_snapshots(jobs),
+        "nextOffset": has_more.then_some(offset.saturating_add(limit)),
+    })))
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ContinueTrainingRequest {
     additional_steps: u32,

@@ -1,7 +1,13 @@
 # Continue a completed LoRA run
 
-Completed LoRA jobs offer **Continue training** in the Queue and in Training Studio's
-completed runs. Enter additional steps; the form shows the cumulative total. For
+In Training Studio, choose **New training** to configure a fresh run, or
+**Continue training** to browse saved completed LoRA runs in the current workspace.
+The saved run history is paged and remains available after clearing the Queue or
+automatic queue retention. It is visible without first selecting a dataset or
+having a trainable base model installed; submission still checks the required resources.
+Run records already deleted by an older retention sweep are not reconstructed.
+Completed jobs also offer **Continue training** directly in the Queue.
+Enter additional steps; the form shows the cumulative total. For
 example, 3,000 completed steps plus 1,000 additional steps trains through step 4,000.
 
 `POST /api/v1/training/jobs/:job_id/continue` accepts only

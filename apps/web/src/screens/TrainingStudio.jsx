@@ -10,6 +10,7 @@ import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from ".
 import { errorMessage } from "../errorMessage.js";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { TrainingRunHistory } from "./training/TrainingRunHistory.jsx";
 import { JOY_CAPTION_MODEL_ID, POSE_DETECT_MODEL_ID, terminalStatuses } from "../constants.js";
 import { missingRequiredModels } from "../modelEligibility.js";
 import {
@@ -279,19 +280,8 @@ function LiveIrisMetrics({ job, token, live = true }) {
   return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
-  if (!jobs.length) {
-    return null;
-  }
+function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
   return (
-    <section className="training-live-panel" aria-label={completed ? "Completed training runs" : "Active training progress"}>
-      <div className="training-live-title">
-        <div>
-          <p className="eyebrow">Runs</p>
-          <h3>{completed ? "Completed training runs" : "Training in progress"}</h3>
-        </div>
-        <span>{jobs.length} {completed ? "completed" : "active"}</span>
-      </div>
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
           const sampleGroups = trainingSampleGroups(job, projectId);
@@ -314,6 +304,18 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onContinueTraining, o
           );
         })}
       </div>
+  );
+}
+
+function TrainingLiveProgress(props) {
+  if (!props.jobs.length) return null;
+  return (
+    <section className="training-live-panel" aria-label="Active training progress">
+      <div className="training-live-title">
+        <div><p className="eyebrow">Runs</p><h3>Training in progress</h3></div>
+        <span>{props.jobs.length} active</span>
+      </div>
+      <TrainingRunCards {...props} />
     </section>
   );
 }
@@ -354,6 +356,7 @@ export function TrainingDataSetsLibrary() {
 
 export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
+  const [trainingAction, setTrainingAction] = useState("new");
   const {
     activeProject,
     token,
@@ -727,8 +730,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
         .slice(0, 3),
     [activeProject?.id, jobs],
   );
-  const completedTrainingJobs = useMemo(
-    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed" && job.payload?.dryRun !== true).slice(0, 5),
+  const completedTrainingRefreshKey = useMemo(
+    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed").map((job) => `${job.id}:${job.updatedAt}`).join("|"),
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
@@ -2360,17 +2363,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }), [activeProject, subjectMasks, sessionHandlers]);
 
   return (
-    <ModelAvailabilityGate
-      ready={trainingReady}
-      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
-      title="Training needs a trainable base model"
-      description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
-      offers={trainingOffers}
-      downloadJobs={trainingDownloadJobs}
-      onDownload={installTrainingBase}
-      onOpenModels={() => setActiveView("Models")}
-      onOpenQueue={() => setActiveView("Queue")}
-    >
     <section className="page-frame training-studio">
       <div className="training-studio-shell">
         {/* Both modes are named by the topbar and lead straight into their work-panel
@@ -2393,6 +2385,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
           </div>
         ) : (
           <>
+            {!datasetLibraryMode ? (
+              <div className="training-run-actions" role="group" aria-label="Training action">
+                <button className={trainingAction === "new" ? "primary-action" : "secondary-action"}
+                  type="button" aria-pressed={trainingAction === "new"}
+                  onClick={() => {
+                    setTrainingAction("new");
+                    setConfigDraft((current) => ({ ...current, resumeFromJobId: "", loadFromJobId: "" }));
+                  }}>New training</button>
+                <button className={trainingAction === "continue" ? "primary-action" : "secondary-action"}
+                  type="button" aria-pressed={trainingAction === "continue"}
+                  onClick={() => setTrainingAction("continue")}>Continue training</button>
+              </div>
+            ) : null}
+            <ModelAvailabilityGate
+              ready={trainingReady || (!datasetLibraryMode && trainingAction === "continue")}
+              initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
+              title="Training needs a trainable base model"
+              description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
+              offers={trainingOffers}
+              downloadJobs={trainingDownloadJobs}
+              onDownload={installTrainingBase}
+              onOpenModels={() => setActiveView("Models")}
+              onOpenQueue={() => setActiveView("Queue")}
+            >
             {datasetLibraryMode ? (
               <DatasetEditorPanel
                 datasetSession={datasetSession}
@@ -2402,6 +2418,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={config}
                 maskSession={maskSession}
               />
+            ) : trainingAction === "continue" ? (
+              <TrainingRunHistory key={activeProject.id} projectId={activeProject.id} token={token}
+                refreshKey={completedTrainingRefreshKey}
+                renderRuns={(savedJobs) => (
+                  <TrainingRunCards jobs={savedJobs} projectId={activeProject.id} token={token} completed
+                    onPreview={setPreviewAsset}
+                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined} />
+                )} />
             ) : (
               <>
                 {trainedLoraOffer ? (
@@ -2481,20 +2505,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   onPreview={setPreviewAsset}
                 />
-                <TrainingLiveProgress
-                  jobs={completedTrainingJobs}
-                  projectId={activeProject?.id}
-                  token={token}
-                  completed
-                  onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined}
-                  onPreview={setPreviewAsset}
-                />
               </>
             )}
+            </ModelAvailabilityGate>
           </>
         )}
       </div>
     </section>
-    </ModelAvailabilityGate>
   );
 }

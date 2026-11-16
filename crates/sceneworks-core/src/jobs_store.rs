@@ -26,6 +26,11 @@ use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_
 /// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
 pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
 
+// Completed LoRA plans are saved training work, independent of the disposable queue view.
+const COMPLETED_LORA_RUN_SQL: &str = "type = 'lora_train' and status = 'completed' \
+    and json_extract(payload_json, '$.dryRun') = 0 \
+    and json_extract(payload_json, '$.plan.target.outputKind') = 'lora'";
+
 fn mint_import_claim_capability(
     payload: &mut serde_json::Map<String, Value>,
 ) -> JobsStoreResult<()> {
@@ -1110,6 +1115,8 @@ impl JobsStore {
     /// owning jobs. Legacy orphan metrics are also removed. Every statement
     /// shares the one caller-supplied cutoff, so the window cannot move
     /// underneath the sweep; a job completed exactly ON the cutoff is retained.
+    /// Saved completed LoRA plans are cleared from the queue at the cutoff, but retained
+    /// for training history and continuation.
     pub fn purge_terminal_jobs_completed_before(&self, cutoff: &str) -> JobsStoreResult<usize> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -1117,8 +1124,17 @@ impl JobsStore {
         let terminal = terminal_statuses_sql();
         let predicate = format!(
             "status in ({terminal}) and completed_at is not null \
-             and datetime(completed_at) < datetime(?1)"
+             and datetime(completed_at) < datetime(?1) \
+             and coalesce(({COMPLETED_LORA_RUN_SQL}), 0) = 0"
         );
+        transaction.execute(
+            &format!(
+                "update jobs set cleared_at = coalesce(cleared_at, ?2) \
+                 where ({COMPLETED_LORA_RUN_SQL}) and cleared_at is null and completed_at is not null \
+                 and datetime(completed_at) < datetime(?1)"
+            ),
+            params![cutoff, utc_now()],
+        )?;
         transaction.execute(
             &format!(
                 // Every column is NAMED on both sides rather than `select m.*, j.…` (sc-21484).
@@ -1992,6 +2008,26 @@ impl JobsStore {
               order by cast(requested.key as integer)",
         )?;
         let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Saved completed LoRA runs, including jobs cleared from the queue. Keep filtering and
+    /// pagination in SQL so unrelated queue traffic cannot push training history out of view.
+    pub fn list_completed_lora_runs(
+        &self,
+        project_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs where project_id = ?1 and ({COMPLETED_LORA_RUN_SQL}) \
+             order by completed_at desc, rowid desc limit ?2 offset ?3"
+        ))?;
+        let jobs = collect_jobs(statement.query_map(
+            params![project_id, limit.clamp(1, MAX_LISTED_JOBS), offset],
+            row_to_job,
+        )?)?;
         Ok(jobs)
     }
 
