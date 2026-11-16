@@ -14596,11 +14596,16 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
             "advanced": { "modelPath": model_path.clone(), "poses": malformed }
         }));
     }
-    assert_invalid_effective_options(json!({
+    let malformed_pose_entries = request(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
         "mode": "character_image", "referenceAssetId": "identity", "count": 1,
         "advanced": { "modelPath": model_path.clone(), "poses": [{}, null] }
     }));
+    assert_eq!(
+        resolve_candle_image_route(&malformed_pose_entries, &settings),
+        Some(CandleImageRoute::PoseReject),
+        "a malformed pose entry must reject explicitly, never reach a provider"
+    );
 
     let qwen_pose = request(json!({
         "projectId": "p", "model": "qwen_image_edit_2511_lightning",
