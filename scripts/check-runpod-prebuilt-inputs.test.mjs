@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validatePrebuiltImageConfig } from "./check-runpod-prebuilt-inputs.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { validatePrebuiltImageConfig, validatePrebuiltWorkerSources } from "./check-runpod-prebuilt-inputs.mjs";
 
 const revision = "6435067bd5c57aab4e7f0e8722bd53ea6c39ba92";
 const config = () => ({ os: "linux", architecture: "amd64", config: {
@@ -42,4 +46,64 @@ test("refuses absent or malformed provenance including nonexact source revisions
     const value = config(); value.config.Labels = Labels;
     assert.throws(() => validatePrebuiltImageConfig(value));
   }
+});
+
+const dockerfile = `# --- Candle GPU worker build\nCOPY crates ./crates\nCOPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt\n# --- Combined RunPod GPU runtime\nFROM prebuilt AS runpod\n`;
+
+function sourceRepository(changedPath, changedContents) {
+  const cwd = mkdtempSync(path.join(tmpdir(), "runpod-prebuilt-inputs-"));
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const write = (file, contents) => {
+    const destination = path.join(cwd, file);
+    mkdirSync(path.dirname(destination), { recursive: true });
+    writeFileSync(destination, contents);
+  };
+  git("init", "-q");
+  for (const file of ["crates/sceneworks-core/src/lib.rs", "apps/web/src/ImageStudio.jsx",
+    "apps/web/content-security-policy.txt", "packages/schemas/model.json", ".dockerignore"]) write(file, "original");
+  write("docker/rust.Dockerfile", dockerfile);
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline");
+  const revision = git("rev-parse", "HEAD");
+  write(changedPath, changedContents);
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "changed input");
+  return { cwd, revision, currentDockerfile: readFileSync(path.join(cwd, "docker/rust.Dockerfile"), "utf8") };
+}
+
+function withSourceRepository(changedPath, changedContents, check) {
+  const source = sourceRepository(changedPath, changedContents);
+  try {
+    check(source);
+  } finally {
+    rmSync(source.cwd, { recursive: true, force: true });
+  }
+}
+
+test("web source drift keeps the immutable Candle worker eligible", () => {
+  withSourceRepository("apps/web/src/ImageStudio.jsx", "changed UI", ({ cwd, revision, currentDockerfile }) => {
+    assert.doesNotThrow(() => validatePrebuiltWorkerSources(revision, currentDockerfile, cwd));
+  });
+});
+
+test("copied worker source, CSP, schema, and context-filter drift refuse the prebuilt worker", () => {
+  for (const file of ["crates/sceneworks-core/src/lib.rs", "apps/web/content-security-policy.txt",
+    "packages/schemas/model.json", ".dockerignore"]) {
+    withSourceRepository(file, "changed input", ({ cwd, revision, currentDockerfile }) => {
+      assert.throws(() => validatePrebuiltWorkerSources(revision, currentDockerfile, cwd),
+        /prebuilt worker inputs differ/);
+    });
+  }
+});
+
+test("Candle Docker stage drift refuses while RunPod wrapper drift remains eligible", () => {
+  withSourceRepository("docker/rust.Dockerfile", dockerfile.replace("COPY crates ./crates", "COPY crates ./worker-crates"),
+    ({ cwd, revision, currentDockerfile }) => {
+      assert.throws(() => validatePrebuiltWorkerSources(revision, currentDockerfile, cwd),
+        /Candle builder\/runtime stages differ/);
+    });
+  withSourceRepository("docker/rust.Dockerfile", dockerfile.replace("FROM prebuilt AS runpod", "FROM current AS runpod"),
+    ({ cwd, revision, currentDockerfile }) => {
+      assert.doesNotThrow(() => validatePrebuiltWorkerSources(revision, currentDockerfile, cwd));
+    });
 });
