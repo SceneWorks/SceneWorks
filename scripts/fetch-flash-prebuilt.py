@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = "x86_64-unknown-linux-gnu"
 FILES = {
     "libflashattention.a", "flash-attn-prebuilt.txt", "LICENSE-MIT",
-    "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt",
+    "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt", "AUTHORS-FLASH-ATTENTION",
 }
 
 
@@ -32,7 +32,9 @@ def sha256(path):
 
 def source_sha256(crate):
     digest = hashlib.sha256()
-    files = sorted([crate / "build.rs", crate / "Cargo.toml", *(crate / "kernels").iterdir()])
+    files = [crate / "build.rs", crate / "Cargo.toml", *(crate / "kernels").iterdir(),
+             *(crate / name for name in FILES if name.startswith(("LICENSE-", "AUTHORS-")))]
+    files.sort(key=lambda path: path.relative_to(crate).as_posix())
     for file in files:
         if not file.is_file():
             continue

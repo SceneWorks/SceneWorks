@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const names = new Set(["libflashattention.a", "flash-attn-prebuilt.txt", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt"]);
+const names = new Set(["libflashattention.a", "flash-attn-prebuilt.txt", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt", "AUTHORS-FLASH-ATTENTION"]);
 const execute = (command, args) => execFileSync(command, args, { encoding: "utf8", timeout: 15000 }).trim();
 
 export async function candleFlashSourceSha256() {
@@ -25,7 +25,8 @@ export async function candleFlashSourceSha256() {
   const packages = metadata.packages.filter(pkg => pkg.name === "candle-flash-attn" && pkg.source?.includes("github.com/SceneWorks/inference"));
   if (packages.length !== 1) throw new Error("expected one pinned candle-flash-attn source");
   const crate = path.dirname(packages[0].manifest_path);
-  const files = ["build.rs", "Cargo.toml", ...(await readdir(path.join(crate, "kernels"))).map(name => `kernels/${name}`)].sort();
+  const files = ["build.rs", "Cargo.toml", ...[...names].filter(name => name.startsWith("LICENSE-") || name.startsWith("AUTHORS-")),
+    ...(await readdir(path.join(crate, "kernels"))).map(name => `kernels/${name}`)].sort();
   const digest = createHash("sha256");
   for (const name of files) {
     const fullPath = path.join(crate, name);

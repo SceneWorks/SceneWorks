@@ -292,7 +292,8 @@ COPY docs/calibration/sc-24217/ ./docs/calibration/sc-24217/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
-# nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
+# nvcc compiles the other candle providers' CUDA kernels here (compiling needs no GPU);
+# FlashAttention links the verified Linux archive when the exact source/toolchain matches.
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in
 # libmoe.a need explicit cubins. Inspect the exact executable copied to /out
 # (rather than a Cargo build-directory candidate) so a stale cache entry cannot

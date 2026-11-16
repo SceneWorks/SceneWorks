@@ -11,7 +11,7 @@ const target = "x86_64-unknown-linux-gnu";
 const sourceSha256 = "a".repeat(64);
 const revision = "b".repeat(40);
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const names = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt"];
+const names = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt", "AUTHORS-FLASH-ATTENTION"];
 
 test("a matching package is cached and a corrupt cached archive fails closed", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "flash-prebuilt-test-"));
