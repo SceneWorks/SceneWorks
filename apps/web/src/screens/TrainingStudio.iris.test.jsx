@@ -1,9 +1,10 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
 vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
 import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // sc-25685/sc-25686 — the Training Studio wiring for the Iris-3B target end to end: picking a
 // dataset fires the data-walk preflight and shows its warning before launch, the Iris options

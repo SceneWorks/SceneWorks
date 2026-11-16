@@ -1,8 +1,9 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
 vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
 import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // sc-23000 — the YuE2 Song Lab inside Audio Studio. Every control-mapping assertion below reads the
