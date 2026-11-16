@@ -54,10 +54,11 @@ async function main() {
   const pin = await inferenceRevision(ROOT);
   assert.equal(pin, PIN, 'inference pin changed');
 
-  stage = 'binding';
+  stage = 'binding-path';
   const privateDir = await realpath(path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay'));
   const bindingPath = await realpath(input.bindingPath);
   assert.equal(path.dirname(bindingPath).toLowerCase(), privateDir.toLowerCase(), 'binding escaped private directory');
+  stage = 'binding-contract';
   const binding = JSON.parse(await readFile(bindingPath, 'utf8'));
   assert.equal(binding.version, 0);
   assert.equal(binding.kind, 'metadata-only-binding');
@@ -65,13 +66,16 @@ async function main() {
   assert.equal(binding.inferenceRevision, pin);
   assert.equal(binding.requestSha256, digest(REQUEST));
   assert.equal(binding.missing.includes('loadedRuntimeDllCensus'), true);
+  stage = 'binding-source';
   // Only proof/workflow files may change after the server issued this source binding.
   const runtimeInputs = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'vendor',
     'crates', 'apps', 'packages', 'config', 'docs/generated', 'docs/calibration', 'docker'];
   const sourceDiff = spawnSync('git', ['diff', '--quiet', binding.sourceSha, sourceSha, '--', ...runtimeInputs], { cwd: ROOT });
   assert.equal(sourceDiff.status, 0, 'bound runtime source changed');
+  stage = 'binding-binary';
   const binary = path.resolve(process.env.SDXL_REPLAY_BINARY);
   assert.equal(await fileSha256(binary), binding.binarySha256, 'bound API binary changed');
+  stage = 'binding-device';
   const devices = execFileSync('nvidia-smi', ['--query-gpu=index,uuid', '--format=csv,noheader'], { encoding: 'utf8' })
     .trim().split(/\r?\n/).map((line) => {
       const [index, uuid] = line.split(',').map((value) => value.trim());
@@ -80,6 +84,7 @@ async function main() {
   assert.deepEqual(devices, binding.devices.map(({ physicalIndex, uuid }) => ({ physicalIndex, uuid })), 'physical host changed');
   const device = devices[0];
   assert(device && device.physicalIndex === 0, 'physical index zero unavailable');
+  stage = 'binding-driver';
   assert.equal(await fileSha256(binding.driver.path), binding.driver.sha256, 'driver bytes changed');
 
   const state = path.join(process.env.RUNNER_TEMP, 'sdxl-exact-replay-census-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT);
