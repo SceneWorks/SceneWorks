@@ -1223,7 +1223,7 @@ describe("ImageStudio edit source picker", () => {
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "uploaded-source" }));
   });
 
-  it("uses the multi-image reference picker for a multiReference model and submits referenceAssetIds (sc-6211)", async () => {
+  it("uses the standard source tabs for multiple edit references and preserves their selection order", async () => {
     const refA = { id: "ref-a", projectId: "project_1", type: "image", displayName: "Ref A", status: {} };
     const refB = { id: "ref-b", projectId: "project_1", type: "image", displayName: "Ref B", status: {} };
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
@@ -1238,6 +1238,7 @@ describe("ImageStudio edit source picker", () => {
     await render(
       baseContext({
         assets: [refA, refB],
+        characters: [{ id: "char-1", name: "Mira", approvedReferences: [{ assetId: refB.id }] }],
         createImageJob,
         imageModels: [FLUX2_DEV],
         selectedAsset: null,
@@ -1252,16 +1253,69 @@ describe("ImageStudio edit source picker", () => {
 
     await click(headButtons().find((button) => button.textContent === "Select images"));
     const dialog = document.body.querySelector('[role="dialog"]');
-    const cards = [...dialog.querySelectorAll(".asset-picker-card")];
-    await click(cards[0]);
-    await click(cards[1]);
+    const tabs = [...dialog.querySelectorAll('[role="tab"]')];
+    expect(tabs.map((tab) => tab.firstChild.textContent)).toEqual(["Assets", "File Upload", "Character"]);
+    expect(dialog.querySelector('[role="listbox"]').getAttribute("aria-multiselectable")).toBe("true");
+    expect(dialog.querySelectorAll(".asset-picker-card")).toHaveLength(1);
+    await click(dialog.querySelector(".asset-picker-card"));
+    await click(tabs.find((tab) => tab.textContent.startsWith("Character")));
+    expect(dialog.querySelector(".asset-picker-card").textContent).toContain("Ref B");
+    await click(dialog.querySelector(".asset-picker-card"));
     await click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
+
+    // Reopening keeps both picks, including the one on the other source tab.
+    await click(headButtons().find((button) => button.textContent === "Edit references"));
+    const reopened = document.body.querySelector('[role="dialog"]');
+    expect(reopened.textContent).toContain("2 selected");
+    expect(reopened.querySelector('.asset-picker-card[aria-selected="true"]')).toBeTruthy();
+    await click([...reopened.querySelectorAll("button")].find((button) => button.textContent === "Cancel"));
 
     await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
     expect(payload.referenceAssetIds).toEqual(["ref-a", "ref-b"]);
     expect(payload.sourceAssetId).toBeNull();
+  });
+
+  it.each([
+    ["multiReference", "Select images"],
+    ["sourceWithMultiReference", "Select references"],
+  ])("imports multiple edit references through the standard File Upload tab (%s)", async (capability, buttonLabel) => {
+    const source = { id: "source", projectId: "project_1", type: "image", displayName: "Source", status: {} };
+    const importAsset = vi.fn(async (file) => ({
+      id: file.name, projectId: "project_1", type: "image", displayName: file.name, status: {},
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(baseContext({
+      assets: [source],
+      importAsset,
+      createImageJob,
+      imageModels: [{ ...Z_IMAGE, capabilities: ["edit_image"], ui: { [capability]: true } }],
+      selectedAsset: source,
+    }));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
+    await click([...container.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === buttonLabel));
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const tabs = [...dialog.querySelectorAll('[role="tab"]')];
+    expect(tabs.map((tab) => tab.firstChild.textContent)).toEqual(["Assets", "File Upload", "Character"]);
+    await click(tabs.find((tab) => tab.textContent === "File Upload"));
+    const input = dialog.querySelector('input[type="file"]');
+    expect(input.accept).toBe("image/*");
+    expect(input.multiple).toBe(true);
+    const files = [
+      new File(["a"], "a.png", { type: "image/png" }),
+      new File(["b"], "b.png", { type: "image/png" }),
+    ];
+    await act(async () => setFileInput(input, files));
+    expect(importAsset).toHaveBeenCalledTimes(2);
+    for (const file of files) expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "edit_image", referenceAssetIds: ["a.png", "b.png"],
+      sourceAssetId: capability === "sourceWithMultiReference" ? "source" : null,
+    }));
   });
 });
 
