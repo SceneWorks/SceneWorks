@@ -219,9 +219,9 @@ on:
       runner_label:
         description: >-
           Which Mac the mlx lane runs on (ignored for candle). `rw-krea` is the SECOND Mac
-          (nax-macos-2); `nax` is Michael's dev Mac (nax-macos), which is also the app repo's
-          ordinary PR runner. Both label sets were verified against the runners that actually served
-          recent jobs -- see the runbook note before changing either.
+          (nax-macos-2); the `nax` choice selects `nax` + `rw-starvector`, which only Michael's dev Mac
+          (nax-macos) carries. `nax` alone matches BOTH Macs. Check `gh api orgs/SceneWorks/actions/runners`
+          before changing either -- see the runbook note.
         required: true
         type: choice
         options:
@@ -580,11 +580,13 @@ jobs:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     needs: moss-selector-preflight
     name: mlx catalog campaign
-    # `rw-krea` and `nax` are the two macOS label sets verified as carried by a live runner
-    # (nax-macos-2 and nax-macos respectively). A label NO runner carries does not fail the
+    # `rw-krea` is carried only by nax-macos-2 and `rw-starvector` only by nax-macos (checked with
+    # `gh api orgs/SceneWorks/actions/runners`, 2026-11-16). `nax` alone is carried by BOTH Macs, so
+    # the dev-Mac choice must add `rw-starvector`: run 43946963737 asked for nax-macos and landed on
+    # nax-macos-2. A label NO runner carries does not fail the
     # dispatch -- the job queues silently until the run is cancelled -- so this is a closed choice
     # rather than a free-text label.
-    runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
+    runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax","rw-starvector"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
     concurrency:
       group: memory-catalog-campaign-mlx-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
