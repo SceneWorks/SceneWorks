@@ -3335,6 +3335,15 @@ fn capture_receipted_local_files(
     if selected.is_empty() {
         return Ok(None);
     }
+    // Legacy/backfilled receipts can omit files that are already in the snapshot (for
+    // example .gitattributes in a whole-repository install). The pinned ledger owns the
+    // closure: verify those files too rather than rejecting a valid install because its
+    // receipt is incomplete. Retain receipt-only files so the caller still rejects extras.
+    selected.extend(
+        pinned
+            .iter()
+            .map(|file| file.relative_path.to_string_lossy().replace('\\', "/")),
+    );
     let library = sceneworks_core::hf_home::model_source_library(&state.settings.data_dir);
     let allowed = vec![library.root().to_path_buf()];
     let resolver = ModelArtifactResolver::new(library);
@@ -4356,6 +4365,73 @@ mod tests {
             &["model.safetensors".to_owned()],
             pinned,
         )
+    }
+
+    #[tokio::test]
+    async fn receipted_install_verifies_pinned_files_omitted_by_legacy_receipt() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, mut pinned, mut download) = receipted_install(&state, b"trusted");
+        download["files"] = json!([]);
+        let receipt_path = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir("owner/hash-once"))
+            .join(".sceneworks-download-complete.json");
+        let original_receipt = std::fs::read(&receipt_path).unwrap();
+        // Backfilled whole-repository receipts omitted hidden files that were present in
+        // the snapshot, like the user's JoyCaption install.
+        for relative in [".gitattributes", "processor/config.json"] {
+            let file = path.parent().unwrap().join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"metadata").unwrap();
+            pinned.push(PortableArtifactFile {
+                relative_path: relative.into(),
+                size_bytes: 8,
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_bytes(b"metadata")
+                ),
+            });
+        }
+        pinned.sort();
+        let fixture = pinned.clone();
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| fixture.clone()));
+        let member = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("valid pinned files omitted from an old receipt are still admitted");
+        assert_eq!(member.files, pinned);
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), original_receipt);
+
+        let omitted = path.parent().unwrap().join(".gitattributes");
+        std::fs::write(&omitted, b"tampered").unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("omitted files must still match their pinned content");
+        assert!(error.detail.contains("files differ from the pinned source"));
+
+        std::fs::remove_file(&omitted).unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("a missing pinned file must not be excused by an old receipt");
+        assert!(error.detail.contains("receipted model file is unavailable"));
+
+        std::fs::write(&omitted, b"metadata").unwrap();
+        std::fs::write(path.parent().unwrap().join("unexpected.json"), b"extra").unwrap();
+        let mut receipt: Value = serde_json::from_slice(&original_receipt).unwrap();
+        receipt["resolvedFiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("unexpected.json"));
+        std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("receipt-only files must not expand the trusted pinned closure");
+        assert!(error.detail.contains("files differ from the pinned source"));
     }
 
     #[tokio::test]
