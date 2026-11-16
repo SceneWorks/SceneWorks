@@ -127,7 +127,8 @@ async function main() {
     SCENEWORKS_BACKEND_CANDLE_ENABLED: 'true', SCENEWORKS_BACKEND_MLX_ENABLED: 'false',
     HF_HUB_CACHE: prior.hub, HUGGINGFACE_HUB_CACHE: prior.hub, HF_HOME: path.dirname(prior.hub),
     HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1' };
-  const child = spawn(binary, [], { cwd: ROOT, env, stdio: ['ignore', log.fd, log.fd] });
+  // WORKER_CHILD treats stdin EOF as shutdown on Windows; keep the child pipe open.
+  const child = spawn(binary, [], { cwd: ROOT, env, stdio: ['pipe', log.fd, log.fd] });
   let spawnFailed = false;
   child.on('error', () => { spawnFailed = true; });
   const done = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });

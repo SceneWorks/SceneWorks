@@ -256,7 +256,8 @@ async function runProof() {
   const wait = async (probe, seconds) => { const end = Date.now() + seconds * 1000; while (Date.now() < end) { alive(); const found = await probe(); if (found) return found; await delay(500); } throw new Error('proof deadline exceeded'); };
   const launch = async (name, overrides) => {
     const log = await open(path.join(state, `${name}.log`), 'wx'); handles.push(log);
-    const child = spawn(binary, [], { cwd: ROOT, env: { ...env, ...overrides }, stdio: ['ignore', log.fd, log.fd] });
+    // WORKER_CHILD treats stdin EOF as shutdown on Windows; keep the child pipe open.
+    const child = spawn(binary, [], { cwd: ROOT, env: { ...env, ...overrides }, stdio: ['pipe', log.fd, log.fd] });
     child.on('error', () => { failure = new Error('owned runtime failed to start'); });
     child.done = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); }); children.push(child);
   };

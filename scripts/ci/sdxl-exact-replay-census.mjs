@@ -113,7 +113,8 @@ async function main() {
     HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', CUDA_VISIBLE_DEVICES: device.uuid };
   const children = [];
   const launch = (overrides) => {
-    const child = spawn(binary, [], { cwd: ROOT, env: { ...env, ...overrides }, stdio: ['ignore', log.fd, log.fd] });
+    // WORKER_CHILD treats stdin EOF as shutdown on Windows; keep the child pipe open.
+    const child = spawn(binary, [], { cwd: ROOT, env: { ...env, ...overrides }, stdio: ['pipe', log.fd, log.fd] });
     child.spawnFailed = false;
     child.on('error', () => { child.spawnFailed = true; });
     child.done = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
