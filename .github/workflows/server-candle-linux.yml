@@ -154,7 +154,10 @@ jobs:
         if: ${{ fromJSON(inputs.campaign_run_id).phase == 'bind' }}
         shell: powershell
         run: |
-          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
           $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-bind-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
           $env:SDXL_REPLAY_BIND_REPORT = $output
           Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_BIND_REPORT=$output"
@@ -171,7 +174,10 @@ jobs:
         if: ${{ fromJSON(inputs.campaign_run_id).phase == 'census' }}
         shell: powershell
         run: |
-          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
           $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-census-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
           $env:SDXL_REPLAY_CENSUS_REPORT = $output
           Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_CENSUS_REPORT=$output"
@@ -245,7 +251,10 @@ jobs:
       - name: Run only under the existing physical UUID lease and owned Windows Job
         shell: powershell
         run: |
-          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
           python -I scripts/ci/windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0 -- node scripts/ci/sdxl-exact-replay-proof.mjs
           if ($LASTEXITCODE -ne 0) { throw 'SDXL witness or physical drain refused' }
       - name: Require physical cleanup before accepting evidence
