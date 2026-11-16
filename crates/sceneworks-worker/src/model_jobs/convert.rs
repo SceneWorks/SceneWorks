@@ -1118,12 +1118,14 @@ mod portable_conversion_source_tests {
         assert!(bound_convert_aux_source(&legacy, "flux2_convert_base")
             .unwrap()
             .is_none());
-        let bound = serde_json::json!({"advanced":{"__portableFrozenSources":true,"__portableAuxPaths":{"flux2_convert_base":"/leased/borrowed"}}});
+        let snapshot = tempfile::tempdir().unwrap();
+        let borrowed = snapshot.path().join("borrowed");
+        let bound = serde_json::json!({"advanced":{"__portableFrozenSources":true,"__portableAuxPaths":{"flux2_convert_base":borrowed}}});
         let bound = sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(bound.as_object().unwrap()).unwrap();
         assert_eq!(
             bound_convert_aux_source(&bound, "flux2_convert_base")
                 .unwrap(),
-            Some(PathBuf::from("/leased/borrowed"))
+            Some(borrowed)
         );
         assert!(bound_convert_aux_source(&bound, "ltx_convert_upscaler")
             .is_err());

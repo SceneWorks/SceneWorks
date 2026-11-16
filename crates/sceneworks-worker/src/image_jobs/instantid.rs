@@ -896,19 +896,21 @@ mod utility_face_source_tests {
     fn utility_face_loader_requires_verified_dispatch_map() {
         let absent = sceneworks_core::portable_aux_bindings::PortableAuxBindings::default();
         assert!(bound_utility_face_stack(&absent).is_err());
+        let snapshot = tempfile::tempdir().unwrap();
+        let face_stack = snapshot.path().join("face");
         let mut bound = JsonObject::new();
         bound.insert(
             "advanced".to_owned(),
             serde_json::json!({
                 "__portableFrozenSources": true,
-                "__portableAuxPaths": {"utility_face_stack": "/private/snapshot/face"}
+                "__portableAuxPaths": {"utility_face_stack": face_stack}
             }),
         );
         assert_eq!(
             bound_utility_face_stack(
                 &sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(&bound).unwrap()
             ).unwrap(),
-            PathBuf::from("/private/snapshot/face")
+            face_stack
         );
     }
 }
