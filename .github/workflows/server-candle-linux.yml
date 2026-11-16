@@ -115,6 +115,58 @@ jobs:
           path: ${{ env.SDXL_REPLAY_PREPARATION_REPORT }}
           if-no-files-found: error
 
+  # A second metadata-only phase obtains the server-issued source route from an
+  # isolated API. No worker is started, so the queued request cannot execute.
+  sdxl-exact-replay-bind:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'bind' && fromJSON(inputs.campaign_run_id).ownerGo == false }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 180
+    env:
+      CUDA_COMPUTE_CAP: '120'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-runner
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select isolated persistent Cargo cache
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+      - name: Build the pinned API without executing models
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --locked --release -p sceneworks-rust-api --no-default-features --features backend-candle
+          if errorlevel 1 exit /b 1
+      - name: Bind queued source and hash selected cached files without a worker
+        shell: powershell
+        run: |
+          $env:SDXL_REPLAY_BINARY = Join-Path $env:CARGO_TARGET_DIR 'release\sceneworks-rust-api.exe'
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-bind-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_BIND_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_BIND_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-bind.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata binding failed' }
+      - name: Upload sanitized binding report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-binding-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_BIND_REPORT }}
+          if-no-files-found: warn
+
   # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
   # on main; reuse its existing standard (compile-only) choice plus an exact marker so dispatch does
   # not depend on GitHub accepting a newly added branch-only choice value.

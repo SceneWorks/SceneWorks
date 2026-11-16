@@ -1,8 +1,8 @@
 # SDXL DDIM exact replay witness (SW-7148)
 
 This is a prepared, unexecuted proof harness. It does not declare a deterministic route.
-The current source checkpoint retains its existing inference pin. Integrate the reviewed
-receipt implementation and final inference pin before building a live candidate.
+The qualification candidate must carry the reviewed receipt implementation and an exact
+merged inference pin; verify both against the live source before building it.
 Normal tests import only metadata validators. Only `workflow_dispatch` starts real weights.
 
 ## Registered dispatch route (required before a live run)
@@ -75,6 +75,16 @@ record is **not** an approved proof plan and cannot pass `validatePlan`; use its
 to complete the server-issued binding, selected files, provider schedule and loaded runtime
 DLL census before the `qualify` phase. If the cache is absent, stage the approved model and
 repeat metadata preparation; do not download weights during the proof.
+
+The separate metadata-only `bind` phase takes the preparation record's absolute path:
+`JSON.stringify({proof:"sdxl-exact-replay",phase:"bind",preparationPath,ownerGo:false})`.
+It builds and starts only the isolated API, verifies that no worker is registered, enqueues
+the fixed request without releasing it to a worker, then reads the server-issued Candle
+route from its private job database. It maps every selected member to the offline hub and
+checks the bytes against that route. Its private version-0 binding record contains the
+source identity, file map and the pinned provider schedule digest; the public artifact
+contains only hashes, counts and the private record path. It still cannot pass `validatePlan`:
+the loaded runtime DLL census and an explicit owner GPU window remain outstanding.
 
 Before a `qualify` or `replay` dispatch, inform the owner and obtain an explicit Windows real-model go window.
 CodeGraph rule `9fdbfea4-e2fc-4854-8342-79f5b831737f` applies even when a runner is idle.

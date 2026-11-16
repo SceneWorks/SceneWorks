@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +10,7 @@ import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
   finalizeEvidence } from './sdxl-exact-replay-proof.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
+import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40), uuid = 'GPU-00000000-0000-0000-0000-000000000001';
@@ -136,6 +137,8 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.match(workflow, /on:\n  workflow_dispatch:/);
   assert.match(workflow, /  sdxl-exact-replay-prepare:\n    if:.*phase == 'prepare'.*ownerGo == false/);
   assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-prepare.mjs/);
+  assert.match(workflow, /  sdxl-exact-replay-bind:\n    if:.*phase == 'bind'.*ownerGo == false/);
+  assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-bind.mjs/);
   assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*ownerGo == true/);
   assert.match(workflow, /  build-candle:\n    if:.*!startsWith/);
   assert.match(workflow, /cancel-in-progress:.*!startsWith/);
@@ -151,6 +154,24 @@ test('metadata preparation cannot inherit a real-model approval or command input
   validatePreparationDispatch(marker);
   assert.throws(() => validatePreparationDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'prepare', ownerGo: true })));
   assert.throws(() => validatePreparationDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'prepare', ownerGo: false, command: 'run' })));
+});
+
+test('metadata binding accepts only a private path and maps the actual cached member bytes', async () => {
+  const marker = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'bind', preparationPath: 'C:\\private\\record.json', ownerGo: false });
+  validateBindingDispatch(marker);
+  assert.throws(() => validateBindingDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'bind', preparationPath: 'record.json', ownerGo: false })));
+  assert.throws(() => validateBindingDispatch(JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'bind', preparationPath: 'C:\\private\\record.json', ownerGo: true })));
+  const hub = await mkdtemp(path.join(os.tmpdir(), 'sdxl-proof-binding-'));
+  try {
+    const root = path.join(hub, 'models--sdxl', 'snapshots', 'revision');
+    await mkdir(path.join(root, 'unet'), { recursive: true });
+    await writeFile(path.join(root, 'unet', 'model.bin'), 'abc');
+    const { input } = fixture();
+    const files = await mapSelectedFiles(input.route, hub, [root]);
+    assert.equal(files.length, 1);
+    await writeFile(path.join(root, 'unet', 'model.bin'), 'abd');
+    await assert.rejects(mapSelectedFiles(input.route, hub, [root]), /absent/);
+  } finally { await rm(hub, { recursive: true, force: true }); }
 });
 
 test('accepted queued request preserves the fixed controls before claims are released', () => {
