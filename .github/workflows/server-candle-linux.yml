@@ -153,7 +153,7 @@ jobs:
       - name: Bind queued source and hash selected cached files without a worker
         shell: powershell
         run: |
-          $env:SDXL_REPLAY_BINARY = Join-Path $env:CARGO_TARGET_DIR 'release\sceneworks-rust-api.exe'
+          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
           $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-bind-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
           $env:SDXL_REPLAY_BIND_REPORT = $output
           Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_BIND_REPORT=$output"
@@ -227,7 +227,7 @@ jobs:
       - name: Run only under the existing physical UUID lease and owned Windows Job
         shell: powershell
         run: |
-          $env:SDXL_REPLAY_BINARY = Join-Path $env:CARGO_TARGET_DIR 'release\sceneworks-rust-api.exe'
+          $env:SDXL_REPLAY_BINARY = Join-Path $env:GITHUB_WORKSPACE 'target\release\sceneworks-rust-api.exe'
           python -I scripts/ci/windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0 -- node scripts/ci/sdxl-exact-replay-proof.mjs
           if ($LASTEXITCODE -ne 0) { throw 'SDXL witness or physical drain refused' }
       - name: Require physical cleanup before accepting evidence

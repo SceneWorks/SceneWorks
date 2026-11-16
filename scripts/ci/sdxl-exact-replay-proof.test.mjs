@@ -146,6 +146,7 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0/);
+  assert.equal((workflow.match(/\$env:SDXL_REPLAY_BINARY = Join-Path \$env:GITHUB_WORKSPACE 'target\\release\\sceneworks-rust-api\.exe'/g) ?? []).length, 2);
   assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_OUTPUT \}\}\/evidence.json/);
 });
 
