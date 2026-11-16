@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "51a909a7badc949009b35013f4026c159b30f281",
+  "inferenceRevision": "b387b95ac7ed06cb84502a90876a669fb54fd79a",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -1222,7 +1222,7 @@
     },
     "candle:minimax_h3": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "1b320f850c8df0c69af4b77e6a4d14f1f52eeb777be51a575d63bc9b7a9f8315",
+      "digest": "56eb181f66d120bf18b4b291edace6002f715fa154d32f2fc422c4bc9f513118",
       "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1266,7 +1266,7 @@
     },
     "candle:minimax_h3_image": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "0cb2c9091d412ab450d7cc47e84d54f0f41f56c074f26d0f3ff3ff1d3c6c86d4",
+      "digest": "583fda7d784710744953c2ff171462769d3e02affbe7fff6834ea691a96959eb",
       "sharedContractDigest": "7e80b9660a5d51586eb9c8fa5f025e9b8eb0d1240263a58cc53d714e3f0c577a",
       "closureCrates": [
         "crates/contracts/core-llm",

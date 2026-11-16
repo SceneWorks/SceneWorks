@@ -321,7 +321,7 @@ pub(crate) fn training_progress(progress: &gen_core::TrainingProgress) {
             (PREPARING_MODEL.to_owned(), ProgressStage::LoadingModel)
         }
         gen_core::TrainingProgress::Caching { current, total } => (
-            format!("Caching dataset latents ({current}/{total})."),
+            format!("Caching training data ({current}/{total})."),
             ProgressStage::CachingLatents,
         ),
         gen_core::TrainingProgress::Training { step, total, loss } => (
