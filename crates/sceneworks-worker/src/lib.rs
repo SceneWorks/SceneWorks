@@ -137,6 +137,16 @@ pub fn minimax_h3_image_render_tier_dir(
         .map_err(|error| error.to_string())
 }
 
+/// The MiniMax-H3-Image tier an unselected render loads on this host (the densest installed tier,
+/// by the render loader's own installed-ness rule), or `None` when no tier is installed. The API
+/// freezes it into the request so the binding and the loader agree.
+pub fn minimax_h3_image_installed_render_tier(
+    data_dir: &Path,
+    entry: &Value,
+) -> Option<&'static str> {
+    image_jobs::minimax_h3_image::installed_render_tier(entry.as_object()?, data_dir)
+}
+
 /// The tier the worker's portable guard verifies model carrier `slot` against before any loader
 /// runs: the job's admitted selection, else (for an unselected image request of a standard-tier
 /// model) the tier the binding froze. The guard rebuilds the artifact closure from this tier and

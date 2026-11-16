@@ -554,7 +554,12 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
     let entry = shipped_entry();
     std::fs::write(
         config.join("builtin.models.jsonc"),
-        json!({ "schemaVersion": 1, "models": [entry.clone()] }).to_string(),
+        json!({ "schemaVersion": 1, "models": [entry.clone(), Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("z_image_turbo")
+                .expect("z_image_turbo is registered")
+                .clone(),
+        )] })
+        .to_string(),
     )
     .unwrap();
     let settings = test_settings(&temp);
@@ -621,6 +626,7 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
         "{}",
         stored.payload["advanced"]
     );
+    assert_eq!(stored.payload["advanced"]["mlxQuantizeFrozen"], json!(true));
     let binding = state
         .jobs_store
         .portable_model_binding(id)
@@ -658,7 +664,93 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
             .get_job(named["id"].as_str().unwrap())
             .expect("job reads");
         assert_eq!(stored.payload["advanced"]["mlxQuantize"], json!(8));
+        assert!(stored.payload["advanced"]
+            .get("mlxQuantizeFrozen")
+            .is_none());
     }
+    // The marker is server-owned: a client that sends it does not get its value kept; the request
+    // is judged as unselected and the installed tier is frozen.
+    let (status, forged) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job(json!({ "mlxQuantize": 8, "mlxQuantizeFrozen": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{forged}");
+    let stored = state
+        .jobs_store
+        .get_job(forged["id"].as_str().unwrap())
+        .expect("job reads");
+    assert_eq!(stored.payload["advanced"]["mlxQuantize"], json!(4));
+
+    // A duplicate that switches to another model drops the frozen tier: it was never the user's.
+    let (status, switched) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({ "payloadChanges": { "model": "z_image_turbo" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{switched}");
+    let stored = state
+        .jobs_store
+        .get_job(switched["id"].as_str().unwrap())
+        .expect("job reads");
+    assert!(
+        stored.payload["advanced"].get("mlxQuantize").is_none(),
+        "{}",
+        stored.payload["advanced"]
+    );
+    assert!(stored.payload["advanced"]
+        .get("mlxQuantizeFrozen")
+        .is_none());
+
+    // After q4 is removed and q8 installed, a duplicate re-freezes to q8 instead of being refused
+    // for an "explicit" q4 the user never chose.
+    std::fs::remove_dir_all(rehost.join("q4")).unwrap();
+    touch(rehost.join("q8/transformer_diffusers/config.json"));
+    touch(
+        snapshot(
+            "SceneWorks/minimax-h3-mlx",
+            "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+        )
+        .join("q8/text_encoder/config.json"),
+    );
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    let stored = state
+        .jobs_store
+        .get_job(duplicate["id"].as_str().unwrap())
+        .expect("job reads");
+    assert_eq!(stored.payload["advanced"]["mlxQuantize"], json!(8));
+    assert_eq!(stored.payload["advanced"]["mlxQuantizeFrozen"], json!(true));
+
+    // A partial bf16 install (its DiT config but not the fused heads its row declares) is not
+    // installed to the loader either: the frozen tier and the loader's own unselected choice agree.
+    touch(upstream.join("transformer_diffusers/config.json"));
+    let installed = sceneworks_worker::minimax_h3_image_installed_render_tier(
+        &settings.data_dir,
+        &stored.payload["modelManifestEntry"],
+    );
+    assert_eq!(installed, Some("q8"));
+    let mut unselected = stored.payload.clone();
+    unselected.remove("advanced");
+    let loader =
+        sceneworks_worker::minimax_h3_image_render_tier_dir(&settings.data_dir, &unselected)
+            .expect("the loader resolves")
+            .expect("an installed tier");
+    assert_eq!(
+        std::fs::canonicalize(loader).unwrap(),
+        std::fs::canonicalize(rehost.join("q8")).unwrap(),
+        "the loader skips the partial bf16 exactly as the freeze does"
+    );
 }
 
 /// SW-7106: the job door keeps MiniMax-H3-Image's sampler block on the payload the worker reads,

@@ -90,9 +90,41 @@ pub(crate) fn tier_dir(data_dir: &Path, entry: &JsonObject, tier: &str) -> Optio
     })
 }
 
-/// A tier directory holds a loadable DiT when its `transformer_diffusers/config.json` is present.
-fn installed(dir: &Path) -> bool {
-    dir.join(DIT_COMPONENT).join("config.json").is_file()
+/// `tier`'s directory when the tier is INSTALLED: its `transformer_diffusers/config.json` is present
+/// and every file selector its catalog row declares (`transformer_diffusers/*` and
+/// `pdd_fused_heads.safetensors` for bf16, `{tier}/transformer_diffusers/*` for q8/q4) matches a file
+/// in the pinned snapshot. The one installed-ness rule for this model: the render and training
+/// loaders resolve through it and the API freezes an unselected request's tier with it
+/// ([`installed_render_tier`]), so a partial install cannot be one tier to the API and another to
+/// the loader.
+fn installed_tier_dir(data_dir: &Path, entry: &JsonObject, tier: &str) -> Option<PathBuf> {
+    let row = primary_row(entry, tier)?;
+    let dir = tier_dir(data_dir, entry, tier)?;
+    if !dir.join(DIT_COMPONENT).join("config.json").is_file() {
+        return None;
+    }
+    let (repo, revision) = row_identity(&row)?;
+    let snapshot = huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
+    let root = glob::Pattern::escape(&snapshot.to_string_lossy());
+    let complete = row
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .all(|selector| {
+            glob::glob(&format!("{root}/{selector}"))
+                .is_ok_and(|mut paths| paths.any(|path| path.is_ok_and(|path| path.is_file())))
+        });
+    complete.then_some(dir)
+}
+
+/// The tier an unselected render loads on this host: the densest installed one, by the same rule
+/// [`resolve_tier_dir`] applies. The API freezes it into the request as `advanced.mlxQuantize`.
+pub(crate) fn installed_render_tier(entry: &JsonObject, data_dir: &Path) -> Option<&'static str> {
+    TIERS
+        .into_iter()
+        .find(|tier| installed_tier_dir(data_dir, entry, tier).is_some())
 }
 
 /// The tier a resolved directory IS, read back from the catalog rows: the upstream snapshot root
@@ -203,7 +235,7 @@ pub(crate) fn resolve_tier_dir(
     data_dir: &Path,
     explicit: Option<&str>,
 ) -> WorkerResult<Option<PathBuf>> {
-    let installed_dir = |tier: &str| tier_dir(data_dir, entry, tier).filter(|dir| installed(dir));
+    let installed_dir = |tier: &str| installed_tier_dir(data_dir, entry, tier);
     if let Some(tier) = explicit {
         if let Some(dir) = installed_dir(tier) {
             return Ok(Some(dir));
@@ -545,6 +577,7 @@ mod tests {
         assert_eq!(resolved, None, "nothing installed yet");
         for file in [
             "transformer_diffusers/config.json",
+            "pdd_fused_heads.safetensors",
             "vae_diffusers/config.json",
             "tokenizer/tokenizer.json",
         ] {
@@ -672,6 +705,7 @@ mod tests {
         assert!(root.starts_with(temporary.path()));
         for file in [
             "transformer_diffusers/config.json",
+            "pdd_fused_heads.safetensors",
             "vae_diffusers/config.json",
             "tokenizer/tokenizer.json",
         ] {
