@@ -344,3 +344,90 @@ async fn qwen38_describer_throughput_on_cuda() {
         total / paths.len() as f64
     );
 }
+
+/// Decode-path breakdown on one tier: the same text-only prompt decoded greedy without a
+/// constraint (on-device sampling), with the describer's temperature and no constraint, and with
+/// the describer's temperature under the JSON constraint. Comparing the three
+/// `describe_generation_stats` lines separates the model step from sampling and constraint cost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight decode-path benchmark; needs a pinned Candle tier under HF_HUB_CACHE and a CUDA device"]
+async fn qwen38_decode_paths_on_cuda() {
+    use gen_core::core_llm::{Constraint, Message, Sampling, TextLlmRequest, ThinkingMode};
+    sceneworks_core::observability::init_logging();
+    let tier = std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV}"));
+    let tier = tier.trim().to_owned();
+    let temp = tempfile::tempdir().expect("bench tempdir creates");
+    let settings = Settings::for_test(temp.path().join("data"));
+    let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
+        .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
+    let user = "Describe, as a JSON object with the keys \"subject\", \"setting\", \"lighting\", \
+                \"mood\" and \"details\", an old lighthouse on a rocky coast at dusk during a storm. \
+                Each value is a long paragraph of at least eighty words.";
+    use gen_core::core_llm::{Speculative, SpeculativeProposer};
+    let mtp = Some(Speculative::proposer(SpeculativeProposer::Mtp, 3));
+    let cases: [(&str, f32, Option<Constraint>, Option<Speculative>); 7] = [
+        ("warmup", 0.0, None, None),
+        ("greedy_free", 0.0, None, None),
+        ("t0.4_free", 0.4, None, None),
+        ("t0.4_json", 0.4, Some(Constraint::Json), None),
+        ("greedy_free_mtp", 0.0, None, mtp),
+        ("t0.4_free_mtp", 0.4, None, mtp),
+        ("t0.4_json_mtp", 0.4, Some(Constraint::Json), mtp),
+    ];
+    for (label, temperature, constraint, speculative) in cases {
+        let (spec, requirements) = crate::batch_describe_jobs::vision_describer_load(&weights_dir);
+        let started = std::time::Instant::now();
+        let output = crate::refine_model_cache::with_cached_refiner(
+            spec,
+            requirements,
+            "bench load failed",
+            move |model| {
+                let request = TextLlmRequest {
+                    messages: vec![Message::user(user.to_owned())],
+                    sampling: Sampling {
+                        temperature,
+                        top_p: if temperature > 0.0 { 0.9 } else { 1.0 },
+                        ..Sampling::default()
+                    },
+                    max_new_tokens: 400,
+                    constraint,
+                    cancel: CancelFlag::new(),
+                    thinking: ThinkingMode::Disabled,
+                    speculative,
+                    ..Default::default()
+                };
+                Ok(model.generate(&request, &mut |_| {}))
+            },
+        )
+        .await
+        .expect("the model loads")
+        .expect("the model generates");
+        let decode = output
+            .timings
+            .as_ref()
+            .map(|t| t.decode.as_secs_f64())
+            .unwrap_or(0.0);
+        let report = output.decode.as_ref();
+        eprintln!(
+            "DECODE case={label} tier={tier} wall_s={:.1} generated={} decode_s={decode:.2} \
+             tok_s={:.1} sampler={:?} graphs_replayed={:?} graphs_eager={:?} path={:?} attention={:?} fused={:?} graph_path={:?} proposer={:?} proposed={:?} accepted={:?} target_forwards={:?} demoted_at={:?} monitor={:?} fallbacks={:?}",
+            started.elapsed().as_secs_f64(),
+            output.usage.generated_tokens,
+            f64::from(output.usage.generated_tokens) / decode.max(1e-9),
+            report.map(|r| r.sampler.clone()),
+            report.map(|r| r.cuda_graphs.replayed),
+            report.map(|r| r.cuda_graphs.eager),
+            report.map(|r| r.path.clone()),
+            report.map(|r| r.attention.clone()),
+            report.map(|r| r.fused_primitives.clone()),
+            report.map(|r| r.graph_path.clone()),
+            report.map(|r| r.proposer),
+            report.map(|r| r.proposed_tokens),
+            report.map(|r| r.accepted_tokens),
+            report.map(|r| r.target_forwards),
+            report.and_then(|r| r.speculative_demoted_at),
+            report.and_then(|r| r.speculative_monitor.clone()),
+            report.map(|r| r.fallbacks.clone()),
+        );
+    }
+}

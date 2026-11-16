@@ -1093,7 +1093,7 @@ fn emit_generation_stats(job_id: &str, phase: &str, output: &gen_core::core_llm:
 /// requirements, which together are the cache key. Shared with the 27B's memory check so that
 /// check asks the cache about exactly the model the describe call loads.
 #[cfg(native_lane)]
-fn vision_describer_load(
+pub(crate) fn vision_describer_load(
     weights_dir: &Path,
 ) -> (
     gen_core::core_llm::LoadSpec,
