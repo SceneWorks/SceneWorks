@@ -215,6 +215,17 @@ export function rowsNotFitted(rows, fitTo) {
 // The rows "Condense" runs for `fitTo`: exactly the rows that are not fitted.
 export const rowsToCondense = rowsNotFitted;
 
+// The condensable rows whose condensed prompt for `fitTo` is usable but was measured over the
+// target's limit (and not edited since). Condensing samples, so condensing them again can fit.
+export function rowsOverLimit(rows, fitTo) {
+  if (!fitTo) return [];
+  return (rows ?? []).filter((row) => {
+    if (!condensable(row)) return false;
+    const condensed = condensedFor(row, fitTo);
+    return Boolean(condensed?.over) && !condensed.edited;
+  });
+}
+
 // What a condense-only or measure-only request carries for a row: its fields as edited, its size,
 // its cut-off notice, and for measuring its edited condensed prompt.
 export function condenseRequestRow(row, { measure = false } = {}) {
@@ -342,8 +353,24 @@ export function promptBatchPayload({ rows, name, dataset, fitTo = null }) {
 // prompt made stale by a field edit, or the editable condensed prompt with its size against the
 // target's limit (with room for each variable value) and an over-limit warning. An edited prompt
 // shows its live character count, never its old token count or verdict, and offers to measure it.
-function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange, onMeasure }) {
+function CondensedPrompt({ row, target, busy, running, measureBlocked, condenseBlockedBy, onChange, onMeasure, onCondense }) {
   if (row.failed) return null;
+  // Condense this one row again on its own describer (a fresh sample of the rewrite).
+  const condenseAgain = (
+    <>
+      {" "}
+      <button
+        className="secondary-action"
+        data-row-action="condense-again"
+        disabled={busy || Boolean(condenseBlockedBy)}
+        onClick={() => onCondense(row)}
+        title={condenseBlockedBy || undefined}
+        type="button"
+      >
+        Condense again
+      </button>
+    </>
+  );
   if (!condensable(row)) {
     return (
       <p className="dataset-caption-mode-note" data-row-note="not-condensed">
@@ -358,6 +385,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
       <p className="inline-warning" data-row-note="condense-interrupted">
         Condensing failed for this image (the job stopped while condensing it), so its seven described fields are kept.
         Condense it, or turn Fit to off.
+        {condenseAgain}
       </p>
     );
   }
@@ -365,6 +393,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
     return (
       <p className="inline-warning" data-row-note="not-condensed">
         {row.provisional ? `Condensing for ${target.name}…` : `Not condensed for ${target.name} yet.`}
+        {row.provisional ? null : condenseAgain}
       </p>
     );
   }
@@ -372,6 +401,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
     return (
       <p className="inline-warning" data-row-note="condense-failed">
         {condensed.notice || "Condensing failed, so the seven fields are saved."}
+        {condenseAgain}
       </p>
     );
   }
@@ -379,6 +409,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
     return (
       <p className="inline-warning" data-row-note="condense-stale">
         Fields changed since this was condensed, so this prompt is not used. Condense again.
+        {condenseAgain}
       </p>
     );
   }
@@ -394,6 +425,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
         {textarea}
         <p className="inline-warning" data-row-note="condensed-empty">
           The condensed prompt is empty, so this row cannot be saved for {target.name}. Type a prompt or condense again.
+          {condenseAgain}
         </p>
       </>
     );
@@ -422,6 +454,7 @@ function CondensedPrompt({ row, target, busy, running, measureBlocked, onChange,
         {size ?? "Tokens not measured"}
         {estimate && condensed.estimateReason ? ` (${size ? "estimated: " : ""}${condensed.estimateReason})` : estimate && size ? " (estimated)" : ""}
         .{condensed.notice ? ` ${condensed.notice}` : ""}
+        {condensed.over ? condenseAgain : null}
       </p>
     </>
   );
@@ -468,6 +501,13 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [rows, setRows] = useState([]);
   const [job, setJob] = useState(null);
   const [rerunItemId, setRerunItemId] = useState(null);
+  // How many images the job this dialog started works on, until the job reports its own count, so
+  // a one-row condense never reads as the whole dataset while the model loads.
+  const [requestedCount, setRequestedCount] = useState(null);
+  // What that job does ("describe", "condense" or "measure"), for a job whose payload is not served.
+  const [requestedKind, setRequestedKind] = useState(null);
+  // Show only the rows that need attention for the active Fit to target.
+  const [attentionOnly, setAttentionOnly] = useState(false);
   const [runError, setRunError] = useState("");
   const [runMessage, setRunMessage] = useState("");
   const [batchName, setBatchName] = useState(() => `${dataset?.name ?? "Dataset"} prompts`);
@@ -634,7 +674,19 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   const running = Boolean(job) && !terminalStatuses.has(job.status);
   const result = job?.result ?? null;
-  const itemCount = result?.itemCount ?? (rerunItemId ? 1 : datasetOrder.length);
+  const itemCount =
+    result?.itemCount ??
+    (Array.isArray(job?.payload?.items) ? job.payload.items.length : null) ??
+    requestedCount ??
+    (rerunItemId ? 1 : datasetOrder.length);
+  // What the job does: a condense-only or measure-only job describes nothing.
+  const jobKind = job?.payload?.measureOnly
+    ? "measure"
+    : job?.payload?.condenseOnly
+      ? "condense"
+      : job?.payload
+        ? "describe"
+        : (requestedKind ?? "describe");
   const processedCount = result?.processedCount ?? 0;
   const progressPercent = Math.round(Math.max(0, Math.min(1, Number(job?.progress) || 0)) * 100);
 
@@ -929,7 +981,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       }
       if (!itemIds && !condense) setRows([]);
       itemsRead.current = { jobId: created.id, count: 0, provisional: new Set() };
-      setRerunItemId(itemIds?.length === 1 ? itemIds[0] : null);
+      setRerunItemId(!condense && itemIds?.length === 1 ? itemIds[0] : null);
+      setRequestedCount(condense ? condense.rows.length : (itemIds?.length ?? datasetOrder.length));
+      setRequestedKind(condense ? (condense.measure ? "measure" : "condense") : "describe");
       setJob(created);
       await monitor(created.id);
     } finally {
@@ -995,6 +1049,19 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     await runCondenseParts(target, pending);
   }
 
+  // Condense again the rows whose condensed prompt came back over the limit (a fresh sample).
+  async function condenseOverLimit() {
+    const over = rowsOverLimit(rows, fitTo);
+    if (!fitTo || !over.length) return;
+    await runCondenseParts(fitTo, over);
+  }
+
+  // Condense one row again, whatever its condensed state.
+  async function condenseRow(row) {
+    if (!fitTo || !condensable(row)) return;
+    await runCondenseParts(fitTo, [row]);
+  }
+
   // Re-count one edited condensed prompt with the target's tokenizer; nothing is generated.
   async function measureRow(row) {
     if (!fitTo) return;
@@ -1041,10 +1108,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Rows that would save without a condensed prompt matching their fields: Save/Export wait.
   const unfitted = useMemo(() => rowsNotFitted(rows, activeFitTo), [rows, activeFitTo]);
   // Saved with a condensed prompt still over the limit after the retry: reported, never fitting.
-  const overLimit = useMemo(
-    () => (activeFitTo ? rows.filter((row) => { const c = condensedFor(row, activeFitTo); return c?.over && !c.edited; }).length : 0),
-    [rows, activeFitTo],
+  const overLimitRows = useMemo(() => rowsOverLimit(rows, activeFitTo), [rows, activeFitTo]);
+  const overLimit = overLimitRows.length;
+  // The rows the "needs attention" filter shows: not fitted, or over the limit.
+  const attentionIds = useMemo(
+    () => new Set([...unfitted, ...overLimitRows].map((row) => row.itemId)),
+    [unfitted, overLimitRows],
   );
+  const showAttentionOnly = attentionOnly && attentionIds.size > 0;
+  const shownRows = showAttentionOnly ? rows.filter((row) => attentionIds.has(row.itemId)) : rows;
   // Saved with a condensed prompt edited since it was measured.
   const unmeasured = useMemo(
     () => (activeFitTo ? rows.filter((row) => condensedFor(row, activeFitTo)?.edited).length : 0),
@@ -1097,8 +1169,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     onClose();
   }
 
+  // Export always writes what the table holds: a row without a usable condensed prompt is written
+  // as its seven fields (the note above says how many), so an unfinished batch is never stuck here.
   async function exportJson() {
-    if (!savedBatch && unfitted.length) return;
+    if (!savedBatch && !usableCount) return;
     setSaveError("");
     const batch = savedBatch ?? payload();
     const slug = (batch.name || "prompt-batch").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1138,6 +1212,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     return "";
   };
   const pendingCondenseIssue = condenseRowsIssue(pendingCondense);
+  const overLimitIssue = condenseRowsIssue(overLimitRows);
+  // Why one row's "Condense again" cannot start, or "".
+  const rowCondenseIssue = (row) =>
+    condenseBlocked ? "Condensing is unavailable right now." : condenseRowsIssue([row]);
   // Measuring re-counts an edited condensed prompt with the target's tokenizer and loads no
   // describer (the job is model-free), so it never waits on a describer or tier being installed.
   // A target whose tokenizer is missing answers "not measured" on the row.
@@ -1316,11 +1394,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             <progress aria-label="Describe progress" max={100} value={progressPercent} />
             <span>
               {(() => {
-                const [doing, done] = job.payload?.measureOnly
-                  ? ["Measuring", "Measured"]
-                  : job.payload?.condenseOnly
-                    ? ["Condensing", "Condensed"]
-                    : ["Describing", "Described"];
+                const [doing, done] =
+                  jobKind === "measure"
+                    ? ["Measuring", "Measured"]
+                    : jobKind === "condense"
+                      ? ["Condensing", "Condensed"]
+                      : ["Describing", "Described"];
                 return running ? doing : job.status === "completed" ? done : `Job ${job.status}`;
               })()}
               : {processedCount} of {itemCount} {itemCount === 1 ? "image" : "images"}
@@ -1348,7 +1427,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
         {rows.length ? (
           <div className="dataset-prompt-batch-table" role="table" aria-label="Described images">
-            {rows.map((row) => {
+            {shownRows.map((row) => {
               const ratio = snapRatio(row.width, row.height);
               const rerunBlockedBy = rerunIssue(row);
               return (
@@ -1389,7 +1468,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                         busy={busy}
                         running={running}
                         measureBlocked={measureBlocked}
+                        condenseBlockedBy={rowCondenseIssue(row)}
                         onChange={updateCondensed}
+                        onCondense={condenseRow}
                         onMeasure={measureRow}
                         row={row}
                         target={fitTarget}
@@ -1439,14 +1520,24 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               <p className="inline-warning" data-save-note="not-fitted" role="status">
                 {unfitted.length} {unfitted.length === 1 ? "row has" : "rows have"} no usable condensed prompt for {fitTarget.name}{" "}
                 (not condensed yet, condensing failed, fields changed since, or the prompt is empty). Condense{" "}
-                {unfitted.length === 1 ? "it" : "them"}, or turn Fit to off to save the seven fields.
+                {unfitted.length === 1 ? "it" : "them"}, or turn Fit to off to save the seven fields. Export writes{" "}
+                {unfitted.length === 1 ? "it" : "them"} as the seven fields.
               </p>
             ) : null}
             {overLimit ? (
               <p className="inline-warning" data-save-note="over" role="status">
                 {overLimit} condensed {overLimit === 1 ? "prompt is" : "prompts are"} still over the limit for {fitTarget.name}; the image
-                model will refuse {overLimit === 1 ? "it" : "them"} until shortened.
+                model will refuse {overLimit === 1 ? "it" : "them"} until shortened. Condense {overLimit === 1 ? "it" : "them"} again
+                for a new attempt, or edit {overLimit === 1 ? "it" : "them"}.
               </p>
+            ) : null}
+            {attentionIds.size ? (
+              <label className="training-toggle-line" data-save-note="attention-filter">
+                <input checked={attentionOnly} onChange={(event) => setAttentionOnly(event.target.checked)} type="checkbox" />
+                <span>
+                  Show only the {attentionIds.size} {attentionIds.size === 1 ? "row" : "rows"} that need attention
+                </span>
+              </label>
             ) : null}
             {unmeasured ? (
               <p className="dataset-caption-mode-note" data-save-note="unmeasured" role="status">
@@ -1470,7 +1561,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             ) : null}
             <button
               className="secondary-action"
-              disabled={!usableCount || running || (!savedBatch && unfitted.length > 0)}
+              disabled={!usableCount || running}
               onClick={exportJson}
               type="button"
             >
@@ -1503,13 +1594,24 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                 Condense for {fitTarget.name} ({pendingCondense.length})
               </button>
             ) : null}
+            {overLimit ? (
+              <button
+                className="secondary-action"
+                disabled={condenseBlocked || Boolean(overLimitIssue)}
+                onClick={condenseOverLimit}
+                title={overLimitIssue || undefined}
+                type="button"
+              >
+                Condense over-limit again ({overLimit})
+              </button>
+            ) : null}
             {rows.length && remainingIds.length ? (
               <button className="secondary-action" disabled={runBlocked} onClick={() => submit(remainingIds)} type="button">
                 Describe remaining ({remainingIds.length})
               </button>
             ) : null}
             <button className="primary-action" disabled={runBlocked} onClick={describeAll} type="button">
-              {running && !rerunItemId ? "Describing…" : rows.length ? "Describe all again" : "Describe images"}
+              {running && !rerunItemId && jobKind === "describe" ? "Describing…" : rows.length ? "Describe all again" : "Describe images"}
             </button>
           </span>
         </footer>
