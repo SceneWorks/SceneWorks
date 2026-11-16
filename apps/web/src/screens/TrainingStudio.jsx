@@ -273,22 +273,22 @@ export function trainingSampleGroups(job, projectId) {
 }
 
 // A live Iris run's holdout validation (sc-25689), re-read while it trains.
-function LiveIrisMetrics({ job, token }) {
-  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live: true })} />;
+function LiveIrisMetrics({ job, token, live = true }) {
+  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
+function TrainingLiveProgress({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
   if (!jobs.length) {
     return null;
   }
   return (
-    <section className="training-live-panel" aria-label="Active training progress">
+    <section className="training-live-panel" aria-label={completed ? "Completed training runs" : "Active training progress"}>
       <div className="training-live-title">
         <div>
           <p className="eyebrow">Runs</p>
-          <h3>Training in progress</h3>
+          <h3>{completed ? "Completed training runs" : "Training in progress"}</h3>
         </div>
-        <span>{jobs.length} active</span>
+        <span>{jobs.length} {completed ? "completed" : "active"}</span>
       </div>
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
@@ -304,9 +304,10 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
                 thumbnailGroups={sampleGroups}
                 expectedThumbnailCount={4}
                 onCancel={onCancel}
+                onContinueTraining={onContinueTraining}
                 onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
               />
-              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} /> : null}
+              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} live={!completed} /> : null}
             </React.Fragment>
           );
         })}
@@ -722,6 +723,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       jobs
         .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && !terminalStatuses.has(job.status))
         .slice(0, 3),
+    [activeProject?.id, jobs],
+  );
+  const completedTrainingJobs = useMemo(
+    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed" && job.payload?.dryRun !== true).slice(0, 5),
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
@@ -2462,6 +2467,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   projectId={activeProject?.id}
                   token={token}
                   onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
+                  onPreview={setPreviewAsset}
+                />
+                <TrainingLiveProgress
+                  jobs={completedTrainingJobs}
+                  projectId={activeProject?.id}
+                  token={token}
+                  completed
+                  onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined}
                   onPreview={setPreviewAsset}
                 />
               </>

@@ -1,4 +1,5 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { canContinueTraining, ContinueTrainingAction } from "./ContinueTrainingAction.jsx";
 import { AssetVedaOutcome, VedaOutcome } from "./VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
@@ -722,6 +723,7 @@ export function WorkerProgressCard({
   onRetry,
   onFreshRetry,
   onDuplicate,
+  onContinueTraining,
   onOpenQueue,
   hideOpenQueue = false,
   allowTitleExpansion = false,
@@ -954,6 +956,9 @@ export function WorkerProgressCard({
             Resume from step {resumeStep}
           </button>
         ) : null}
+        {onContinueTraining && canContinueTraining(job) ? (
+          <ContinueTrainingAction key={job.id} job={job} onContinue={onContinueTraining} />
+        ) : null}
         {canRetry ? (
           <button
             className="secondary-action"
@@ -992,6 +997,12 @@ export function WorkerProgressCard({
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
       </div>
+      {typeof job.payload?.continuation?.sourceJobId === "string" && Number.isInteger(job.payload.continuation.initialStep) ? (
+        <p className="worker-progress-card__continuation">
+          Continues run <code>{job.payload.continuation.sourceJobId}</code> from step {job.payload.continuation.initialStep}.
+          {" "}Original LoRA preserved.
+        </p>
+      ) : null}
       {thumbnailAssets?.[0]?.recipe?.rawAdapterSettings?.vedaExecution ? (
         <AssetVedaOutcome asset={thumbnailAssets[0]} />
       ) : (

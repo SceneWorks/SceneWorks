@@ -437,7 +437,7 @@ crates/media/candle-gen/candle-gen/src/quant/nvfp4_kitchen.rs	1592172ef7c1a181c1
 crates/media/candle-gen/candle-gen/src/sampler.rs	c2124dc29a1a96c2785d438103fc14f2067d0a98	57520dadd77574972f3a310bb0a3e4fb7ab5abdbb7ae346cc5bd3ef4b415da73	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/seed.rs	cdf2e6e41af0e4d5f56aee5b3b70687cf6fc0e62	b6d25a3c22c29b04cc4113f036f7ae77e9c70fc564ffbb9785ae0659bce562f3	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/train/dataset.rs	6db5bd26f49e03632dcb88b188efc58cea065ce8	4307d189474bbe675bd5b4b098720659c8ad0879e0f11d808d49b75e002ce414	architecture:crates/media/candle-gen/candle-gen
-crates/media/candle-gen/candle-gen/src/train/flow_match.rs	3424967ca9b2165ef503e4e06b5b5b367e392f25	7294eafc9437a5221982512bb13f41304314efd7b09946be9ef98bfe2d42d1b4	architecture:crates/media/candle-gen/candle-gen
+crates/media/candle-gen/candle-gen/src/train/flow_match.rs	b0c8ba0dd89e34dbd1410fb088ffd45b9da15c6e	7294eafc9437a5221982512bb13f41304314efd7b09946be9ef98bfe2d42d1b4	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/train/latent_lpips.rs	c9b9be63ee953aabb62cdb5a3b29df0f49125276	66a666f0a533b9e30fc274055f28f6237445ef4d4978e4c30b948ea5ce4d6620	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/train/lora.rs	61feca3f23526d02d50293cf2cbeed659073722b	b69d745bc4134327ad32b227761c7d4e9ab8e1ffe5c2dc5efb00beaf800f15b9	architecture:crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen/src/train/merge.rs	924cad5fa2a6a8c4e95dbd9666d992e0865a8007	74ddda906702769004cc8d3d8d4a216df90a0871da2a26ed011ac5c5c51f21ac	architecture:crates/media/candle-gen/candle-gen
