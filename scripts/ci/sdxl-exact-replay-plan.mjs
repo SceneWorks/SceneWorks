@@ -12,7 +12,7 @@ import { RUNTIME_INPUTS } from './sdxl-exact-replay-census.mjs';
 import { REQUEST, digest, validatePlan } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = '101975c301686467f089cf8c0e3c4a9e33846b6d';
+const PIN = 'da00c5a8f14cc8d65b90e5a97a57fd43d66f814b';
 let stage = 'dispatch';
 
 export function validatePlanDispatch(raw) {
