@@ -21,7 +21,7 @@ import { isMossImage, mossDefaults, mossWireOptions, mossPresetWithOrdinarySetti
 import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
 import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
+import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -3098,11 +3098,13 @@ export function ImageStudio() {
                   // sc-6211: FLUX.2-dev multi-reference edit — pick 1–N reference images that the
                   // model combines/edits (Conditioning::MultiReference). Sends the plural
                   // `referenceAssetIds`; a single pick reduces to the normal single-reference edit.
-                  <AssetPickerField
+                  <ImageEditSourcePickerField
                     assets={editImageAssets}
                     buttonLabel="Select images"
                     changeLabel="Edit references"
+                    characters={characters}
                     emptyLabel="No reference images selected"
+                    importAsset={importAsset}
                     label={
                       maxStudioReferences != null
                         ? `Reference images (up to ${maxStudioReferences}, in order)`
@@ -3110,6 +3112,7 @@ export function ImageStudio() {
                     }
                     multiple
                     onChange={changeReferenceAssetIds}
+                    projectId={activeProject?.id}
                     values={referenceAssetIds}
                   />
                 ) : null}
@@ -3164,14 +3167,17 @@ export function ImageStudio() {
                       </>
                     ) : null}
                     {sourceWithMultiReference ? (
-                      <AssetPickerField
+                      <ImageEditSourcePickerField
                         assets={editImageAssets}
                         buttonLabel="Select references"
                         changeLabel="Edit references"
+                        characters={characters}
                         emptyLabel="No additional references selected (optional)"
+                        importAsset={importAsset}
                         label="Additional references (optional)"
                         multiple
                         onChange={changeReferenceAssetIds}
+                        projectId={activeProject?.id}
                         values={referenceAssetIds}
                       />
                     ) : null}
