@@ -9425,17 +9425,23 @@ mod tests {
             );
         }
 
-        let forged = parse(plan_json(
-            dir.path(),
-            "kolors_lora",
-            "anima_base",
-            "lora",
-            &[&image],
-        ));
-        assert!(preflight_training_run(&settings, &forged, false)
-            .expect_err("a forged kernel/base pairing must fail")
-            .to_string()
-            .contains("No native trainer"));
+        let mut forged = plan_json(dir.path(), "kolors_lora", "kolors", "lora", &[&image]);
+        let kolors = sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.kernel == "kolors_lora" && target.base_model == "kolors")
+            .expect("Kolors training target ships");
+        forged["config"] = serde_json::to_value(&kolors.defaults).unwrap();
+        forged["target"]["baseModel"] = json!("anima_base");
+        let error = preflight_training_run(&settings, &parse(forged), false)
+            .expect_err("a forged kernel/base pairing must fail");
+        match error {
+            WorkerError::Validation(refusal) => {
+                assert_eq!(refusal.field, "target.baseModel");
+                assert!(refusal.detail.contains("authoritative target"), "{refusal}");
+            }
+            other => panic!("expected authoritative target refusal: {other}"),
+        }
 
         let mut unsupported_network =
             plan_json(dir.path(), "wan_lora", "wan_2_2", "lokr", &[&image]);

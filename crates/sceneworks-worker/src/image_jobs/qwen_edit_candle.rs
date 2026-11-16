@@ -1806,7 +1806,13 @@ mod qwen_edit_tier_reconcile_tests {
             "advanced": advanced,
         });
         let payload = value.as_object().unwrap();
-        ImageRequest::from_resolved(payload, payload).unwrap()
+        let mut effective = payload.clone();
+        if let Some(advanced) = effective.get_mut("advanced").and_then(Value::as_object_mut) {
+            if advanced.get("phases").is_some_and(Value::is_null) {
+                advanced.remove("phases");
+            }
+        }
+        ImageRequest::from_resolved(payload, &effective).unwrap()
     }
 
     /// The real manifest shape for both live edit ids (config/manifests/builtin.models.jsonc): the

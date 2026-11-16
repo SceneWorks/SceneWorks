@@ -14596,16 +14596,11 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
             "advanced": { "modelPath": model_path.clone(), "poses": malformed }
         }));
     }
-    let malformed_pose = request(json!({
+    assert_invalid_effective_options(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "keep the person",
         "mode": "character_image", "referenceAssetId": "identity", "count": 1,
         "advanced": { "modelPath": model_path.clone(), "poses": [{}, null] }
     }));
-    assert!(!flux2_edit_candle_available(&malformed_pose, &settings));
-    assert_eq!(
-        resolve_candle_image_route(&malformed_pose, &settings),
-        Some(CandleImageRoute::PoseReject)
-    );
 
     let qwen_pose = request(json!({
         "projectId": "p", "model": "qwen_image_edit_2511_lightning",
@@ -14630,15 +14625,11 @@ fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_
         "Qwen pose plans must reserve one streamed result per pose"
     );
 
-    let malformed_qwen = request(json!({
+    assert_invalid_effective_options(json!({
         "projectId": "p", "model": "qwen_image_edit_2511_lightning",
         "mode": "character_image", "referenceAssetId": "identity",
         "advanced": { "poses": false }
     }));
-    assert_eq!(
-        resolve_candle_image_route(&malformed_qwen, &settings),
-        Some(CandleImageRoute::PoseReject)
-    );
 
     for (mode, references) in [
         ("edit_image", json!({ "sourceAssetId": "source" })),
