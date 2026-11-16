@@ -997,7 +997,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 -- bash scripts/ci/memory-catalog/run.sh
-          if ($LASTEXITCODE -ne 0) { throw 'owned CUDA catalog walk failed' }
+          $walkStatus = $LASTEXITCODE
+          if ($walkStatus -ne 0) {
+            # The wrapper prints one JSON line; its receipt (error, child exit) and the walk's own
+            # log and failing cases are printed here, and the receipt is copied into the work dir.
+            node scripts/ci/memory-catalog/walk-report.mjs --work-dir "$env:WORK_DIR_NATIVE" --receipt "$env:RUNNER_TEMP\sceneworks-cuda-execution-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-memory-catalog-candle\resource-receipt.json"
+            throw "owned CUDA catalog walk failed (exit $walkStatus)"
+          }
 
       - name: Push whatever landed
         if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}

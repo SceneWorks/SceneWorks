@@ -319,6 +319,33 @@ class FunctionalAdmissionTests(unittest.TestCase):
                 self.assertEqual(receipt["binding_rechecked"]["devices"][0]["index"], 1)
         self.guard.verify_idle.assert_not_called()
 
+    def test_main_prints_its_own_failure_reason_and_child_exit_into_the_job_log(self):
+        import contextlib, io
+        cases = [(Mock(side_effect=TimeoutError("exact GPU UUID lock/idle wait exhausted the existing execution budget")),
+                  {"error": "TimeoutError: exact GPU UUID lock/idle wait exhausted the existing execution budget"}),
+                 (Mock(return_value=([self.two], [], {"GPU-two": {}}, 0)),
+                  {"child": {"returncode": 2, "timeout": False, "owned_tree_empty": True}})]
+        for attempt, (claim, expected) in enumerate(cases, 1):
+            env = dict(self.environment, GITHUB_RUN_ID=str(40 + attempt), GITHUB_RUN_ATTEMPT="1",
+                       RUNNER_TEMP=str(self.out), PUBLIC=str(self.out))
+            binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+            printed = io.StringIO()
+            with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+                 patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                     "--cuda-ordinals", "0", "--", "bash", "scripts/ci/memory-catalog/run.sh"]), \
+                 patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+                 patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+                 patch.object(shared, "resolve_binding", return_value=binding), \
+                 patch.object(shared, "claim_uuids", claim), \
+                 patch.object(shared, "release_transaction"), \
+                 patch.object(shared, "execute_owned", Mock(return_value=expected.get("child"))), \
+                 contextlib.redirect_stdout(printed):
+                self.assertNotEqual(shared.main(), 0)
+            line = json.loads(printed.getvalue().strip().splitlines()[-1])
+            self.assertIs(line["resource_completed"], False)
+            for key, value in expected.items():
+                self.assertEqual(line[key], value)
+
     def test_owned_timeout_terminates_only_the_assigned_job_and_waits_for_empty_tree(self):
         child = Mock(); child.wait.side_effect = subprocess.TimeoutExpired("owned", 1)
         job = Mock()
