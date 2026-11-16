@@ -178,6 +178,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
           $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
           if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
+          $binaryHash = (Get-FileHash -LiteralPath $env:SDXL_REPLAY_BINARY -Algorithm SHA256).Hash
+          Write-Host "Compiled SDXL API SHA256: $binaryHash"
           $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-census-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
           $env:SDXL_REPLAY_CENSUS_REPORT = $output
           Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_CENSUS_REPORT=$output"

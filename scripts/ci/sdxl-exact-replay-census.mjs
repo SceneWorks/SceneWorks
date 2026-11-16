@@ -193,8 +193,10 @@ async function main() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     const reason = publicReasons.has(error?.message) ? ' (' + error.message + ')' : '';
-    const fileError = stage === 'binding-binary' && ['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error?.code)
-      ? ` (${error.code})` : '';
+    const fileError = stage === 'binding-binary'
+      ? ` (${[error?.name, error?.code, error?.syscall].filter((value) => typeof value === 'string')
+        .map((value) => value.replace(/[^A-Za-z0-9_]/g, '')).filter(Boolean).join('/') || 'unknown error'})`
+      : '';
     console.error('SDXL runtime census failed at ' + stage + (reason || fileError) + '. No job or model was started.');
     process.exitCode = 1;
   });
