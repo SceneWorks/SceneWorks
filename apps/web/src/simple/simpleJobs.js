@@ -384,6 +384,10 @@ export function buildSimpleAudioRequest({ model, prompt, mode, voice, durationSe
 // ([`simpleSentArmedReferenceId`], the one gate `buildSimpleImageRequest` routes through): a
 // reference retained from another model on a model with no img2img (MiniMax-H3-Image) is dropped
 // by Generate, so the rewriter must not pick its edit workflow for it either.
+//
+// The ordered list is sent only on the EDIT tab (`buildSimpleImageRequest` sets `multiReference`
+// for `edit_image` alone), so references kept after switching to text-to-image are not the
+// rewriter's either: there it sees only what the text request sends (an img2img reference, if any).
 export function simpleRewriteReferenceIds({
   supportsOrderedReferences,
   orderedReferenceIds = [],
@@ -392,7 +396,9 @@ export function simpleRewriteReferenceIds({
   model = "",
   supportsImg2img = false,
 }) {
-  if (supportsOrderedReferences) return [...orderedReferenceIds];
+  if (supportsOrderedReferences && mode === "edit_image" && orderedReferenceIds.length) {
+    return [...orderedReferenceIds];
+  }
   const armed = simpleSentArmedReferenceId({ mode, model, supportsImg2img, referenceAssetId });
   return armed ? [armed] : [];
 }

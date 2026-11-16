@@ -1,6 +1,79 @@
 //! SW-7100 (feature SW-F363): MiniMax-H3-Image at the image-job door — the run-time licence gate
 //! (E23) and this model's own size envelope (E25).
 use super::support::*;
+use sceneworks_core::contracts::{JobType, JsonObject};
+
+/// Run the WORKER's portable guard selection against what the API admitted: for every frozen
+/// route, the tier the guard re-derives for `model_id`'s carrier (`portable_guard_runtime_variant`)
+/// must rebuild an artifact closure whose primary row is the bound tier and source — otherwise the
+/// worker refuses the binding before any loader runs. Returns the bound tier, which every route
+/// must agree on.
+pub(crate) fn assert_worker_guard_accepts(
+    job_type: &JobType,
+    payload: &JsonObject,
+    binding: &Value,
+    model_id: &str,
+) -> String {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableJobBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::ArtifactMemberRole;
+    let binding: PortableJobBinding = serde_json::from_value(binding.clone()).unwrap();
+    assert!(!binding.routes.is_empty(), "the job is bound");
+    let mut tiers = std::collections::BTreeSet::new();
+    for (key, route) in &binding.routes {
+        let model = route
+            .models
+            .iter()
+            .find(|model| model.model_id == model_id)
+            .unwrap_or_else(|| panic!("{key} binds {model_id}"));
+        let entry = Value::Object(payload.clone())
+            .pointer(&format!("/{}", model.slot))
+            .cloned()
+            .unwrap_or_else(|| panic!("{key}: payload carries {}", model.slot));
+        let variant = sceneworks_worker::portable_guard_runtime_variant(
+            job_type,
+            payload,
+            &model.slot,
+            &entry,
+            Some(model),
+        )
+        .unwrap();
+        let closure =
+            sceneworks_core::model_artifacts::artifact_selection::selected_portable_model_artifact_closure(
+                &entry,
+                &route.backend,
+                &route.platform,
+                variant.as_deref(),
+                payload,
+            )
+            .unwrap();
+        let primary_row = closure["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .unwrap_or_else(|| panic!("{key}: the worker's closure has a primary"))
+            .clone();
+        assert_eq!(
+            primary_row["variant"], model.variant,
+            "{key}: the worker guard rebuilds the bound tier"
+        );
+        let primary = model
+            .members
+            .iter()
+            .find(|member| member.role == ArtifactMemberRole::Primary)
+            .unwrap();
+        let PortableSourceIdentity::Revision { identity } = &primary.source else {
+            panic!("{key}: a pinned primary");
+        };
+        assert_eq!(primary_row["repo"], identity.repository.as_str(), "{key}");
+        assert_eq!(primary_row["revision"], identity.revision.as_str(), "{key}");
+        tiers.insert(model.variant.clone());
+    }
+    assert_eq!(tiers.len(), 1, "every route binds one tier: {tiers:?}");
+    tiers.into_iter().next().unwrap()
+}
 
 fn shipped_entry() -> Value {
     let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -400,6 +473,20 @@ async fn an_unselected_expansion_freezes_the_installed_expander_tier() {
         .portable_model_binding(job["id"].as_str().unwrap())
         .expect("binding reads")
         .expect("the expansion is bound");
+    let stored = state
+        .jobs_store
+        .get_job(job["id"].as_str().unwrap())
+        .expect("job reads");
+    assert_eq!(
+        assert_worker_guard_accepts(
+            &JobType::PromptRefine,
+            &stored.payload,
+            &binding,
+            "minimax_h3_image_pe"
+        ),
+        "q4",
+        "the worker's portable guard accepts the admitted q4 expander"
+    );
     let routes = binding["routes"].as_object().expect("bound routes");
     assert!(!routes.is_empty(), "{binding}");
     for (key, route) in routes {
@@ -451,6 +538,127 @@ async fn an_unselected_expansion_freezes_the_installed_expander_tier() {
             }),
         "{local}"
     );
+}
+
+/// PR #3418 review: a headless image request that names no tier, with only H3-Image's q4 tier
+/// installed, freezes q4 as its explicit `advanced.mlxQuantize` (H3-Image declares no
+/// `mlx.standardTierLayout`, so admission's implicit rule would bind bf16). The binding, the
+/// worker's portable guard and the render loader then all select q4. The request that names a tier
+/// keeps its own.
+#[tokio::test]
+async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_entry();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    // A q4-only install: the upstream snapshot's VAE/tokenizer/processor, the re-host's q4 DiT and
+    // MiniMax-H3's q4 text encoder. No bf16 DiT.
+    let snapshot = |repo: &str, revision: &str| {
+        let root = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+            .unwrap();
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs").join("main"), revision).unwrap();
+        root.join("snapshots").join(revision)
+    };
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    };
+    let upstream = snapshot(
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    for file in [
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+        "processor/processor_config.json",
+    ] {
+        touch(upstream.join(file));
+    }
+    let rehost = snapshot(
+        "SceneWorks/minimax-h3-image-mlx",
+        "6f62669b919bccdbf51b08c696fbb84542000a87",
+    );
+    touch(rehost.join("q4/transformer_diffusers/config.json"));
+    touch(
+        snapshot(
+            "SceneWorks/minimax-h3-mlx",
+            "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+        )
+        .join("q4/text_encoder/config.json"),
+    );
+    let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 q4").await;
+    let job = |advanced: Value| {
+        json!({
+            "projectId": project["id"], "model": "minimax_h3_image", "prompt": "a lighthouse",
+            "width": 2048, "height": 2048, "advanced": advanced,
+        })
+    };
+
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", job(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let stored = state.jobs_store.get_job(id).expect("job reads");
+    assert_eq!(
+        stored.payload["advanced"]["mlxQuantize"],
+        json!(4),
+        "{}",
+        stored.payload["advanced"]
+    );
+    let binding = state
+        .jobs_store
+        .portable_model_binding(id)
+        .expect("binding reads")
+        .expect("the render is bound");
+    assert_eq!(
+        assert_worker_guard_accepts(
+            &JobType::ImageGenerate,
+            &stored.payload,
+            &binding,
+            "minimax_h3_image"
+        ),
+        "q4"
+    );
+    let dir =
+        sceneworks_worker::minimax_h3_image_render_tier_dir(&settings.data_dir, &stored.payload)
+            .expect("the loader resolves")
+            .expect("an installed tier");
+    assert_eq!(
+        std::fs::canonicalize(dir).unwrap(),
+        std::fs::canonicalize(rehost.join("q4")).unwrap()
+    );
+
+    // A request that names its tier keeps it (here an uninstalled q8, refused later by name).
+    let (status, named) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job(json!({ "mlxQuantize": 8 })),
+    )
+    .await;
+    if status == StatusCode::CREATED {
+        let stored = state
+            .jobs_store
+            .get_job(named["id"].as_str().unwrap())
+            .expect("job reads");
+        assert_eq!(stored.payload["advanced"]["mlxQuantize"], json!(8));
+    }
 }
 
 /// SW-7106: the job door keeps MiniMax-H3-Image's sampler block on the payload the worker reads,

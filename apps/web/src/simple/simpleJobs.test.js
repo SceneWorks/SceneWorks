@@ -443,6 +443,7 @@ describe("simpleRewriteReferenceIds", () => {
         supportsOrderedReferences: true,
         orderedReferenceIds: ["a", "b", "c"],
         referenceAssetId: "a",
+        mode: "edit_image",
       }),
     ).toEqual(["a", "b", "c"]);
     expect(
@@ -466,6 +467,36 @@ describe("simpleRewriteReferenceIds", () => {
     const request = buildSimpleImageRequest({ ...inputs, prompt: "a lighthouse", resolution: "1024x1024", count: 1 });
     expect(request.sourceAssetId ?? null).toBeNull();
     expect(JSON.stringify(request)).not.toContain("kept");
+  });
+
+  // PR #3418 review: references attached on the H3-Image Edit tab survive a switch to
+  // text-to-image, but the text request sends none of them, so the expander must not see them
+  // (it would pick its edit workflow and write `<Picture N>` instructions for hidden images).
+  // *Mutation that reds this:* returning the ordered list without the edit-tab gate.
+  it("hands the expander only the references the emitted request carries, per tab", () => {
+    const shared = {
+      model: "minimax_h3_image",
+      supportsImg2img: false,
+      referenceAssetId: "a",
+      prompt: "a lighthouse",
+      resolution: "2048x2048",
+      count: 1,
+    };
+    for (const mode of ["text_to_image", "edit_image"]) {
+      const ordered = ["a", "b"];
+      const request = buildSimpleImageRequest({ ...shared, mode, referenceAssetIds: ordered });
+      const emitted = request.referenceAssetIds?.length
+        ? request.referenceAssetIds
+        : [request.sourceAssetId, request.referenceAssetId].filter(Boolean);
+      expect(
+        simpleRewriteReferenceIds({
+          ...shared,
+          mode,
+          supportsOrderedReferences: true,
+          orderedReferenceIds: ordered,
+        }),
+      ).toEqual(emitted);
+    }
   });
 });
 

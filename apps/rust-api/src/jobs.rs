@@ -1957,6 +1957,51 @@ async fn canonical_model_provenance(
     .map_err(ApiError::bad_request)
 }
 
+/// MiniMax-H3-Image renders an unselected request from its densest installed tier (bf16, q8, q4;
+/// the worker's `minimax_h3_image::resolve_tier_dir`). It does not declare
+/// `mlx.standardTierLayout` (its tiers are the upstream snapshot root plus a re-host's `{tier}/`,
+/// not one turnkey's `q4/ q8/ bf16/`), so portable admission's implicit standard-tier rule does not
+/// apply and the binding would freeze the catalog's bf16 default. Freeze the installed tier into
+/// the request instead, as the explicit `advanced.mlxQuantize` the loader, the binding and the
+/// worker's portable guard all read, so the three select one tier. A request that names a tier, or
+/// a host with no tier installed, is left unchanged.
+fn freeze_minimax_h3_image_implicit_tier(
+    state: &AppState,
+    job_type: &JobType,
+    model_id: &str,
+    entry: &Value,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    if model_id != sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID
+        || !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit)
+        || sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant(payload)
+            .is_some()
+    {
+        return Ok(());
+    }
+    let mut host = entry.clone();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let installed = crate::models::installed_variant_keys(&host, &state.settings.data_dir);
+    let Some(bits) = sceneworks_core::training::MINIMAX_H3_IMAGE_BASE_TIERS
+        .into_iter()
+        .find(|tier| installed.iter().any(|variant| variant == tier))
+        .map(|tier| match tier {
+            "q4" => 4,
+            "q8" => 8,
+            _ => 0,
+        })
+    else {
+        return Ok(());
+    };
+    payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+        .insert("mlxQuantize".to_owned(), json!(bits));
+    Ok(())
+}
+
 /// Resolve and stamp the authoritative catalog entry at every image-job creation boundary.
 ///
 /// The typed image route, raw Batch Detail route, retry, and duplicate all reach this seam. That is
@@ -2094,6 +2139,13 @@ pub(crate) async fn canonicalize_image_model_payload(
     ) {
         return Err(ApiError::bad_request(reason));
     }
+    freeze_minimax_h3_image_implicit_tier(
+        state,
+        job_type,
+        &model_id,
+        &model_manifest_entry,
+        payload,
+    )?;
 
     // Every image entry point reaches this post-expansion/post-merge seam.
     sceneworks_core::moss_image::scrub_reports(payload);

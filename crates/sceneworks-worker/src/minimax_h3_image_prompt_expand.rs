@@ -403,7 +403,8 @@ mod tests {
     }
 
     /// The catalog entry as a macOS worker receives it: the published q8/q4 MLX rows are macOS-only,
-    /// so tests of those rows must not depend on the host this suite runs on.
+    /// so tests of those rows resolve as a macOS worker (`resolve_dirs_for_os(.., "macos")`) and
+    /// must not depend on the host this suite runs on.
     fn macos_entry() -> JsonObject {
         let mut entry = Value::Object(catalog_entry());
         sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
@@ -509,12 +510,15 @@ mod tests {
         let (data, _cache) = isolated();
         let entry = macos_entry();
         // Nothing installed: the error names the Models screen and that H3-Image needs none of it.
-        let error = resolve_dirs(&settings(data.path()), &entry, None, None).unwrap_err();
+        let error =
+            resolve_dirs_for_os(&settings(data.path()), &entry, None, None, "macos").unwrap_err();
         assert!(error.to_string().contains("Models screen"), "{error}");
         // An explicit pending tier is refused by name, never substituted.
-        let error = resolve_dirs(&settings(data.path()), &entry, Some("q4"), None).unwrap_err();
+        let error = resolve_dirs_for_os(&settings(data.path()), &entry, Some("q4"), None, "macos")
+            .unwrap_err();
         assert!(error.to_string().contains("tier q4"), "{error}");
-        let error = resolve_dirs(&settings(data.path()), &entry, Some("q6"), None).unwrap_err();
+        let error = resolve_dirs_for_os(&settings(data.path()), &entry, Some("q6"), None, "macos")
+            .unwrap_err();
         assert!(error.to_string().contains("no `q6` tier"), "{error}");
     }
 
@@ -536,7 +540,8 @@ mod tests {
         let upstream = snapshot(data.path(), PE_REPO, PE_REVISION);
         synthetic_prompt_tree(&upstream);
 
-        let dirs = resolve_dirs(&settings(data.path()), &entry, None, None).unwrap();
+        let dirs =
+            resolve_dirs_for_os(&settings(data.path()), &entry, None, None, "macos").unwrap();
         assert_eq!(dirs.weights, tier_snapshot.join("q8"));
         assert_eq!(dirs.prompt_root, upstream);
         assert_eq!(dirs.tier, Some("q8"));

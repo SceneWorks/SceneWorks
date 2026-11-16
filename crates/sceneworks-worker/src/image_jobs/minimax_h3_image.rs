@@ -35,7 +35,8 @@ pub(crate) const TEXT_ENCODER_COMPONENT: &str = "text_encoder";
 /// The tier-agnostic co-requisite whose snapshot is the load root (`vae_diffusers/`).
 const ROOT_COMPONENT: &str = "image_vae";
 /// Tiers, densest first: an unselected request takes the densest installed one.
-const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+/// Shared with the API, which freezes the same choice into an unselected request.
+use sceneworks_core::training::MINIMAX_H3_IMAGE_BASE_TIERS as TIERS;
 
 /// Whether `model` is this route.
 pub(crate) fn is_model(model: &str) -> bool {
@@ -138,11 +139,12 @@ fn snapshot_names(snapshot: &Path, repo: &str, revision: &str) -> bool {
 /// The tier an explicit `advanced.mlxQuantize` names (`<= 0` or `>= 9` ⇒ bf16, `1..=4` ⇒ q4,
 /// `5..=8` ⇒ q8), or `None` when the request names none.
 fn explicit_tier(request: &ImageRequest) -> WorkerResult<Option<&'static str>> {
-    let Some(value) = request
-        .advanced
-        .get("mlxQuantize")
-        .filter(|value| !value.is_null())
-    else {
+    explicit_tier_in(&request.advanced)
+}
+
+/// [`explicit_tier`] over a request's `advanced` object.
+fn explicit_tier_in(advanced: &JsonObject) -> WorkerResult<Option<&'static str>> {
+    let Some(value) = advanced.get("mlxQuantize").filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     let bits = sceneworks_core::payload_util::json_integer(value).ok_or_else(|| {
@@ -170,6 +172,26 @@ pub(crate) fn resolve_weights_dir(
         &settings.data_dir,
         explicit_tier(request)?,
     )
+}
+
+/// The tier directory a render of `payload` (an image job payload carrying its
+/// `modelManifestEntry`) loads, exactly as [`resolve_weights_dir`] resolves it.
+pub(crate) fn render_tier_dir(
+    payload: &JsonObject,
+    data_dir: &Path,
+) -> WorkerResult<Option<PathBuf>> {
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("{MODEL_ID} request has no catalog entry"))
+        })?;
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    resolve_tier_dir(entry, data_dir, explicit_tier_in(advanced)?)
 }
 
 /// [`resolve_weights_dir`] for a caller that already knows the explicit tier (or `None`): an

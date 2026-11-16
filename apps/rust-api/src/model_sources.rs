@@ -308,6 +308,24 @@ fn payload_model_entries(payload: &JsonObject) -> Vec<&Value> {
         .collect()
 }
 
+/// [`payload_model_entries`] with each carrier's slot name (`modelManifestEntries/<n>` for the array).
+fn payload_model_slots(payload: &JsonObject) -> Vec<(String, &Value)> {
+    ["modelManifestEntry", "baseModelManifestEntry"]
+        .into_iter()
+        .filter_map(|key| payload.get(key).map(|entry| (key.to_owned(), entry)))
+        .chain(
+            payload
+                .get("modelManifestEntries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(index, entry)| (format!("modelManifestEntries/{index}"), entry)),
+        )
+        .filter(|(_, entry)| !entry.is_null())
+        .collect()
+}
+
 fn push_model_entry(payload: &mut JsonObject, entry: Value) -> Result<(), ApiError> {
     payload
         .entry("modelManifestEntries".to_owned())
@@ -873,7 +891,6 @@ async fn preflight_payload_model_sources(
     job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
-    let requested_variant = requested_runtime_variant(payload);
     let local_utility_selection = matches!(
         job_type,
         JobType::DatasetAnalysis | JobType::TrainingCaption
@@ -881,15 +898,26 @@ async fn preflight_payload_model_sources(
     .then(|| payload.get("modelNameOrPath").and_then(Value::as_str))
     .flatten()
     .filter(|selection| !selection.trim().is_empty());
-    let entries = payload_model_entries(payload)
+    // Each carrier is judged at the tier its job was admitted with (the same selection the
+    // portable binding freezes: a training base's plan tier, a prompt expansion's `peTier`, else
+    // the request's explicit tier), not one request-wide tier.
+    let entries = payload_model_slots(payload)
         .into_iter()
-        .filter(|entry| {
+        .map(|(slot, entry)| {
+            let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+            let variant = sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
+                job_type, payload, &slot, model_id,
+            )
+            .unwrap_or_else(|_| requested_runtime_variant(payload));
+            (entry, variant)
+        })
+        .filter(|(entry, _)| {
             entry
                 .get("downloads")
                 .and_then(Value::as_array)
                 .is_some_and(|downloads| !downloads.is_empty())
         })
-        .map(|entry| {
+        .map(|(entry, variant)| {
             let mut entry = entry.clone();
             if let Some(selection) = local_utility_selection.filter(|_| {
                 payload.get("modelManifestEntries").and_then(Value::as_array)
@@ -911,9 +939,9 @@ async fn preflight_payload_model_sources(
                     }
                 }
             }
-            entry
+            (entry, variant)
         })
-        .filter(|entry| entry.get("downloads").and_then(Value::as_array).is_some_and(|downloads| !downloads.is_empty()))
+        .filter(|(entry, _)| entry.get("downloads").and_then(Value::as_array).is_some_and(|downloads| !downloads.is_empty()))
         .collect::<Vec<_>>();
     if entries.is_empty() {
         return Ok(());
@@ -921,13 +949,9 @@ async fn preflight_payload_model_sources(
     let data_dir = state.settings.data_dir.clone();
     let local_artifacts = local_resolved_artifacts(state);
     tokio::task::spawn_blocking(move || {
-        for entry in &entries {
-            let resolution = availability_for_entry(
-                &data_dir,
-                entry,
-                requested_variant.as_deref(),
-                &local_artifacts,
-            );
+        for (entry, variant) in &entries {
+            let resolution =
+                availability_for_entry(&data_dir, entry, variant.as_deref(), &local_artifacts);
             if resolution.availability == ModelAvailability::InstalledExternalUnavailable {
                 let model_id = entry
                     .get("id")

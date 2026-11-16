@@ -8955,6 +8955,21 @@ async fn minimax_h3_image_training_freezes_the_installed_packed_tier_into_the_pl
             .expect("job reads");
         let plan = &stored.payload["plan"];
         assert_eq!(plan["config"]["advanced"]["baseTier"], "q4", "{plan}");
+        // The worker's portable guard accepts the admitted q4 base before the trainer runs.
+        let binding = state
+            .jobs_store
+            .portable_model_binding(&stored.id)
+            .expect("binding reads")
+            .expect("the run is bound");
+        assert_eq!(
+            crate::tests::minimax_h3_image_jobs::assert_worker_guard_accepts(
+                &stored.job_type,
+                &stored.payload,
+                &binding,
+                "minimax_h3_image"
+            ),
+            "q4"
+        );
         assert_eq!(
             std::fs::canonicalize(plan["target"]["baseModelPath"].as_str().unwrap()).unwrap(),
             std::fs::canonicalize(&tier_dir).unwrap(),

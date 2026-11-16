@@ -25,7 +25,7 @@ use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant, resident_base_component_downloads,
+    is_co_requisite_download, resident_base_component_downloads,
     selected_portable_model_artifact_closure, selected_portable_requirements_for_model,
     selected_resident_base_closure_for_row,
 };
@@ -1265,38 +1265,20 @@ fn selected_portable_aux_ids(
     Ok(ids)
 }
 
+/// The tier `slot` (holding `model_id`) was admitted with: the one selection the API's portable
+/// admission froze the binding from (`admitted_runtime_variant`: a training base's plan tier, a
+/// prompt expansion's `peTier`, else the request's explicit tier), so this guard re-derives the
+/// closure the API bound rather than a default of its own.
 fn selected_runtime_variant(
     job_type: &JobType,
     payload: &JsonObject,
+    slot: &str,
     model_id: &str,
 ) -> WorkerResult<Option<String>> {
-    if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
-        return Ok(requested_runtime_variant(payload));
-    }
-    let target = payload
-        .get("plan")
-        .and_then(|plan| plan.get("target"))
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| invalid_binding("training plan has no canonical target"))?;
-    let base = target
-        .get("baseModel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no base model"))?;
-    if base != model_id {
-        return Ok(requested_runtime_variant(payload));
-    }
-    let kernel = target
-        .get("kernel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no native kernel"))?;
-    Ok(Some(
-        if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
-            "q4"
-        } else {
-            "bf16"
-        }
-        .to_owned(),
-    ))
+    sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
+        job_type, payload, slot, model_id,
+    )
+    .map_err(invalid_binding)
 }
 
 /// The tier this request runs. An image request that names no tier runs the worker's implicit
@@ -1305,7 +1287,7 @@ fn selected_runtime_variant(
 /// is the selection. It applies only where that implicit rule applies (an image job's
 /// `modelManifestEntry` slot of a standard quant-tier model) and only to a bf16/q8/q4 tier; the
 /// selected closure is then verified against the binding like any explicit tier.
-fn bound_runtime_variant(
+pub(crate) fn bound_runtime_variant(
     job_type: &JobType,
     payload: &JsonObject,
     slot: &str,
@@ -1316,7 +1298,7 @@ fn bound_runtime_variant(
         .get("id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id)? {
+    if let Some(variant) = selected_runtime_variant(job_type, payload, slot, model_id)? {
         return Ok(Some(variant));
     }
     if slot != "modelManifestEntry"
@@ -5364,8 +5346,13 @@ mod tests {
             {"provider":"huggingface","repo":"guardfx/training-base","revision":REV_A,
              "variant":"bf16","files":["bf16/model.safetensors"]}
         ]});
-        let selected =
-            selected_runtime_variant(&JobType::LoraTrain, &payload, "z_image_turbo").unwrap();
+        let selected = selected_runtime_variant(
+            &JobType::LoraTrain,
+            &payload,
+            "modelManifestEntry",
+            "z_image_turbo",
+        )
+        .unwrap();
         assert_eq!(selected.as_deref(), Some("bf16"));
         let closure =
             selected_model_artifact_closure(&entry, std::env::consts::OS, selected.as_deref());

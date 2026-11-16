@@ -126,6 +126,33 @@ pub fn minimax_h3_image_training_install_refusal(
     minimax_h3_image_training_base(data_dir, config).err()
 }
 
+/// The tier directory a MiniMax-H3-Image render of the job `payload` loads on this host — the
+/// render loader's own resolution (an explicit `advanced.mlxQuantize` honoured by name, else the
+/// densest installed tier). Lets the API's tests prove its admitted tier is the one loaded.
+pub fn minimax_h3_image_render_tier_dir(
+    data_dir: &Path,
+    payload: &JsonObject,
+) -> Result<Option<PathBuf>, String> {
+    image_jobs::minimax_h3_image::render_tier_dir(payload, data_dir)
+        .map_err(|error| error.to_string())
+}
+
+/// The tier the worker's portable guard verifies model carrier `slot` against before any loader
+/// runs: the job's admitted selection, else (for an unselected image request of a standard-tier
+/// model) the tier the binding froze. The guard rebuilds the artifact closure from this tier and
+/// refuses a binding that names another, so the API's tests use it to prove that what admission
+/// froze is what the worker accepts.
+pub fn portable_guard_runtime_variant(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &Value,
+    binding: Option<&sceneworks_core::model_artifacts::portable_binding::PortableModelBinding>,
+) -> Result<Option<String>, String> {
+    external_library_runtime::bound_runtime_variant(job_type, payload, slot, entry, binding)
+        .map_err(|error| error.to_string())
+}
+
 /// The DiT tier a MiniMax-H3-Image LoRA/LoKr run trains over on this host's installs, and that
 /// tier's directory: the plan's `advanced.baseTier` (absent / `auto` = densest installed) resolved
 /// exactly as the trainer resolves it, or the refusal [`minimax_h3_image_training_install_refusal`]

@@ -9,7 +9,7 @@ use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
 use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, is_supported_model_download, requested_runtime_variant,
+    admitted_runtime_variant, is_co_requisite_download, is_supported_model_download,
     safe_download_dir, selected_portable_model_artifact_closure,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
@@ -1492,36 +1492,20 @@ fn training_base_selection(
     if base != model_id {
         return Ok(None);
     }
-    let kernel = target
-        .get("kernel")
-        .and_then(Value::as_str)
-        .ok_or_else(|| incomplete("training plan has no native kernel"))?;
     let path = target
         .get("baseModelPath")
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| incomplete("training plan has no resolved base model path"))?;
-    let tier = if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
-        "q4"
-    } else if sceneworks_core::training::is_minimax_h3_image_training_kernel(kernel) {
-        // MiniMax-H3-Image trains over the tier the API froze into `advanced.baseTier`, whose
-        // directory is the plan's `baseModelPath` (bf16: the upstream snapshot; q8/q4: the
-        // re-host's tier directory). A plan without one trains the upstream bf16 checkpoint.
-        let advanced = payload
-            .get("plan")
-            .and_then(|plan| plan.pointer("/config/advanced"))
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        sceneworks_core::training::minimax_h3_image_base_tier(&advanced)
-            .map_err(incomplete)?
-            .unwrap_or("bf16")
-    } else {
-        "bf16"
-    };
+    // The base tier comes from the one selection the worker's portable guard also reads, so the
+    // admitted binding and the worker's verified closure name the same tier (MiniMax-H3-Image:
+    // the plan's frozen `advanced.baseTier`, whose directory is `baseModelPath`).
+    let tier = admitted_runtime_variant(job_type, payload, "", model_id)
+        .map_err(incomplete)?
+        .unwrap_or_else(|| "bf16".to_owned());
     Ok(Some(TrainingBaseSelection {
         path: PathBuf::from(path),
-        tier: tier.to_owned(),
+        tier,
     }))
 }
 
@@ -1595,8 +1579,10 @@ async fn verify_training_primary_path(
     Ok(())
 }
 
-/// The variant a model slot's binding freezes: the training plan's tier, else the request's explicit
-/// tier, else the tier the worker would run for an unselected image request.
+/// The variant a model slot's binding freezes: the job's admitted selection
+/// ([`admitted_runtime_variant`], shared with the worker's portable guard: the training plan's
+/// tier, a prompt expansion's `peTier`, else the request's explicit tier), else the tier the worker
+/// would run for an unselected image request.
 fn slot_requested_variant(
     state: &AppState,
     job_type: &JobType,
@@ -1605,25 +1591,15 @@ fn slot_requested_variant(
     entry: &Value,
     training: Option<&TrainingBaseSelection>,
 ) -> Option<String> {
+    let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
     training
         .map(|selection| selection.tier.clone())
-        .or_else(|| prompt_expander_variant(job_type, payload, slot))
-        .or_else(|| requested_runtime_variant(payload))
+        .or_else(|| {
+            admitted_runtime_variant(job_type, payload, slot, model_id)
+                .ok()
+                .flatten()
+        })
         .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))
-}
-
-/// The expander tier the API froze on a MiniMax-H3-Image prompt expansion (`peTier`), which the
-/// worker loads by name. The expander's carrier is the job's `modelManifestEntry`.
-fn prompt_expander_variant(job_type: &JobType, payload: &JsonObject, slot: &str) -> Option<String> {
-    if *job_type != JobType::PromptRefine || slot != "modelManifestEntry" {
-        return None;
-    }
-    payload
-        .get(sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|tier| !tier.is_empty())
-        .map(str::to_ascii_lowercase)
 }
 
 /// The tier an image request that names none runs, so the binding freezes that tier rather than
