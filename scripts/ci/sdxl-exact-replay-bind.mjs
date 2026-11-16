@@ -11,9 +11,10 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest, sourceIdentity, verifyMembers } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'da00c5a8f14cc8d65b90e5a97a57fd43d66f814b';
-// Derived from this pin's AlphaSchedule/DiscreteModelSampling/Normal 20-step source and
+const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
+// Derived from AlphaSchedule/DiscreteModelSampling/Normal 20-step source and
 // NumericScheduleDigest::f32_values, then canonicalized by the proof harness.
+// The SDXL/sampling source is unchanged between da00c5a8 and this pin.
 const SCHEDULE_SHA256 = 'e6c4fabcef6944e589759bd092184dc47baa5786c50cd92870c695bd36092289';
 let stage = 'dispatch';
 let failureHint = '';

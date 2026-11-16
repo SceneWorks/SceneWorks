@@ -12,7 +12,7 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'da00c5a8f14cc8d65b90e5a97a57fd43d66f814b';
+const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
 export const RUNTIME_INPUTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'vendor',
   'crates', 'apps', 'packages', 'config', 'docs/generated', 'docs/calibration', 'docker']);
 let stage = 'dispatch';

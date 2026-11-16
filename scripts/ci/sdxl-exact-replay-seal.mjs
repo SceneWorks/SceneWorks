@@ -10,7 +10,7 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { SCOPE, digest, requireReplayQualification, validatePlan } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'da00c5a8f14cc8d65b90e5a97a57fd43d66f814b';
+const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
 const REVIEW_URL = 'https://github.com/SceneWorks/inference/pull/1464';
 
 export function makeReplayPlan(plan, qualification, sourceSha, pin, now = Date.now()) {
