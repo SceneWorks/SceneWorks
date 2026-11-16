@@ -21,8 +21,8 @@ function fixture() {
     modelSlot: 'modelManifestEntry', modelId: 'sdxl', operation: 'image_generate', providerId: 'sdxl' },
   models: [{ schemaVersion: 1, slot: 'modelManifestEntry', modelId: 'sdxl', backend: 'candle',
     variant: 'base', tier: '4', authoredOptionsSha256: hash('authored'), members: [{ role: 'primary',
-      componentId: 'unet', source: { kind: 'digest', sha256: hash('source') }, files: [
-        { relativePath: 'unet/model.bin', sizeBytes: 3, sha256: hash('abc') } ] }] }] };
+      componentId: 'unet', source: { kind: 'digest', sha256: `sha256:${hash('source')}` }, files: [
+        { relativePath: 'unet/model.bin', sizeBytes: 3, sha256: `sha256:${hash('abc')}` } ] }] }] };
   const schedule = [{ sampler: 'ddim', schedule: { element: 'f32_le_bits', count: 21, sha256: hash('sigmas') }, estimator: 'eps' }];
   const execution = { state: 'resolved', identity: { version: 1, provider_id: 'sdxl', backend: 'candle', runtime_id: 'candle-execution-v1', output_units: 1,
     sampling: resolved(['ddim']), schedule: resolved(schedule), estimator: resolved('eps'),
@@ -77,6 +77,9 @@ test('source identity excludes only request binding and refuses extra adapter/pr
   const { input } = fixture(); const before = digest(sourceIdentity(input.route));
   input.route.models[0].authoredOptionsSha256 = hash('new project');
   assert.equal(digest(sourceIdentity(input.route)), before);
+  input.route.models[0].members[0].files[0].sha256 = hash('abc');
+  assert.throws(() => sourceIdentity(input.route), /invalid member digest/);
+  input.route.models[0].members[0].files[0].sha256 = `sha256:${hash('abc')}`;
   input.route.models[0].members[0].role = 'lora'; assert.throws(() => sourceIdentity(input.route));
   input.route.models[0].members[0].role = 'primary'; input.route.expectedProvider.operation = 'image_edit';
   assert.throws(() => sourceIdentity(input.route));

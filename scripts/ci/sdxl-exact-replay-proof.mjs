@@ -12,6 +12,7 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HEX = /^[a-f0-9]{64}$/;
+const MEMBER_SHA = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{40}$/;
 export const SCOPE = 'same_device_pinned_runtime';
 export const REQUEST = Object.freeze({ model: 'sdxl', mode: 'text_to_image',
@@ -40,7 +41,7 @@ export function sourceIdentity(route) {
   for (const member of model.members) {
     assert(['primary', 'required_component', 'co_requisite'].includes(member.role), 'adapter/optional source outside witness');
     assert(member.files?.length > 0, 'member bytes missing');
-    for (const file of member.files) assert(HEX.test(file.sha256) && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0, 'invalid member digest');
+    for (const file of member.files) assert(MEMBER_SHA.test(file.sha256) && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0, 'invalid member digest');
   }
   const { authoredOptionsSha256: _request, ...source } = model;
   return { backend: route.backend, platform: route.platform, expectedProvider: route.expectedProvider, models: [source] };
@@ -102,7 +103,7 @@ export async function verifyMembers(route, plan) {
     assert(!used.has(actual), 'duplicate physical member'); used.add(actual);
     const info = await stat(actual);
     assert(info.isFile() && info.size === file.sizeBytes, 'selected member size changed');
-    assert.equal(await fileSha256(actual), file.sha256, 'selected member bytes changed');
+    assert.equal(`sha256:${await fileSha256(actual)}`, file.sha256, 'selected member bytes changed');
   }
 }
 

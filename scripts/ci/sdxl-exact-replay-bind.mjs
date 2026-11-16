@@ -55,7 +55,7 @@ export async function mapSelectedFiles(route, hub, roots) {
           relative.split('/').every((part) => part && part !== '.' && part !== '..'), 'unsafe bound member path');
         const selected = path.join(root, ...relative.split('/'));
         const info = await stat(selected).catch(() => null);
-        if (!info?.isFile() || info.size !== file.sizeBytes || await fileSha256(selected) !== file.sha256) {
+        if (!info?.isFile() || info.size !== file.sizeBytes || `sha256:${await fileSha256(selected)}` !== file.sha256) {
           candidate.length = 0; break;
         }
         candidate.push({ slot: model.slot, memberIndex, relativePath: file.relativePath, path: selected });
