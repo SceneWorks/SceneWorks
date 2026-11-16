@@ -208,6 +208,8 @@ pub(crate) async fn continue_training_job(
         .as_object()
         .cloned()
         .ok_or_else(|| ApiError::internal("Training config must be an object."))?;
+    let iris_receipts =
+        crate::iris_curricula::check_iris_submit(&state, &project_id, target, &plan, false).await?;
     let mut payload = source.payload.clone();
     let entry = payload
         .get_mut("manifestEntry")
@@ -238,6 +240,18 @@ pub(crate) async fn continue_training_job(
             &plan.output.file_name,
             false,
             &plan.target.base_model,
+        );
+        if let Some(receipts) = &iris_receipts {
+            entry.insert(
+                crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+                receipts.clone(),
+            );
+        }
+    }
+    if let Some(receipts) = iris_receipts {
+        payload.insert(
+            crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+            receipts,
         );
     }
     payload.insert("continuation".into(), link);

@@ -713,6 +713,9 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
         next["manifestEntry"]["provenance"]["configSnapshot"],
         next["plan"]["config"]
     );
+    assert_eq!(next["irisReceipts"]["parentRunJobId"], job_id);
+    assert_eq!(next["manifestEntry"]["irisReceipts"], next["irisReceipts"]);
+    assert_eq!(next["irisReceipts"]["dataset"]["id"], dataset_id);
 
     // A completed continuation carries API-resolved paths in its stored config. A further
     // continuation must validate its client options and resolve the immediate parent's checkpoint.
@@ -733,6 +736,20 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
         json!({"stepsCompleted": total + 1000}),
     )
     .await;
+    let (_, continued_loras) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let registered = continued_loras
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == next["plan"]["output"]["loraId"])
+        .expect("the continued adapter is registered");
+    assert_eq!(registered["irisReceipts"], next["irisReceipts"]);
     let (status, again) = request(
         app.clone(),
         "POST",
@@ -744,6 +761,11 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     let latest = private_training_payload(&settings.data_dir, again["id"].as_str().unwrap());
     assert_eq!(latest["plan"]["config"]["steps"], total + 2000);
     assert_eq!(again["sourceJobId"], continued_id);
+    assert_eq!(latest["irisReceipts"]["parentRunJobId"], continued_id);
+    assert_eq!(
+        latest["manifestEntry"]["irisReceipts"],
+        latest["irisReceipts"]
+    );
     assert_eq!(
         std::path::Path::new(
             latest["plan"]["config"]["advanced"]["iris"]["resume_from"]
