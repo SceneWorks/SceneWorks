@@ -707,6 +707,26 @@ jobs:
         if: ${{ inputs.qwen_persistent_weights }}
         run: node scripts/ci/memory-catalog/bind-qwen-persistent-cache.mjs
 
+      - name: Provide a Hugging Face CLI for --download-missing
+        # The walk probes `hf` then `huggingface-cli` once and, finding neither, fetches nothing
+        # (run 43975075897 on nax-macos; nax-macos-2 happens to have `hf`). When neither is on PATH,
+        # install the repo's pinned client into a job-private venv under $RUNNER_TEMP -- never the
+        # runner user's Python or Homebrew -- and put its bin on PATH for the later steps. Same
+        # python3.12 + requirements-hf.txt pattern as macos-mlx.yml's provisioning steps.
+        if: ${{ inputs.download_missing }}
+        run: |
+          if command -v hf >/dev/null || command -v huggingface-cli >/dev/null; then
+            echo "Hugging Face CLI already on PATH; not installing one"
+            exit 0
+          fi
+          command -v python3.12 >/dev/null
+          python3.12 --version | grep -E '^Python 3\.12\.'
+          python3.12 -m venv "$RUNNER_TEMP/hf-cli-venv"
+          "$RUNNER_TEMP/hf-cli-venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+          "$RUNNER_TEMP/hf-cli-venv/bin/hf" --version
+          echo "$RUNNER_TEMP/hf-cli-venv/bin" >> "$GITHUB_PATH"
+
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
 
