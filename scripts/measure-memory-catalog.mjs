@@ -4511,26 +4511,37 @@ export function failureReason(error) {
       .split("\n").map((line) => line.trim()).filter(Boolean)
       .join(" ").slice(0, FAILURE_REASON_LIMIT) || "unknown failure";
   }
-  const lines = stderr
+  // SW-F363 (campaign run 43794810762): Node prints a thrown error's own properties AFTER its stack
+  // as an object literal whose opening brace ends the LAST STACK FRAME (`    at fn (file) {`), then
+  // `  errno: -28,` … `}` — nested `[cause]:` errors, `details: { … }` and arrays included. Four
+  // `ingest_failed` rows quoted the bare `}`. So the literal is stripped from the RAW lines first —
+  // before frames are filtered, or its opening brace would be filtered with them and the depth count
+  // would never close — and when one was stripped, the reason is the error's own header line plus
+  // any continuation of its message (an AssertionError's `1 !== 2`), not whatever came last.
+  const raw = stderr
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !/^(at |Node\.js v)/.test(line));
+    .filter((line) => line && !/^Node\.js v/.test(line));
+  const stripped = withoutTrailingLiteral(raw);
+  const lines = stripped.filter((line) => !/^at /.test(line) && !/^\.\.\. \d+ lines? matching /.test(line));
   // sc-22738, the SECOND half of the same defect. Reading from the end fixed the ordering, and
   // then `protocol::fail` was taught to defer its informational notes until AFTER the failure
   // line — so the last line became the sc-22414 coherence tally again, this time by construction.
   // Informational lines are not outcomes: skip them and quote the last line that is one. Falling
   // back to the last line overall keeps a stderr that is ONLY notes from reporting nothing.
   const outcome = lines.filter((line) => !INFORMATIONAL_LINE_PATTERN.test(line));
-  // SW-F363 (campaign run 43794810762): Node prints a thrown error's own properties AFTER the
-  // message as an object literal — `{`, `code: '…'`, `}` — so a child that died on such an error
-  // ended stderr on a bare `}`, and four `ingest_failed` rows quoted just that. A trailing
-  // object/array literal is not the outcome: skip it (balanced from its closing line back to the
-  // line that opens it, keeping any message text on that opening line) and quote what precedes it.
-  const kept = withoutTrailingLiteral(outcome);
-  return ((kept.at(-1) ?? outcome.at(-1) ?? lines.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+  if (stripped.length !== raw.length) {
+    const header = outcome.findLastIndex((line) => /^(?:[A-Z][A-Za-z]*)?Error\b/.test(line));
+    if (header !== -1) return outcome.slice(header).join(" ").slice(0, FAILURE_REASON_LIMIT);
+  }
+  return ((outcome.at(-1) ?? lines.at(-1) ?? raw.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
 }
 
-/** `lines` minus a trailing object/array literal (see `failureReason`). Unchanged when there is none. */
+/**
+ * `lines` minus a trailing object/array literal (see `failureReason`), balanced from its closing
+ * line back to the line whose trailing `{`/`[` opens it; that line's other text is kept. Unchanged
+ * when the last line does not close a literal, or the literal never balances.
+ */
 export function withoutTrailingLiteral(lines) {
   if (lines.length === 0 || !/^[\]})]+[,;]?$/.test(lines.at(-1))) return lines;
   let depth = 0;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat, rm } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -5576,31 +5576,35 @@ test("every shipped tiered model is measurable", async () => {
 });
 
 // SW-F363, campaign run 43794810762: four `ingest_failed` rows quoted a bare `}`, because Node
-// prints a thrown error's own properties after its message as an object literal. The reason is the
-// error line before that literal; the step log gets the whole stderr tail.
-test("a failure reason skips the object literal Node prints after an error", () => {
-  const stderr = [
-    "file:///x/extract-memory-anchors.mjs:612",
-    "    throw new Error(",
-    "          ^",
-    "Error: anchor regime:m:mlx:q4:base:base:optimized:fp:imc-1 has no recorded loader-closure digest",
-    "    at loaderClosureDigestFor (file:///x/extract-memory-anchors.mjs:612:11)",
-    "{",
-    "  code: 'ERR_X',",
-    "  detail: [ 1, 2 ]",
-    "}",
-    "Node.js v24.15.0",
-  ].join("\n");
-  assert.equal(
-    failureReason({ stderr }),
-    "Error: anchor regime:m:mlx:q4:base:base:optimized:fp:imc-1 has no recorded loader-closure digest",
+// prints a thrown error's own properties after its stack as an object literal whose opening brace
+// ends the last stack FRAME. The fixtures are REAL Node output — each shape is produced by throwing
+// in a child `node -e` — so a change in how Node prints them reds here rather than in a campaign.
+test("a failure reason names the error, not the object literal Node prints after it", () => {
+  const nodeStderr = (code) => {
+    const result = spawnSync(process.execPath, ["-e", code], { encoding: "utf8" });
+    assert.notEqual(result.status, 0, code);
+    return result.stderr;
+  };
+  // A real fs error, which carries errno/code/syscall/path properties.
+  const fsError = nodeStderr(
+    'require("node:fs").writeFileSync("/nonexistent-sw-f363-dir/x", "y")',
   );
-  // AssertionError prints its properties on the same line as the opening brace's owner.
-  assert.equal(
-    failureReason({ stderr: "AssertionError [ERR_ASSERTION]: a != b {\n  operator: '=='\n}" }),
-    "AssertionError [ERR_ASSERTION]: a != b",
+  assert.match(fsError, /\{\n\s+errno:/, "the fixture really prints a property literal");
+  assert.match(failureReason({ stderr: fsError }), /^Error: ENOENT: no such file or directory, open '\/nonexistent-sw-f363-dir\/x'/);
+  // An ENOSPC-shaped error (the run's likely cause) with a nested cause, details object and array.
+  const nested = nodeStderr(
+    'const inner = Object.assign(new Error("inner"), { code: "X", details: { a: [1, 2] } });'
+      + 'throw Object.assign(new Error("ENOSPC: no space left on device, write", { cause: inner }), { errno: -28, code: "ENOSPC", syscall: "write" })',
   );
-  // Nothing to strip: unchanged, and a stderr that is ONLY a literal still reports something.
+  assert.match(nested, /\[cause\]: Error: inner/);
+  assert.equal(failureReason({ stderr: nested }), "Error: ENOSPC: no space left on device, write");
+  // A real strictEqual failure: frames follow the multi-line message, then the property literal.
+  const assertion = nodeStderr('require("node:assert").strictEqual(1, 2)');
+  assert.equal(
+    failureReason({ stderr: assertion }),
+    "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1 !== 2",
+  );
+  // No literal: unchanged; and a stderr that is only a literal still reports something.
   assert.deepEqual(withoutTrailingLiteral(["Error: x"]), ["Error: x"]);
   assert.equal(failureReason({ stderr: "{\n}" }), "}");
   // The step-log tail is bounded and keeps the end.
