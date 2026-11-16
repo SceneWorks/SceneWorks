@@ -1759,14 +1759,16 @@ copied into the job environment under the names the worker itself reads.
 | backend | `runs-on` | box |
 |---|---|---|
 | `mlx` (default) | `[self-hosted, macOS, ARM64, rw-krea]` | `nax-macos-2`, the second Mac |
-| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax]` | `nax-macos`, the dev Mac |
+| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax, rw-starvector]` | `nax-macos`, the dev Mac |
 | `candle` | `[self-hosted, Windows, X64, cuda]` | the RTX PRO 6000 Windows box |
 
 🔴 Weight-set labels move between the two Macs — they name a weight set, not a machine. Both label
-sets above were confirmed against the `runner_name` of jobs that actually served them, which is the
-only way to check (`gh api /orgs/SceneWorks/actions/runners` 403s without `admin:org`). Re-confirm
-before assuming `rw-krea` is still the second Mac, and remember that a label no runner carries does
-not fail the dispatch: the job queues silently until the run is cancelled.
+sets above were checked with `gh api --paginate orgs/SceneWorks/actions/runners` on 2026-11-16:
+`rw-krea` is on nax-macos-2 only and `rw-starvector` on nax-macos only, while `nax` is on BOTH Macs.
+An earlier version of this note claimed `[…, nax]` alone selected the dev Mac; it does not (run
+43946963737 asked for nax-macos and ran on nax-macos-2). Re-check before relying on either, confirm
+the `Runner name` line in the job log, and remember that a label no runner carries does not fail the
+dispatch: the job queues silently until the run is cancelled.
 
 **What the job does.** Checks out `ref` shallowly (`fetch-depth: 1` — nothing in the campaign reads
 history beyond HEAD, and a full clone of this repo's 2+ GiB pack was costing 27+ minutes on the
