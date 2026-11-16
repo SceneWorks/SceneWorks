@@ -16,7 +16,7 @@ const PIN = '101975c301686467f089cf8c0e3c4a9e33846b6d';
 let stage = 'dispatch';
 const publicReasons = new Set([
   'binding escaped private directory', 'inference pin changed', 'bound runtime source changed',
-  'bound API binary changed', 'physical host changed', 'physical index zero unavailable',
+  'runtime binary changed', 'physical host changed', 'physical index zero unavailable',
   'driver bytes changed', 'isolated API has a worker', 'API did not become healthy',
   'API exited', 'worker exited', 'idle worker did not register',
   'census cannot run queued jobs', 'census created a job', 'CUDA driver not loaded',
@@ -74,7 +74,9 @@ async function main() {
   assert.equal(sourceDiff.status, 0, 'bound runtime source changed');
   stage = 'binding-binary';
   const binary = path.resolve(process.env.SDXL_REPLAY_BINARY);
-  assert.equal(await fileSha256(binary), binding.binarySha256, 'bound API binary changed');
+  // Windows release links are not byte-reproducible across these separate jobs.
+  // Record the binary that this census actually starts and guard its bytes throughout.
+  const binarySha256 = await fileSha256(binary);
   stage = 'binding-device';
   const devices = execFileSync('nvidia-smi', ['--query-gpu=index,uuid', '--format=csv,noheader'], { encoding: 'utf8' })
     .trim().split(/\r?\n/).map((line) => {
@@ -162,6 +164,7 @@ async function main() {
       const names = runtimeFiles.map((file) => path.basename(file.path).toLowerCase());
       assert.equal(new Set(names).size, names.length, 'duplicate runtime library names');
       assert.equal(db.prepare('select count(*) as n from jobs').get().n, 0, 'census created a job');
+      assert.equal(await fileSha256(binary), binarySha256, 'runtime binary changed');
       const publicFiles = runtimeFiles.map((file) => ({ name: path.basename(file.path).toLowerCase(), sha256: file.sha256 }))
         .sort((a, b) => a.name.localeCompare(b.name));
       const censusPath = path.join(privateDir, 'census-' + sourceSha + '-' + process.env.GITHUB_RUN_ID + '-' + process.env.GITHUB_RUN_ATTEMPT + '.json');
@@ -169,13 +172,14 @@ async function main() {
         bindingSourceSha: binding.sourceSha, bindingPath, bindingSha256: await fileSha256(bindingPath),
         inferenceRevision: pin, requestSha256: binding.requestSha256, hub: binding.hub,
         sourceIdentitySha256: binding.sourceIdentitySha256, scheduleSha256: binding.scheduleSha256,
-        files: binding.files, binarySha256: binding.binarySha256, driver: binding.driver,
+        files: binding.files, bindingBinarySha256: binding.binarySha256, binarySha256, driver: binding.driver,
         deviceUuid: device.uuid, physicalIndex: device.physicalIndex, runtimeFiles,
         ownerGo: false, missing: ['ownerGpuWindow'] };
       const report = { version: 1, kind: 'metadata-only-runtime-census', sourceSha,
         inferenceRevision: pin, censusPath, deviceUuid: device.uuid, physicalIndex: device.physicalIndex,
         selectedFileCount: binding.files.length, runtimeLibraryCount: publicFiles.length,
-        runtimeLibrariesSha256: digest(publicFiles), binarySha256: binding.binarySha256, missing: record.missing };
+        runtimeLibrariesSha256: digest(publicFiles), bindingBinarySha256: binding.binarySha256,
+        binarySha256, missing: record.missing };
       result = { censusPath, record, report };
     } finally { db.close(); }
   } finally {
@@ -192,7 +196,8 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
-    const reason = publicReasons.has(error?.message) ? ' (' + error.message + ')' : '';
+    const publicReason = [...publicReasons].find((value) => error?.message === value || error?.message?.startsWith(value + '\n'));
+    const reason = publicReason ? ' (' + publicReason + ')' : '';
     const fileError = stage === 'binding-binary'
       ? ` (${[error?.name, error?.code, error?.syscall].filter((value) => typeof value === 'string')
         .map((value) => value.replace(/[^A-Za-z0-9_]/g, '')).filter(Boolean).join('/') || 'unknown error'})`
