@@ -7,6 +7,10 @@ const refused = (field, detail) => ({ state: "invalid", refusal: {
 }, metadataSource: "server", liveChecks: "server" });
 
 function fixtureResult(kind, payload) {
+  if (kind === "image" && payload.model === "minimax_h3_image" && payload.mode === "edit_image"
+    && new Set(payload.referenceAssetIds ?? []).size === 17) {
+    return refused("referenceAssetIds", "minimax_h3_image takes up to 16 reference images, but this request supplies 17. Reduce the ordered conditioning list (source, mask and references together) to 16 or fewer.");
+  }
   if (kind === "image" && payload.model === "flux3_klein"
     && payload.mode === "text_to_image" && payload.width === 16) {
     return refused("width", "The unconditioned FLUX 3 width is below its declared floor.");

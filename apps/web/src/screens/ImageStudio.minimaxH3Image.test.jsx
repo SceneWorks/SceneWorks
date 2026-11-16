@@ -386,7 +386,7 @@ describe("ImageStudio — MiniMax-H3-Image edit and LoRAs (SW-7101)", () => {
     expect(container.textContent).toContain("Reference images (up to 16, in order)");
 
     await pick(17);
-    expect(container.textContent).toContain("takes up to 16 reference images — remove 1.");
+    expect(container.textContent).toContain("takes up to 16 reference images, but this request supplies 17.");
     expect(generateButton().disabled).toBe(true);
 
     await pick(16);

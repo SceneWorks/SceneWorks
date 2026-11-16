@@ -187,6 +187,7 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(container.querySelector("#su-image-negative")).toBeNull();
     await click(container.querySelector('button[aria-label="Insert <Picture 3> into the prompt"]'));
     expect(container.querySelector("#su-image-prompt").value).toBe("Put the hat from <Picture 3>");
+    await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
     // One ordered list, the armed reference first — the same payload the full studio sends.

@@ -37,6 +37,25 @@ function unpack(row) { return { ...row, controls: row.controls.map((id) => basel
   changes: row.changes.map((change) => ({ ...change, calls: baseline.calls[change.calls], persisted: change.persisted == null ? null : baseline.states[change.persisted] })),
   persisted: baseline.states[row.persisted],
 }; }
+// New H3-only UI state is persisted even on old models. Assert its default before
+// projecting it out of persisted state; every old field and request stays compared.
+function oldPersistedState(value) {
+  if (Array.isArray(value)) return value.map(oldPersistedState);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "h3ImageSampler") {
+      expect(child).toEqual({ sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+    } else if (key === "h3ExpandOpen") {
+      expect(child).toBe(false);
+    } else result[key] = oldPersistedState(child);
+  }
+  return result;
+}
+function oldSurface(actual) {
+  return { ...actual, persisted: oldPersistedState(actual.persisted),
+    changes: actual.changes.map((change) => ({ ...change, persisted: oldPersistedState(change.persisted) })) };
+}
 function pack(rows) {
   const controls = [], calls = [], states = [], indices = [new Map(), new Map(), new Map()];
   const intern = (pool, index, value) => { const key = JSON.stringify(value); if (!index.has(key)) { index.set(key, pool.length); pool.push(value); } return index.get(key); };
@@ -82,9 +101,18 @@ describe("pinned public catalog (SW-7028)", () => {
             expect(controls.every(({ id, controlId }) => Boolean(id) && Boolean(controlId))).toBe(true);
             expect(new Set(controls.map(({ controlId }) => controlId)).size).toBe(controls.length);
           }
-          expect(snapshot).toEqual(frozenControlInventory(keyFor(row)));
+          if (inventory.rows[keyFor(row)]) {
+            expect(snapshot).toEqual(frozenControlInventory(keyFor(row)));
+          } else {
+            // This model landed after the pinned capture; its dedicated mounted tests own
+            // behavior. Keep its controls in the explicit identity inventory.
+            expect(row.model).toMatch(/^minimax_h3_image/);
+            const ids = snapshot.controls.map((control) => control.id);
+            if (row.studio === "image") expect(ids).toContain("h3ImageSampler");
+            if (row.studio === "training") expect(ids).toContain("h3ImageLicenseAccepted");
+          }
         }
-        expect(actual).toEqual(unpack(baseline.rows[keyFor(row)]));
+        if (baseline.rows[keyFor(row)]) expect(oldSurface(actual)).toEqual(unpack(baseline.rows[keyFor(row)]));
       }
     });
   }
