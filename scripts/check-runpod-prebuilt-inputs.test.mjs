@@ -48,7 +48,7 @@ test("refuses absent or malformed provenance including nonexact source revisions
   }
 });
 
-const dockerfile = `# --- Candle GPU worker build\nCOPY crates ./crates\nCOPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt\n# --- Combined RunPod GPU runtime\nFROM prebuilt AS runpod\n`;
+const dockerfile = `# --- Candle GPU worker build\nCOPY crates ./crates\nCOPY scripts/fetch-flash-prebuilt.py ./scripts/fetch-flash-prebuilt.py\nCOPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt\n# --- Combined RunPod GPU runtime\nFROM prebuilt AS runpod\n`;
 
 function sourceRepository(changedPath, changedContents) {
   const cwd = mkdtempSync(path.join(tmpdir(), "runpod-prebuilt-inputs-"));
@@ -60,7 +60,8 @@ function sourceRepository(changedPath, changedContents) {
   };
   git("init", "-q");
   for (const file of ["crates/sceneworks-core/src/lib.rs", "apps/web/src/ImageStudio.jsx",
-    "apps/web/content-security-policy.txt", "packages/schemas/model.json", ".dockerignore"]) write(file, "original");
+    "apps/web/content-security-policy.txt", "packages/schemas/model.json", ".dockerignore",
+    "scripts/fetch-flash-prebuilt.py"]) write(file, "original");
   write("docker/rust.Dockerfile", dockerfile);
   git("add", ".");
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline");
@@ -86,9 +87,9 @@ test("web source drift keeps the immutable Candle worker eligible", () => {
   });
 });
 
-test("copied worker source, CSP, schema, and context-filter drift refuse the prebuilt worker", () => {
+test("copied worker source, FlashAttention fetcher, CSP, schema, and context-filter drift refuse the prebuilt worker", () => {
   for (const file of ["crates/sceneworks-core/src/lib.rs", "apps/web/content-security-policy.txt",
-    "packages/schemas/model.json", ".dockerignore"]) {
+    "packages/schemas/model.json", ".dockerignore", "scripts/fetch-flash-prebuilt.py"]) {
     withSourceRepository(file, "changed input", ({ cwd, revision, currentDockerfile }) => {
       assert.throws(() => validatePrebuiltWorkerSources(revision, currentDockerfile, cwd),
         /prebuilt worker inputs differ/);

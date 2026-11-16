@@ -33,7 +33,7 @@ export function validatePrebuiltWorkerSources(revision, dockerfile, cwd = proces
     ".dockerignore", ".cargo", "vendor", "crates", "apps/rust-api", "apps/rust-worker",
     "apps/desktop/Cargo.toml", "apps/desktop/build.rs",
     "apps/web/content-security-policy.txt", "config", "packages/schemas",
-    "docs/generated", "docs/calibration",
+    "docs/generated", "docs/calibration", "scripts/fetch-flash-prebuilt.py",
   ];
   const diff = spawnSync("git", ["diff", "--quiet", revision, "HEAD", "--", ...workerInputs], { cwd });
   assert.equal(diff.status, 0, `prebuilt worker inputs differ from ${revision} (git diff exit ${diff.status})`);
