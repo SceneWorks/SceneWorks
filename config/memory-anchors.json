@@ -14520,5 +14520,54 @@
         "loaderClosureDigest": "43de50db8e96e563c52fc639e4d9fa20775d9fe597bc40f0ee774fbfac9242fc"
       }
     }
+  ],
+  "regimeAnchors": [
+    {
+      "id": "regime:minimax_h3_image:mlx:bf16:base:base:optimized:minimax-h3-image-mlx-v1:imc-00ba5215184ebc48203b",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "optimized",
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363/minimax-h3-image-bf16-mlx-optimized-evidence.json",
+        "sha256": "427bf5abbebb80d0cb6e894faa3f6a01d86c152f67ee6171df1d5a9e6fca5e79",
+        "recordId": "imc-00ba5215184ebc48203b",
+        "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+        "loaderClosureDigest": "d1b2810121c4436e5799f938861c9f58c8e3dc1ff8665bab3122680ef76f6150"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4492059660,
+        "denoise": 3459218564,
+        "decode": 2056801520
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4758332990,
+        "denoise": 3459218564,
+        "decode": 2056899824
+      },
+      "overallAllocatorEnvelopeBytes": 4758332990,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    }
   ]
 }
