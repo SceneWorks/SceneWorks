@@ -247,3 +247,100 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
     // A missing fixture, a failed load or generation, or an empty field cannot emit this.
     eprintln!("MODEL_INFERENCE_BODY_COMPLETED {test_fqn}");
 }
+
+/// Directory of real images the throughput benchmark describes (the first
+/// `$SCENEWORKS_QWEN38_BENCH_IMAGES_COUNT`, default 4, in name order). Never checked in.
+const BENCH_IMAGES_ENV: &str = "SCENEWORKS_QWEN38_BENCH_IMAGES";
+const BENCH_COUNT_ENV: &str = "SCENEWORKS_QWEN38_BENCH_IMAGES_COUNT";
+
+/// Throughput benchmark of the describe path on one tier: real images described one after another
+/// on a resident model, as a batch job does. Each generation's `describe_generation_stats` event
+/// (prompt and generated tokens, prefill and decode seconds, sampler, CUDA-graph replays) prints on
+/// stdout; this adds the per-image wall time and the raw reply so the output is read, not just timed.
+///
+/// ```text
+/// $env:HF_HUB_CACHE = "E:\huggingface\hub"
+/// $env:SCENEWORKS_QWEN38_DESCRIBER_TIER = "q4"
+/// $env:SCENEWORKS_QWEN38_BENCH_IMAGES = "<a directory of images>"
+/// cargo test -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_throughput -- --ignored --nocapture --test-threads=1
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight describer GPU benchmark; needs a pinned Candle tier under HF_HUB_CACHE, a CUDA device and a directory of images"]
+async fn qwen38_describer_throughput_on_cuda() {
+    // The worker's stdout event sink, so each `describe_generation_stats` line prints.
+    sceneworks_core::observability::init_logging();
+    let tier = std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV}"));
+    let tier = tier.trim().to_owned();
+    let images_dir = PathBuf::from(
+        std::env::var(BENCH_IMAGES_ENV).unwrap_or_else(|_| panic!("set ${BENCH_IMAGES_ENV}")),
+    );
+    let count: usize = std::env::var(BENCH_COUNT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(4);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&images_dir)
+        .expect("the bench image directory reads")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp"
+                    )
+                })
+        })
+        .collect();
+    paths.sort();
+    paths.truncate(count);
+    assert!(!paths.is_empty(), "no images in {}", images_dir.display());
+
+    let temp = tempfile::tempdir().expect("bench tempdir creates");
+    let settings = Settings::for_test(temp.path().join("data"));
+    let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
+        .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    let describer = VisionCaptionerDescriber {
+        model: DescribeModel::Qwen38,
+        weights_dir,
+        job_id: "qwen38-describer-bench".to_owned(),
+    };
+
+    // Warm-up: the load and first-call graph capture are paid here, not by a measured image.
+    let started = std::time::Instant::now();
+    describer
+        .describe(synthetic_scene(512, 384), &prompt, CancelFlag::new())
+        .await
+        .expect("the describer loads")
+        .expect("the warm-up generates");
+    eprintln!(
+        "BENCH warmup tier={tier} wall_s={:.1}",
+        started.elapsed().as_secs_f64()
+    );
+
+    let mut total = 0.0;
+    for path in &paths {
+        let image = crate::image_decode::decode_image_any(path).expect("the image decodes");
+        let started = std::time::Instant::now();
+        let raw = describer
+            .describe(image, &prompt, CancelFlag::new())
+            .await
+            .expect("the describer is loaded")
+            .expect("the describer generates");
+        let wall = started.elapsed().as_secs_f64();
+        total += wall;
+        let parses = describer.parse(&raw).is_ok();
+        eprintln!(
+            "BENCH tier={tier} image={} wall_s={wall:.1} chars={} parses={parses}",
+            path.file_name().unwrap().to_string_lossy(),
+            raw.len()
+        );
+        eprintln!("BENCH_REPLY {raw}");
+    }
+    eprintln!(
+        "BENCH_TOTAL tier={tier} images={} wall_s={total:.1} per_image_s={:.1}",
+        paths.len(),
+        total / paths.len() as f64
+    );
+}

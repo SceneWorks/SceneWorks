@@ -1307,6 +1307,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                 </span>
               </label>
             ))}
+            <span className="dataset-caption-field-hint" data-tier-hint="speed">
+              q4 is the fastest tier. Full precision takes about twice as long per image.
+            </span>
           </fieldset>
         ) : null}
         {!selectedAvailable ? (
