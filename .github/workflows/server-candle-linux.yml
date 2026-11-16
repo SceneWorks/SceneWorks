@@ -339,7 +339,7 @@ jobs:
       - name: Select the existing listener-isolated Cargo dependency cache
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated Cargo cache selection failed' }
       - name: Fetch source dependencies only, never model weights
         shell: cmd
