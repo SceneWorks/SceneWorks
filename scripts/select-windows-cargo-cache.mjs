@@ -90,7 +90,7 @@ async function main() {
   await ensurePhysicalCargoCache(flashAttention);
   await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\nCANDLE_FLASH_ATTN_BUILD_DIR=${flashAttention}\n`);
   process.env.CARGO_HOME = selected.cache;
-  const sourceSha256 = await candleFlashSourceSha256();
+  const sourceSha256 = await candleFlashSourceSha256(process.cwd());
   const prebuilt = await fetchPrebuilt({ sourceSha256, target: "x86_64-pc-windows-msvc", cacheRoot: path.join(selected.cache, "flash-attn-prebuilt") });
   if (prebuilt) await appendFile(process.env.GITHUB_ENV, `CANDLE_FLASH_ATTN_PREBUILT_DIR=${prebuilt}\n`);
   console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, flash_attention_build: flashAttention, inference_revision: revision, inference_commit_present: present }));

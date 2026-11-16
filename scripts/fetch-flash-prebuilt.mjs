@@ -15,11 +15,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const names = new Set(["libflashattention.a", "flash-attn-prebuilt.txt", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-FLASH-ATTENTION", "LICENSE-CUTLASS.txt", "AUTHORS-FLASH-ATTENTION"]);
 const execute = (command, args) => execFileSync(command, args, { encoding: "utf8", timeout: 15000 }).trim();
 
-export async function candleFlashSourceSha256() {
+export async function candleFlashSourceSha256(workspace = root) {
   // Cargo resolves the exact git-pinned crate and supplies its physical checkout path.
   // This may fetch dependencies on a clean local machine, just as cargo build would.
   const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--locked", "--format-version", "1", "--features", "sceneworks-worker/backend-candle"], {
-    cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 300000,
+    cwd: workspace, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 300000,
     env: { ...process.env, CARGO_NET_OFFLINE: "false" },
   }));
   const packages = metadata.packages.filter(pkg => pkg.name === "candle-flash-attn" && pkg.source?.includes("github.com/SceneWorks/inference"));
