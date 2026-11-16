@@ -284,12 +284,15 @@ async function runProof() {
       res.writeHead(response.status, { 'content-type': response.headers.get('content-type') ?? 'application/json' }); res.end(bytes);
     } catch { failure = new Error('claim transport/preflight refused'); res.writeHead(503); res.end(); }
   });
+  let stage = 'start';
   try {
+    stage = 'api_start';
     const proxyPort = await listen(proxy);
     await launch('api', { SCENEWORKS_API_PORT: String(port), SCENEWORKS_RUN_UTILITY_INPROCESS: '0' });
     await wait(async () => { try { return await api('GET', '/api/v1/health'); } catch { return false; } }, 120);
     const { DatabaseSync } = await import('node:sqlite');
     db = new DatabaseSync(env.SCENEWORKS_JOBS_DB_PATH, { readOnly: true });
+    stage = 'worker_start';
     await launch('worker', { SCENEWORKS_WORKER_ONLY: '1', SCENEWORKS_API_URL: `http://127.0.0.1:${proxyPort}`, SCENEWORKS_WORKER_PROOF_KEY: workerKey });
     await wait(async () => {
       const workers = await api('GET', '/api/v1/workers');
@@ -306,22 +309,27 @@ async function runProof() {
       const actual = await Promise.all(selected.map(async (file) => ({ name: path.basename(file).toLowerCase(), sha256: await fileSha256(file) })));
       same(actual.sort((a, b) => a.name.localeCompare(b.name)), libraries, 'executed runtime libraries changed');
     };
+    stage = 'project_create';
     const project = await api('POST', '/api/v1/projects', { name: 'SDXL exact replay proof' });
     const runJob = async (sourceJob) => {
+      stage = sourceJob ? 'exact_action' : 'fresh_action';
       alive(); assert.equal(runtime(), baselineRuntime, 'device/runtime changed before render');
       assert.equal(await fileSha256(binary), evidence.binarySha256, 'runtime binary changed');
       const accepted = sourceJob ? await api('POST', `/api/v1/jobs/${sourceJob}/exact-replay`, {})
         : await api('POST', '/api/v1/image/jobs', { ...REQUEST, projectId: project.id, requestedGpu: String(plan.physicalIndex) });
+      stage = 'queued_payload';
       const queued = db.prepare('select status, payload_json, portable_model_binding_json from jobs where id=?').get(accepted.id);
       assert.equal(queued?.status, 'queued', 'job bypassed claim preflight');
       const envelope = JSON.parse(queued.portable_model_binding_json);
       const routes = Object.values(envelope.routes).filter((route) => route.backend === 'candle' && route.platform === 'windows');
       assert.equal(routes.length, 1, 'ambiguous accepted Candle route');
-      const route = routes[0]; await verifyMembers(route, plan);
+      const route = routes[0]; stage = 'selected_source'; await verifyMembers(route, plan);
       const payload = JSON.parse(queued.payload_json); verifyQueuedPayload(payload);
       const payloadSha256 = digest(payload);
       claimRoute = route; claimJob = accepted.id;
+      stage = 'render';
       const job = await wait(async () => { const job = await api('GET', `/api/v1/jobs/${accepted.id}`); assert(!['failed', 'canceled', 'interrupted'].includes(job.status), 'render failed/canceled'); return job.status === 'completed' && job; }, 3600);
+      stage = 'completed_receipt';
       const publicReceipt = await wait(async () => { try { return await api('GET', `/api/v1/jobs/${job.id}/execution-receipt`); } catch { return false; } }, 30);
       const row = db.prepare('select execution_receipt_json from jobs where id=? and status=\'completed\' and progress_side_effects_pending=0').get(job.id);
       const receipt = JSON.parse(row.execution_receipt_json);
@@ -330,19 +338,28 @@ async function runProof() {
       const projectRoot = await realpath(project.path), file = await realpath(path.resolve(projectRoot, asset.file.path));
       const relative = path.relative(projectRoot, file); assert(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'PNG escaped owned project');
       const png = await readFile(file);
+      stage = 'completed_identity';
       const witness = completedWitness({ job, receipt, route, png, workerId, device: String(plan.physicalIndex), pin, scheduleSha256: plan.scheduleSha256, payloadSha256 });
+      stage = 'post_render_environment';
       await verifyMembers(route, plan);
       await runtimeFiles(); await checkLoadedRuntime();
       assert.equal(runtime(), baselineRuntime, 'device/runtime changed after render');
       return witness;
     };
-    evidence.jobs.push(await runJob(), await runJob()); compareFresh(...evidence.jobs);
+    evidence.jobs.push(await runJob(), await runJob()); stage = 'compare_fresh'; compareFresh(...evidence.jobs);
     if (phase === 'replay') {
       verifyReplayCandidate(evidence.jobs[0], qualification.jobs[0]);
       evidence.jobs.push(await runJob(evidence.jobs[0].jobId));
       compareFresh(evidence.jobs[0], evidence.jobs[2]);
     }
     evidence.bodyAccepted = true;
+  } catch (error) {
+    // The public artifact must never contain private cache paths, request bodies or runtime logs.
+    evidence.failureStage = stage;
+    if (error instanceof assert.AssertionError && /^[A-Za-z0-9 ./:_-]{1,160}$/.test(error.message)) {
+      evidence.failureCheck = error.message;
+    }
+    throw error;
   } finally {
     claimJob = null;
     let drained = true;
