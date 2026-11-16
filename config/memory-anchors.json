@@ -14603,6 +14603,53 @@
       },
       "overallAllocatorEnvelopeBytes": 4758332990,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
+      "id": "regime:minimax_h3_image:mlx:q4:base:base:lora:minimax-h3-image-mlx-v1:imc-c1b9495bd68c3cc569b0",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "lora",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363/minimax-h3-image-q4-mlx-lora-evidence.json",
+        "sha256": "c647a74827bf7796c13712caf2119db344f189ae941d64f4cdf35fe8f2e79bf6",
+        "recordId": "imc-c1b9495bd68c3cc569b0",
+        "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+        "loaderClosureDigest": "d1b2810121c4436e5799f938861c9f58c8e3dc1ff8665bab3122680ef76f6150"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 14706225932,
+        "denoise": 12914745784,
+        "decode": 2056801520
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 16846742786,
+        "denoise": 12914745784,
+        "decode": 2056899824
+      },
+      "overallAllocatorEnvelopeBytes": 16846742786,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     }
   ]
 }
