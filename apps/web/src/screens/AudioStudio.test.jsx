@@ -478,6 +478,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     await click(modeTab(container, "Music"));
     const promptInput = container.querySelector('textarea[aria-label="Prompt"]');
     await setTextareaValue(promptInput, "dreamy pop");
+    await vi.waitFor(() => expect(buttonWithText(container, "Refine my prompt").disabled).toBe(false));
     await click(buttonWithText(container, "Refine my prompt"));
     await settle({ microtasks: 8 });
 

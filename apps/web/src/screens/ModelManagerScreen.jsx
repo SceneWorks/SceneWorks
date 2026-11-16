@@ -1,4 +1,5 @@
 import { useStableActions } from "./modelManager/memo.js";
+import { cachedModelCatalog } from "../portableModelFacts.js";
 import { ModelCard } from "./modelManager/ModelCard.jsx";
 import { LoraRow } from "./modelManager/LoraRow.jsx";
 import { LoraImportPanel } from "./modelManager/LoraImportPanel.jsx";
@@ -580,6 +581,7 @@ export function ModelManagerScreen() {
     token = "",
     loras,
     models,
+    modelCatalogStatus,
     jobAction,
     setActiveView,
     deleteLora: deleteLoraAction,
@@ -595,6 +597,9 @@ export function ModelManagerScreen() {
     presets: recipePresets = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
   } = useAppContext();
+  const staleCatalog = modelCatalogStatus === "error" ? cachedModelCatalog() : null;
+  const staleCatalogAgeMinutes = Number.isFinite(staleCatalog?.savedAt)
+    ? Math.max(0, Math.floor((Date.now() - staleCatalog.savedAt) / 60000)) : null;
   // Third-party LyCORIS now applies on every MLX provider (epic 3641), so the LyCORIS upload is no
   // longer Mac-gated.
   const onCancelJob = (job) => jobAction(job, "cancel");
@@ -1533,6 +1538,12 @@ export function ModelManagerScreen() {
 
   return (
     <section className="page-frame models-surface">
+      {staleCatalog?.entries.length ? (
+        <aside className="inline-warning" role="status">
+          <p>Server unavailable. Model availability saved on this device {staleCatalogAgeMinutes === null ? "at an unknown time" : `${staleCatalogAgeMinutes} minutes ago`} is for reference only; reconnect to check current options and installation.</p>
+          <p>{staleCatalog.entries.slice(0, 12).map((entry) => `${entry.name ?? entry.id}: ${entry.installState ?? "unknown"}`).join(" · ")}{staleCatalog.entries.length > 12 ? ` · ${staleCatalog.entries.length - 12} more cached models` : ""}</p>
+        </aside>
+      ) : null}
       {licenseAckError ? <p role="alert" className="inline-warning">{licenseAckError}</p> : null}
       <WorkPanel>
         <div className="models-tabbar">

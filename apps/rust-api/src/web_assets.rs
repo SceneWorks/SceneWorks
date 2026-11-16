@@ -230,7 +230,7 @@ fn apply_common_headers(
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY.trim()),
     );
     headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     headers.insert(

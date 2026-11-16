@@ -139,9 +139,13 @@ pub(crate) fn repa_teacher_component(
     if !is_iris_training_kernel(&plan.target.kernel) {
         return Ok(None);
     }
-    let options = sceneworks_core::training::iris::iris_options(&plan.config)
-        .map_err(|error| crate::error::WorkerError::InvalidPayload(error.to_string()))?;
-    if !curricula::iris_repa_enabled(&options) {
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(crate::error::WorkerError::InvalidPayload)?;
+    if !options.iris.repa_enabled() {
         return Ok(None);
     }
     let dir = installed_repa_teacher(&settings.data_dir).ok_or_else(|| {
@@ -159,26 +163,6 @@ pub(crate) fn repa_teacher_component(
     )
     .map_err(crate::error::WorkerError::InvalidPayload)?;
     Ok(Some(gen_core::WeightsSource::Dir(dir)))
-}
-
-/// The engine `train_dtype` of an Iris run: `fp16` reaches the trainer verbatim (accelerate's
-/// dynamic loss scaling, `MixedPrecision::Fp16`); every other kernel keeps the shared mapping.
-#[cfg(native_lane)]
-pub(crate) fn apply_iris_train_dtype(
-    mut config: gen_core::TrainingConfig,
-    plan: &TrainingPlan,
-) -> gen_core::TrainingConfig {
-    if is_iris_training_kernel(&plan.target.kernel)
-        && plan
-            .config
-            .advanced
-            .get("mixedPrecision")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("fp16"))
-    {
-        config.train_dtype = "fp16".to_owned();
-    }
-    config
 }
 
 /// A typed refusal of an Iris plan by the engine's own resolution.
@@ -276,14 +260,16 @@ pub fn resolve_iris_config(
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
     let mut engine =
         crate::training_jobs::map_engine_config(config).map_err(training_config_refusal)?;
-    if config
-        .advanced
-        .get("mixedPrecision")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("fp16"))
-    {
-        engine.train_dtype = "fp16".to_owned();
-    }
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        "",
+    )
+    .map_err(|message| IrisPlanRefusal {
+        kind: "invalid".to_owned(),
+        message,
+    })?;
+    engine.train_dtype = options.common.train_dtype;
     let request = gen_core::TrainingRequest {
         items: Vec::new(),
         config: engine,

@@ -84,7 +84,11 @@ elif mode == "complete":
 elif mode == "root-exit":
     raise SystemExit(7)
 elif mode == "event-failure":
-    time.sleep(0.15)
+    # The monitor may not have written its first event when this child starts
+    # on a busy CI host. Wait for the file before replacing it with a directory.
+    deadline = time.monotonic() + 5
+    while not os.path.isfile(event_file) and time.monotonic() < deadline:
+        time.sleep(0.01)
     os.unlink(event_file)
     os.mkdir(event_file)
 time.sleep(60)

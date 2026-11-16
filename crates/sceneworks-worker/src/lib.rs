@@ -159,8 +159,10 @@ pub fn portable_guard_runtime_variant(
     entry: &Value,
     binding: Option<&sceneworks_core::model_artifacts::portable_binding::PortableModelBinding>,
 ) -> Result<Option<String>, String> {
-    external_library_runtime::bound_runtime_variant(job_type, payload, slot, entry, binding)
-        .map_err(|error| error.to_string())
+    external_library_runtime::bound_runtime_variant_from_payload(
+        job_type, payload, slot, entry, binding,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The DiT tier a MiniMax-H3-Image LoRA/LoKr run trains over on this host's installs, and that
@@ -319,6 +321,7 @@ pub(crate) use sceneworks_core::admission_geometry;
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
 #[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 mod advanced;
 mod api_client;
 #[cfg(native_lane)]
@@ -537,7 +540,7 @@ use image_jobs::*;
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
 /// This is independent of effective-caption Unicode-character admission after enhancement.
 pub fn prompt_enhancement_max_tokens(model_id: &str) -> u64 {
-    u64::from(gen_core::generator::max_enhance_tokens_for_model(model_id))
+    sceneworks_core::request_validation::prompt_enhancement::max_tokens(model_id)
 }
 mod vector_jobs;
 #[doc(hidden)]
@@ -1863,6 +1866,8 @@ enum JobOutcome {
 struct ClaimedJob {
     job: JobSnapshot,
     portable_model_binding: Option<PortableRouteBinding>,
+    execution_claim_capability: Option<String>,
+    exact_replay_expected: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>,
 }
 
 /// Runtime backend advertised to the private portable-source claim. The worker repeats this
@@ -1903,15 +1908,46 @@ async fn run_job_with_shutdown(
     http_client: &reqwest::Client,
     claimed: ClaimedJob,
 ) -> JobOutcome {
+    let capability = claimed.execution_claim_capability.clone();
+    with_execution_claim_capability(
+        capability,
+        run_job_with_shutdown_scoped(api, settings, http_client, claimed),
+    )
+    .await
+}
+
+async fn run_job_with_shutdown_scoped(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    claimed: ClaimedJob,
+) -> JobOutcome {
     let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = run_utility_job(
-        api,
-        settings,
-        http_client,
-        claimed.job,
-        claimed.portable_model_binding,
-        shutdown.clone(),
+    let project_id = claimed
+        .job
+        .project_id
+        .as_deref()
+        .or_else(|| claimed.job.payload.get("projectId").and_then(Value::as_str));
+    let project_root = project_id.and_then(|project_id| {
+        ProjectStore::new(settings.data_dir.clone(), "worker")
+            .get_project(project_id)
+            .ok()
+            .map(|project| PathBuf::from(project.path))
+    });
+    let job_future = with_execution_project_root(
+        project_root,
+        with_exact_replay_expected(
+            claimed.exact_replay_expected,
+            run_utility_job(
+                api,
+                settings,
+                http_client,
+                claimed.job,
+                claimed.portable_model_binding,
+                shutdown.clone(),
+            ),
+        ),
     );
     tokio::pin!(job_future);
 
@@ -2052,6 +2088,8 @@ async fn poll_once(
     Ok(Some(ClaimedJob {
         job,
         portable_model_binding: claim.portable_model_binding,
+        execution_claim_capability: claim.execution_claim_capability,
+        exact_replay_expected: claim.exact_replay_expected,
     }))
 }
 

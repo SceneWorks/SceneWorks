@@ -96,16 +96,10 @@ pub(crate) async fn continue_training_job(
     // Stored Iris plans include paths resolved by the API. Validate the client-shaped
     // options again, then resolve this continuation's immediate parent below.
     if let Some(objective) = sceneworks_core::training::iris::iris_objective(target) {
-        if let Some(options) = plan
-            .config
-            .advanced
-            .get_mut(objective.options_key())
-            .and_then(Value::as_object_mut)
-        {
-            for key in sceneworks_core::training::iris::IRIS_API_OWNED_OPTION_KEYS {
-                options.remove(key);
-            }
-        }
+        sceneworks_core::training::iris::strip_api_owned_paths_for_continuation(
+            &mut plan.config,
+            objective,
+        );
     }
     sceneworks_core::training::validate_training_config_for_target(target, &plan.config)
         .map_err(training_plan_error_to_api_error)?;
@@ -113,7 +107,14 @@ pub(crate) async fn continue_training_job(
         .project_id
         .clone()
         .ok_or_else(|| ApiError::bad_request("The source training project is missing."))?;
-    let scope = training_output_scope(&plan.config.advanced)?;
+    let scope = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(ApiError::bad_request)?
+    .common
+    .output_scope;
     validate_lora_id_component(&plan.output.lora_id)?;
     let (source_dir, _) =
         resolve_training_output_location(&state, &scope, Some(&project_id), &plan.output.lora_id)
@@ -184,18 +185,11 @@ pub(crate) async fn continue_training_job(
     let is_iris = sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel);
     if is_iris {
         if let Some(objective) = sceneworks_core::training::iris::iris_objective(target) {
-            let options = plan
-                .config
-                .advanced
-                .entry(objective.options_key())
-                .or_insert_with(|| json!({}));
-            let options = options
-                .as_object_mut()
-                .ok_or_else(|| ApiError::bad_request("Invalid Iris training options."))?;
-            // Continue the same data walk through the new step limit, even when the
-            // original run ended at an epoch cap or began as a new phase.
-            options.remove("num_epochs");
-            options.insert("resume_data_policy".into(), json!("exact"));
+            sceneworks_core::training::iris::prepare_iris_continuation_options(
+                &mut plan.config,
+                objective,
+            )
+            .map_err(training_plan_error_to_api_error)?;
         }
         let root = sceneworks_worker::iris_checkpoint_root(&original_dir, &plan.output.file_name);
         let terminal = root.join(format!(
@@ -212,15 +206,12 @@ pub(crate) async fn continue_training_job(
             .insert("resumeFromJobId".into(), json!(job_id));
         crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
         if let Some(objective) = sceneworks_core::training::iris::iris_objective(target) {
-            if let Some(options) = plan
-                .config
-                .advanced
-                .get_mut(objective.options_key())
-                .and_then(Value::as_object_mut)
-            {
-                // Pin this source checkpoint, rather than selecting a later writer's newest one.
-                options.insert("resume_from".into(), json!(terminal.display().to_string()));
-            }
+            sceneworks_core::training::iris::pin_iris_continuation_checkpoint(
+                &mut plan.config,
+                objective,
+                &terminal.display().to_string(),
+            )
+            .map_err(training_plan_error_to_api_error)?;
         }
     }
     plan.provenance.source_job_id = fresh_job_id.clone();

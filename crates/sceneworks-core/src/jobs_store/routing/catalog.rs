@@ -16,9 +16,11 @@ use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
     classify_candle_video_gap, classify_image_gap, classify_video_gap, UnsupportedReason,
 };
+#[cfg(test)]
+use crate::jobs_store::routing::has_nonempty_nested_array;
 use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_mlx_eligible};
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    has_nonempty_array, has_nonempty_string, has_nonempty_string_array,
 };
 
 /// The user-facing affordance prefix the Mac UI shows in place of a control with no native Mac lane
@@ -831,6 +833,32 @@ impl VideoModelCaps {
 // Generated from the schema-validated router product policy in the static ModelSpec build.
 include!(concat!(env!("OUT_DIR"), "/model-route-policy.rs"));
 
+pub(crate) fn video_route_facts(
+    model: &str,
+) -> sceneworks_options::video_eligibility::VideoRouteFacts {
+    crate::registry::builtin_model_specs()
+        .find(|spec| spec.product.id == model)
+        .map(|spec| {
+            let facts = spec.option_route_facts();
+            sceneworks_options::video_eligibility::VideoRouteFacts::from_value(Some(&facts))
+        })
+        .or_else(|| {
+            VIDEO_MODEL_CAPS
+                .iter()
+                .find(|caps| caps.id == model)
+                .map(|caps| {
+                    sceneworks_options::video_eligibility::VideoRouteFacts::new(
+                        caps.video_mlx_routed,
+                        caps.candle_video_routed,
+                        caps.candle_video_i2v,
+                        caps.candle_video_vace,
+                        false,
+                    )
+                })
+        })
+        .unwrap_or_default()
+}
+
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
 /// tables above (sc-9495). Expands to a compile-time-built array of exactly the ids whose column is
 /// `true`, in table-row order, so the generated constant is a drop-in for the hand-written list it
@@ -988,10 +1016,19 @@ fn imported_provider_route(
 /// identity alone.
 /// The single imported provider operation a payload selects. Exactly one wins, and the order is the
 /// contract: a phase list is a MultiPhase job even when it also carries poses, and so on down.
+#[cfg(test)]
 fn imported_payload_operation(payload: &Map<String, Value>) -> &'static str {
-    if has_nonempty_nested_array(payload, "advanced", "phases") {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    imported_payload_operation_with_facts(payload, &facts)
+}
+
+fn imported_payload_operation_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> &'static str {
+    if crate::jobs_store::routing::route_nested_array_nonempty(facts, "phases") {
         "multi_phase"
-    } else if has_nonempty_nested_array(payload, "advanced", "poses") {
+    } else if crate::jobs_store::routing::route_nested_array_nonempty(facts, "poses") {
         "pose"
     } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         "edit"
@@ -1307,29 +1344,35 @@ fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
 
 /// Explicit load-time quant requested by the shared image payload. A named tier takes precedence
 /// over the legacy MLX bit count. Unknown names are terminal rather than silently coerced.
+#[cfg(test)]
 fn imported_requested_quant(
     payload: &Map<String, Value>,
     ignore_quant_tier: bool,
 ) -> Result<Option<&'static str>, ()> {
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    let named = advanced
-        .and_then(|advanced| {
-            if ignore_quant_tier {
-                advanced.get("quant")
-            } else {
-                advanced.get("quantTier").or_else(|| advanced.get("quant"))
-            }
-        })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
-    let bits = advanced
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        });
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    imported_requested_quant_with_facts(&facts, ignore_quant_tier)
+}
+
+fn imported_requested_quant_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+    ignore_quant_tier: bool,
+) -> Result<Option<&'static str>, ()> {
+    use crate::resolved_options::RouteField;
+    let named_field = if ignore_quant_tier || matches!(&facts.quant_tier, RouteField::Absent) {
+        &facts.quant
+    } else {
+        &facts.quant_tier
+    };
+    let named = match named_field {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(value.trim().to_ascii_lowercase()),
+        RouteField::Invalid => return Err(()),
+    };
+    let bits = match &facts.mlx_quantize {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(bits) => Some(*bits),
+        RouteField::Invalid => return Err(()),
+    };
     if let Some(named) = named.as_deref() {
         return match named {
             "nvfp4" => Ok(Some("nvfp4")),
@@ -1354,31 +1397,63 @@ fn imported_requested_quant(
 ///
 /// This helper deliberately does not infer Pose from either field. A caller must independently select
 /// Pose from a non-empty `advanced.poses` set and prove that exact source/backend operation exists.
+#[cfg(test)]
 pub fn imported_control_intent_is_material(advanced: &Map<String, Value>) -> bool {
-    if advanced
-        .get("controlImage")
-        .is_some_and(|value| !value.is_null())
-    {
-        return true;
-    }
-    match advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
-    }
+    let payload = Map::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
+    imported_control_intent_is_material_with_facts(&facts)
+}
+
+/// Evaluate saved or bare imported control intent from the one-time route projection.
+pub fn imported_control_intent_is_material_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    facts.control_image.is_present_nonnull()
+        || match &facts.control_mode {
+            crate::resolved_options::RouteField::Valid(mode) => !mode.trim().is_empty(),
+            crate::resolved_options::RouteField::Invalid => true,
+            crate::resolved_options::RouteField::Absent
+            | crate::resolved_options::RouteField::Null => false,
+        }
+}
+
+/// Control intent after the request has passed shared validation and image option binding.
+pub fn imported_control_intent_is_material_resolved(
+    advanced: &crate::image_request::ImageAdvanced,
+) -> bool {
+    advanced.control_image.is_some()
+        || advanced
+            .control_mode
+            .as_ref()
+            .is_some_and(|mode| !mode.value.trim().is_empty())
 }
 
 /// The imported Pose surface currently assembles a pose-only Krea control branch. Omission/empty
 /// keeps that proven default; any explicit non-pose or malformed mode must fail before claim rather
 /// than reach a worker predicate that cannot consume it. When provider facts gain per-control-kind
 /// metadata this check can be derived from that registration instead.
+#[cfg(test)]
 pub fn imported_pose_control_mode_is_supported(advanced: &Map<String, Value>) -> bool {
-    match advanced.get("controlMode") {
-        None | Some(Value::Null) => true,
-        Some(Value::String(mode)) if mode.trim().is_empty() => true,
-        Some(Value::String(mode)) => mode.trim().eq_ignore_ascii_case("pose"),
-        Some(_) => false,
+    let payload = Map::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
+    match facts.control_mode {
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            true
+        }
+        crate::resolved_options::RouteField::Valid(mode) => {
+            mode.trim().is_empty() || mode.trim().eq_ignore_ascii_case("pose")
+        }
+        crate::resolved_options::RouteField::Invalid => false,
     }
+}
+
+/// Pose-mode check for a previously bound image request.
+pub fn imported_pose_control_mode_is_supported_resolved(
+    advanced: &crate::image_request::ImageAdvanced,
+) -> bool {
+    advanced.control_mode.as_ref().is_none_or(|mode| {
+        mode.value.trim().is_empty() || mode.value.trim().eq_ignore_ascii_case("pose")
+    })
 }
 
 /// Fail-closed request gate for a non-builtin imported image model. The exact source shape and
@@ -1387,6 +1462,16 @@ pub fn imported_image_request_provider_eligible(
     model: &str,
     payload: &Map<String, Value>,
     backend: &str,
+) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    imported_image_request_provider_eligible_with_facts(model, payload, backend, &facts)
+}
+
+pub(crate) fn imported_image_request_provider_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    backend: &str,
+    route_options: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     if is_builtin_image_model(model) {
         return false;
@@ -1425,10 +1510,11 @@ pub fn imported_image_request_provider_eligible(
 
     let has_reference_list = has_nonempty_string_array(payload, "referenceAssetIds");
     let has_loras = has_nonempty_array(payload, "loras");
-    let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
-    let has_phases = has_nonempty_nested_array(payload, "advanced", "phases");
+    let has_poses = crate::jobs_store::routing::route_nested_array_nonempty(route_options, "poses");
+    let has_phases =
+        crate::jobs_store::routing::route_nested_array_nonempty(route_options, "phases");
     let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
-    let operation = imported_payload_operation(payload);
+    let operation = imported_payload_operation_with_facts(payload, route_options);
     // On Krea strict-pose jobs the character id associates the result with Character Studio.
     // The pose lane uses the single reference for likeness scoring, as the builtin lane does.
     if (has_nonempty_string(payload, "characterId") && !(family == "krea_2" && operation == "pose"))
@@ -1453,20 +1539,26 @@ pub fn imported_image_request_provider_eligible(
     // An explicit user control map/mode is semantically material. It may only accompany a selected
     // Pose operation; never flatten it into Generate/Edit/MultiPhase. The exact route lookup and
     // Control-conditioning check below then prove that this source/backend can consume the request.
-    if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(imported_control_intent_is_material)
-        && operation != "pose"
-    {
+    let control_intent_is_material = route_options.control_image.is_present_nonnull()
+        || match &route_options.control_mode {
+            crate::resolved_options::RouteField::Valid(mode) => !mode.trim().is_empty(),
+            crate::resolved_options::RouteField::Invalid => true,
+            crate::resolved_options::RouteField::Absent
+            | crate::resolved_options::RouteField::Null => false,
+        };
+    if control_intent_is_material && operation != "pose" {
         return false;
     }
-    if operation == "pose"
-        && payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .is_some_and(|advanced| !imported_pose_control_mode_is_supported(advanced))
-    {
+    let pose_control_mode_supported = match &route_options.control_mode {
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            true
+        }
+        crate::resolved_options::RouteField::Valid(mode) => {
+            mode.trim().is_empty() || mode.trim().eq_ignore_ascii_case("pose")
+        }
+        crate::resolved_options::RouteField::Invalid => false,
+    };
+    if operation == "pose" && !pose_control_mode_supported {
         return false;
     }
     let Some(route) = imported_provider_route(backend, family, source, operation) else {
@@ -1477,18 +1569,22 @@ pub fn imported_image_request_provider_eligible(
     }
     let ignore_quant_tier = family == "flux2" && source == "comfy_ui_tree";
     if native_nvfp4 {
-        let advanced = payload.get("advanced").and_then(Value::as_object);
-        let named = advanced
-            .and_then(|advanced| advanced.get("quantTier").or_else(|| advanced.get("quant")))
-            .and_then(Value::as_str)
-            .map(str::trim);
-        if named.is_some_and(|quant| !quant.eq_ignore_ascii_case("nvfp4"))
-            || advanced.is_some_and(|advanced| advanced.contains_key("mlxQuantize"))
-        {
+        use crate::resolved_options::RouteField;
+        let named = if matches!(&route_options.quant_tier, RouteField::Absent) {
+            &route_options.quant
+        } else {
+            &route_options.quant_tier
+        };
+        let valid_named = match named {
+            RouteField::Absent | RouteField::Null => true,
+            RouteField::Valid(quant) => quant.trim().eq_ignore_ascii_case("nvfp4"),
+            RouteField::Invalid => false,
+        };
+        if !valid_named || !matches!(&route_options.mlx_quantize, RouteField::Absent) {
             return false;
         }
     }
-    match imported_requested_quant(payload, ignore_quant_tier) {
+    match imported_requested_quant_with_facts(route_options, ignore_quant_tier) {
         // `supported_quants` advertises the provider's quantize-on-LOAD tiers. For a native NVFP4
         // checkpoint the tier is not a load-time instruction at all — the stored codec is a
         // property of the file and the engine's compiled plan owns which projections execute
@@ -1974,8 +2070,10 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
     CANDLE_ROUTED_TRAINING_KERNELS.contains(kernel)
 }
 
-/// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
-pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
+pub(crate) fn moss_training_plan_is_supported_with_facts(
+    plan: &Map<String, Value>,
+    route: &crate::resolved_options::TrainingRouteFacts,
+) -> bool {
     let base = plan
         .get("target")
         .and_then(Value::as_object)
@@ -1984,20 +2082,14 @@ pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool
     if !matches!(base, Some("moss_image_base" | "moss_image_sft")) {
         return false;
     }
-    let advanced = match plan.get("config") {
-        None => None,
-        Some(Value::Object(config)) => match config.get("advanced") {
-            None => None,
-            Some(Value::Object(advanced)) => Some(advanced),
-            _ => return false,
-        },
-        _ => return false,
-    };
-    let method = match advanced.and_then(|advanced| advanced.get("networkType")) {
-        None => "lora",
-        Some(Value::String(value)) if value.trim().is_empty() => "lora",
-        Some(Value::String(value)) => value.trim(),
-        _ => return false,
+    let method = match &route.network_type {
+        crate::resolved_options::RouteField::Absent => "lora",
+        crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => "lora",
+        crate::resolved_options::RouteField::Valid(value) => value.trim(),
+        crate::resolved_options::RouteField::Null
+        | crate::resolved_options::RouteField::Invalid => {
+            return false;
+        }
     };
     method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
 }
@@ -3496,7 +3588,7 @@ mod tests {
     /// passed its own tests, because each layer was correct in isolation. sc-15328 itself: the
     /// manifest advertised `loraCompatibility.families = ["mage-flow"]` on the three Mage generation
     /// variants, the picker therefore offered a trained Mage adapter as "installed and compatible",
-    /// `mage_flow_mlx_eligible` refused any payload with a non-empty `loras`, and every Mage
+    /// the old Mage Flow route predicate refused any payload with a non-empty `loras`, and every Mage
     /// `ModelCaps` row is `candle_lora: false`. No lane claimed the job. It did not fail — it sat
     /// `queued` / "Waiting for an available worker." **forever**, next to an idle mlx worker, with
     /// no error and no terminal state. That is strictly worse than a rejection.

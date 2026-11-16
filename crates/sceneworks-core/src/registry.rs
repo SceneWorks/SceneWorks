@@ -72,6 +72,33 @@ pub fn preview_feature(id: &str) -> Option<&'static BTreeMap<String, bool>> {
 }
 
 impl ModelSpec {
+    /// Immutable route declarations for the portable static validator. Author choices cannot
+    /// grant a backend route or provider capability.
+    pub fn option_route_facts(&self) -> Value {
+        let (mlx, candle, i2v, vace) = match &self.routing {
+            Some(RoutePolicy::Video {
+                video_mlx_routed,
+                candle_video_routed,
+                candle_video_i2v,
+                candle_video_vace,
+            }) => (
+                *video_mlx_routed,
+                *candle_video_routed,
+                *candle_video_i2v,
+                *candle_video_vace,
+            ),
+            _ => (false, false, false, false),
+        };
+        let lora = candle
+            && self
+                .video_routes
+                .get("candle")
+                .into_iter()
+                .flatten()
+                .flat_map(|route| &route.engines)
+                .any(|engine| engine.supports_lora);
+        serde_json::json!({"videoMlxRouted":mlx,"candleVideoRouted":candle,"candleVideoI2v":i2v,"candleVideoVace":vace,"candleVideoLora":lora})
+    }
     /// Author choices may change display text, visibility, product menus and valid defaults. Native
     /// routes, immutable download identities, restrictions, and evidence always come from the
     /// static spec. Credentials, install observations and physical bindings are added by their host.
@@ -106,6 +133,7 @@ impl ModelSpec {
                     .expect("serializable download evidence"),
             );
         }
+        model["optionRouteFacts"] = self.option_route_facts();
         evidence::project_memory_evidence(&mut model, &Value::Object(facts))
             .expect("build-validated static model evidence projection");
         model
@@ -206,3 +234,23 @@ mod assemble;
 mod parity_contract_tests;
 #[cfg(test)]
 mod tests;
+
+/// Replace reserved routing facts with compiled policy; imported/user rows cannot grant lanes.
+pub fn project_option_route_facts(entry: &mut Value) {
+    let id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let facts = crate::jobs_store::video_route_facts(id);
+    if let Some(object) = entry.as_object_mut() {
+        if facts.mlx || facts.candle {
+            object.insert(
+                "optionRouteFacts".into(),
+                serde_json::json!({
+                    "videoMlxRouted":facts.mlx, "candleVideoRouted":facts.candle,
+                    "candleVideoI2v":facts.candle_i2v, "candleVideoVace":facts.candle_vace,
+                    "candleVideoLora":facts.candle_lora
+                }),
+            );
+        } else {
+            object.remove("optionRouteFacts");
+        }
+    }
+}

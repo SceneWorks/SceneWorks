@@ -2366,7 +2366,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5422,7 +5422,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7233,6 +7233,7 @@ dependencies = [
  "sceneworks-gen-core-checkpoint",
  "sceneworks-gen-core-h3",
  "sceneworks-gen-core-moss-image",
+ "sceneworks-options",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -7559,6 +7560,27 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+]
+
+[[package]]
+name = "sceneworks-options"
+version = "0.11.1"
+dependencies = [
+ "sceneworks-gen-core-moss-image-policy",
+ "sceneworks-gen-core-supra2-policy",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "sceneworks-options-wasm"
+version = "0.11.1"
+dependencies = [
+ "sceneworks-options",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

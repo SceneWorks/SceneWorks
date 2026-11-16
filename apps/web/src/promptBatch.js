@@ -259,6 +259,27 @@ export function firstResolvedPrompt(prompts, variables) {
   ).prompt;
 }
 
+// Only the leading directive can change a render's dimensions. Keep its template
+// tokens, but leave prompt-body axes out of live dimension checks.
+export function leadingResolutionTemplate(prompt) {
+  if (typeof prompt !== "string") return "prompt";
+  const start = prompt.search(/\S/);
+  if (start < 0) return "prompt";
+  if (prompt[start] !== "[" && prompt.slice(start, start + 2) !== "{{") return "prompt";
+  let insidePlaceholder = false;
+  for (let index = start; index < prompt.length; index += 1) {
+    if (prompt.slice(index, index + 2) === "{{") { insidePlaceholder = true; index += 1; continue; }
+    if (insidePlaceholder && prompt.slice(index, index + 2) === "}}") {
+      insidePlaceholder = false;
+      index += 1;
+      if (prompt[start] !== "[" && prompt[index + 1] !== "[") return prompt.slice(0, index + 1);
+      continue;
+    }
+    if (!insidePlaceholder && prompt[index] === "]") return prompt.slice(0, index + 1);
+  }
+  return "prompt";
+}
+
 // A leading `[WxH]` renders a prompt at an exact size, overriding the Studio Aspect
 // (sc-10063); `[W:H]` instead selects the largest available size near the requested
 // aspect ratio. Non-numeric brackets stay literal. Returns the stripped prompt and {width,height}

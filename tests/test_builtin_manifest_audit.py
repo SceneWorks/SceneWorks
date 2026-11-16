@@ -902,70 +902,47 @@ def test_manifest_model_path_is_only_an_optional_override():
     and continue to repo resolution (or decline an imported-only lane) when it
     is absent.
     """
+    # The typed accessors split request/manifest reads across lines. Scan the whole file:
+    # image_jobs.rs also has production functions after its first inline test module.
     expected_readers = {
-        # sc-16426: gallery attribution reads the imported checkpoint only after the worker has
-        # selected an imported Krea/SDXL route, and declines attribution when every path source is
-        # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
         "image_jobs/artifact_resolution.rs",
-        "image_jobs/flux2_control_candle.rs",
-        "image_jobs/kolors_control.rs",
-        "image_jobs/krea_control.rs",
-        "image_jobs/qwen_control.rs",
-        "image_jobs/zimage_control.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
-        "image_jobs/instantid.rs",
-        "image_jobs/kolors_ipadapter.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/krea_control.rs",
         "image_jobs/krea_control_candle.rs",
         "image_jobs/krea_imported.rs",
-        # sc-15036: the fine-tuned Mage-Flow base lane. Audited — `modelPath` is an optional
-        # FIRST preference here, falling through to the catalog entry's `paths.model` (which is
-        # what registration actually stamps) and then declining the lane entirely with `Ok(None)`
-        # when neither is present, so a normal install never reaches it.
         "image_jobs/mage_finetuned.rs",
-        "image_jobs/pulid.rs",
-        "image_jobs/pulid_candle.rs",
+        "image_jobs/qwen_control.rs",
         "image_jobs/qwen_edit_candle.rs",
         "image_jobs/sdxl_edit_candle.rs",
         "image_jobs/sdxl_imported.rs",
         "image_jobs/sdxl_ipadapter.rs",
+        "image_jobs/zimage_control.rs",
         "image_jobs/zimage_edit_candle.rs",
     }
     actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = _before_test_module(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
         for match in re.finditer(
-            r'request\.model_manifest_entry\.get\("modelPath"\)',
+            r'request\s*\.\s*model_manifest_entry\s*\.\s*get\("modelPath"\)',
             source,
         ):
             relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
+            # This one assertion inspects the absence of a manifest override; it is not a reader.
+            if relative_path == "image_jobs/qwen_edit_candle.rs" and source[
+                match.end() :
+            ].startswith(".is_none()"):
+                continue
             actual_readers.append(relative_path)
-            prefix = source[max(0, match.start() - 500) : match.start()]
-            statement_start = source.rfind(
-                "let raw_path = request", max(0, match.start() - 500), match.start()
-            )
-            statement_end = source.find(";", match.end())
-            statement = (
-                source[statement_start : statement_end + 1]
-                if statement_start >= 0 and statement_end >= 0
-                else ""
-            )
-            compact_statement = re.sub(r"\s+", "", statement)
-            # sc-16426's attribution-only reader uses idiomatic `?`, which Clippy requires. Keep
-            # that exception exact: any new source, precedence change, panic/error conversion, or
-            # fallback change must fail this inventory audit and be reviewed explicitly.
-            question_mark_optional = relative_path == "image_jobs.rs" and compact_statement == (
-                'letraw_path=request.advanced.get("modelPath")'
-                '.or_else(||request.model_manifest_entry.get("modelPath"))'
-                '.or_else(||{request.model_manifest_entry.get("paths")'
-                '.and_then(|paths|paths.get("model"))})'
-                ".and_then(Value::as_str)?;"
-            )
+            prefix = re.sub(r"\s+", " ", source[max(0, match.start() - 280) : match.start()])
             assert (
-                "if let Some(path) = request" in prefix
-                or "let Some(raw_path) = request" in prefix
-                or question_mark_optional
+                ("if let Some(path) = request" in prefix
+                 or "let Some(raw_path) = request" in prefix
+                 or relative_path == "image_jobs.rs" and "let raw_path = request" in prefix)
+                and '.advanced_text("modelPath")' in prefix
+                and ".or_else(|| {" in prefix
             ), (
                 f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"

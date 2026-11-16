@@ -532,14 +532,14 @@ describe("configValidation", () => {
     });
   }
 
-  it("enforces advertised numeric limits and integer fields without losing fractional alpha or learning rate", () => {
+  it("leaves advertised limits to Rust while preserving local integer and precision guards", () => {
     const advertised = { ...target, limits: { rank: [4, 128], alpha: [1, 128], steps: [10, 2000], batchSize: [1, 4], resolutions: [512, 1024] } };
     const errors = (draft, selectedTarget = advertised) => configValidation({ ...wholeDraft, ...draft }, { ...ctx, selectedTarget }).filter((entry) => entry.kind === "error");
-    expect(errors({ rank: 3 }).some((entry) => entry.field === "rank")).toBe(true);
+    expect(errors({ rank: 3 }).some((entry) => entry.field === "rank")).toBe(false);
     expect(errors({ steps: 100.5 }).some((entry) => entry.field === "steps")).toBe(true);
     expect(errors({ saveEvery: 4294967296 }).some((entry) => entry.field === "saveEvery")).toBe(true);
-    expect(errors({ resolution: 768 }).some((entry) => entry.field === "resolution")).toBe(true);
-    expect(errors({ alpha: 1.5 }).some((entry) => entry.field === "alpha")).toBe(true);
+    expect(errors({ resolution: 768 }).some((entry) => entry.field === "resolution")).toBe(false);
+    expect(errors({ alpha: 1.5 }).some((entry) => entry.field === "alpha")).toBe(false);
     expect(errors({ alpha: 1.5, learningRate: 0.00001 }, { ...advertised, limits: { ...advertised.limits, alpha: undefined } })).toEqual([]);
   });
 

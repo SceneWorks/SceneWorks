@@ -1,6 +1,9 @@
+const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
+vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CharacterGenerationPanel } from "./characterPanels.jsx";
 
@@ -104,6 +107,7 @@ describe("CharacterGenerationPanel reference selection (sc-8851)", () => {
   let root;
 
   beforeEach(() => {
+    feedbackState.value = { state: "valid" };
     global.IS_REACT_ACT_ENVIRONMENT = true;
     // Some shared children portal to document.body; render into a body-attached node.
     container = document.createElement("div");
@@ -263,6 +267,7 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
   };
 
   beforeEach(() => {
+    feedbackState.value = { state: "valid" };
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -332,6 +337,17 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
     );
     await act(async () => button.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
   }
+
+  it.each(["pending", "server-required", "invalid"])("blocks character image generation while feedback is %s", async (state) => {
+    feedbackState.value = { state, refusal: { field: "steps", detail: "Fix the authored steps" } };
+    const createImageJob = vi.fn(async () => ({ id: "job" }));
+    await mount(createImageJob);
+    const button = [...container.querySelectorAll("button")].find((candidate) => candidate.textContent.trim() === "Generate");
+    expect(button.disabled).toBe(true);
+    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
+    await generate();
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
 
   it("sends both values for an undeclared image model", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));

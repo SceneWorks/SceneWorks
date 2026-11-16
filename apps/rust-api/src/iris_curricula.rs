@@ -20,11 +20,11 @@
 use super::*;
 
 use sceneworks_core::training::iris::curricula::{
-    self, iris_curriculum_receipt, iris_dist_world, iris_repa_enabled, IRIS_REPA_TEACHER_MODEL_ID,
-    IRIS_REPA_TEACHER_REPO, IRIS_REPA_TEACHER_REVISION, IRIS_STAGES,
+    self, iris_curriculum_receipt, IRIS_REPA_TEACHER_MODEL_ID, IRIS_REPA_TEACHER_REPO,
+    IRIS_REPA_TEACHER_REVISION, IRIS_STAGES,
 };
 use sceneworks_core::training::iris::{
-    iris_options, is_iris_training_kernel, IrisObjective, IRIS_OPTIONS_KEY, RESUME_FROM_JOB_KEY,
+    is_iris_training_kernel, IrisObjective, RESUME_FROM_JOB_KEY,
 };
 use sceneworks_core::training::{TrainingConfig, TrainingPlan, TrainingTarget};
 
@@ -159,9 +159,6 @@ pub(crate) async fn iris_plan_check(
 ) -> Result<Json<Value>, ApiError> {
     let target = iris_target(&request.target_id)?;
     let config = request.config;
-    let options = iris_options(&config).unwrap_or_default();
-    let (world_size, share_device, timeout_secs) = iris_dist_world(&options);
-    let global_batch = curricula::iris_global_batch(&config, world_size);
     let teacher = teacher_status(&state);
     let mut first_refusal: Option<Value> = None;
 
@@ -170,6 +167,19 @@ pub(crate) async fn iris_plan_check(
     {
         first_refusal = Some(refusal("invalid", error.to_string()));
     }
+    let controls = match crate::training::resolved_training_options_for_config(&target, &config) {
+        Ok(controls) => controls,
+        Err(error) => {
+            if first_refusal.is_none() {
+                first_refusal = Some(refusal("invalid", error.detail));
+            }
+            sceneworks_core::resolved_options::IrisTrainingOptions::default()
+        }
+    };
+    let world_size = controls.dist_topology.world_size;
+    let share_device = controls.dist_topology.share_device;
+    let timeout_secs = controls.dist_topology.timeout_secs;
+    let global_batch = curricula::iris_global_batch(&config, world_size);
     // The run's own install (S7): a missing backbone / text encoder / task export is a typed
     // refusal here, so the engine resolution below never silently skips for want of a backbone.
     if first_refusal.is_none() {
@@ -178,7 +188,7 @@ pub(crate) async fn iris_plan_check(
         }
     }
     if first_refusal.is_none()
-        && iris_repa_enabled(&options)
+        && controls.repa_enabled()
         && teacher["installed"] != Value::Bool(true)
     {
         first_refusal = Some(refusal(
@@ -227,7 +237,7 @@ pub(crate) async fn iris_plan_check(
         "ok": first_refusal.is_none(),
         "refusal": first_refusal,
         "globalBatch": global_batch,
-        "expectedGlobalBatch": options.get("expected_global_batch").cloned().unwrap_or(Value::Null),
+        "expectedGlobalBatch": controls.expected_global_batch.map(|value| value.value),
         "worldSize": world_size,
         "shareDevice": share_device,
         "timeoutSecs": timeout_secs,
@@ -255,13 +265,10 @@ fn iris_rank_memory_json(lane: &str, config: &TrainingConfig) -> Value {
     })
 }
 
-fn plan_stage(plan: &TrainingPlan) -> Option<String> {
-    plan.config
-        .advanced
-        .get(IRIS_OPTIONS_KEY)
-        .and_then(|iris| iris.get("stage"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+fn plan_stage(plan: &TrainingPlan) -> Result<Option<String>, ApiError> {
+    Ok(crate::training::resolved_training_options_for_plan(plan)?
+        .stage
+        .map(|stage| stage.value))
 }
 
 fn refused(kind: &'static str, message: impl Into<String>) -> ApiError {
@@ -287,15 +294,16 @@ pub(crate) async fn check_iris_submit(
     if !is_iris_training_kernel(&plan.target.kernel) {
         return Ok(None);
     }
-    let options =
-        iris_options(&plan.config).map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let stage = options.get("stage").and_then(Value::as_str);
-    let parent_stage = options.get("parent_stage").and_then(Value::as_str);
-    let resume_job = plan
-        .config
-        .advanced
-        .get(RESUME_FROM_JOB_KEY)
-        .and_then(Value::as_str);
+    let controls = crate::training::resolved_training_options_for_plan(plan)?;
+    let stage = controls.stage.as_ref().map(|value| value.value.as_str());
+    let parent_stage = controls
+        .parent_stage
+        .as_ref()
+        .map(|value| value.value.as_str());
+    let resume_job = controls
+        .resume_from_job_id
+        .as_ref()
+        .map(|value| value.value.as_str());
 
     // ---- curriculum lineage: a continuing stage names the run of its parent stage ------------
     if let (Some(stage), Some(parent), None) = (stage, parent_stage, resume_job) {
@@ -317,11 +325,12 @@ pub(crate) async fn check_iris_submit(
             &plan.target.base_model,
         )
         .await?;
-        let previous_stage = plan_stage(&previous);
+        let previous_stage = plan_stage(&previous)?;
         if let Some(stage) = stage {
-            let policy = options
-                .get("resume_data_policy")
-                .and_then(Value::as_str)
+            let policy = controls
+                .resume_data_policy
+                .as_ref()
+                .map(|value| value.value.as_str())
                 .unwrap_or("exact");
             match previous_stage.as_deref() {
                 Some(saved) if saved == stage => {}
@@ -353,15 +362,19 @@ pub(crate) async fn check_iris_submit(
         }
         // A projector the resumed run drops: a replicated full-optimizer resume refuses the changed
         // parameter routing (the engine's `check_resume`, upstream's `_validate_optimizer_layout`).
-        let previous_options = iris_options(&previous.config).unwrap_or_default();
-        let strategy = options
-            .get("dist")
-            .and_then(|dist| dist.get("strategy"))
-            .and_then(Value::as_str)
+        let previous_controls = crate::training::resolved_training_options_for_plan(&previous)?;
+        let strategy = controls
+            .dist_strategy
+            .as_ref()
+            .map(|value| value.value.as_str())
             .unwrap_or("ddp");
-        let core_resume = options.get("resume_optimizer").and_then(Value::as_str) == Some("core");
-        if iris_repa_enabled(&previous_options)
-            && !iris_repa_enabled(&options)
+        let core_resume = controls
+            .resume_optimizer
+            .as_ref()
+            .map(|value| value.value.as_str())
+            == Some("core");
+        if previous_controls.repa_enabled()
+            && !controls.repa_enabled()
             && strategy == "ddp"
             && !core_resume
         {
@@ -385,7 +398,7 @@ pub(crate) async fn check_iris_submit(
     }
 
     // ---- the REPA teacher ----------------------------------------------------------------------
-    if iris_repa_enabled(&options)
+    if controls.repa_enabled()
         && !dry_run
         && sceneworks_worker::installed_repa_teacher(&state.settings.data_dir).is_none()
     {

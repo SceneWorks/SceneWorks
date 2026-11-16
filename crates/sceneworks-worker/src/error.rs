@@ -13,6 +13,8 @@ pub enum WorkerError {
         code: Option<String>,
     },
     InvalidPayload(String),
+    Validation(sceneworks_core::request_validation::ValidationRefusal),
+    ReplayUnavailable(sceneworks_core::execution_receipt::ReplayUnavailable),
     /// The configured external model library holding an installed model cannot currently be
     /// proven present (disconnected, or a different physical volume now occupies its path).
     /// Distinct from [`Self::InvalidPayload`]/[`Self::Engine`] so a disconnect is never surfaced
@@ -38,6 +40,8 @@ impl fmt::Display for WorkerError {
                 None => write!(formatter, "API {status}: {detail}"),
             },
             Self::InvalidPayload(detail) => formatter.write_str(detail),
+            Self::Validation(error) => error.fmt(formatter),
+            Self::ReplayUnavailable(reason) => write!(formatter, "{}", reason.reason),
             Self::ExternalLibraryUnavailable(detail) => write!(
                 formatter,
                 "[{}] {detail}",

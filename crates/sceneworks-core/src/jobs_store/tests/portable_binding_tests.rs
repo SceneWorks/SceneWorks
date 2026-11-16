@@ -24,7 +24,7 @@ fn request() -> CreateJob {
     }
 }
 
-fn binding() -> Value {
+pub(super) fn binding() -> Value {
     let platform = std::env::consts::OS;
     let authored = json!({"model":"example"});
     let digest = canonical_authored_options_sha256(&authored).unwrap();

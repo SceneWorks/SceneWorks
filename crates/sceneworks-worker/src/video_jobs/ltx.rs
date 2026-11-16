@@ -46,18 +46,18 @@ impl Ltx25TransformerVariant {
 pub(super) fn ltx25_transformer_variant(
     request: &VideoRequest,
 ) -> WorkerResult<Ltx25TransformerVariant> {
-    match request.advanced.get("transformerVariant") {
+    match request
+        .options()
+        .transformer_variant
+        .as_ref()
+        .map(|v| v.value.as_str())
+    {
         None => Ok(Ltx25TransformerVariant::Distilled),
-        Some(Value::String(value)) if value == "distilled" => {
-            Ok(Ltx25TransformerVariant::Distilled)
-        }
-        Some(Value::String(value)) if value == "dev" => Ok(Ltx25TransformerVariant::Dev),
-        Some(Value::String(value)) => Err(WorkerError::InvalidPayload(format!(
+        Some("distilled") => Ok(Ltx25TransformerVariant::Distilled),
+        Some("dev") => Ok(Ltx25TransformerVariant::Dev),
+        Some(value) => Err(WorkerError::InvalidPayload(format!(
             "unsupported LTX-2.5 transformerVariant {value:?}; choose \"distilled\" or \"dev\""
         ))),
-        Some(_) => Err(WorkerError::InvalidPayload(
-            "advanced.transformerVariant must be \"distilled\" or \"dev\" when present".to_owned(),
-        )),
     }
 }
 
@@ -130,16 +130,15 @@ pub(super) fn ltx25_generation_options(
     // its siblings: `ltx25_transformer_variant` is only ever consulted for `ltx_2_5`, so without
     // this entry a non-2.5 request carrying it selected nothing and was silently ignored while the
     // adjacent 2.5-only knobs failed closed.
-    const KEYS: [&str; 6] = [
-        "vaeDecoder",
-        "autoDuration",
-        "autoDurationMinSeconds",
-        "autoDurationMaxSeconds",
-        "temporalUpsampleRounds",
-        "transformerVariant",
-    ];
     if request.model != "ltx_2_5" {
-        if KEYS.iter().any(|key| request.advanced.contains_key(*key)) {
+        let options = request.options();
+        if options.vae_decoder.is_some()
+            || options.auto_duration.is_some()
+            || options.auto_duration_min_seconds.is_some()
+            || options.auto_duration_max_seconds.is_some()
+            || options.temporal_upsample_rounds.is_some()
+            || options.transformer_variant.is_some()
+        {
             return Err(WorkerError::InvalidPayload(format!(
                 "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample \
                  controls are not supported by {}",
@@ -154,7 +153,7 @@ pub(super) fn ltx25_generation_options(
         });
     }
 
-    if request.advanced.contains_key("guidanceScale") {
+    if request.options().guidance_scale.is_some() {
         return Err(WorkerError::InvalidPayload(
             "LTX-2.5 does not accept advanced.guidanceScale; distilled guidance is baked in and \
              the dev checkpoint uses its fixed native video/audio guider parameters"
@@ -162,25 +161,23 @@ pub(super) fn ltx25_generation_options(
         ));
     }
 
-    let decoder = sceneworks_core::video_request::requested_ltx25_vae_decoder(&request.advanced)
+    let decoder = request
+        .options()
+        .ltx25_vae_decoder()
         .map_err(WorkerError::InvalidPayload)?;
-    let temporal_upsample_rounds =
-        sceneworks_core::video_request::requested_temporal_upsample_rounds(&request.advanced)
-            .map_err(WorkerError::InvalidPayload)?;
+    let temporal_upsample_rounds = request
+        .options()
+        .temporal_upsample_rounds()
+        .map_err(WorkerError::InvalidPayload)?;
 
     // The API removes these keys when an explicit duration is present. This duplicate precedence
     // is intentional: replayed jobs and any future non-HTTP producer must reach the same contract.
     let auto_range = if request.duration_was_explicit {
-        match request.advanced.get("autoDuration") {
-            Some(Value::Bool(_)) | None => None,
-            Some(_) => {
-                return Err(WorkerError::InvalidPayload(
-                    "advanced.autoDuration must be a boolean when present".to_owned(),
-                ))
-            }
-        }
+        None
     } else {
-        sceneworks_core::video_request::requested_auto_duration(&request.advanced)
+        request
+            .options()
+            .auto_duration_range()
             .map_err(WorkerError::InvalidPayload)?
     };
     if let Some(range) = auto_range {
@@ -351,7 +348,10 @@ pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
 /// accepted as int or string). The default is Q4 (sc-5608).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
-    request.quant_bits().map(|bits| bits >= 8).unwrap_or(false)
+    request
+        .resolved_quant_bits()
+        .map(|bits| bits >= 8)
+        .unwrap_or(false)
 }
 
 /// Whether the request opts into the dense **bf16** LTX checkpoint (`advanced.mlxQuantize <= 0`,
@@ -359,7 +359,10 @@ pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
 /// so the big bf16 bundle is a deliberate opt-in (mirrors [`resolve_mlx_dense_quant`]'s `<= 0` rule).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_bf16(request: &VideoRequest) -> bool {
-    request.quant_bits().map(|bits| bits <= 0).unwrap_or(false)
+    request
+        .resolved_quant_bits()
+        .map(|bits| bits <= 0)
+        .unwrap_or(false)
 }
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
@@ -451,9 +454,8 @@ pub(super) fn resolve_ltx_model_dir(
             })?;
         let dir = if request.model == "ltx_2_5" {
             let tier = request
-                .advanced
-                .get("__portableBoundTier")
-                .and_then(Value::as_str)
+                .portable_aux
+                .bound_tier()
                 .filter(|tier| matches!(*tier, "q4" | "q8" | "bf16"))
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload(
@@ -558,7 +560,7 @@ pub(super) fn resolve_ltx_model_dir(
 
 #[cfg(target_os = "macos")]
 fn portable_ltx_sources_bound(request: &VideoRequest) -> bool {
-    request.advanced.get("__portableFrozenSources") == Some(&Value::Bool(true))
+    request.portable_aux.frozen_sources()
 }
 
 /// The required Gemma encoder must come from the verified portable publisher snapshot.
@@ -782,18 +784,23 @@ pub(super) enum LtxTextEncoderSelection {
 
 #[cfg(target_os = "macos")]
 pub(super) fn selected_ltx_text_encoder(
-    advanced: &JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
 ) -> WorkerResult<LtxTextEncoderSelection> {
-    let legacy = match advanced.get("useUncensoredEnhancer") {
-        None => None,
-        Some(Value::Bool(value)) => Some(*value),
-        Some(_) => {
-            return Err(WorkerError::InvalidPayload(
-                "advanced.useUncensoredEnhancer must be a boolean when present".to_owned(),
-            ));
-        }
-    };
-    let selected = match advanced.get("textEncoderModel") {
+    let legacy = options
+        .use_uncensored_enhancer
+        .as_ref()
+        .filter(|value| {
+            matches!(
+                value.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        })
+        .map(|value| value.value);
+    let selected = match options
+        .text_encoder_model
+        .as_ref()
+        .map(|v| v.value.as_str())
+    {
         None => {
             return Ok(if legacy == Some(true) {
                 LtxTextEncoderSelection::Amoral
@@ -801,20 +808,12 @@ pub(super) fn selected_ltx_text_encoder(
                 LtxTextEncoderSelection::Default
             });
         }
-        Some(Value::String(id)) if id == DEFAULT_TEXT_ENCODER_ID => {
-            LtxTextEncoderSelection::Default
-        }
-        Some(Value::String(id)) if id == AMORAL_TEXT_ENCODER_ID => LtxTextEncoderSelection::Amoral,
-        Some(Value::String(id)) => Err(WorkerError::InvalidPayload(format!(
+        Some(id) if id == DEFAULT_TEXT_ENCODER_ID => LtxTextEncoderSelection::Default,
+        Some(id) if id == AMORAL_TEXT_ENCODER_ID => LtxTextEncoderSelection::Amoral,
+        Some(id) => Err(WorkerError::InvalidPayload(format!(
             "unsupported LTX text encoder {id:?}; choose {DEFAULT_TEXT_ENCODER_ID:?} or an \
              installed option returned by GET /api/v1/models"
         )))?,
-        Some(_) => {
-            return Err(WorkerError::InvalidPayload(
-                "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models"
-                    .to_owned(),
-            ));
-        }
     };
     if legacy.is_some_and(|legacy| legacy != (selected == LtxTextEncoderSelection::Amoral)) {
         return Err(WorkerError::InvalidPayload(format!(
@@ -827,12 +826,12 @@ pub(super) fn selected_ltx_text_encoder(
 
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_selected_ltx_text_encoder(
-    advanced: &JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
     staged_alternate: Option<PathBuf>,
 ) -> WorkerResult<(bool, Option<PathBuf>)> {
-    let selection = selected_ltx_text_encoder(advanced)?;
+    let selection = selected_ltx_text_encoder(options)?;
     let use_alternate = selection == LtxTextEncoderSelection::Amoral;
-    if use_alternate && !advanced::bool(advanced, "enhancePrompt") {
+    if use_alternate && !options.enhance_prompt.as_ref().is_some_and(|v| v.value) {
         return Err(WorkerError::InvalidPayload(format!(
             "text encoder {AMORAL_TEXT_ENCODER_ID:?} is selected but prompt enhancement is off; \
              enable advanced.enhancePrompt or choose the default encoder"
@@ -858,11 +857,11 @@ pub(super) fn resolve_selected_ltx_text_encoder(
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_ltx_text_encoder_for_model(
     model: &str,
-    advanced: &JsonObject,
+    options: &sceneworks_core::video_request::VideoOptions,
     staged_alternate: Option<PathBuf>,
 ) -> WorkerResult<(bool, Option<PathBuf>)> {
     if model == "ltx_2_5" {
-        if selected_ltx_text_encoder(advanced)? != LtxTextEncoderSelection::Default {
+        if selected_ltx_text_encoder(options)? != LtxTextEncoderSelection::Default {
             return Err(WorkerError::InvalidPayload(
                 "LTX-2.5 does not support alternate textEncoderModel or uncensored enhancer selections; use its tier-local Gemma-4 encoder and stock prompt enhancer"
                     .to_owned(),
@@ -870,7 +869,7 @@ pub(super) fn resolve_ltx_text_encoder_for_model(
         }
         return Ok((false, None));
     }
-    resolve_selected_ltx_text_encoder(advanced, staged_alternate)
+    resolve_selected_ltx_text_encoder(options, staged_alternate)
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -967,7 +966,7 @@ async fn ensure_ltx_gemma_present(
     if request.model != "ltx_2_3_eros" {
         return Ok(());
     }
-    ensure_ltx_bundle_gemma_present(api, settings, job).await
+    ensure_ltx_bundle_gemma_present(api, settings, job, &request.portable_aux).await
 }
 
 /// Ensure the eros Gemma-3 text encoder is on disk, fetching the bundle's `gemma/` on demand. The
@@ -985,16 +984,12 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     // A portable convert already admitted the exact pinned Gemma co-requisite
     // and installed its verified mini-HF overlay. Do not let the legacy
     // provisioning fallback fetch a different revision after that guard.
-    if job
-        .payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(crate::portable_aux_sources::has_bound_aux_paths)
-    {
+    if portable_aux.has_paths() {
         let source = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)
             .map(|root| root.join("gemma"))
             .ok_or_else(|| {
@@ -1002,13 +997,20 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
                     "portable LTX conversion lacks its verified pinned Gemma source".to_owned(),
                 )
             })?;
-        let files: Vec<PortableGemmaFile> =
-            serde_json::from_value(job.payload["advanced"]["__portableGemmaFiles"].clone())
-                .map_err(|error| {
-                    WorkerError::InvalidPayload(format!(
-                        "portable LTX conversion lacks its frozen Gemma ledger: {error}"
-                    ))
-                })?;
+        let files: Vec<PortableGemmaFile> = portable_aux
+            .gemma_files()
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable LTX conversion lacks its frozen Gemma ledger".to_owned(),
+                )
+            })?
+            .iter()
+            .map(|file| PortableGemmaFile {
+                relative_path: file.relative_path.to_string_lossy().into_owned(),
+                size_bytes: file.size_bytes,
+                sha256: file.sha256.clone(),
+            })
+            .collect();
         let data_dir = settings.data_dir.clone();
         let task = crate::load_progress::spawn_blocking(move || {
             install_portable_gemma(&source, &data_dir, &files)
@@ -1512,9 +1514,10 @@ pub(super) fn resolve_ltx_distill_adapter(
     };
     // Opt-out knob (default on): the distill LoRA is a required runtime component for these models.
     let enabled = request
-        .advanced
-        .get("useDistillLora")
-        .and_then(Value::as_bool)
+        .options()
+        .use_distill_lora
+        .as_ref()
+        .map(|v| v.value)
         .unwrap_or(true);
     let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
     // The knob is only rejected where honoring it would contradict required behavior — on LTX-2.5
@@ -1543,9 +1546,19 @@ pub(super) fn resolve_ltx_distill_adapter(
         .and_then(Value::as_f64)
         .unwrap_or(0.4) as f32;
     let (stage1, stage2) = if ltx25_dev {
-        if request.advanced.contains_key("distillStage1Strength")
-            || request.advanced.contains_key("distillStage2Strength")
-        {
+        let authored_strength = [
+            request.options().distill_stage1_strength.as_ref(),
+            request.options().distill_stage2_strength.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|bound| {
+            matches!(
+                bound.origin,
+                sceneworks_core::resolved_options::Origin::Authored { .. }
+            )
+        });
+        if authored_strength {
             return Err(WorkerError::InvalidPayload(
                 "LTX-2.5 dev fixes the bundled refinement adapter to pass scales [0, 1]; \
                  distillStage1Strength and distillStage2Strength cannot be overridden."
@@ -1561,8 +1574,18 @@ pub(super) fn resolve_ltx_distill_adapter(
         (manifest_stage1, manifest_stage2)
     } else {
         (
-            advanced::f32(&request.advanced, "distillStage1Strength", manifest_stage1),
-            advanced::f32(&request.advanced, "distillStage2Strength", manifest_stage2),
+            request
+                .options()
+                .distill_stage1_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(manifest_stage1),
+            request
+                .options()
+                .distill_stage2_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(manifest_stage2),
         )
     };
     // The distill LoRA repo/file live in `resources.distilledLora` (the recommended cond_safe variant).
@@ -1684,7 +1707,12 @@ pub(super) fn resolve_ltx_conditioning(
 /// failing the job. The fallback is disclosed rather than silent.
 #[cfg(native_lane)]
 pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerResult<f32> {
-    let strength = advanced::f32(&request.advanced, "imageConditioningStrength", 1.0);
+    let strength = request
+        .options()
+        .image_conditioning_strength
+        .as_ref()
+        .map(|v| v.value as f32)
+        .unwrap_or(1.0);
     if strength.to_bits() != 1.0f32.to_bits() {
         tracing::info!(
             event = "video_memory_evidence_excluded",
@@ -1754,13 +1782,28 @@ pub(super) fn resolve_keyframe_conditioning(
     Ok(vec![
         Conditioning::Keyframe {
             image: first,
-            frame_idx: advanced::i32(&request.advanced, "imageFrameIndex", 0),
-            strength: advanced::f32(&request.advanced, "imageConditioningStrength", 1.0),
+            frame_idx: request
+                .options()
+                .image_frame_index
+                .as_ref()
+                .map(|v| v.value as i32)
+                .unwrap_or(0),
+            strength: request
+                .options()
+                .image_conditioning_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
         },
         Conditioning::Keyframe {
             image: last,
             frame_idx: -1,
-            strength: advanced::f32(&request.advanced, "lastFrameConditioningStrength", 1.0),
+            strength: request
+                .options()
+                .last_frame_conditioning_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
         },
     ])
 }
@@ -1802,7 +1845,12 @@ pub(super) fn build_video_clip_conditioning(
     let mut conditioning = vec![Conditioning::VideoClip {
         frames: left_frames,
         frame_idx: 0,
-        strength: advanced::f32(&request.advanced, "videoConditioningStrength", 1.0),
+        strength: request
+            .options()
+            .video_conditioning_strength
+            .as_ref()
+            .map(|v| v.value as f32)
+            .unwrap_or(1.0),
     }];
     if request.mode == "video_bridge" {
         let right = right_frames.ok_or_else(|| {
@@ -1814,11 +1862,12 @@ pub(super) fn build_video_clip_conditioning(
         conditioning.push(Conditioning::VideoClip {
             frames: right,
             frame_idx: -1,
-            strength: advanced::f32(
-                &request.advanced,
-                "bridgeRightVideoConditioningStrength",
-                1.0,
-            ),
+            strength: request
+                .options()
+                .bridge_right_video_conditioning_strength
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
         });
     }
     Ok(conditioning)
@@ -2194,7 +2243,12 @@ pub(super) async fn resolve_ltx_replace_conditioning(
     let references = resolve_character_reference_receipts(settings, request, project_path)?;
     let reference_count = references.len();
     let frame_total = frames.len();
-    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
+    let masking_strength = request
+        .options()
+        .masking_strength
+        .as_ref()
+        .map(|v| v.value as f32)
+        .unwrap_or(1.0);
     let reference_images = references
         .iter()
         .map(|reference| reference.image.clone())
@@ -2253,25 +2307,37 @@ pub(super) async fn generate_ltx(
     // engine setup. A bad request must remain a cheap, actionable InvalidPayload.
     let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_ltx_text_encoder_for_model(
         &request.model,
-        &request.advanced,
-        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-            crate::portable_aux_sources::bound_aux_path(&request.advanced, "ltx_amoral_gemma_3_12b")
+        request.options(),
+        if request.portable_aux.has_paths() {
+            request
+                .portable_aux
+                .path("ltx_amoral_gemma_3_12b")
+                .map(Path::to_path_buf)
         } else {
             resolve_ltx_uncensored_enhancer_dir(&settings.data_dir)
         },
     )?;
-    let enhance_prompt = advanced::bool(&request.advanced, "enhancePrompt");
-    let video_mode = advanced::bool(&request.advanced, "noAudio").then(|| "no_audio".to_owned());
+    let enhance_prompt = request
+        .options()
+        .enhance_prompt
+        .as_ref()
+        .is_some_and(|v| v.value);
+    let video_mode = request
+        .options()
+        .no_audio
+        .as_ref()
+        .is_some_and(|v| v.value)
+        .then(|| "no_audio".to_owned());
     let enhance_max_tokens = request
-        .advanced
-        .get("enhanceMaxTokens")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .options()
+        .enhance_max_tokens
+        .as_ref()
+        .and_then(|v| u32::try_from(v.value).ok());
     let enhance_temperature = request
-        .advanced
-        .get("enhanceTemperature")
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32);
+        .options()
+        .enhance_temperature
+        .as_ref()
+        .map(|v| v.value as f32);
     let ltx25_options = ltx25_generation_options(request)?;
     // extend_clip / video_bridge build in-context VideoClip conditioning from decoded source
     // clips (async ffmpeg extraction); every other mode resolves keyframe/reference conditioning
@@ -2367,6 +2433,15 @@ pub(super) async fn generate_ltx(
         uncensored_enhancer_dir,
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((decoded, replacement_status))
 }

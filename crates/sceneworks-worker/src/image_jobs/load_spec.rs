@@ -11,7 +11,6 @@ use super::artifact_resolution::ZIMAGE_MLX_TURNKEY_REPO;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::ZIMAGE_MLX_TURNKEY_REVISION;
 use super::quantization::tier_key_from_resolved_dir;
-use super::requested_decoder_id;
 use super::AdapterSpec;
 #[cfg(all(test, target_os = "macos"))]
 use super::Generator;
@@ -19,7 +18,6 @@ use super::ImageRequest;
 use super::LoadSpec;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::JsonObject;
 #[cfg(any(
     all(not(target_os = "macos"), feature = "backend-candle"),
@@ -667,10 +665,10 @@ pub(crate) fn attach_manifest_text_encoder(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<ManifestTextEncoderAttachedSpec> {
-    crate::text_encoder_selection::prepare_selected_text_encoder(
+    crate::text_encoder_selection::prepare_selected_text_encoder_id(
         spec,
         engine_id,
-        &request.advanced,
+        request.advanced_text("textEncoderModel"),
         &request.model_manifest_entry,
         settings,
     )
@@ -680,10 +678,9 @@ pub(crate) fn attach_manifest_text_encoder(
 /// Whether the request carries a non-default authored encoder id. Kept beside the attachment seam
 /// so bespoke File routes make the same default/invalid-shape decision as registry routes.
 pub(crate) fn has_authored_text_encoder(request: &ImageRequest) -> WorkerResult<bool> {
-    match request.advanced.get("textEncoderModel") {
-        None => Ok(false),
-        Some(Value::String(id)) if id == "default" => Ok(false),
-        Some(Value::String(id)) if !id.trim().is_empty() => Ok(true),
+    match request.advanced_text("textEncoderModel") {
+        None | Some("default") => Ok(false),
+        Some(id) if !id.trim().is_empty() => Ok(true),
         Some(_) => Err(WorkerError::InvalidPayload(
             "advanced.textEncoderModel must be a non-empty string option id returned by GET /api/v1/models"
                 .to_owned(),
@@ -840,9 +837,9 @@ fn selected_decoder_option(
 pub(super) fn validate_selected_decoder_request(
     engine_id: &str,
     decoder_id: &str,
-    advanced: &JsonObject,
+    request: &ImageRequest,
 ) -> WorkerResult<gen_core::DecoderOption> {
-    if advanced::flag(advanced, "usePid") {
+    if request.advanced_bool("usePid").unwrap_or(false) {
         return Err(WorkerError::InvalidPayload(
             "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder"
                 .to_owned(),
@@ -859,20 +856,26 @@ pub(super) fn attach_selected_decoder_unprepared(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
-    let Some(decoder_id) = requested_decoder_id(&request.advanced)? else {
+    let Some(decoder_id) = request
+        .advanced_text("decoder")
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "native")
+    else {
         return Ok(spec);
     };
-    let option = validate_selected_decoder_request(engine_id, decoder_id, &request.advanced)?;
+    let option = validate_selected_decoder_request(engine_id, decoder_id, request)?;
     let manifest = Value::Object(request.model_manifest_entry.clone());
-    let source = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        let path =
-            crate::portable_aux_sources::bound_aux_path(&request.advanced, option.component_id)
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "portable decoder '{}' source is not bound",
-                        option.component_id
-                    ))
-                })?;
+    let source = if request.portable_aux.has_paths() {
+        let path = request
+            .portable_aux
+            .path(option.component_id)
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "portable decoder '{}' source is not bound",
+                    option.component_id
+                ))
+            })?;
         WeightsSource::File(path)
     } else {
         crate::model_jobs::resolve_optional_component(&manifest, option.component_id, settings)
@@ -892,10 +895,14 @@ pub(super) fn selected_decoder_component_pin(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
-    let Some(decoder_id) = requested_decoder_id(&request.advanced)? else {
+    let Some(decoder_id) = request
+        .advanced_text("decoder")
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "native")
+    else {
         return Ok(None);
     };
-    let option = validate_selected_decoder_request(engine_id, decoder_id, &request.advanced)?;
+    let option = validate_selected_decoder_request(engine_id, decoder_id, request)?;
     let source = spec.components.get(option.component_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "decoder '{}' component '{}' was not staged",

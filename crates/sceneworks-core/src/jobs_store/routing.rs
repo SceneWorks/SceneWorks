@@ -9,7 +9,7 @@ pub(crate) mod catalog;
 pub(crate) mod gaps;
 pub(crate) mod mlx;
 mod portable;
-pub use portable::native_route_claims_request;
+pub use portable::{native_route_claims_request, native_route_claims_request_resolved};
 
 #[cfg(test)]
 mod typed_registry_contract_tests;
@@ -19,6 +19,13 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::contracts::{ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage};
+
+/// One bound view shared by native claim predicates for a stored request. Bare catalog probes
+/// construct their own syntax facts because they are intentionally incomplete requests.
+pub(crate) struct RouteContext<'a> {
+    pub payload: &'a Map<String, Value>,
+    pub options: &'a crate::resolved_options::RouteOptionFacts,
+}
 
 /// Every built-in SenseNova-U1 variant. Keep routing, understanding, and gap
 /// classification on one list so adding an Infographic/distilled tier cannot
@@ -333,50 +340,7 @@ fn image_family_selectors_include_shipped_variants_without_claiming_neighbors() 
 /// so the routing layer cannot hold a second opinion about what "too many" means. A stored job that
 /// somehow carries more is refused by the worker's resolver with the engine's own wording, which is
 /// a loud failure rather than a job nothing can claim (the sc-10523 defect).
-pub fn qwen_image_2_1_reference_ids(payload: &Map<String, Value>) -> Option<Vec<String>> {
-    fn scalar<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
-        match payload.get(key) {
-            None | Some(Value::Null) => Some(None),
-            Some(Value::String(value)) => Some(Some(value.trim()).filter(|id| !id.is_empty())),
-            Some(_) => None,
-        }
-    }
-
-    let mut ids: Vec<String> = Vec::new();
-    for key in ["sourceAssetId", "maskAssetId"] {
-        if let Some(id) = scalar(payload, key)? {
-            ids.push(id.to_owned());
-        }
-    }
-    match payload.get("referenceAssetIds") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(values)) => {
-            for value in values {
-                let id = value.as_str()?.trim();
-                if id.is_empty() {
-                    return None;
-                }
-                ids.push(id.to_owned());
-            }
-        }
-        Some(_) => return None,
-    }
-    if let Some(id) = scalar(payload, "referenceAssetId")? {
-        ids.push(id.to_owned());
-    }
-    // DEDUPE by asset id, keeping the FIRST occurrence — and this is a correctness fix, not tidying.
-    //
-    // The web's `editReferenceIds` leads `referenceAssetIds` with the working image while
-    // `buildEditJobBody` also sets `sourceAssetId`, so the ordinary Image-Editor payload names the
-    // same asset twice. On this engine every entry occupies one of the model's slots AND gets its
-    // own number in the prompt template, so sending it twice silently costs a slot and renumbers
-    // every reference after it — a duplicate is not a harmless repeat, it changes the render and
-    // the count the cap is measured against. First occurrence wins because the earlier slot is the
-    // one the prompt refers to.
-    let mut seen = std::collections::HashSet::with_capacity(ids.len());
-    ids.retain(|id| seen.insert(id.clone()));
-    Some(ids)
-}
+pub use sceneworks_options::image_request::ordered_image_reference_ids as qwen_image_2_1_reference_ids;
 
 /// Validate the mutually-exclusive image-reference carriers used by native conditioned-image
 /// routes and return the selected reference count. Missing, null, blank strings, and an empty plural
@@ -421,85 +385,146 @@ pub(super) fn conditioned_reference_count(
 }
 
 /// True when `payload[object_key][array_key]` is a non-empty array.
+#[cfg(test)]
 pub(super) fn has_nonempty_nested_array(
     payload: &Map<String, Value>,
     object_key: &str,
     array_key: &str,
 ) -> bool {
-    payload
-        .get(object_key)
-        .and_then(Value::as_object)
-        .and_then(|object| object.get(array_key))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
+    debug_assert_eq!(object_key, "advanced");
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    route_nested_array_nonempty(&facts, array_key)
 }
 
-/// Nested equivalent of [`has_nonempty_or_malformed_array`]. A malformed parent object or child
-/// carrier fails closed; a missing/null parent and a missing/null/empty child mean "not supplied".
-pub(super) fn has_nonempty_or_malformed_nested_array(
-    payload: &Map<String, Value>,
-    object_key: &str,
+pub(super) fn route_nested_array_nonempty(
+    facts: &crate::resolved_options::RouteOptionFacts,
     array_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => has_nonempty_or_malformed_array(object, array_key),
-        Some(_) => true,
-    }
+    matches!(
+        match array_key {
+            "poses" => &facts.poses,
+            "phases" => &facts.phases,
+            _ => return false,
+        },
+        crate::resolved_options::RouteField::Valid(1..)
+    )
 }
 
-/// True when an optional nested carrier is present with any non-null value. A malformed parent
-/// object also fails closed. These carriers are emitted only when their feature is active, so an
-/// empty string/object or wrong scalar is malformed rather than an alternate representation of
-/// "not supplied"; callers must not silently ignore it.
-pub(super) fn has_nonnull_or_malformed_nested_carrier(
-    payload: &Map<String, Value>,
-    object_key: &str,
+pub(super) fn route_nested_array_material(
+    facts: &crate::resolved_options::RouteOptionFacts,
+    array_key: &str,
+) -> bool {
+    matches!(
+        match array_key {
+            "poses" => &facts.poses,
+            "phases" => &facts.phases,
+            _ => return false,
+        },
+        crate::resolved_options::RouteField::Valid(1..)
+            | crate::resolved_options::RouteField::Invalid
+    )
+}
+
+pub(super) fn route_carrier_material(
+    facts: &crate::resolved_options::RouteOptionFacts,
     carrier_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => object
-            .get(carrier_key)
-            .is_some_and(|value| !value.is_null()),
-        Some(_) => true,
+    if !facts.advanced_was_authored(carrier_key) {
+        return false;
+    }
+    match carrier_key {
+        "controlMode" => facts.control_mode.is_present_nonnull(),
+        "controlImage" => facts.control_image.is_present_nonnull(),
+        "controlScale" => facts.control_scale.is_present_nonnull(),
+        "controlWeights" => facts.control_weights.is_present_nonnull(),
+        "mlxQuantize" => facts.mlx_quantize.is_present_nonnull(),
+        "quantTier" => facts.quant_tier.is_present_nonnull(),
+        "trueCfgScale" => facts.true_cfg_scale.is_present_nonnull(),
+        "imageGuidanceScale" => facts.image_guidance_scale.is_present_nonnull(),
+        "ipAdapterScale" => facts.ip_adapter_scale.is_present_nonnull(),
+        "referenceStrength" => facts.reference_strength.is_present_nonnull(),
+        "strength" => facts.strength.is_present_nonnull(),
+        "convRot" => facts.conv_rot.is_present_nonnull(),
+        _ => panic!("undeclared advanced route carrier: {carrier_key}"),
     }
 }
 
-/// True when an optional advanced numeric knob is present but is neither a finite JSON number nor a
-/// finite numeric string. Missing and null mean "use the model default"; malformed authored values
-/// fail closed so a submitted control can never be silently replaced by that default.
-pub(super) fn has_malformed_optional_nested_number(
-    payload: &Map<String, Value>,
-    object_key: &str,
+pub(super) fn route_number_malformed(
+    facts: &crate::resolved_options::RouteOptionFacts,
     number_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => match object.get(number_key) {
-            None | Some(Value::Null) => false,
-            Some(Value::Number(value)) => value.as_f64().is_none_or(|value| !value.is_finite()),
-            Some(Value::String(value)) => value
-                .trim()
-                .parse::<f64>()
-                .map_or(true, |value| !value.is_finite()),
-            Some(_) => true,
+    use crate::resolved_options::RouteField;
+    matches!(
+        match number_key {
+            "controlScale" => &facts.control_scale,
+            "trueCfgScale" => &facts.true_cfg_scale,
+            "imageGuidanceScale" => &facts.image_guidance_scale,
+            "ipAdapterScale" => &facts.ip_adapter_scale,
+            "referenceStrength" => &facts.reference_strength,
+            "strength" => &facts.strength,
+            _ => return true,
         },
-        Some(_) => true,
-    }
+        RouteField::Invalid
+    )
 }
 
-/// Unsupported structural carriers for Krea's reference edit lane. LoRAs, quant selection,
-/// guidance, and text-style controls are deliberately allowed; mask/control/pose/phase inputs have
-/// no consumer in the edit provider and therefore fail closed.
-pub(super) fn krea_edit_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
+/// Bind the precision carriers of a bare routing probe without running full request validation.
+/// Full submissions bind the same fields through `ImageAdvanced::bind` after shared resolution.
+pub(super) fn probe_image_precision_options(
+    payload: &Map<String, Value>,
+) -> Result<crate::image_request::ImageAdvanced, String> {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    probe_image_precision_options_from_facts(&facts)
+}
+
+pub(super) fn probe_image_precision_options_from_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Result<crate::image_request::ImageAdvanced, String> {
+    use crate::resolved_options::{Bound, Origin, RouteField};
+    let mut options = crate::image_request::ImageAdvanced::default();
+    let origin = Origin::Internal("routing-probe");
+    options.quant_tier = match &facts.quant_tier {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(Bound {
+            value: value.clone(),
+            origin,
+        }),
+        RouteField::Invalid => return Err("advanced.quantTier is malformed".to_owned()),
+    };
+    options.mlx_quantize = match &facts.mlx_quantize {
+        RouteField::Absent => None,
+        RouteField::Null => Some(Bound {
+            value: None,
+            origin,
+        }),
+        RouteField::Valid(value) => Some(Bound {
+            value: Some(*value),
+            origin,
+        }),
+        RouteField::Invalid => return Err("advanced.mlxQuantize is malformed".to_owned()),
+    };
+    options.conv_rot = match &facts.conv_rot {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(value) => Some(Bound {
+            value: *value,
+            origin,
+        }),
+        RouteField::Invalid => return Err("advanced.convRot is malformed".to_owned()),
+    };
+    Ok(options)
+}
+
+pub(super) fn krea_edit_has_unsupported_carrier_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     ["controls", "controlnets"]
         .iter()
         .any(|key| has_nonempty_or_malformed_array(payload, key))
         || has_nonempty_or_malformed_string(payload, "maskAssetId")
         || ["poses", "phases"]
             .iter()
-            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+            .any(|key| route_nested_array_material(facts, key))
         || [
             "controlMode",
             "controlImage",
@@ -507,12 +532,37 @@ pub(super) fn krea_edit_has_unsupported_carrier(payload: &Map<String, Value>) ->
             "controlWeights",
         ]
         .iter()
-        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        .any(|key| route_carrier_material(facts, key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zimage_identity_probe_preserves_legacy_angle_and_numeric_strength_spelling() {
+        for (angle, expected) in [
+            (serde_json::json!(false), true),
+            (serde_json::json!(0), true),
+            (serde_json::json!(""), true),
+            (serde_json::json!([]), true),
+            (serde_json::json!(true), false),
+            (serde_json::json!(1), false),
+            (serde_json::json!("angles"), false),
+            (serde_json::json!(["front"]), false),
+        ] {
+            let payload = serde_json::json!({
+                "mode":"character_image",
+                "referenceAssetId":"face",
+                "advanced":{"referenceStrength":"0.6", "angleSet": angle}
+            });
+            assert_eq!(
+                super::candle::zimage_identity_candle_eligible(payload.as_object().unwrap()),
+                expected,
+                "legacy angleSet {angle} must preserve the identity route"
+            );
+        }
+    }
 
     #[test]
     fn canonical_ltx_clip_probes_include_the_required_ic_lora_and_honor_eros_withdrawal() {

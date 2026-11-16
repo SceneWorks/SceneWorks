@@ -388,7 +388,11 @@ async fn adapter_import_cpu_contract() {
         assert_eq!(claimed["job"]["id"], job["id"]);
         assert_eq!(claimed["job"]["workerId"], utility.worker_id);
         assert_eq!(claimed["job"]["assignedGpu"], "cpu");
-        native::run_acceptance_utility_job(&utility, serde_json::from_value(claimed["job"].clone()).unwrap()).await;
+        native::run_acceptance_utility_job(
+            &utility,
+            serde_json::from_value(claimed["job"].clone()).unwrap(),
+            claimed["executionClaimCapability"].as_str().map(str::to_owned),
+        ).await;
         let (status, completed) = request(app.clone(), "GET", &format!("/api/v1/jobs/{}",job["id"].as_str().unwrap()), Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{completed}");
         assert_eq!(completed["status"], "completed", "{completed}");
@@ -722,6 +726,9 @@ async fn pre_model_library_and_dispatch_cpu_contract(
         .await;
         assert_eq!(status, StatusCode::OK, "{claimed}");
         assert_eq!(claimed["job"]["id"], id, "{claimed}");
+        let execution_claim_capability = claimed["executionClaimCapability"]
+            .as_str()
+            .map(str::to_owned);
         let (status, claimed) = request(
             app.clone(),
             "GET",
@@ -733,17 +740,18 @@ async fn pre_model_library_and_dispatch_cpu_contract(
         let mut job: sceneworks_core::contracts::JobSnapshot =
             serde_json::from_value(claimed).unwrap();
         // Fault injection into the claimed local snapshot only. No model data
-        // exists: the first case stops at the typed source guard; the second
-        // admits an empty confined local directory, then hits the image handler's
-        // missing-project check before every loader/tensor path.
-        job.payload.clear();
+        // exists: the first case reaches the typed source guard with otherwise
+        // valid options; the second is refused by shared validation before any loader.
         if invalid_image {
+            job.payload.clear();
             job.payload
                 .insert("model".into(), json!("cpu-only-invalid-image"));
             job.payload.insert("modelManifestEntry".into(), json!({"id":"cpu-only-invalid-image",
                 "modelPath":source_only,"source":{"provider":"local","path":"models/imports/source-only"}}));
+        } else {
+            job.payload.remove("modelManifestEntry");
         }
-        native::run_acceptance_utility_job(&worker, job).await;
+        native::run_acceptance_utility_job(&worker, job, execution_claim_capability).await;
         let (status, failed) = request(
             app.clone(),
             "GET",
@@ -756,7 +764,7 @@ async fn pre_model_library_and_dispatch_cpu_contract(
         let error = failed["error"].as_str().unwrap();
         assert!(
             error.contains(if invalid_image {
-                "Missing payload.projectId"
+                "missing field `projectId`"
             } else {
                 "no model manifest entries"
             }),

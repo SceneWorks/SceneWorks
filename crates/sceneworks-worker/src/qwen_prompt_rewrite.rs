@@ -59,13 +59,11 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) const MAX_REWRITE_REFERENCES: usize = 10;
+
 use serde_json::{Map, Value};
 
 use crate::{WorkerError, WorkerResult};
-
-/// The `task` discriminator that selects this path on a `prompt_refine` job.
-#[cfg(any(test, native_lane))]
-pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK as REWRITE_TASK;
 
 /// Whether the rewriters apply to `model`: the base 2.1 model and its distilled Turbo sibling
 /// (sc-25907) — one prompt format, one template — and nothing else. A rewrite request naming any
@@ -123,13 +121,6 @@ pub(crate) const REWRITE_TOP_K: usize = 20;
 /// `payload.maxNewTokens`.
 pub(crate) const T2I_MAX_NEW_TOKENS: u32 = 16256;
 pub(crate) const I2I_MAX_NEW_TOKENS: u32 = 24000;
-
-/// Upper bound on reference images sent to the edit rewriter.
-///
-/// The same 10 the render takes (S3 edit contract): the rewrite must see EXACTLY the ordered list
-/// the render will condition on, or its `ratio_follow: "<imageN>"` names a different picture than
-/// the one the user attached.
-pub(crate) const MAX_REWRITE_REFERENCES: usize = 10;
 
 /// Which of the two rewriters a request selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -777,6 +768,9 @@ mod tests {
     fn the_rewrite_sees_exactly_the_ten_references_the_render_takes() {
         // S3 edit contract: 1-10 ordered references. The rewrite's `<imageN>` numbering is only
         // meaningful if its list is the render's list.
-        assert_eq!(MAX_REWRITE_REFERENCES, 10);
+        assert_eq!(
+            sceneworks_core::request_validation::utility_validation::MAX_QWEN_REWRITE_IMAGES,
+            10
+        );
     }
 }

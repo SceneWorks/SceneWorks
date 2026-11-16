@@ -368,6 +368,7 @@ describe("SimpleShell", () => {
       textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
     });
 
+    await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
 
     expect(context.createImageJob).toHaveBeenCalledTimes(1);

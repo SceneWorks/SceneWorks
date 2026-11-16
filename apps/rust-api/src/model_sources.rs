@@ -20,13 +20,14 @@ use crate::error::ApiError;
 use crate::AppState;
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    requested_runtime_variant, selected_requirements_for_model, LocalCacheEligibility,
+    requested_runtime_variant_typed, selected_requirements_for_model, LocalCacheEligibility,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalLibraryUnavailableContext, ModelAvailability,
     ModelResolution,
 };
 use sceneworks_core::model_artifacts::ResolvedModelArtifact;
+use sceneworks_core::resolved_options::RouteField;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -901,14 +902,32 @@ async fn preflight_payload_model_sources(
     // Each carrier is judged at the tier its job was admitted with (the same selection the
     // portable binding freezes: a training base's plan tier, a prompt expansion's `peTier`, else
     // the request's explicit tier), not one request-wide tier.
+    let (_, options) = crate::portable_admission::route_option_facts(job_type, payload)?;
+    let typed_variant = requested_runtime_variant_typed(
+        payload.get("variant").and_then(Value::as_str),
+        match &options.quant_tier {
+            RouteField::Valid(tier) => Some(tier.as_str()),
+            _ => None,
+        },
+        match &options.mlx_quantize {
+            RouteField::Valid(bits) => Some(*bits),
+            _ => None,
+        },
+    );
     let entries = payload_model_slots(payload)
         .into_iter()
         .map(|(slot, entry)| {
             let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
-            let variant = sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
-                job_type, payload, &slot, model_id,
-            )
-            .unwrap_or_else(|_| requested_runtime_variant(payload));
+            let variant = if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+                || (*job_type == JobType::PromptRefine && slot == "modelManifestEntry")
+            {
+                sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
+                    job_type, payload, &slot, model_id,
+                )
+                .unwrap_or_else(|_| typed_variant.clone())
+            } else {
+                typed_variant.clone()
+            };
             (entry, variant)
         })
         .filter(|(entry, _)| {

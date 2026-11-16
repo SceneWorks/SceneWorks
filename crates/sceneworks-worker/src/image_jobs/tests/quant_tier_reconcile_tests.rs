@@ -12,6 +12,20 @@ use crate::JsonObject;
 use crate::Path;
 use serde_json::json;
 
+fn resolved_request(payload: &JsonObject) -> ImageRequest {
+    let mut effective = payload.clone();
+    if let Some(value) = effective
+        .get_mut("advanced")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|advanced| advanced.get_mut("mlxQuantize"))
+    {
+        if let Some(lowered) = sceneworks_core::options::legacy_integer(value) {
+            *value = lowered;
+        }
+    }
+    ImageRequest::from_resolved(payload, &effective).expect("tier fixture options bind")
+}
+
 /// The resolved basename → precision map used to record the tier that ran (not the one requested).
 #[test]
 fn tier_quant_from_resolved_dir_maps_basename_to_precision() {
@@ -174,7 +188,7 @@ fn bf16_request_with_only_q4_present_records_q4() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
 
-    let req = ImageRequest::from_payload(
+    let req = resolved_request(
         json!({ "model": "sd3_5_large", "advanced": { "mlxQuantize": 0 } })
             .as_object()
             .unwrap(),
@@ -205,13 +219,13 @@ fn bf16_request_with_only_q4_present_records_q4() {
 #[test]
 fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
     let req = |mlx_quantize: serde_json::Value| {
-        ImageRequest::from_payload(
+        resolved_request(
                 json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": mlx_quantize }, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                     .as_object()
                     .unwrap(),
             )
     };
-    let default = ImageRequest::from_payload(
+    let default = resolved_request(
             json!({ "model": "flux2_klein_9b", "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } }).as_object().unwrap(),
         );
     // No selection → the q8 default (matches standard_tier_subdir's preferred, sc-10726).
@@ -240,7 +254,7 @@ fn dense_te_no_fallback_records_transformer_tier() {
         std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
     }
 
-    let req = ImageRequest::from_payload(
+    let req = resolved_request(
             json!({ "model": "flux2_klein_9b", "advanced": {}, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                 .as_object()
                 .unwrap(),
@@ -276,7 +290,7 @@ fn dense_te_no_fallback_records_transformer_tier() {
 /// the load quant stays `None`. This is the case that legitimately warns/emits.
 #[test]
 fn dense_te_genuine_fallback_records_resolved_tier() {
-    let req = ImageRequest::from_payload(
+    let req = resolved_request(
             json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": 8 }, "modelManifestEntry": { "mlx": { "denseTextEncoderTier": true } } })
                 .as_object()
                 .unwrap(),

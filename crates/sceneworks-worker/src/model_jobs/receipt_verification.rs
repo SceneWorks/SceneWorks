@@ -217,12 +217,10 @@ mod tests {
             "snapshotRevision":revision,"resolvedFiles":files,
             "artifactTreeStamp":receipt["artifactTreeStamp"],"receipts":[receipt,q8_receipt]});
         std::fs::write(&marker, serde_json::to_vec(&mirrored).unwrap()).unwrap();
-        let request = ImageRequest::from_payload(
-            json!({"model":"sdxl","advanced":{"mlxQuantize":8},
-            "modelManifestEntry":model})
-            .as_object()
-            .unwrap(),
-        );
+        let payload = json!({"model":"sdxl","advanced":{"mlxQuantize":8},
+            "modelManifestEntry":model});
+        let authored = payload.as_object().unwrap();
+        let request = ImageRequest::from_resolved(authored, authored).unwrap();
         let mut settings =
             crate::image_jobs::resolved_artifact_provenance_tests::settings(data.path());
         let resolved = crate::image_jobs::resolve_weights_dir(&request, &settings)

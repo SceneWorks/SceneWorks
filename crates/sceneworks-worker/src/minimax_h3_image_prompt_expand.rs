@@ -4,7 +4,7 @@
 //! ordered references as `<Picture N>` — into the long caption MiniMax-H3-Image was trained on, and
 //! proposes an aspect ratio. It is a Qwen3.8-27B fine-tune on the ordinary native TextLlm lane, so
 //! [`crate::prompt_refine_jobs`] drives it as the `prompt_refine` task
-//! [`EXPAND_TASK`]. The request assembly and the reply contract are the engine's
+//! [`sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK`]. The request assembly and the reply contract are the engine's
 //! (`core_llm::minimax_h3_image_pe`); this module only finds the weights and the prompt files on
 //! disk and shapes the job result.
 //!
@@ -35,8 +35,6 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 };
 
 /// The `task` discriminator that selects this path on a `prompt_refine` job.
-#[cfg(any(test, native_lane))]
-pub(crate) use sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK as EXPAND_TASK;
 use sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID as TARGET_MODEL_ID;
 /// The expander's catalog id.
 pub(crate) use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID as PE_MODEL_ID;

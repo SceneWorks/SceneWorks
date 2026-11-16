@@ -124,9 +124,7 @@ pub(crate) const INT8_CONVROT_TIER: &str = "int8-convrot";
 /// SELECTED only when all three hold — see [`nvfp4_selected`].
 pub(super) fn nvfp4_requested(request: &ImageRequest) -> bool {
     request
-        .advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
+        .advanced_text("quantTier")
         .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(NVFP4_TIER))
 }
 
@@ -431,7 +429,7 @@ pub(super) fn standard_tier_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
     // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
     // no weights, and reporting otherwise routes the loader at a tier it cannot load
@@ -552,19 +550,31 @@ pub(super) fn qwen_control_tier_subdir(
 ) -> &'static str {
     // Portable dispatch writes this private field only after verifying the route binding.
     // It fixes the source tier across hosts instead of clamping to this worker's cache.
-    if let Some(tier) = request
-        .advanced
-        .get("__portableBoundTier")
-        .and_then(Value::as_str)
-    {
-        return match tier {
+    let selection = sceneworks_core::payload_util::resolved_quant_selection(
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .mlx_quantize
+            .as_ref(),
+        request.portable_aux.bound_tier(),
+    );
+    if matches!(
+        selection,
+        sceneworks_core::payload_util::ResolvedQuantSelection::Bound(_)
+    ) {
+        return match request
+            .portable_aux
+            .bound_tier()
+            .expect("bound selection has a tier")
+        {
             "q4" => "q4",
             "q8" => "q8",
             "bf16" => "bf16",
             _ => "q8", // the verified guard rejects any other tier before dispatch
         };
     }
-    request.quant_bits().map_or_else(
+    request.resolved_quant_bits().map_or_else(
         || qwen_control_installed_default_tier(snapshot),
         |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
     )
@@ -611,7 +621,7 @@ pub(super) fn control_raw_settings(
     guidance: Option<f32>,
     engine: Option<&str>,
 ) -> sceneworks_core::contracts::JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".into(), Value::Bool(true));
     raw.insert("repo".into(), Value::String(repo.into()));
     raw.insert("numInferenceSteps".into(), serde_json::json!(steps));
@@ -646,17 +656,27 @@ mod control_helper_tests {
         std::fs::create_dir_all(dir.path().join("q4")).unwrap();
         std::fs::write(dir.path().join("q4/model.safetensors"), b"metadata fixture").unwrap();
         let payload = json!({"advanced":{}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         assert_eq!(qwen_control_tier_subdir(&request, Some(dir.path())), "q4");
         assert_eq!(qwen_control_tier_subdir(&request, None), "q8");
         let mut bound = request.clone();
-        bound
-            .advanced
-            .insert("__portableBoundTier".into(), json!("q8"));
+        let dispatch =
+            json!({"advanced":{"__portableFrozenSources":true,"__portableBoundTier":"q8"}});
+        bound.portable_aux =
+            sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(
+                dispatch.as_object().unwrap(),
+            )
+            .unwrap();
         assert_eq!(qwen_control_tier_subdir(&bound, Some(dir.path())), "q8");
         for (bits, expected) in [(0, "bf16"), (4, "q4"), (8, "q8")] {
-            let mut request = request.clone();
-            request.advanced.insert("mlxQuantize".into(), json!(bits));
+            let payload = json!({"advanced":{"mlxQuantize":bits}});
+            let request = ImageRequest::from_resolved(
+                payload.as_object().unwrap(),
+                payload.as_object().unwrap(),
+            )
+            .unwrap();
             assert_eq!(
                 qwen_control_tier_subdir(&request, Some(dir.path())),
                 expected
@@ -666,13 +686,15 @@ mod control_helper_tests {
     #[test]
     fn shared_control_telemetry_preserves_backend_nulls_and_native_engine_spelling() {
         let payload = json!({"advanced":{"guidanceScale":19,"mlxQuantize":4,"untouched":true}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
         #[cfg(target_os = "macos")]
         let backend = ControlBackend::Mlx(None);
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let backend = ControlBackend::Candle;
         let raw = control_raw_settings(&request, "repo", 8, 0.9, 2, backend, None, None);
-        assert_eq!(raw["untouched"], json!(true));
+        assert!(!raw.contains_key("untouched"));
         assert_eq!(raw["poseCount"], json!(2));
         #[cfg(target_os = "macos")]
         {
@@ -681,7 +703,7 @@ mod control_helper_tests {
         }
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
-            assert_eq!(raw["guidanceScale"], json!(19));
+            assert_eq!(raw["guidanceScale"], json!(19.0));
             assert_eq!(raw["mlxQuantize"], json!(4));
         }
         assert!(!raw.contains_key("controlEngine"));

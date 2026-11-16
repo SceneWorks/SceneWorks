@@ -33,10 +33,10 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
-import { linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
+import { iterateBatch, leadingResolutionTemplate, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
-  dimensionConstraintMessage,
   evaluateModelDimensions,
+  dimensionConstraintMessage,
   isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
 // sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
@@ -125,8 +125,11 @@ import { usePidState, useStrictControlState } from "./imageStudio/useImageContro
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
+import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 import {
   downloadOffersFor,
   imageModelUsable,
@@ -1170,7 +1173,6 @@ export function ImageStudio() {
   // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
   // request the API accepts would be a client stricter than the gate.
   const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
-  const distinctReferenceCount = mossEdit ? referenceAssetIds.length : new Set(referenceAssetIds).size;
   let mossEditError = "";
   if (mossEdit) {
     try {
@@ -1181,12 +1183,6 @@ export function ImageStudio() {
       if (referenceAssetIds.some((id) => !editImageAssets.some((asset) => asset.id === id))) mossEditError = "A MOSS reference is missing from this project. Reacquire that exact slot before editing.";
     } catch (error) { mossEditError = error.message; }
   }
-  const referenceOverflowError =
-    mode === "edit_image" && maxStudioReferences != null && distinctReferenceCount > maxStudioReferences
-      ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
-          distinctReferenceCount - maxStudioReferences
-        }.`
-      : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -2118,9 +2114,16 @@ export function ImageStudio() {
     referenceRequest: flux3ReferenceRequest,
     dimensionIntent: activeDimensionIntent,
   });
-  const { width, height, invalid: dimensionsInvalid, constraints: dimensionConstraints } = dimensionEval;
-  // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
-  const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const { width, height, constraints: dimensionConstraints } = dimensionEval;
+  // A bare native stride is advice for the editable controls, not an API request
+  // limit. The portable owner enforces the grid only with a full declared envelope.
+  const declaredMinimum = Number(selectedModel?.limits?.minDimension);
+  const declaredMaximum = Number(selectedModel?.limits?.maxDimension);
+  const uiOnlyDimensionAdvice = dimensionConstraints.step > 1 && !(
+    Number.isInteger(declaredMinimum) && declaredMinimum > 0 &&
+    Number.isInteger(declaredMaximum) && declaredMaximum > 0
+  );
+  const dimensionAdvice = uiOnlyDimensionAdvice ? dimensionConstraintMessage(dimensionEval) : null;
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
@@ -2132,9 +2135,6 @@ export function ImageStudio() {
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
     hiresFixEnabled && (hiresFixTargetWidth > 4096 || hiresFixTargetHeight > 4096);
-  const hiresFixTargetMessage = hiresFixTargetInvalid
-    ? `Hires.fix target ${hiresFixTargetWidth}×${hiresFixTargetHeight} exceeds the 4096px image limit.`
-    : "";
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -2411,12 +2411,12 @@ export function ImageStudio() {
   // Layout references and model geometry are derived once above and passed unchanged
   // to the shared request builder; exact replay tiers and MOSS components must be ready.
   function preflightError(kind) {
+    if (kind === "batch" && portableBatchRefusal) return portableBatchRefusal.detail;
     if (!mossComponents.ready || mossEditError) return mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.");
     if (!selectedModelServesMode) return `Install or select a model that supports ${modeLabel} generation.`;
     if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
     if (characterReferenceError) return characterReferenceError;
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
-    if (dimensionsInvalid || hiresFixTargetInvalid) return hiresFixTargetMessage || dimensionError || "Width and height must each be between 256 and 4096.";
     if (cfgIntervalError) return cfgIntervalError;
     if (h3ImageSamplerError) return h3ImageSamplerError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
@@ -2725,24 +2725,22 @@ export function ImageStudio() {
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
-  // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
-  // SAME per-model range + stride the single-generate gate enforces (sc-14058), not the raw backend
-  // envelope. For a native-resolution model (Mage-Flow) an off-range OR off-÷16-stride size blocks the
-  // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
-  // so the batch and single paths cannot drift.
-  const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
-    .filter(
-      (res) =>
-        res &&
-        evaluateModelDimensions({
-          model: selectedModel,
-          resolution: `${res.width}x${res.height}`,
-          widthOverride: "",
-          heightOverride: "",
-          referenceRequest: flux3ReferenceRequest,
-        }).invalid,
-    );
+  let batchDimensionAdvice = null;
+  if (uiOnlyDimensionAdvice && batchMode && batchTotal > 0) {
+    for (const { prompt: directive } of iterateBatch(batchPrompts.map(leadingResolutionTemplate), batchVariables)) {
+      const { resolution: itemResolution } = parsePromptResolution(directive, resolutionOptions);
+      const evaluation = evaluateModelDimensions({
+        model: selectedModel,
+        resolution: `${itemResolution?.width ?? width}x${itemResolution?.height ?? height}`,
+        widthOverride: "",
+        heightOverride: "",
+      });
+      if (evaluation.invalid) {
+        batchDimensionAdvice = `Width and height must be between ${dimensionConstraints.min} and ${dimensionConstraints.max} and a multiple of ${dimensionConstraints.step}.`;
+        break;
+      }
+    }
+  }
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
@@ -2773,11 +2771,7 @@ export function ImageStudio() {
       batchTotal,
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
-      resolutionIssues: batchResolutionIssues,
-      // Per-model range + stride for the inline [WxH] directive — the SAME constraints the free
-      // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
-      // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
-      dimensionConstraints,
+      dimensionAdvice: batchDimensionAdvice,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2789,8 +2783,7 @@ export function ImageStudio() {
       batchTotal,
       batchMissingKeys,
       batchGroupIssues,
-      batchResolutionIssues,
-      dimensionConstraints,
+      batchDimensionAdvice,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2823,6 +2816,7 @@ export function ImageStudio() {
       captionHasContent,
       tensorConditioning: mossEdit && Boolean(mossImageAdvanced.positive),
       prompt,
+      dimensionAdvice,
       // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
       // style is active (styleless behavior unchanged). For prose that is the Subject:/Style:
       // composition; for a structured model it is the style-injected, re-serialized caption. Either
@@ -2843,11 +2837,6 @@ export function ImageStudio() {
       modelName: selectedModel?.name,
       // Multi-phase denoise problems (sc-13885): an enabled-but-broken phase list blocks Generate.
       multiPhaseIssues: multiPhaseValidationIssues,
-      // Free Width/Height override out of the model's range or off its ÷16 stride (sc-14058). A precise
-      // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
-      // not only on click. null when the dimensions are valid.
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2859,6 +2848,7 @@ export function ImageStudio() {
       captionHasContent,
       mossEdit, mossImageAdvanced,
       prompt,
+      dimensionAdvice,
       stylePreviewActive,
       structuredStyleActive,
       styledPreviewPrompt,
@@ -2873,8 +2863,6 @@ export function ImageStudio() {
       selectedLoraValidationResult,
       selectedModel,
       multiPhaseValidationIssues,
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2882,10 +2870,51 @@ export function ImageStudio() {
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
+  let portableDraft = null;
+  // Build the outgoing request even when a separate form requirement is unmet. The portable
+  // validator owns option refusals, including model geometry and reference limits.
+  if (!batchMode && selectedModel && (!structuredPromptModel || structuredActive)) {
+    try {
+      portableDraft = buildJobRequest({
+        promptToSend: structuredPromptModel ? serializeCaption(caption) : prompt,
+        submitIntent: prompt,
+        sendStructured: Boolean(structuredPromptModel),
+        submitCaption: caption,
+        submitBackend: magicPromptBackend,
+      });
+    } catch { /* Server keeps the authoritative gate. */ }
+  }
+  const portableFeedback = usePortableFeedback(
+    "image", portableDraft, selectedModel,
+    Boolean(prompt.trim() || (structuredActive && captionHasContent) || (mossEdit && mossImageAdvanced.positive)),
+  );
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+  let portableBatchRevision = null;
+  if (batchMode && selectedModel && !structuredPromptModel && batchTotal > 0) {
+    try {
+      portableBatchRevision = JSON.stringify({
+        common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions,
+      });
+    } catch { /* The server checks requests built from this draft. */ }
+  }
+  const portableBatchFeedback = usePortableBatchFeedback(
+    "image",
+    portableBatchRevision,
+    function* batchRequests() {
+      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+        const { prompt: cleanPrompt, resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+        yield buildBatchJobRequest(cleanPrompt, { resolution: itemResolution });
+      }
+    },
+    selectedModel,
+    Boolean(portableBatchRevision),
+  );
+  const portableBatchRefusal = portableBatchFeedback?.result.state === "invalid"
+    ? portableBatchFeedback.result.refusal : null;
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || ["invalid", "server-required"].includes(portableBatchFeedback?.result.state) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -2914,12 +2943,14 @@ export function ImageStudio() {
   batchJobCount,
   BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
+  token,
   buildBatchJobRequest,
   onMagicExpand,
   createImageJob
   });
   const generateDisabled =
     submitting ||
+    portableFeedbackBlocks(portableFeedback) ||
     replayTierUnavailable ||
     Boolean(characterReferenceError) ||
     !mossComponents.ready ||
@@ -2974,6 +3005,9 @@ export function ImageStudio() {
             batchBusy={batchBusy}
             batchError={batchError}
             batchValidity={batchValidity}
+            portableBatchRefusal={portableBatchRefusal}
+            portableBatchRefusalIndex={portableBatchFeedback?.index}
+            portableBatchCheckedCount={["valid", "partial"].includes(portableBatchFeedback?.result.state) ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
             batchRun={batchRun}
             batchRunProgress={batchRunProgress}
@@ -3667,7 +3701,11 @@ export function ImageStudio() {
 
           {/* The preset/LoRA problems that used to be three separate .inline-warning
               paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}
-          <ValidationSummary issues={generateValidity.surfaced} label="Generate errors" />
+          <ValidationSummary issues={portableRefusal
+            ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+            : generateValidity.surfaced} label="Generate errors" />
+          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+          {portableFeedbackStatus(portableBatchFeedback?.result) ? <p role="status">{portableFeedbackStatus(portableBatchFeedback.result)}</p> : null}
 
         </WorkPanel>
 

@@ -114,9 +114,19 @@ async fn stub(gate: Arc<Gate>) -> (String, tokio::task::JoinHandle<()>) {
     (url, server)
 }
 
-fn fixture() -> (tempfile::TempDir, Settings, TrainingPlan, Vec<u8>) {
+fn fixture() -> (
+    tempfile::TempDir,
+    sceneworks_core::hf_home::test_support::CacheRootGuard,
+    Settings,
+    TrainingPlan,
+    Vec<u8>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().canonicalize().unwrap();
+    let cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        data.clone(),
+        data.join("cache/source-library"),
+    );
     let settings = super::tests::test_settings(&data);
     let dataset = data.join("datasets/ds-1");
     std::fs::create_dir_all(&dataset).unwrap();
@@ -137,7 +147,13 @@ fn fixture() -> (tempfile::TempDir, Settings, TrainingPlan, Vec<u8>) {
         item["ltxPreparedBundleSize"] = json!(bytes.len());
         item["ltxPreparedBundleSha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
     }
-    (dir, settings, serde_json::from_value(plan).unwrap(), bytes)
+    (
+        dir,
+        cache,
+        settings,
+        serde_json::from_value(plan).unwrap(),
+        bytes,
+    )
 }
 
 fn inert_preflight(
@@ -303,7 +319,7 @@ async fn copy_and_hash_leave_runtime_live_and_preserve_exact_snapshot_and_contex
         PreparedBundleCheckpoint::Copy,
         PreparedBundleCheckpoint::Verify,
     ] {
-        let (_dir, mut settings, plan, bytes) = fixture();
+        let (_dir, _cache, mut settings, plan, bytes) = fixture();
         let gate = Gate::new(Mode::Success);
         let (url, server) = stub(gate.clone()).await;
         settings.api_url = url;
@@ -355,7 +371,7 @@ async fn cancellation_and_heartbeat_failure_wait_for_copy_then_cleanup_without_l
             PreparedBundleCheckpoint::Copy,
             PreparedBundleCheckpoint::Verify,
         ] {
-            let (_dir, mut settings, plan, bytes) = fixture();
+            let (_dir, _cache, mut settings, plan, bytes) = fixture();
             let gate = Gate::new(mode);
             let (url, server) = stub(gate.clone()).await;
             settings.api_url = url;
@@ -398,7 +414,7 @@ async fn cancellation_and_heartbeat_failure_wait_for_copy_then_cleanup_without_l
 
 #[tokio::test(flavor = "current_thread")]
 async fn abandoned_async_waiter_trips_copy_flag_and_retains_cleanup_owner_until_winddown() {
-    let (_dir, mut settings, plan, bytes) = fixture();
+    let (_dir, _cache, mut settings, plan, bytes) = fixture();
     let gate = Gate::new(Mode::Abandon);
     let (url, server) = stub(gate.clone()).await;
     settings.api_url = url;
@@ -437,7 +453,7 @@ async fn abandoned_async_waiter_trips_copy_flag_and_retains_cleanup_owner_until_
 
 #[test]
 fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
-    let (_dir, settings, plan, bytes) = fixture();
+    let (_dir, _cache, settings, plan, bytes) = fixture();
     let handoff = inert_preflight(&settings, &plan, PreparedTrainingInputs::default(), &bytes)
         .map(|prepared| Arc::new(TrainingPreflightHandoff(Mutex::new(Some(prepared)))))
         .expect("descriptor-only preparation");
@@ -469,7 +485,7 @@ fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
 #[cfg(native_lane)]
 #[tokio::test(flavor = "current_thread")]
 async fn production_dry_run_preserves_summary_and_closes_prepared_inputs_without_a_trainer() {
-    let (_dir, mut settings, plan, _) = fixture();
+    let (_dir, _cache, mut settings, plan, _) = fixture();
     let gate = Gate::new(Mode::Success);
     gate.entered.store(true, Ordering::SeqCst);
     let (url, server) = stub(gate.clone()).await;

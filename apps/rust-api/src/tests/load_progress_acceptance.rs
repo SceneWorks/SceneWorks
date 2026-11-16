@@ -855,7 +855,14 @@ async fn run(case: &str) {
         require(claimed["job"]["id"] == id, "claim selected another job")?;
         let job = serde_json::from_value(claimed["job"].clone()).map_err(|e| e.to_string())?;
         // Await normal dispatcher teardown even on failure. No timeout drops a live native task.
-        native::run_acceptance_utility_job(&worker, job).await;
+        native::run_acceptance_utility_job(
+            &worker,
+            job,
+            claimed["executionClaimCapability"]
+                .as_str()
+                .map(str::to_owned),
+        )
+        .await;
         let completed = api
             .json("GET", &format!("/api/v1/jobs/{id}"), Value::Null)
             .await?;

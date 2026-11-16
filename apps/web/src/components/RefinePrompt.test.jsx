@@ -1,7 +1,10 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
+vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
 import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RefinePromptControl } from "./RefinePromptControl.jsx";
 
 
@@ -19,6 +22,7 @@ describe("RefinePromptControl", () => {
   let root;
 
   beforeEach(() => {
+    feedbackState.value = { state: "valid" };
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -35,6 +39,22 @@ describe("RefinePromptControl", () => {
     root = createRoot(container);
     act(() => root.render(ui));
   }
+
+  it.each(["pending", "server-required", "invalid"])("waits through %s before auto-starting the confirmed draft once", async (state) => {
+    feedbackState.value = { state, refusal: { code: "invalid_option", field: "prompt", detail: "Fix this prompt" } };
+    const refinePrompt = vi.fn(async () => "A confirmed rewrite");
+    const ui = <RefinePromptControl autoStart prompt="neon street" modelId="z" workflow="image" refinePrompt={refinePrompt} onApply={vi.fn()} />;
+    render(ui);
+    expect(refineButton(container).disabled).toBe(true);
+    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix this prompt");
+    await act(async () => refineButton(container).click());
+    expect(refinePrompt).not.toHaveBeenCalled();
+    feedbackState.value = { state: "valid" };
+    await act(async () => root.render(React.cloneElement(ui)));
+    expect(refinePrompt).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(React.cloneElement(ui)));
+    expect(refinePrompt).toHaveBeenCalledTimes(1);
+  });
 
   it("disables the button when the prompt is empty", () => {
     render(<RefinePromptControl prompt="   " guidePath="/prompt-guides/z.md" modelId="z" workflow="image" refinePrompt={vi.fn()} onApply={vi.fn()} />);

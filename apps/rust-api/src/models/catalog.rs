@@ -256,25 +256,24 @@ pub(crate) async fn resolve_selected_image_text_encoder(
     model_id: &str,
     manifest_entry: &mut Value,
 ) -> Result<(), ApiError> {
-    let selected = match job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("textEncoderModel"))
-    {
-        None => {
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let selected = match &route_options.text_encoder_model {
+        sceneworks_core::resolved_options::RouteField::Absent
+        | sceneworks_core::resolved_options::RouteField::Null => {
             if let Some(object) = manifest_entry.as_object_mut() {
                 object.remove("resolvedTextEncoder");
             }
             return Ok(());
         }
-        Some(Value::String(id)) if id == "default" => {
+        sceneworks_core::resolved_options::RouteField::Valid(id) if id == "default" => {
             if let Some(object) = manifest_entry.as_object_mut() {
                 object.remove("resolvedTextEncoder");
             }
             return Ok(());
         }
-        Some(Value::String(id)) => id.as_str(),
-        Some(_) => return Err(ApiError::bad_request(
+        sceneworks_core::resolved_options::RouteField::Valid(id) => id.as_str(),
+        sceneworks_core::resolved_options::RouteField::Invalid => return Err(ApiError::bad_request(
             "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models",
         )),
     };
@@ -2086,6 +2085,7 @@ pub(crate) fn merge_model_entries_with_registry(
         .collect();
     let mut merged = merge_entries_by_id(builtin, user.clone());
     for entry in &mut merged {
+        sceneworks_core::registry::project_option_route_facts(entry);
         let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
@@ -2374,6 +2374,7 @@ pub(crate) async fn resolve_model_manifest_entry(
             catalog_scope = Some("builtin");
         }
     }
+    sceneworks_core::registry::project_option_route_facts(&mut entry);
     inherit_provider_decoder_downloads(&mut entry, &builtin);
     if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
         // The merged worker-facing entry must carry the same routing authority as `/models`.

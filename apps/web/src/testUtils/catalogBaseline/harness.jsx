@@ -21,6 +21,9 @@ import { AUDIO_MODES, VIDEO_MODES, audioModelServesMode } from "../../modelEligi
 
 const imageModes = ["text_to_image", "edit_image", "character_image"];
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+// The pinned capture predates typed option feedback. Keep its old surface and
+// submission assertions exact while separate mounted tests assert this new message.
+const oldSurfaceHint = (node) => !node.textContent.includes("[shared request validation]");
 const screens = { image: ImageStudio, video: VideoStudio, audio: AudioStudio, vector: VectorStudio,
   document: DocumentStudio, training: TrainingStudio, character: CharacterStudio,
   simpleImage: SimpleImageStudio, simpleVideo: SimpleVideoStudio, simpleAudio: SimpleAudioStudio };
@@ -158,6 +161,7 @@ export function controls(container, persistenceKey) {
 }
 export async function click(node) {
   if (!node) throw new Error("Missing baseline interaction target");
+  await settleServerFeedback(node.ownerDocument);
   await act(async () => node.click());
 }
 export async function change(node, value) {
@@ -165,6 +169,15 @@ export async function change(node, value) {
     const proto = node.tagName === "SELECT" ? HTMLSelectElement.prototype : node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, "value").set.call(node, value);
     node.dispatchEvent(new Event(node.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
+  });
+  await settleServerFeedback(node.ownerDocument);
+}
+async function settleServerFeedback(document) {
+  await vi.waitFor(() => {
+    if ([...document.querySelectorAll('[role="status"]')].some((node) =>
+      node.textContent.includes("Checking options with the server"))) {
+      throw new Error("Waiting for server option feedback");
+    }
   });
 }
 export function submissionButton(container, studio) {
@@ -204,6 +217,7 @@ export async function mount(catalog, row, saved = {}, overrides = {}) {
     return <SimpleUiContext.Provider value={simple}><Screen />{sheet ? <SimpleSheet onClose={() => setSheet(null)} phone={false} title={sheet.title}>{sheet.body ?? <SimpleSheetOptions kind={sheet.kind} options={sheet.options} onSelect={(value) => { sheet.onSelect(value); setSheet(null); }} />}</SimpleSheet> : null}</SimpleUiContext.Provider>;
   }
   await act(async () => root.render(<AppContext.Provider value={context}><Shell /></AppContext.Provider>));
+  await settleServerFeedback(container.ownerDocument);
   const close = async () => { await act(async () => root.unmount()); container.remove(); };
   return { container, root, context, calls, persistenceKey, close, getPersisted };
 }
@@ -282,7 +296,7 @@ export async function observe(catalog, row) {
       const persisted = Object.fromEntries(Object.entries(afterPersisted ?? {}).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(beforePersisted?.[key])));
       changes.push({ control: initial.findIndex((c) => c.label === labelFor(node)), label: labelFor(node), value: next,
         calls: JSON.parse(JSON.stringify(calls)), persisted: Object.keys(persisted).length ? persisted : null,
-        hints: [...container.querySelectorAll("[role=alert],.form-error,.error")].map((n) => clean(n.textContent)) });
+        hints: [...container.querySelectorAll("[role=alert],.form-error,.error")].filter(oldSurfaceHint).map((n) => clean(n.textContent)) });
       if (node.isConnected) { if (node.type === "checkbox") await click(node); else await change(node, before); }
     }
     for (const group of [...container.querySelectorAll(".su-chips")]) {
@@ -297,7 +311,7 @@ export async function observe(catalog, row) {
     }
     return { controls: initial, menus, availability: clean(container.querySelector(".model-availability-gate")?.textContent), submission: { available: Boolean(submit), disabled: submit?.disabled ?? null, calls: defaults }, changes,
       persisted: getPersisted(),
-      hints: [...container.querySelectorAll(".field-hint,[role=alert],.form-error,.error")].map((node) => clean(node.textContent)),
+      hints: [...container.querySelectorAll(".field-hint,[role=alert],.form-error,.error")].filter(oldSurfaceHint).map((node) => clean(node.textContent)),
     };
   } finally { await close(); }
 }

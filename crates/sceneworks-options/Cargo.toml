@@ -1,0 +1,19 @@
+[package]
+name = "sceneworks-options"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = { workspace = true }
+sceneworks-gen-core-moss-image-policy = { git = "https://github.com/SceneWorks/inference", rev = "b387b95ac7ed06cb84502a90876a669fb54fd79a" }
+sceneworks-gen-core-supra2-policy = { git = "https://github.com/SceneWorks/inference", rev = "b387b95ac7ed06cb84502a90876a669fb54fd79a" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+syn = { workspace = true }

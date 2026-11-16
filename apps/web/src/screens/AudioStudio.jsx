@@ -5,6 +5,8 @@ import { AudioGenerationSettings } from "./audioStudio/AudioGenerationSettings.j
 import { AudioAdvancedPanel } from "./audioStudio/AudioAdvancedPanel.jsx";
 import { useAudioSettingsWriter } from "./audioStudio/useAudioSettingsWriter.js";
 import { useAudioSubmission } from "./audioStudio/useAudioSubmission.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useAudioModelDefaults } from "./audioStudio/useAudioModelDefaults.js";
 import { useAudioScript } from "./audioStudio/useAudioScript.js";
 import { useAudioVoiceLibrary } from "./audioStudio/useAudioVoiceLibrary.js";
@@ -447,7 +449,8 @@ export function AudioStudio() {
 
   const {
     runAgain,
-    submit
+    submit,
+    draft: portableDraft,
   } = useAudioSubmission({
     createAudioJob,
   rememberLocalGenerationJob,
@@ -506,6 +509,8 @@ export function AudioStudio() {
   selectedIsNativeClone,
   matchStrength
   });
+  const portableFeedback = usePortableFeedback("audio", portableDraft, selectedModel, canGenerate);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   // The picker must contain only models that can generate in the active mode. Utility-only or
   // incompatible reduced catalogs are handled by the availability gate / mode snap above.
@@ -619,10 +624,12 @@ export function AudioStudio() {
             addSegment={addSegment}
             setPrompt={setPrompt}
             prompt={prompt}
-            canGenerate={canGenerate}
+            canGenerate={canGenerate && !portableFeedbackBlocks(portableFeedback)}
             setGenreTags={setGenreTags}
             songPrompt={songPrompt}
           />
+            {portableRefusal ? <p className="inline-warning" role="alert">{portableRefusal.detail}</p> : null}
+            {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
 
             {/* Settings bar (epic 14361 / sc-14363). The row is a FIXED 4-column grid — Model ·
                 Voice · Language · Length — with `align-items: end`, and the model's capability

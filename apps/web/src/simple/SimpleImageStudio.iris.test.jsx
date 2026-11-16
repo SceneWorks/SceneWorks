@@ -152,6 +152,7 @@ describe("SimpleImageStudio with Iris 3B (sc-25679)", () => {
     // ... and the reason is visible beside it.
     expect(negativeHint()?.textContent).toMatch(/only applies with guidance above 1\.0/);
 
+    await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     expect(context.createImageJob).toHaveBeenCalled();
     const request = context.createImageJob.mock.calls[0][0];

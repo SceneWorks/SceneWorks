@@ -41,15 +41,21 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
         assert_eq!(original["id"], projected["id"]);
         let id = original["id"].as_str().unwrap();
         let mut once = original.clone();
+        if let Some(spec) = super::builtin_model_spec(id) {
+            // The trusted route projection is added before measured evidence in the
+            // effective builtin manifest; it is not an author-owned manifest field.
+            once["optionRouteFacts"] = spec.option_route_facts();
+        }
         project_builtin_memory_evidence(&mut once).unwrap();
         let mut twice = once.clone();
         project_builtin_memory_evidence(&mut twice).unwrap();
         assert_eq!(once, twice, "{id}: evidence projection must be idempotent");
         if once != *projected {
-            let differing: Vec<_> = once
+            let differing: std::collections::BTreeSet<_> = once
                 .as_object()
                 .unwrap()
                 .keys()
+                .chain(projected.as_object().unwrap().keys())
                 .filter(|key| once[*key] != projected[*key])
                 .cloned()
                 .collect();

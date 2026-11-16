@@ -75,3 +75,5 @@ mod yue2_transcriptions;
 
 #[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
 mod moss_training_acceleration;
+
+mod shared_validation;

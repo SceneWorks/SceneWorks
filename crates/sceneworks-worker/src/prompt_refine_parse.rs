@@ -43,7 +43,13 @@ pub(super) async fn parse_refine_request(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<RefineRequest> {
-    let payload = &job.payload;
+    let effective = sceneworks_core::request_validation::resolve(
+        "promptRefine",
+        &job.payload,
+        &JsonObject::new(),
+    )
+    .map_err(WorkerError::Validation)?;
+    let payload = &effective;
     // The job is dispatched by the `task` discriminator: `magic_prompt` (text idea → JSON caption,
     // sc-5997), `image_caption` (reference image → JSON caption, sc-8105 — the `core_llm` VISION path),
     // or the default free-text rewrite. The two caption tasks both emit a JSON-constrained Ideogram
@@ -59,13 +65,6 @@ pub(super) async fn parse_refine_request(
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
-    // The vision tasks (image_caption / image_describe) are driven by the reference image, not a text
-    // prompt, so they do not require a `prompt`; every other task does.
-    if original_prompt.is_empty() && !task.is_vision() {
-        return Err(WorkerError::InvalidPayload(
-            "Prompt refinement requires a non-empty prompt.".to_owned(),
-        ));
-    }
     // The vision tasks resolve + decode a reference image (the JoyCaption `load_caption_image` pattern →
     // RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`. The path
     // is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484), so — like
@@ -254,8 +253,8 @@ pub(super) async fn parse_refine_request(
             build_image_describe_messages(style, multi_reference)
         }
         RefineTask::MagicPrompt => {
-            let aspect_ratio =
-                crate::payload::trimmed_string(payload.get("aspectRatio")).unwrap_or("1:1");
+            let aspect_ratio = crate::payload::trimmed_string(payload.get("aspectRatio"))
+                .expect("shared magic-prompt default");
             build_magic_prompt_messages(&original_prompt, aspect_ratio)
         }
         // sc-22713: the composed planning request IS the user turn; the embedded asset carries the

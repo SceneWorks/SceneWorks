@@ -82,12 +82,15 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.__sceneworksOptionsTestServer = ({ requests }) =>
+      requests.map((request) => ({ state: "valid", resolved: request }));
     window.localStorage.clear();
     ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
     await unmountRoot(root, container);
+    delete globalThis.__sceneworksOptionsTestServer;
     vi.clearAllMocks();
   });
 
@@ -143,6 +146,8 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     await act(async () => setTextarea(container.querySelector("#su-image-prompt"), "a harbour at dawn"));
     await act(async () => setInput(width, "6272"));
     await act(async () => setInput(container.querySelector("input[aria-label=\"Custom height\"]"), "2688"));
+    await act(async () => {});
+    await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
     expect(request).toMatchObject({ model: "minimax_h3_image", width: 6272, height: 2688 });
@@ -182,6 +187,7 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(container.querySelector("#su-image-negative")).toBeNull();
     await click(container.querySelector('button[aria-label="Insert <Picture 3> into the prompt"]'));
     expect(container.querySelector("#su-image-prompt").value).toBe("Put the hat from <Picture 3>");
+    await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
     // One ordered list, the armed reference first — the same payload the full studio sends.

@@ -164,6 +164,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["loras[].repo", L_LORAS],
   ["loras[].hash", L_LORAS],
   ["advanced", L_SETTINGS],
+  ["advanced.lowResStart", L_SETTINGS],
   ["advanced.mossImage", L_SETTINGS],
   ["advanced.mossImageAdvanced", L_SETTINGS],
   ["advanced.mossImageSampleIndex", L_SETTINGS],

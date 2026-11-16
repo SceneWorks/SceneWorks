@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
@@ -77,6 +78,7 @@ import {
 } from "../training/trainedLoraOffer.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import {
   irisCaptionFieldOptions,
@@ -811,6 +813,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
+  // Build the same body used by Start training while the user edits. Dataset readiness,
+  // installation and licence checks remain live server-owned gates.
+  let trainingRequest = null;
+  if (selectedTarget && activeDataset) {
+    try {
+      const snapshot = trainingConfigSnapshot({
+        activeDataset, configDraft, selectedPreset, selectedTarget, dryRun: false,
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      });
+      trainingRequest = {
+        targetId: snapshot.targetId, datasetId: snapshot.datasetId,
+        datasetVersion: snapshot.datasetVersion, presetId: snapshot.presetId,
+        presetVersion: snapshot.presetVersion, outputName: snapshot.outputName,
+        dryRun: false, config: snapshot.config,
+        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
+      };
+    } catch { /* The existing draft validation and server retain the gate. */ }
+  }
+  const trainingFeedback = usePortableFeedback("training", trainingRequest, selectedTarget, Boolean(trainingRequest));
+  const trainingRefusal = trainingFeedback?.state === "invalid" ? trainingFeedback.refusal : null;
 
   // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
   // field names, the active lane for the declared memory floor, and the data-walk preflight.
@@ -2217,7 +2239,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configValidity.ready || submittingJob) {
+    if (!configValidity.ready || portableFeedbackBlocks(trainingFeedback) || submittingJob) {
       return;
     }
     setSubmittingJob(true);
@@ -2235,19 +2257,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         dryRun,
         trainingLane: trainingLaneFromCapabilities(macCapabilities),
       });
-      const job = await createTrainingJob({
-        targetId: snapshot.targetId,
-        datasetId: snapshot.datasetId,
-        datasetVersion: snapshot.datasetVersion,
-        presetId: snapshot.presetId,
-        presetVersion: snapshot.presetVersion,
-        outputName: snapshot.outputName,
-        dryRun,
-        config: snapshot.config,
-        // Only reachable once the licence notice was accepted (configValidity holds Start until
-        // then); the API refuses an unacknowledged real run against a licence-bound base.
-        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
-      });
+      const job = await createTrainingJob(trainingRequest);
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
     } catch (err) {
@@ -2443,6 +2453,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onOpenQueue={() => setActiveView("Queue")}
                   onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   configValidity={configValidity}
+                  trainingRefusal={trainingRefusal}
+                  trainingFeedback={trainingFeedback}
                   trainingTargetsError={trainingTargetsError}
                   trainingPresetsError={trainingPresetsError}
                   configError={configError}

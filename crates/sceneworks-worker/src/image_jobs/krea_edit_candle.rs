@@ -17,8 +17,8 @@ use super::pid::pid_output_tier;
 use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::safetensors_tensor_bytes_with_prefixes;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream;
 use super::CandleBaseEvidence;
@@ -49,7 +49,7 @@ use serde_json::json;
 // candle build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs`
 // module, so it shares that module's imports (ImageRequest/Settings/WorkerResult/WorkerError/
 // `load_reference_image`/`fit_engine_image`/`resolve_weights_dir`/`resolve_adapters`/`resolve_seed`/
-// `resolve_advanced_or_manifest_u32`/`start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/
+// `resolved_option_or_manifest_u32`/`start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/
 // `gen_core`/`AdapterSpec`/… all in scope).
 //
 // Both Krea image variants edit: **Raw** on the full-CFG loop (epic 10871) and **Turbo** on the CFG-free
@@ -154,12 +154,12 @@ fn krea_edit_candle_steps(request: &ImageRequest) -> u32 {
     } else {
         KREA_EDIT_CANDLE_DEFAULT_STEPS
     };
-    resolve_advanced_or_manifest_u32(request, "steps", default, 1..=100)
+    resolved_option_or_manifest_u32(request, "steps", default, 1..=100)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the Raw default (3.5).
 fn krea_edit_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         KREA_EDIT_CANDLE_DEFAULT_GUIDANCE,
@@ -281,7 +281,7 @@ fn krea_edit_candle_raw_settings(
     guidance: f32,
     reference_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -339,11 +339,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // `turbo_schedule`; Raw honors the resolved guidance on the full-CFG loop (sc-11640).
     let distilled = krea_edit_candle_distilled(request);
     let guidance = if distilled {
-        sceneworks_core::image_sampling_controls::effective_guidance(
-            &request.advanced,
-            &JsonObject::new(),
-        )
-        .unwrap_or(0.0) as f32
+        request.advanced_f64("guidanceScale").unwrap_or(0.0) as f32
     } else {
         krea_edit_candle_guidance(request)
     };

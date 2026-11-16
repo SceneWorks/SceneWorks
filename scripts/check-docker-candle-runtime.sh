@@ -100,6 +100,10 @@ for identity in default override; do
     sleep 0.5
   done
   [[ "${ready}" == 1 ]] || { docker logs "${api}"; exit 1; }
+  docker exec "${api}" sh -ec '
+    curl -fsS --max-time 5 -H "Authorization: Bearer $SCENEWORKS_ACCESS_TOKEN" \
+      http://127.0.0.1:8010/ | grep -Fq "<div id=\"root\">"
+  ' || { echo "Embedded web root did not return the app" >&2; exit 1; }
   assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data
   # Unless combined-image overrides are supplied, the default case exercises the
   # worker image's actual USER and CMD. Explicit CPU selection needs no GPU.

@@ -180,9 +180,7 @@ fn explicit_tier(request: &ImageRequest) -> WorkerResult<Option<&'static str>> {
 /// [`explicit_tier`] over a request's `advanced` object.
 fn explicit_tier_in(advanced: &JsonObject) -> WorkerResult<Option<&'static str>> {
     use sceneworks_core::payload_util::QuantSelection;
-    if let Some(name) = advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
+    if let Some(name) = sceneworks_core::image_request::authored_quant_tier(advanced)
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
@@ -807,7 +805,9 @@ mod tests {
             "the expander is resident"
         );
         let api = crate::ApiClient::new(&settings);
-        let result = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+        let result =
+            crate::image_jobs::run_image_generate_job(&api, &settings, &job, &Default::default())
+                .await;
         assert!(result.is_err(), "no weights: the job cannot render");
         assert!(
             !global_refiner_is_resident().await,

@@ -498,6 +498,17 @@ describe("simpleRewriteReferenceIds", () => {
       ).toEqual(emitted);
     }
   });
+
+  it("preserves the single-source carrier and sends multiple edit references in order", () => {
+    const common = { model: "minimax_h3_image", mode: "edit_image", referenceAssetId: "a",
+      prompt: "a lighthouse", resolution: "2048x2048", count: 1 };
+    const single = buildSimpleImageRequest({ ...common, referenceAssetIds: ["a"] });
+    expect(single.sourceAssetId).toBe("a");
+    expect(single.referenceAssetIds ?? []).toEqual([]);
+    const multiple = buildSimpleImageRequest({ ...common, referenceAssetIds: ["a", "b"] });
+    expect(multiple.sourceAssetId).toBeNull();
+    expect(multiple.referenceAssetIds).toEqual(["a", "b"]);
+  });
 });
 
 // sc-24114 — the rewriter's aspect suggestion is never silently dropped in Simple.

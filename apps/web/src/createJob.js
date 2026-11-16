@@ -98,9 +98,11 @@ export function makeCreateJob({
       }
       // A batch may be stopped while its shared confirmation is open.
       if (!shouldContinue()) return { cancelled: true };
+      const body = definition.buildBody(args, project, requestedGpu);
+      if (!shouldContinue()) return { cancelled: true };
       const job = await submitJobRequest(definition.path, token, {
         method: "POST",
-        body: JSON.stringify(definition.buildBody(args, project, requestedGpu)),
+        body: JSON.stringify(body),
       });
       afterCreate?.(job, ...args);
       setJobs((items) => upsertJobNewest(items, job));

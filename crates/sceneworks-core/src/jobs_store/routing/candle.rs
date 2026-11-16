@@ -4,25 +4,21 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
-use crate::image_request::{
-    image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES,
-};
+use crate::image_request::{Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
-    CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
-    CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
+    CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
+    CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
+    CANDLE_VIDEO_VACE_MODELS,
 };
+#[cfg(test)]
+use crate::jobs_store::routing::has_nonempty_nested_array;
 use crate::jobs_store::routing::mlx::{
-    flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
-    minimax_h3_image_mlx_eligible, pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible,
-    supra2_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    instantid_mlx_eligible, minimax_h3_image_mlx_eligible, pulid_flux_mlx_eligible,
+    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
-    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
-    has_nonempty_nested_array, has_nonempty_or_malformed_array,
-    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonempty_string_array, has_nonnull_or_malformed_nested_carrier,
-    krea_edit_has_unsupported_carrier,
+    conditioned_reference_count, has_nonempty_array, has_nonempty_or_malformed_array,
+    has_nonempty_or_malformed_string, has_nonempty_string, has_nonempty_string_array,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -77,6 +73,7 @@ pub(crate) enum CandleImageLane {
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
+    QwenImage21Edit,
     SenseNovaEdit,
     ZImageEdit,
     ZImageIdentity,
@@ -84,11 +81,6 @@ pub(crate) enum CandleImageLane {
     IdeogramImg2Img,
     BooguEdit,
     MageEdit,
-    /// Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
-    /// images. A bespoke lane rather than a widening of the generic txt2img gate because that gate
-    /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
-    /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
-    QwenImage21Edit,
     /// MiniMax-H3-Image edit (SW-7101): ONE ordered list of 1..=16 reference images. Bespoke for the
     /// same reason as [`Self::QwenImage21Edit`]: the generic txt2img gate refuses `edit_image` and
     /// every conditioning carrier, and the id is itself a candle txt2img id.
@@ -119,7 +111,7 @@ pub(crate) enum CandleImageLane {
 struct CandleImageRoute {
     lane: CandleImageLane,
     models: ModelMatch,
-    shape: fn(&Map<String, Value>) -> bool,
+    shape: fn(&crate::jobs_store::routing::RouteContext<'_>) -> bool,
 }
 
 /// Every SenseNova-U1 variant, from the typed registry's `sensenova-u1` family.
@@ -133,25 +125,38 @@ enum ModelMatch {
 }
 
 impl CandleImageRoute {
-    fn matches(&self, model: &str, payload: &Map<String, Value>) -> bool {
+    fn matches(&self, model: &str, context: &crate::jobs_store::routing::RouteContext<'_>) -> bool {
         let model_matches = match self.models {
             ModelMatch::Any(models) => models.contains(&model),
             ModelMatch::Family(predicate) => predicate(model),
         };
-        model_matches && (self.shape)(payload)
+        model_matches && (self.shape)(context)
     }
+}
+
+fn simple_pose_control_shape(context: &crate::jobs_store::routing::RouteContext<'_>) -> bool {
+    context.payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && crate::jobs_store::routing::route_nested_array_nonempty(context.options, "poses")
+}
+
+fn strict_pose_control_shape(context: &crate::jobs_store::routing::RouteContext<'_>) -> bool {
+    context.payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+        && matches!(
+            &context.options.poses_all_objects,
+            crate::resolved_options::RouteField::Valid(1..=MAX_JOB_POSES)
+        )
 }
 
 const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     CandleImageRoute {
         lane: CandleImageLane::MossImageEdit,
         models: ModelMatch::Family(crate::moss_image::is_moss),
-        shape: moss_edit_candle_eligible,
+        shape: |context| moss_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
-        shape: instantid_candle_eligible,
+        shape: |context| instantid_candle_eligible(context.payload),
     },
     CandleImageRoute {
         // Generic SDXL OpenPose ControlNet. This must precede the edit and IP-Adapter lanes so a
@@ -159,12 +164,12 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         // the pose in another conditioned route.
         lane: CandleImageLane::SdxlControl,
         models: ModelMatch::Family(is_sdxl_control_model),
-        shape: sdxl_control_candle_candidate,
+        shape: |context| has_material_sdxl_control_intent_with_facts(context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::SdxlEdit,
         models: ModelMatch::Family(is_sdxl_family_candle_model),
-        shape: sdxl_edit_candle_eligible,
+        shape: |context| sdxl_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux2Edit,
@@ -173,12 +178,12 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "flux2_klein_9b_kv",
             "flux2_klein_9b_true_v2",
         ]),
-        shape: flux2_edit_candle_eligible,
+        shape: |context| flux2_edit_candle_eligible_with_facts(context.payload, context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux2Edit,
         models: ModelMatch::Any(&["flux2_dev"]),
-        shape: flux2_dev_edit_candle_eligible,
+        shape: |context| flux2_edit_candle_eligible_with_facts(context.payload, context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::QwenEdit,
@@ -188,37 +193,41 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "qwen_image_edit_2511",
             "qwen_image_edit_2511_lightning",
         ]),
-        shape: qwen_edit_candle_eligible,
+        shape: |context| qwen_edit_candle_eligible_with_facts(context.payload, context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::SenseNovaEdit,
         models: ModelMatch::Family(is_sensenova_model),
-        shape: sensenova_edit_candle_eligible,
+        shape: |context| {
+            sensenova_edit_candle_eligible_with_facts(context.payload, context.options)
+        },
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageEdit,
         models: ModelMatch::Any(&["z_image_turbo", "z_image_edit"]),
-        shape: zimage_edit_candle_eligible,
+        shape: |context| zimage_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageIdentity,
         models: ModelMatch::Any(&["z_image_turbo"]),
-        shape: zimage_identity_candle_eligible,
+        shape: |context| {
+            zimage_identity_candle_eligible_with_facts(context.payload, context.options)
+        },
     },
     CandleImageRoute {
         lane: CandleImageLane::IdeogramEdit,
         models: ModelMatch::Any(&["ideogram_4", "ideogram_4_turbo"]),
-        shape: ideogram_edit_candle_eligible,
+        shape: |context| ideogram_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::IdeogramImg2Img,
         models: ModelMatch::Any(&["ideogram_4", "ideogram_4_turbo"]),
-        shape: ideogram_img2img_candle_eligible,
+        shape: |context| ideogram_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguEdit,
         models: ModelMatch::Any(&["boogu_image_edit"]),
-        shape: boogu_edit_candle_eligible,
+        shape: |context| boogu_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::MageEdit,
@@ -227,7 +236,7 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             "mage_flow_edit",
             "mage_flow_edit_turbo",
         ]),
-        shape: mage_edit_candle_eligible,
+        shape: |context| mage_edit_candle_eligible(context.payload),
     },
     // Qwen-Image 2.1 reference / local editing (sc-24110). The Candle port registers the SAME
     // engine id as the MLX one and declares the SAME `Reference` + `MultiReference` conditioning,
@@ -237,13 +246,28 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     CandleImageRoute {
         lane: CandleImageLane::Flux3Reference,
         models: ModelMatch::Family(crate::image_request::flux3::is_model),
-        shape: flux3_reference_candle_eligible,
+        shape: |context| {
+            crate::image_request::flux3::parse(context.payload)
+                .is_ok_and(|request| !request.asset_ids.is_empty())
+                && crate::jobs_store::routing::mlx::flux3_payload_tier_with_facts(context.options)
+                    .is_ok_and(Flux3Tier::served_by_candle)
+                && crate::jobs_store::routing::mlx::flux3_surface_eligible_with_facts(
+                    context.payload,
+                    context.options,
+                )
+        },
     },
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
         // Turbo (sc-25907) is the same request contract under a second engine id.
         models: ModelMatch::Family(crate::jobs_store::routing::is_qwen_image_2_1_model),
-        shape: qwen_image_2_1_edit_candle_eligible,
+        shape: |context| {
+            crate::jobs_store::routing::mlx::qwen_image_2_1_mlx_eligible_with_facts(
+                context.payload,
+                context.options,
+            ) && crate::jobs_store::routing::qwen_image_2_1_reference_ids(context.payload)
+                .is_some_and(|ids| !ids.is_empty())
+        },
     },
     // MiniMax-H3-Image edit (SW-7101): the Candle port registers the SAME engine id and the SAME
     // `Reference` + `MultiReference` conditioning as MLX, so the shape is the MLX predicate plus a
@@ -251,97 +275,104 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     CandleImageRoute {
         lane: CandleImageLane::MinimaxH3ImageEdit,
         models: ModelMatch::Any(&["minimax_h3_image"]),
-        shape: minimax_h3_image_edit_candle_eligible,
+        shape: |context| minimax_h3_image_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguImg2Img,
         models: ModelMatch::Any(&["boogu_image", "boogu_image_turbo"]),
-        shape: boogu_img2img_candle_eligible,
+        shape: |context| boogu_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::KreaEdit,
         models: ModelMatch::Any(&["krea_2_raw", "krea_2_turbo"]),
-        shape: krea_edit_candle_eligible,
+        shape: |context| {
+            context.payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+                && conditioned_reference_count(context.payload, true, 2).is_some()
+                && !crate::jobs_store::routing::krea_edit_has_unsupported_carrier_with_facts(
+                    context.payload,
+                    context.options,
+                )
+        },
     },
     CandleImageRoute {
         lane: CandleImageLane::BerniniEdit,
         models: ModelMatch::Any(&["bernini_image"]),
-        shape: bernini_image_edit_candle_eligible,
+        shape: |context| bernini_image_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::SdxlIpAdapter,
         models: ModelMatch::Family(is_sdxl_family_candle_model),
-        shape: sdxl_ipadapter_candle_eligible,
+        shape: |context| sdxl_ipadapter_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::KolorsIpAdapter,
         models: ModelMatch::Any(&["kolors"]),
-        shape: kolors_ipadapter_candle_eligible,
+        shape: |context| kolors_ipadapter_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::FluxIpAdapter,
         models: ModelMatch::Any(&["flux_dev", "flux_schnell"]),
-        shape: flux_ipadapter_candle_eligible,
+        shape: |context| flux_ipadapter_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::QwenControl,
         models: ModelMatch::Any(&["qwen_image"]),
-        shape: qwen_control_candle_eligible,
+        shape: simple_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::KolorsControl,
         models: ModelMatch::Any(&["kolors"]),
-        shape: kolors_control_candle_eligible,
+        shape: simple_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::KolorsEdit,
         models: ModelMatch::Any(&["kolors"]),
-        shape: kolors_edit_candle_eligible,
+        shape: |context| kolors_edit_candle_eligible_with_facts(context.payload, context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageControl,
         models: ModelMatch::Any(&["z_image_turbo", "z_image"]),
-        shape: zimage_control_candle_eligible,
+        shape: simple_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::ZImageImg2Img,
         models: ModelMatch::Any(&["z_image", "z_image_turbo"]),
-        shape: zimage_img2img_candle_eligible,
+        shape: |context| zimage_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::Sd3Img2Img,
         models: ModelMatch::Family(is_sd3_family_candle_model),
-        shape: sd3_img2img_candle_eligible,
+        shape: |context| sd3_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::SanaImg2Img,
         models: ModelMatch::Any(&["sana_1600m", "sana_sprint_1600m"]),
-        shape: sana_img2img_candle_eligible,
+        shape: |context| sana_img2img_candle_eligible_with_facts(context.payload, context.options),
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux1Control,
         models: ModelMatch::Any(&["flux_dev"]),
-        shape: flux1_control_candle_eligible,
+        shape: simple_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux2Control,
         models: ModelMatch::Any(&["flux2_dev"]),
-        shape: flux2_dev_control_candle_eligible,
+        shape: strict_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::KreaControl,
         models: ModelMatch::Any(&["krea_2_turbo"]),
-        shape: krea_control_candle_eligible,
+        shape: simple_pose_control_shape,
     },
     CandleImageRoute {
         lane: CandleImageLane::KreaImg2Img,
         models: ModelMatch::Any(&["krea_2_turbo", "krea_2_raw"]),
-        shape: krea_img2img_candle_eligible,
+        shape: |context| krea_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::Pulid,
         models: ModelMatch::Any(&["pulid_flux_dev"]),
-        shape: pulid_flux_candle_eligible,
+        shape: |context| pulid_flux_candle_eligible(context.payload),
     },
 ];
 
@@ -377,6 +408,20 @@ pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
 /// Resolve the first matching Candle image lane. The order is part of the scheduler contract:
 /// specialized conditioned lanes precede the generic registry text-to-image lane.
 pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane> {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&job.payload);
+    image_job_candle_lane_with_context(
+        job,
+        &crate::jobs_store::routing::RouteContext {
+            payload: &job.payload,
+            options: &options,
+        },
+    )
+}
+
+pub(crate) fn image_job_candle_lane_with_context(
+    job: &JobSnapshot,
+    context: &crate::jobs_store::routing::RouteContext<'_>,
+) -> Option<CandleImageLane> {
     if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         return None;
     }
@@ -385,26 +430,34 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
     // sc-26241: a precision request the model cannot load is refused before ANY lane — a
     // specialized conditioned route matching on its other carriers must never pick it up and run
     // it at a precision the request did not name.
-    if candle_image_quant_tier_refusal(model, &job.payload) {
+    if candle_image_quant_tier_refusal_with_facts(model, context.options) {
         return None;
     }
 
-    if imported_image_request_provider_eligible(model, &job.payload, "candle") {
+    if crate::jobs_store::routing::catalog::imported_image_request_provider_eligible_with_facts(
+        model,
+        &job.payload,
+        "candle",
+        context.options,
+    ) {
         return Some(CandleImageLane::ImportedFamily);
     }
 
     // Owned-to-reject requests are deliberately not a served lane. The scheduler claims them via
     // `image_job_candle_pose_reject`, while the worker's reject guard runs before generic T2I.
-    if image_request_candle_pose_reject(model, &job.payload) {
+    if CANDLE_ROUTED_MODELS.contains(&model)
+        && !model_has_candle_pose_lane(model)
+        && has_material_sdxl_control_intent_with_facts(context.options)
+    {
         return None;
     }
 
     CANDLE_IMAGE_ROUTES
         .iter()
-        .find(|route| route.matches(model, &job.payload))
+        .find(|route| route.matches(model, context))
         .map(|route| route.lane)
         .or_else(|| {
-            image_request_candle_eligible(model, &job.payload)
+            image_request_candle_eligible_with_context(model, context)
                 .then_some(CandleImageLane::TextToImage)
         })
 }
@@ -412,6 +465,13 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
 /// Does this image job belong on the Candle (Windows/CUDA) image lane?
 pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     image_job_candle_lane(job).is_some()
+}
+
+pub(crate) fn image_job_is_candle_eligible_with_context(
+    job: &JobSnapshot,
+    context: &crate::jobs_store::routing::RouteContext<'_>,
+) -> bool {
+    image_job_candle_lane_with_context(job, context).is_some()
 }
 
 /// One check in the generic candle text-to-image gate, named so a refusal can be *reported* instead
@@ -447,14 +507,14 @@ pub(crate) enum CandleImageRefusal {
     Fp8rTier,
     /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
     /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
-    /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
+    /// enabled hires fix (adapters route since sc-25681). Delegates to `iris_mlx_eligible_with_facts` so the two lanes refuse
     /// exactly the same list.
     IrisSurface,
     /// Distilled FLUX 3 has the same text-to-image-only surface on both native backends.
     Flux3Surface,
     /// Supra2-IMG (sc-24214): anything outside the plain text-to-image surface the MLX arm admits —
     /// a non-`text_to_image` mode, controls, a user LoRA, a quant carrier (`mlxQuantize` /
-    /// `quantTier`) or an enabled hires fix. Delegates to [`supra2_mlx_eligible`] so the two lanes
+    /// `quantTier`) or an enabled hires fix. Delegates to `supra2_mlx_eligible_with_facts` so the two lanes
     /// refuse exactly the same list.
     Supra2Surface,
     /// MiniMax-H3-Image (SW-7100): anything outside the text-to-image surface the MLX arm admits
@@ -492,7 +552,7 @@ impl CandleImageRefusal {
     }
 }
 
-type CandleImageCheck = fn(&str, &Map<String, Value>) -> bool;
+type CandleImageCheck = fn(&str, &crate::jobs_store::routing::RouteContext<'_>) -> bool;
 
 /// **The** generic candle txt2img gate, as an ordered table: [`image_request_candle_eligible`] is
 /// "no entry refuses", and [`candle_image_first_refusal`] is "the first entry that does". Both the
@@ -504,94 +564,95 @@ type CandleImageCheck = fn(&str, &Map<String, Value>) -> bool;
 /// compile until it has wording for it. Do not re-order casually: earlier entries mask later ones
 /// in both the refusal *and* the message.
 const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
-    (CandleImageRefusal::SanaCarrier, candle_refuses_sana_carrier),
-    (
-        CandleImageRefusal::ReferenceOnlyMode,
-        candle_refuses_reference_only_mode,
-    ),
-    (CandleImageRefusal::EditMode, candle_refuses_edit_mode),
-    (
-        CandleImageRefusal::ConditioningCarrier,
-        candle_refuses_conditioning_carrier,
-    ),
-    (CandleImageRefusal::UserLora, candle_refuses_user_lora),
-    (
-        CandleImageRefusal::Flux1PackedTier,
-        candle_refuses_flux1_unsupported_packed_tier,
-    ),
+    (CandleImageRefusal::SanaCarrier, |model, context| {
+        matches!(model, "sana_1600m" | "sana_sprint_1600m")
+            && (has_nonempty_or_malformed_string(context.payload, "referenceAssetId")
+                || sana_has_unsupported_carrier_with_facts(context.payload, context.options))
+    }),
+    (CandleImageRefusal::ReferenceOnlyMode, |model, context| {
+        candle_refuses_reference_only_mode(model, context.payload)
+    }),
+    (CandleImageRefusal::EditMode, |model, context| {
+        candle_refuses_edit_mode(model, context.payload)
+    }),
+    (CandleImageRefusal::ConditioningCarrier, |model, context| {
+        candle_refuses_conditioning_carrier(model, context.payload)
+    }),
+    (CandleImageRefusal::UserLora, |model, context| {
+        candle_refuses_user_lora(model, context.payload)
+    }),
+    (CandleImageRefusal::Flux1PackedTier, |model, context| {
+        candle_refuses_flux1_unsupported_packed_tier_with_facts(model, context.options)
+    }),
     (
         CandleImageRefusal::QuantLoraCombination,
-        candle_refuses_quant_lora_combination,
+        |model, context| {
+            candle_refuses_quant_lora_combination_with_facts(
+                model,
+                context.payload,
+                context.options,
+            )
+        },
     ),
-    (CandleImageRefusal::Poses, candle_refuses_poses),
-    (CandleImageRefusal::Phases, candle_refuses_phases),
-    (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
-    (CandleImageRefusal::Fp8rTier, candle_refuses_fp8r_tier),
-    (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
-    (
-        CandleImageRefusal::Flux3Surface,
-        candle_refuses_flux3_surface,
-    ),
-    (
-        CandleImageRefusal::Supra2Surface,
-        candle_refuses_supra2_surface,
-    ),
+    (CandleImageRefusal::Poses, |_, context| {
+        crate::jobs_store::routing::route_nested_array_nonempty(context.options, "poses")
+    }),
+    (CandleImageRefusal::Phases, |_, context| {
+        crate::jobs_store::routing::route_nested_array_nonempty(context.options, "phases")
+    }),
+    (CandleImageRefusal::QuantTier, |model, context| {
+        candle_refuses_quant_tier_with_facts(model, context.options)
+    }),
+    (CandleImageRefusal::Fp8rTier, |model, context| {
+        candle_refuses_fp8r_tier_with_facts(model, context.options)
+    }),
+    (CandleImageRefusal::IrisSurface, |model, context| {
+        model == "iris_3b"
+            && !crate::jobs_store::routing::mlx::iris_mlx_eligible_with_facts(
+                context.payload,
+                context.options,
+            )
+    }),
+    (CandleImageRefusal::Flux3Surface, |model, context| {
+        FLUX3_TIERED_MODEL_IDS.contains(&model)
+            && !(crate::jobs_store::routing::mlx::flux3_payload_tier_with_facts(context.options)
+                .is_ok_and(Flux3Tier::served_by_candle)
+                && crate::jobs_store::routing::mlx::flux3_surface_eligible_with_facts(
+                    context.payload,
+                    context.options,
+                ))
+    }),
+    (CandleImageRefusal::Supra2Surface, |model, context| {
+        model == "supra2_img"
+            && !crate::jobs_store::routing::mlx::supra2_mlx_eligible_with_facts(
+                context.payload,
+                context.options,
+            )
+    }),
     (
         CandleImageRefusal::MinimaxH3ImageSurface,
-        candle_refuses_minimax_h3_image_surface,
+        |model, context| candle_refuses_minimax_h3_image_surface(model, context.payload),
     ),
 ];
 
-/// Iris-3B (sc-25680) serves ONE request shape on both lanes: text-to-image with no source,
-/// reference, mask, control, pose, quant carrier or hires fix (its adapters route, sc-25681). The generic checks above
-/// already refuse most of those; this one closes the rest (`controls`, `quantTier`, a non-
-/// `text_to_image` mode, the hires-fix second pass) by DELEGATING to the MLX predicate instead of
-/// restating it, so the Candle and MLX lanes can never disagree about what Iris accepts. Last in the
-/// table so a carrier the generic checks name is reported by them.
-fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "iris_3b" && !iris_mlx_eligible(payload)
+fn candle_refuses_fp8r_tier_with_facts(
+    model: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    !FLUX3_TIERED_MODEL_IDS.contains(&model)
+        && candle_image_quant_tier_refusal_with_facts(model, facts)
 }
 
-/// Distilled FLUX 3 on Candle: the shared text-to-image surface ([`flux3_surface_eligible`]) in any
-/// package the Candle provider serves (sc-26241) — bf16, the locally converted GGML q4/q8, and the
-/// publisher FP8R/NVFP4. Which WORKER may run a publisher package (its device floor) is the
-/// scheduler's `required_capability`, not this lane predicate. A malformed or conflicting
-/// precision request is refused here by name.
-fn flux3_reference_candle_eligible(payload: &Map<String, Value>) -> bool {
-    crate::image_request::flux3::parse(payload).is_ok_and(|request| !request.asset_ids.is_empty())
-        && flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
-        && flux3_surface_eligible(payload)
-}
-
-fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    FLUX3_TIERED_MODEL_IDS.contains(&model)
-        && !(flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
-            && flux3_surface_eligible(payload))
-}
-
-/// A named precision tier the model cannot load is refused, never run at another precision: the
-/// generic lane reads only `mlxQuantize`, so without this a `quantTier: "fp8r"` on a dense family
-/// would silently render dense. FLUX 3's own tiers are judged by [`candle_refuses_flux3_surface`].
-fn candle_refuses_fp8r_tier(model: &str, payload: &Map<String, Value>) -> bool {
-    !FLUX3_TIERED_MODEL_IDS.contains(&model) && candle_image_quant_tier_refusal(model, payload)
-}
-
-/// [`image_quant_tier_refusal`] over a payload's `advanced` block (absent = nothing to refuse).
-fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) -> bool {
-    match payload.get("advanced") {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(advanced)) => image_quant_tier_refusal(model, advanced).is_some(),
-        Some(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
+fn candle_image_quant_tier_refusal_with_facts(
+    model: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    match crate::jobs_store::routing::probe_image_precision_options_from_facts(facts) {
+        Ok(options) => {
+            crate::image_request::image_quant_tier_refusal_resolved(model, &options).is_some()
+        }
+        Err(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
     }
-}
-
-/// Supra2-IMG (sc-24214) serves ONE request shape on both lanes: plain 256x256 text-to-image with no
-/// source, reference, mask, control, pose, user LoRA, quant carrier or hires fix. Like the Iris check
-/// it DELEGATES to the MLX predicate instead of restating it, so the Candle and MLX lanes can never
-/// disagree about what Supra2 accepts; last in the table so a carrier the generic checks name is
-/// reported by them.
-fn candle_refuses_supra2_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "supra2_img" && !supra2_mlx_eligible(payload)
 }
 
 /// MiniMax-H3-Image (SW-7100): the candle lane serves exactly the MLX arm's text-to-image shape.
@@ -610,12 +671,6 @@ fn candle_refuses_minimax_h3_image_surface(model: &str, payload: &Map<String, Va
 /// t2i as a malformed conditioning shape and enforce-failed it `candle_unsupported`. Same defect
 /// class as sc-19712 F-1 on the MLX twin; sharing the helper is what stops the two SANA gates
 /// from drifting apart again.
-fn candle_refuses_sana_carrier(model: &str, payload: &Map<String, Value>) -> bool {
-    matches!(model, "sana_1600m" | "sana_sprint_1600m")
-        && (has_nonempty_or_malformed_string(payload, "referenceAssetId")
-            || sana_has_unsupported_carrier(payload))
-}
-
 /// The reference-bearing modes whose whole point is a conditioning image. Not every candle family
 /// reserves them — see [`candle_reserves_reference_only_modes`].
 pub(crate) fn candle_reference_only_mode(payload: &Map<String, Value>) -> bool {
@@ -697,19 +752,22 @@ fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
     !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
 }
 
-/// Some families admit quant and adapters independently without proving their composition.
-fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
-    candle_quant_lora_combination_is_unsupported(
-        candle_family_serves_quant(model),
-        candle_family_serves_lora(model),
-        candle_family_serves_quant_lora(model),
-        payload,
-    )
+fn candle_refuses_quant_lora_combination_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    candle_family_serves_quant(model)
+        && candle_family_serves_lora(model)
+        && !candle_family_serves_quant_lora(model)
+        && candle_requested_quant_bits_from_facts(facts).is_some()
+        && has_nonempty_array(payload, "loras")
 }
 
 /// Pure decision seam for the deliberate standalone-quant + standalone-adapter catalog shape.
 /// Keeping this independent of a currently promoted model lets the staged Chroma catalog remain
 /// fail-closed while the composition rule stays directly testable.
+#[cfg(test)]
 pub(crate) fn candle_quant_lora_combination_is_unsupported(
     serves_quant: bool,
     serves_lora: bool,
@@ -723,29 +781,11 @@ pub(crate) fn candle_quant_lora_combination_is_unsupported(
         && has_nonempty_array(payload, "loras")
 }
 
-/// Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
-fn candle_refuses_poses(_model: &str, payload: &Map<String, Value>) -> bool {
-    has_nonempty_nested_array(payload, "advanced", "poses")
-}
-
-/// A multi-phase schedule (`advanced.phases`, the web Multi-Phase editor) is refused by this base
-/// lane: the candle txt2img lane renders one schedule, so honoring only the first phase would
-/// silently drop the rest of the user's intent.
-fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
-    has_nonempty_nested_array(payload, "advanced", "phases")
-}
-
-/// A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
-/// The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
-/// an explicit quant request can't be honored — refuse it rather than silently running dense
-/// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
-/// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
-/// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
-/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Once
-/// Chroma's staged catalog promotion lands, it has exactly those two published packed directories,
-/// so a non-q4/q8 value remains refused instead of reaching the downstream directory resolver.
-fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
-    let Some(bits) = candle_requested_quant_bits(payload) else {
+fn candle_refuses_quant_tier_with_facts(
+    model: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    let Some(bits) = candle_requested_quant_bits_from_facts(facts) else {
         return false;
     };
     !candle_family_serves_quant(model)
@@ -753,43 +793,47 @@ fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool 
             && !matches!(bits, 4 | 8))
 }
 
-/// FLUX.1's direct Candle loader opens the hosted q4/q8 artifact directories. It has no honest
-/// q6 or bf16 route: accepting either and letting the general resolver reinterpret it would make
-/// the selected tier and the loaded weights disagree. An absent/null selection keeps the hosted q4
-/// default; every other shape fails closed.
-fn candle_refuses_flux1_unsupported_packed_tier(model: &str, payload: &Map<String, Value>) -> bool {
+fn candle_refuses_flux1_unsupported_packed_tier_with_facts(
+    model: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if !matches!(model, "flux_schnell" | "flux_dev") {
         return false;
     }
-    let Some(advanced) = payload.get("advanced") else {
-        return false;
-    };
-    let Some(advanced) = advanced.as_object() else {
-        return true;
-    };
-    match advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => false,
-        Some(value) => !matches!(
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok()),
-            Some(4 | 8)
-        ),
-    }
+    use crate::resolved_options::RouteField;
+    !matches!(
+        &facts.mlx_quantize,
+        RouteField::Absent | RouteField::Null | RouteField::Valid(4 | 8)
+    )
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
 /// the chain of early returns it replaced. `None` means the generic candle txt2img lane accepts it.
+#[cfg(test)]
 pub(crate) fn candle_image_first_refusal(
     model: &str,
     payload: &Map<String, Value>,
+) -> Option<CandleImageRefusal> {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    candle_image_first_refusal_with_context(
+        model,
+        &crate::jobs_store::routing::RouteContext {
+            payload,
+            options: &options,
+        },
+    )
+}
+
+fn candle_image_first_refusal_with_context(
+    model: &str,
+    context: &crate::jobs_store::routing::RouteContext<'_>,
 ) -> Option<CandleImageRefusal> {
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return Some(CandleImageRefusal::UnroutedFamily);
     }
     CANDLE_IMAGE_CHECKS
         .iter()
-        .find(|(_, refuses)| refuses(model, payload))
+        .find(|(_, refuses)| refuses(model, context))
         .map(|(refusal, _)| *refusal)
 }
 
@@ -800,12 +844,17 @@ pub(crate) fn candle_image_refusals(
     model: &str,
     payload: &Map<String, Value>,
 ) -> Vec<CandleImageRefusal> {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let context = crate::jobs_store::routing::RouteContext {
+        payload,
+        options: &options,
+    };
     if !CANDLE_ROUTED_MODELS.contains(&model) {
         return vec![CandleImageRefusal::UnroutedFamily];
     }
     CANDLE_IMAGE_CHECKS
         .iter()
-        .filter(|(_, refuses)| refuses(model, payload))
+        .filter(|(_, refuses)| refuses(model, &context))
         .map(|(refusal, _)| *refusal)
         .collect()
 }
@@ -813,8 +862,16 @@ pub(crate) fn candle_image_refusals(
 /// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
 /// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
 /// Eligible ⇔ no [`CANDLE_IMAGE_CHECKS`] entry refuses.
+#[cfg(test)]
 pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     candle_image_first_refusal(model, payload).is_none()
+}
+
+fn image_request_candle_eligible_with_context(
+    model: &str,
+    context: &crate::jobs_store::routing::RouteContext<'_>,
+) -> bool {
+    candle_image_first_refusal_with_context(model, context).is_none()
 }
 
 fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
@@ -831,6 +888,7 @@ fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// `advanced.mlxQuantize` is an optional advanced override, so a payload-level value `> 0` is a
 /// deliberate tier/quant request. Individual families may provide their own default tier or reject
 /// explicit dense encodings; this helper deliberately reports only an explicit positive request.
+#[cfg(test)]
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
     candle_requested_quant_bits(payload).is_some()
 }
@@ -842,28 +900,32 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// for sc-20530: the gap classifier has to name the REQUESTED tier in the refusal message, and
 /// re-deriving it there is how the wording drifts from the gate that produced the refusal.
 pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Option<i64> {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|bits| *bits > 0)
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    candle_requested_quant_bits_from_facts(&facts)
 }
 
-fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("quantization"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| {
+fn candle_requested_quant_bits_from_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<i64> {
+    match &facts.mlx_quantize {
+        crate::resolved_options::RouteField::Valid(bits) if *bits > 0 => Some(*bits),
+        _ => None,
+    }
+}
+
+fn candle_request_wants_torch_quantization_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    match &facts.quantization {
+        crate::resolved_options::RouteField::Valid(value) => {
             let value = value.trim();
             !value.is_empty() && !value.eq_ignore_ascii_case("auto")
-        })
+        }
+        crate::resolved_options::RouteField::Invalid => true,
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            false
+        }
+    }
 }
 
 /// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
@@ -883,6 +945,13 @@ pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     video_request_is_candle_eligible(&job.job_type, &job.payload)
 }
 
+pub(crate) fn video_job_is_candle_eligible_with_context(
+    job: &JobSnapshot,
+    context: &super::RouteContext<'_>,
+) -> bool {
+    video_request_is_candle_eligible_with_context(&job.job_type, context)
+}
+
 /// The `(job_type, payload)` form of [`video_job_is_candle_eligible`] — the same predicate,
 /// reachable before a [`JobSnapshot`] exists (sc-19504). See
 /// [`super::mlx::video_request_is_mlx_eligible`] for why the seam is shaped this way.
@@ -890,10 +959,25 @@ pub(crate) fn video_request_is_candle_eligible(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> bool {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_is_candle_eligible_with_context(
+        job_type,
+        &super::RouteContext {
+            payload,
+            options: &options,
+        },
+    )
+}
+
+fn video_request_is_candle_eligible_with_context(
+    job_type: &JobType,
+    context: &super::RouteContext<'_>,
+) -> bool {
+    let payload = context.payload;
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    if candle_request_wants_torch_quantization(payload) {
+    if candle_request_wants_torch_quantization_with_facts(context.options) {
         // `advanced.quantization` selects a Torch GGUF overlay. Native Candle tiers use
         // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
         return false;
@@ -916,8 +1000,8 @@ pub(crate) fn video_request_is_candle_eligible(
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
         JobType::VideoGenerate => {
-            video_request_candle_eligible(model, payload)
-                || scail2_animate_candle_eligible(model, payload)
+            video_request_candle_eligible_with_facts(model, payload, context.options)
+                || scail2_animate_candle_eligible_with_facts(model, payload, context.options)
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
@@ -926,14 +1010,19 @@ pub(crate) fn video_request_is_candle_eligible(
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, payload, job_type)
-                || scail2_replace_candle_eligible(model, payload)
-                || ltx_replace_candle_eligible(model, payload)
+            video_request_candle_vace_eligible_with_facts(model, payload, job_type, context.options)
+                || scail2_replace_candle_eligible_with_facts(model, payload, context.options)
+                || ltx_replace_candle_eligible_with_facts(model, payload, context.options)
         }
         // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
         JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_eligible(model, payload)
-                || video_request_candle_vace_eligible(model, payload, job_type)
+            video_request_candle_eligible_with_facts(model, payload, context.options)
+                || video_request_candle_vace_eligible_with_facts(
+                    model,
+                    payload,
+                    job_type,
+                    context.options,
+                )
         }
         _ => false,
     }
@@ -1032,10 +1121,19 @@ pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn video_request_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return false;
     }
-    if candle_request_wants_torch_quantization(payload) {
+    if candle_request_wants_torch_quantization_with_facts(facts) {
         return false;
     }
     if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") {
@@ -1202,8 +1300,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     // lane — production q8 means the hosted packed `q8/` split bundle (INT8-ConvRot stays a
     // measurement-only selector on the inference side) — with no residual exclusion or parity
     // obligation. Other video providers remain dense and fail closed for positive tier requests.
-    if (candle_request_wants_quant(payload) || matches!(model, "ltx_2_3" | "ltx_2_5"))
-        && !candle_video_tier_select_eligible(model, payload)
+    if (candle_requested_quant_bits_from_facts(facts).is_some()
+        || matches!(model, "ltx_2_3" | "ltx_2_5"))
+        && !candle_video_tier_select_eligible(model, payload, facts)
     {
         return false;
     }
@@ -1218,28 +1317,26 @@ enum CandleLtxTier {
 }
 
 /// Parse only the exact packed tiers published by the shared LTX bundle.
-fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    let Some(value) = value else {
-        return Some(CandleLtxTier::Q4);
-    };
-    match value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
-    {
-        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
-        4 => Some(CandleLtxTier::Q4),
-        8 => Some(CandleLtxTier::Q8),
-        _ => None,
+fn candle_ltx_requested_tier(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<CandleLtxTier> {
+    use crate::resolved_options::RouteField;
+    match &facts.mlx_quantize {
+        RouteField::Absent | RouteField::Null => Some(CandleLtxTier::Q4),
+        RouteField::Valid(..=0) => Some(CandleLtxTier::Bf16),
+        RouteField::Valid(4) => Some(CandleLtxTier::Q4),
+        RouteField::Valid(8) => Some(CandleLtxTier::Q8),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 
-fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
+fn candle_ltx_product_tier_eligible(
+    model: &str,
+    mode: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     matches!(
-        (model, candle_ltx_requested_tier(payload)),
+        (model, candle_ltx_requested_tier(facts)),
         ("ltx_2_3", Some(CandleLtxTier::Q4 | CandleLtxTier::Q8))
             | (
                 "ltx_2_5",
@@ -1256,7 +1353,11 @@ fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<Strin
     )
 }
 
-fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+fn candle_video_tier_select_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if matches!(
         model,
         "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3" | "minimax_h3_ref"
@@ -1266,13 +1367,23 @@ fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) 
     let Some(mode) = payload.get("mode").and_then(Value::as_str) else {
         return false;
     };
-    candle_ltx_product_tier_eligible(model, mode, payload)
+    candle_ltx_product_tier_eligible(model, mode, facts)
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
 /// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
 /// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
+#[cfg(test)]
 pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    ltx_replace_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn ltx_replace_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     // SC-18902 withdrew the Eros Candle route after the exact-head CUDA render proved that its
     // undistilled checkpoint is not compatible with Candle's single-pass distilled recipe. Keep
     // this newer advanced-mode route aligned with the same product decision as the base lane.
@@ -1287,7 +1398,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     {
         return false;
     }
-    candle_ltx_product_tier_eligible(model, "replace_person", payload)
+    candle_ltx_product_tier_eligible(model, "replace_person", facts)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
@@ -1296,10 +1407,21 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
 /// dedicated VACE-Fun provider is admitted here only for PersonReplace and accepts user adapters;
 /// generic VACE still rejects them. Factored out so the routing tests can probe it with synthetic
 /// payloads (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn video_request_candle_vace_eligible(
     model: &str,
     payload: &Map<String, Value>,
     job_type: &JobType,
+) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_candle_vace_eligible_with_facts(model, payload, job_type, &facts)
+}
+
+fn video_request_candle_vace_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    job_type: &JobType,
+    facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     if model == "wan_2_2_vace_fun_14b" {
         if !matches!(job_type, JobType::PersonReplace) {
@@ -1338,7 +1460,7 @@ pub(crate) fn video_request_candle_vace_eligible(
     if model != "wan_2_2_vace_fun_14b" && has_nonempty_array(payload, "loras") {
         return false;
     }
-    if candle_request_wants_quant(payload) {
+    if candle_requested_quant_bits_from_facts(facts).is_some() {
         return false;
     }
     true
@@ -1348,32 +1470,34 @@ pub(crate) fn video_request_candle_vace_eligible(
 /// precision. Absence retains the established dense bf16 Candle baseline; q4/q8 are exact explicit
 /// package selections. This is deliberately stricter than the historical MLX range mapping: q6
 /// must not silently select q4/q8.
-fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    match value {
-        None | Some(Value::Null) => Some("bf16"),
-        Some(value) => match value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-        {
-            Some(..=0) => Some("bf16"),
-            Some(4) => Some("q4"),
-            Some(8) => Some("q8"),
-            _ => None,
-        },
+fn scail2_candle_effective_tier(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<&'static str> {
+    use crate::resolved_options::RouteField;
+    match &facts.mlx_quantize {
+        RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => Some("bf16"),
+        RouteField::Valid(4) => Some("q4"),
+        RouteField::Valid(8) => Some("q8"),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 
 /// The request selects one exact tier and never asks a packed provider to merge an adapter.
+#[cfg(test)]
 pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_candle_source_tier_eligible_with_facts(payload, &facts)
+}
+
+fn scail2_candle_source_tier_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     let has_adapters = payload
         .get("loras")
         .and_then(Value::as_array)
         .is_some_and(|loras| !loras.is_empty());
-    let Some(tier) = scail2_candle_effective_tier(payload) else {
+    let Some(tier) = scail2_candle_effective_tier(facts) else {
         return false;
     };
     !has_adapters || tier == "bf16"
@@ -1387,12 +1511,12 @@ pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -
 fn scail2_candle_product_tier_eligible(
     model: &str,
     mode: &str,
-    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     model == "scail2_14b"
         && matches!(mode, "animate_character" | "replace_person")
         && matches!(
-            scail2_candle_effective_tier(payload),
+            scail2_candle_effective_tier(facts),
             Some("q4" | "q8" | "bf16")
         )
 }
@@ -1406,7 +1530,17 @@ fn scail2_candle_product_tier_eligible(
 /// preserved and resolved to bf16 by the worker. Mirrors the MLX
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_animate_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn scail2_animate_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if model != "scail2_14b" {
         return false;
     }
@@ -1422,8 +1556,8 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
     if !has_nonempty_string(payload, "sourceClipAssetId") {
         return false;
     }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "animate_character", payload)
+    scail2_candle_source_tier_eligible_with_facts(payload, facts)
+        && scail2_candle_product_tier_eligible(model, "animate_character", facts)
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
@@ -1432,7 +1566,17 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
 /// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch) on dense bf16 only; the exact
 /// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
+#[cfg(test)]
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_replace_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn scail2_replace_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if model != "scail2_14b" {
         return false;
     }
@@ -1442,8 +1586,8 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     {
         return false;
     }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "replace_person", payload)
+    scail2_candle_source_tier_eligible_with_facts(payload, facts)
+        && scail2_candle_product_tier_eligible(model, "replace_person", facts)
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the
@@ -1530,34 +1674,33 @@ pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
 }
 
+#[cfg(test)]
 fn has_material_sdxl_control_intent(payload: &Map<String, Value>) -> bool {
-    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
-        return false;
-    };
-    let poses_are_material = match advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) if poses.is_empty() => false,
-        Some(_) => true,
-    };
-    let named_control_is_material = match advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    has_material_sdxl_control_intent_with_facts(&facts)
+}
+
+fn has_material_sdxl_control_intent_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    use crate::resolved_options::RouteField;
+    let poses_are_material = matches!(&facts.poses, RouteField::Valid(1..) | RouteField::Invalid);
+    let named_control_is_material = match &facts.control_mode {
+        RouteField::Valid(mode) => !mode.trim().is_empty(),
+        RouteField::Invalid => true,
+        RouteField::Absent | RouteField::Null => false,
     };
     poses_are_material
         || named_control_is_material
-        || advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-        || advanced
-            .get("controlWeights")
-            .is_some_and(|value| !value.is_null())
+        || facts.control_image.is_present_nonnull()
+        || facts.control_weights.is_present_nonnull()
 }
 
 /// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
 /// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
 /// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
 /// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
+#[cfg(test)]
 pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
     has_material_sdxl_control_intent(payload)
 }
@@ -1578,7 +1721,16 @@ pub(crate) fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// FLUX.2 reference-route candle conditions. Edit/reference, character, and style requests all
 /// use native token-concat conditioning and must carry a concrete source/reference id.
 /// Mirrors the worker's `flux2_edit_candle_available` gate minus local weight resolution.
+#[cfg(test)]
 pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    flux2_edit_candle_eligible_with_facts(payload, &facts)
+}
+
+fn flux2_edit_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     let mode = payload.get("mode").and_then(Value::as_str);
     if !matches!(
         mode,
@@ -1594,23 +1746,14 @@ pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         4,
     )
     .is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, true, false, false)
-        && !conditioned_true_cfg_is_malformed(payload)
+        && !conditioned_edit_has_unsupported_carrier_with_facts(payload, facts, true, false, false)
+        && !conditioned_true_cfg_is_malformed_with_facts(facts)
 }
 
-fn flux2_dev_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    flux2_edit_candle_eligible(payload)
-}
-
-/// Qwen-Image-Edit candle-routing conditions (sc-5487, sc-18476). The candle `QwenEdit` provider
-/// serves instruction edit plus ordered singular/plural reference and character/angle workflows on
-/// the Qwen-Image-Edit family. Character Studio pose sets are supported only with exactly one identity
-/// reference: each pose skeleton is appended as the second ordered edit reference. Masks, controls,
-/// phases, malformed pose sets/CFG, and conflicting reference carriers are rejected rather than
-/// dropped. Mirrors the worker's
-/// `qwen_edit_candle_available` gate (minus local weight resolution); macOS keeps the corresponding
-/// MLX `qwen_image_edit` path, including its pre-existing best-effort pose grouping.
-pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+fn qwen_edit_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     let mode = payload.get("mode").and_then(Value::as_str);
     if !matches!(mode, Some("edit_image" | "character_image")) {
         return false;
@@ -1619,54 +1762,58 @@ pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     else {
         return false;
     };
-    let Some(pose_count) = strict_candle_pose_count(payload) else {
+    let Some(pose_count) = strict_candle_pose_count_with_facts(facts) else {
         return false;
     };
     (pose_count == 0 || (mode == Some("character_image") && reference_count == 1))
-        && !conditioned_edit_has_unsupported_carrier(payload, true, false, true)
-        && !conditioned_true_cfg_is_malformed(payload)
+        && !conditioned_edit_has_unsupported_carrier_with_facts(payload, facts, true, false, true)
+        && !conditioned_true_cfg_is_malformed_with_facts(facts)
 }
 
 /// Strict Character Studio pose carrier shared by the newly conditioned Candle routes.
 /// Missing/null/empty means no pose set; a supplied set must contain only objects and stay within the
 /// API-wide pose bound. Workers parse those same objects with the production whole-body renderer.
+#[cfg(test)]
 fn strict_candle_pose_count(payload: &Map<String, Value>) -> Option<usize> {
-    match payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-    {
-        None | Some(Value::Null) => Some(0),
-        Some(Value::Array(poses))
-            if poses.len() <= MAX_JOB_POSES && poses.iter().all(Value::is_object) =>
-        {
-            Some(poses.len())
-        }
-        Some(_) => None,
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    strict_candle_pose_count_with_facts(&facts)
+}
+
+fn strict_candle_pose_count_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<usize> {
+    use crate::resolved_options::RouteField;
+    match &facts.poses_all_objects {
+        RouteField::Absent | RouteField::Null => Some(0),
+        RouteField::Valid(count) if *count <= MAX_JOB_POSES => Some(*count),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 
-/// SenseNova-U1's registered Candle generator accepts structural Reference/MultiReference
-/// conditioning plus image true-CFG. Unsupported blend-strength, control, mask, adapter, pose, and
-/// phase carriers are rejected here so they can never reach the generic registered stream as T2I.
-pub(crate) fn sensenova_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+fn sensenova_edit_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     let mode = payload.get("mode").and_then(Value::as_str);
     if !matches!(mode, Some("edit_image" | "character_image")) {
         return false;
     }
     conditioned_reference_count(payload, mode == Some("edit_image"), 5).is_some()
-        && !conditioned_edit_has_unsupported_carrier(payload, false, true, false)
-        && !conditioned_true_cfg_is_malformed(payload)
+        && !conditioned_edit_has_unsupported_carrier_with_facts(payload, facts, false, true, false)
+        && !conditioned_true_cfg_is_malformed_with_facts(facts)
 }
 
-fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
+fn conditioned_true_cfg_is_malformed_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     ["trueCfgScale", "imageGuidanceScale"]
         .iter()
-        .any(|key| has_malformed_optional_nested_number(payload, "advanced", key))
+        .any(|key| crate::jobs_store::routing::route_number_malformed(facts, key))
 }
 
-fn conditioned_edit_has_unsupported_carrier(
+fn conditioned_edit_has_unsupported_carrier_with_facts(
     payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
     allow_loras: bool,
     reject_strength: bool,
     allow_poses: bool,
@@ -1678,8 +1825,8 @@ fn conditioned_edit_has_unsupported_carrier(
         || ["maskAssetId"]
             .iter()
             .any(|key| has_nonempty_or_malformed_string(payload, key))
-        || (!allow_poses && has_nonempty_or_malformed_nested_array(payload, "advanced", "poses"))
-        || has_nonempty_or_malformed_nested_array(payload, "advanced", "phases")
+        || (!allow_poses && crate::jobs_store::routing::route_nested_array_material(facts, "poses"))
+        || crate::jobs_store::routing::route_nested_array_material(facts, "phases")
         || [
             "controlMode",
             "controlImage",
@@ -1689,11 +1836,11 @@ fn conditioned_edit_has_unsupported_carrier(
             "quantTier",
         ]
         .iter()
-        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        .any(|key| crate::jobs_store::routing::route_carrier_material(facts, key))
         || (reject_strength
             && ["strength", "ipAdapterScale", "referenceStrength"]
                 .iter()
-                .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key)))
+                .any(|key| crate::jobs_store::routing::route_carrier_material(facts, key)))
         || (reject_strength
             && ["strength", "referenceStrength"]
                 .iter()
@@ -1713,31 +1860,12 @@ pub(crate) fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
     has_nonempty_string(payload, "sourceAssetId")
 }
 
-/// Krea 2 Kontext-style dual-conditioned image-edit candle-routing conditions (epic 10871). The bespoke
-/// candle Krea edit lane (`generate_candle_krea_edit_stream`) serves `edit_image` mode on `krea_2_raw` —
-/// the conditioning image rides as in-context VAE tokens AND grounds the Qwen3-VL vision tower, requiring
-/// the `krea2_identity_edit` LoRA (checked worker-side, R5). The image can arrive as the two-reference
-/// scene+person set (`referenceAssetIds`, scene = image 1, person = image 2, `sourceAssetId` null) or a
-/// plain `sourceAssetId` — the same fields the worker's `krea_edit_candle_reference_ids` resolves (no
-/// singular `referenceAssetId`, unlike the MLX lane). Gating on `sourceAssetId` alone stranded the two-ref
-/// form (the candle worker owns the lane with no fallback), the off-Mac twin of the MLX
-/// `krea_mlx_eligible` bug. Gated to `krea_2_raw` by the caller. Mirrors the worker's
-/// `krea_edit_candle_available` gate (minus the local weight-resolve check) so the router and worker
-/// agree. Candle-only — macOS keeps the MLX `krea_2_edit` registry generator's edit path (`krea_edit.rs`).
-pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    conditioned_reference_count(payload, true, 2).is_some()
-        && !krea_edit_has_unsupported_carrier(payload)
-}
-
 /// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
 /// epic 8588). The candle img2img lane serves a `krea_2_turbo` / `krea_2_raw` job in a **non-edit** mode
 /// carrying a `referenceAssetId` — the "Start from an image" tile: the reference is VAE-encoded and blended
 /// into the init latent at `advanced.strength`, then the denoise runs from `sigmas[start]` (CFG-free
 /// `render_img2img` for Turbo, two-forward CFG `render_base_img2img` for Raw). Distinct from the Krea
-/// **edit** lane (`edit_image` mode + the Kontext dual-conditioning, `krea_edit_candle_eligible`) and the
+/// **edit** lane (`edit_image` mode + the Kontext dual-conditioning) and the
 /// pose-control lane (`advanced.poses`, branched first). Gated to each id by the caller (Turbo + Raw have
 /// separate branches so the precedence comments stay per-id). Mirrors the worker's img2img resolve in
 /// `generate_candle_stream` (the `model_supports_img2img` + `resolve_img2img_init_generic` path).
@@ -1788,19 +1916,19 @@ pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool 
     has_nonempty_string(payload, "referenceAssetId")
 }
 
-/// SANA base/Sprint non-edit img2img: exactly one singular reference, with no edit/control/adapter
-/// carrier that the generic worker path would otherwise drop. Candle has no Q4/Q8 or LoRA surface for
-/// these dense snapshots, so those request shapes remain unclaimed.
-pub(crate) fn sana_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+fn sana_img2img_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
         && has_nonempty_string(payload, "referenceAssetId")
-        && !sana_has_unsupported_carrier(payload)
+        && !sana_has_unsupported_carrier_with_facts(payload, facts)
 }
 
-/// SANA consumes only one singular reference. Optional empty/null carriers mean "absent"; any
-/// non-empty unsupported or malformed carrier must not fall through to the generic txt2img lane,
-/// whose worker request type would otherwise ignore it.
-fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
+fn sana_has_unsupported_carrier_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     ["referenceAssetIds", "controls", "controlnets", "loras"]
         .iter()
         .any(|key| has_nonempty_or_malformed_array(payload, key))
@@ -1809,7 +1937,7 @@ fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
             .any(|key| has_nonempty_or_malformed_string(payload, key))
         || ["poses", "phases"]
             .iter()
-            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+            .any(|key| crate::jobs_store::routing::route_nested_array_material(facts, key))
         || [
             "controlMode",
             "controlImage",
@@ -1819,25 +1947,21 @@ fn sana_has_unsupported_carrier(payload: &Map<String, Value>) -> bool {
             "quantTier",
         ]
         .iter()
-        .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
-        || sana_has_unsupported_quant_carrier(payload)
+        .any(|key| crate::jobs_store::routing::route_carrier_material(facts, key))
+        || sana_has_unsupported_quant_carrier_with_facts(facts)
 }
 
-fn sana_has_unsupported_quant_carrier(payload: &Map<String, Value>) -> bool {
-    let Some(value) = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-    else {
-        return false;
-    };
-    if value.is_null() {
+fn sana_has_unsupported_quant_carrier_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    use crate::resolved_options::RouteField;
+    if !facts.advanced_was_authored("mlxQuantize") {
         return false;
     }
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
-        .is_none_or(|bits| bits > 0)
+    match &facts.mlx_quantize {
+        RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => false,
+        RouteField::Valid(_) | RouteField::Invalid => true,
+    }
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
@@ -1903,30 +2027,6 @@ pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         .get("sourceAssetId")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Qwen-Image 2.1 reference / local editing (sc-24110) on the Candle lane: a conditioned request
-/// carrying 1..=10 ordered condition images.
-///
-/// Deliberately DELEGATES to [`qwen_image_2_1_mlx_eligible`] instead of restating it. The Candle
-/// port registers the same engine id, the same `Reference` + `ReferenceRgba` + `MultiReference`
-/// conditioning, the same 10-image cap and the same refusal of pose/control carriers — there is
-/// exactly ONE request contract for this model, so a second copy of the predicate could only ever
-/// drift from it. The only thing this wrapper adds is the CONDITIONED narrowing: the plain
-/// text-to-image arm of that predicate (an empty ordered list) belongs to the generic candle
-/// txt2img gate, which already claims 2.1 t2i off-Mac and applies `CANDLE_IMAGE_CHECKS`'s LoRA and
-/// quant-tier refusals to it.
-///
-/// The narrowing is on the ordered REFERENCE LIST, never on `mode` — exactly like the MLX predicate
-/// and the worker's `is_qwen_image_2_1_edit`. Upstream has no mode axis: a non-empty list IS the
-/// edit call. A mode-keyed narrowing (what this used to be) left a `text_to_image` request carrying
-/// a `referenceAssetId` — the manifest's `image_to_image` operation — unclaimable off-Mac while the
-/// Mac claimed it, which the backend capability matrix at the terminal pin surfaced as three
-/// MLX-only cells (`image_to_image`, `reference`, `referenceRgba`) with no exception behind them.
-pub(crate) fn qwen_image_2_1_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    qwen_image_2_1_mlx_eligible(payload)
-        && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
-            .is_some_and(|ids| !ids.is_empty())
 }
 
 /// MiniMax-H3-Image edit (SW-7101) on candle: the MLX arm's shape with a NON-EMPTY ordered
@@ -2025,6 +2125,7 @@ pub(crate) fn flux_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bo
 /// `QwenImageControlNetPipeline`). Mirrors the worker's `qwen_control_available` gate (minus the local
 /// weight-resolve check) so the router and worker agree. Candle-only — the macOS path is the registry
 /// `qwen_image_control` generator, not a separate candle-eligible gate.
+#[cfg(test)]
 pub(crate) fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2038,6 +2139,7 @@ pub(crate) fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool
 /// `edit_image`. Same shape as `qwen_control_candle_eligible` — the model gate (`kolors`) is applied at
 /// the call site. Mirrors the worker's `kolors_control_available` gate (minus the local weight-resolve
 /// check) so the router and worker agree. Candle-only — the macOS path is the MLX Kolors ControlNet.
+#[cfg(test)]
 pub(crate) fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2045,11 +2147,10 @@ pub(crate) fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bo
     has_nonempty_nested_array(payload, "advanced", "poses")
 }
 
-/// Kolors source-image img2img/edit through the registered Candle generator. The existing pure
-/// `referenceAssetId` IP-Adapter route and pose ControlNet route are intentionally separate and
-/// precede this route. Only a singular `sourceAssetId` is accepted here; plural/reference/mask/
-/// control carriers fail closed rather than being discarded by the generic stream.
-pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+fn kolors_edit_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     payload.get("mode").and_then(Value::as_str) == Some("edit_image")
         && has_nonempty_string(payload, "sourceAssetId")
         && !["referenceAssetIds", "controls", "controlnets", "loras"]
@@ -2060,7 +2161,7 @@ pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
             .any(|key| has_nonempty_or_malformed_string(payload, key))
         && !["poses", "phases"]
             .iter()
-            .any(|key| has_nonempty_or_malformed_nested_array(payload, "advanced", key))
+            .any(|key| crate::jobs_store::routing::route_nested_array_material(facts, key))
         && [
             "controlMode",
             "controlImage",
@@ -2070,8 +2171,8 @@ pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
             "quantTier",
         ]
         .iter()
-        .all(|key| !has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
-        && !has_malformed_optional_nested_number(payload, "advanced", "strength")
+        .all(|key| !crate::jobs_store::routing::route_carrier_material(facts, key))
+        && !crate::jobs_store::routing::route_number_malformed(facts, "strength")
 }
 
 /// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic
@@ -2081,6 +2182,7 @@ pub(crate) fn kolors_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
 /// qwen/kolors gates — the model gate (`z_image_turbo` / `z_image`) is applied at the call site (both call
 /// this). Mirrors the worker's `zimage_control_available`. Candle-only — the macOS path is the MLX
 /// `z_image_turbo_control` / `z_image_control` registry generators.
+#[cfg(test)]
 pub(crate) fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2099,7 +2201,16 @@ pub(crate) fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bo
 /// With-Character job without a positive `referenceStrength` stays plain txt2img on both backends. Mirrors
 /// the worker's `zimage_identity_candle_available` (minus the local weight-resolve check). Candle-only —
 /// macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`resolve_zimage_identity_init`).
+#[cfg(test)]
 pub(crate) fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    zimage_identity_candle_eligible_with_facts(payload, &route)
+}
+
+fn zimage_identity_candle_eligible_with_facts(
+    payload: &Map<String, Value>,
+    route: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
         return false;
     }
@@ -2109,37 +2220,30 @@ pub(crate) fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> b
     }
     // referenceStrength > 0 engages the identity init (parity with `zimage_identity_strength`); without a
     // positive strength the With-Character job stays plain txt2img.
-    let reference_strength = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("referenceStrength"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.0);
+    let reference_strength = match &route.reference_strength {
+        crate::resolved_options::RouteField::Valid(value) => *value,
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            0.0
+        }
+        crate::resolved_options::RouteField::Invalid => return false,
+    };
     if reference_strength <= 0.0 {
         return false;
     }
     // Angle / pose sets are `character_image` too but route to their own lanes — exclude both so this
     // plain With-Character gate never steals them (the worker sits this lane BEFORE the strict-control
     // lane). Mirrors the worker's `resolve_character_image_likeness_source` exclusions.
-    let angle_set = match payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("angleSet"))
-    {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(Value::Array(value)) => !value.is_empty(),
-        _ => false,
+    let angle_set = match &route.angle_set {
+        crate::resolved_options::RouteField::Valid(value) => *value,
+        crate::resolved_options::RouteField::Absent | crate::resolved_options::RouteField::Null => {
+            false
+        }
+        crate::resolved_options::RouteField::Invalid => return false,
     };
     if angle_set {
         return false;
     }
-    !has_nonempty_nested_array(payload, "advanced", "poses")
+    !crate::jobs_store::routing::route_nested_array_nonempty(route, "poses")
 }
 
 /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 candle-routing conditions (sc-8412, epic 8236). The
@@ -2149,6 +2253,7 @@ pub(crate) fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> b
 /// control gates — the model gate (`flux_dev`) is applied at the call site. Mirrors the worker's
 /// `flux1_control_candle_available`. Candle-only — the macOS path is the MLX `flux1_dev_control` registry
 /// generator (sc-8244).
+#[cfg(test)]
 pub(crate) fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2162,6 +2267,7 @@ pub(crate) fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> boo
 /// on the Q4 dev DiT), NOT an `edit_image`. Same shape as the qwen/kolors/zimage control gates — the model
 /// gate (`flux2_dev`) is applied at the call site. Mirrors the worker's `flux2_control_candle_available`.
 /// Candle-only — the macOS path is the MLX `flux2_dev_control` registry generator (sc-6055).
+#[cfg(test)]
 pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2175,6 +2281,7 @@ pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) ->
 /// Same shape as the qwen/kolors/zimage/flux control gates — the model gate (`krea_2_turbo`) is applied at
 /// the call site. Mirrors the worker's `krea_control_candle_available`. Candle-only (there is no MLX Krea
 /// control twin yet — 8459 S5 / sc-8465).
+#[cfg(test)]
 pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
@@ -2221,6 +2328,7 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
 /// and nothing silently mis-serves them. **Mac is unaffected:** `sdxl + poses` is MLX-served there
 /// (`model_mac_support("sdxl").features.pose`), so the MLX worker claims it and other descriptors
 /// decline. Pairs with the worker's `candle_unsupported_pose_reject` dispatch guard.
+#[cfg(test)]
 pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String, Value>) -> bool {
     if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
         return false;
@@ -2229,14 +2337,32 @@ pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String
 }
 
 /// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].
+#[cfg(test)]
 pub(crate) fn image_job_candle_pose_reject(job: &JobSnapshot) -> bool {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&job.payload);
+    image_job_candle_pose_reject_with_context(
+        job,
+        &crate::jobs_store::routing::RouteContext {
+            payload: &job.payload,
+            options: &options,
+        },
+    )
+}
+
+pub(crate) fn image_job_candle_pose_reject_with_context(
+    job: &JobSnapshot,
+    context: &crate::jobs_store::routing::RouteContext<'_>,
+) -> bool {
     if !matches!(job.job_type, JobType::ImageGenerate) {
         return false;
     }
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    image_request_candle_pose_reject(model, &job.payload)
+    if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
+        return false;
+    }
+    has_material_sdxl_control_intent_with_facts(context.options)
 }
 
 /// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
@@ -2260,6 +2386,18 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// dense TI2V-5B base. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    let route = job
+        .payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .map(crate::resolved_options::TrainingRouteFacts::from_plan_syntax);
+    training_job_is_candle_eligible_with_facts(job, route.as_ref())
+}
+
+pub(crate) fn training_job_is_candle_eligible_with_facts(
+    job: &JobSnapshot,
+    route: Option<&crate::resolved_options::TrainingRouteFacts>,
+) -> bool {
     // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
     // resolved plan's kernel (`krea_control` ∈ [`CANDLE_ROUTED_TRAINING_KERNELS`]), so it is
     // candle-eligible on the same terms as a `lora_train` run.
@@ -2281,23 +2419,25 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("baseModel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let network_type = plan
-        .get("config")
-        .and_then(Value::as_object)
-        .and_then(|config| config.get("advanced"))
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("networkType"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("lora");
+    let Some(network) = route else {
+        return false;
+    };
+    let network_type = match &network.network_type {
+        crate::resolved_options::RouteField::Absent => "lora",
+        crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => "lora",
+        crate::resolved_options::RouteField::Valid(value) => value.trim(),
+        crate::resolved_options::RouteField::Null
+        | crate::resolved_options::RouteField::Invalid => {
+            return false;
+        }
+    };
     let is_adapter =
         network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
 
     match kernel {
         "moss_image_lora" => {
             job.job_type == JobType::LoraTrain
-                && super::catalog::moss_training_plan_is_supported(plan)
+                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)
         }
         "flux3_klein_lora" | "flux3_klein_edit_lora" => {
             base_model == "flux3_klein_base" && network_type == "lora"

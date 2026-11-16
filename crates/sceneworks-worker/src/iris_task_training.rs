@@ -35,9 +35,9 @@ use sceneworks_core::training::iris::depth::{
     depth_init, DEPTH_INIT_PARENT, ITEM_DEPTH_KEY as SW_ITEM_DEPTH_KEY,
 };
 use sceneworks_core::training::iris::restore::{
-    restore_options, ITEM_DEGRADED_KEY as SW_ITEM_DEGRADED_KEY, RESTORE_TRAINING_RESOURCE_MODELS,
+    ITEM_DEGRADED_KEY as SW_ITEM_DEGRADED_KEY, RESTORE_TRAINING_RESOURCE_MODELS,
 };
-use sceneworks_core::training::iris::{iris_options, IrisObjective};
+use sceneworks_core::training::iris::IrisObjective;
 use serde_json::{json, Map, Value};
 
 /// The task export folders inside the pinned `speridlabs/iris-3b` snapshot.
@@ -163,21 +163,17 @@ fn catalog_id_for(component: &str) -> &'static str {
         .unwrap_or("iris_restore_train_resources")
 }
 
-fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
-    let advanced = &config.advanced;
-    let string = |key: &str, default: &str| {
-        crate::payload::trimmed_string(advanced.get(key))
-            .unwrap_or(default)
-            .to_owned()
-    };
-    let u32_of = |key: &str| {
-        advanced
-            .get(key)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(0)
-    };
-    let network = string("networkType", "full");
+fn sw_config_to_engine(
+    config: &sceneworks_core::training::TrainingConfig,
+    objective: IrisObjective,
+) -> TrainingConfig {
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        objective.base_model(),
+    )
+    .expect("Iris task config is validated before native mapping");
+    let common = &options.common;
     TrainingConfig {
         rank: config.rank,
         alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
@@ -190,25 +186,43 @@ fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> Tr
         save_every: config.save_every,
         seed: config.seed.max(0) as u64,
         optimizer: config.optimizer.clone(),
-        weight_decay: advanced
-            .get("weightDecay")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32,
-        lr_scheduler: gen_core::LrSchedule::parse(&string("lrScheduler", "constant")),
-        lr_warmup_steps: u32_of("lrWarmupSteps"),
-        network_type: gen_core::NetworkType::parse(&network),
-        full_finetune: network.eq_ignore_ascii_case("full"),
-        loss_type: string("lossType", "mse"),
-        sample_every: u32_of("sampleEvery"),
+        weight_decay: common.weight_decay,
+        lr_scheduler: gen_core::LrSchedule::parse(&common.lr_scheduler),
+        lr_warmup_steps: common.lr_warmup_steps,
+        network_type: gen_core::NetworkType::parse(&common.network_type),
+        full_finetune: common.full_finetune,
+        loss_type: common.loss_type.clone(),
+        sample_every: common.sample_every,
         ..TrainingConfig::default()
     }
+}
+
+fn restore_init_is_parent(config: &sceneworks_core::training::TrainingConfig) -> bool {
+    sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        IrisObjective::Restoration.base_model(),
+    )
+    .ok()
+    .and_then(|options| options.iris.restore_init.map(|value| value.value))
+    .as_deref()
+        == Some("parent")
 }
 
 /// Shape the engine config of a task run: its options bag is the ONLY `model_options` key (both
 /// task trainers refuse any other), and nothing prompt-shaped travels (no prompt, no previews
 /// prompts, no adapter targets for a full depth run).
+pub(crate) fn shape_task_config_resolved(
+    config: TrainingConfig,
+    objective: IrisObjective,
+    wire: &sceneworks_core::resolved_options::ValidatedModelOptionsWire,
+) -> TrainingConfig {
+    shape_task_config_with_bag(config, objective, wire.for_iris_task(objective))
+}
+
+#[cfg(test)]
 pub(crate) fn shape_task_config(
-    mut config: TrainingConfig,
+    config: TrainingConfig,
     objective: IrisObjective,
 ) -> TrainingConfig {
     let key = objective.options_key();
@@ -218,7 +232,15 @@ pub(crate) fn shape_task_config(
         .cloned()
         .filter(Value::is_object)
         .unwrap_or_else(|| Value::Object(Map::new()));
-    config.model_options = Map::from_iter([(key.to_owned(), bag)]);
+    shape_task_config_with_bag(config, objective, Map::from_iter([(key.to_owned(), bag)]))
+}
+
+fn shape_task_config_with_bag(
+    mut config: TrainingConfig,
+    objective: IrisObjective,
+    model_options: Map<String, Value>,
+) -> TrainingConfig {
+    config.model_options = model_options;
     config.sample_prompts.clear();
     config.trigger_word = None;
     config.control_type = None;
@@ -431,16 +453,7 @@ pub fn iris_training_install_refusal(
                     ),
                 ));
             }
-            let parent = restore_options(config)
-                .ok()
-                .and_then(|options| {
-                    options
-                        .get("init")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("parent");
+            let parent = restore_init_is_parent(config);
             (parent && installed_backbone(data_dir).is_none()).then(|| {
                 IrisInstallRefusal::new(
                     "missing_backbone",
@@ -549,16 +562,7 @@ pub(crate) fn task_load_inputs_bound(
                 })?;
                 components.insert(resource.component.to_owned(), WeightsSource::File(path));
             }
-            let parent = restore_options(config)
-                .ok()
-                .and_then(|options| {
-                    options
-                        .get("init")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("parent");
+            let parent = restore_init_is_parent(config);
             if parent {
                 components.insert(
                     restore_train::PARENT_COMPONENT.to_owned(),
@@ -699,16 +703,15 @@ pub fn iris_task_dataset_report(
     dataset: &sceneworks_core::training::TrainingDataset,
     dataset_root: &Path,
 ) -> Value {
-    let engine_config = sw_config_to_engine(config);
-    let mut engine_config = engine_config;
-    let key = objective.options_key();
-    let bag = match objective {
-        IrisObjective::Restoration => restore_options(config).ok().map(Value::Object),
-        _ => iris_options(config).ok().map(Value::Object),
-    }
-    .unwrap_or_else(|| json!({}));
-    engine_config.model_options = Map::from_iter([(key.to_owned(), bag)]);
-    let engine_config = shape_task_config(engine_config, objective);
+    let engine_config = sw_config_to_engine(config, objective);
+    let model_options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        objective.base_model(),
+    )
+    .map(|options| options.model_options_wire.for_iris_task(objective))
+    .unwrap_or_else(|_| Map::from_iter([(objective.options_key().to_owned(), json!({}))]));
+    let engine_config = shape_task_config_with_bag(engine_config, objective, model_options);
     let mut items = Vec::with_capacity(dataset.items.len());
     let mut engine_items = Vec::with_capacity(dataset.items.len());
     for item in &dataset.items {
@@ -811,10 +814,7 @@ pub fn iris_task_dataset_report(
                         .map_err(|error| error.to_string())
                 })
                 .and_then(|export| {
-                    let has_parent = restore_options(config)
-                        .ok()
-                        .and_then(|options| options.get("init").cloned())
-                        == Some(json!("parent"));
+                    let has_parent = restore_init_is_parent(config);
                     restore_train::RestoreTrainPlan::resolve(&request, &export, &[], has_parent)
                         .map_err(|error| error.to_string())
                 }) {
@@ -1480,7 +1480,7 @@ mod tests {
     #[test]
     fn restoration_defaults_are_the_engine_recipe() {
         let target = sceneworks_core::training::iris::restore::iris_restore_target();
-        let engine = sw_config_to_engine(&target.defaults);
+        let engine = sw_config_to_engine(&target.defaults, IrisObjective::Restoration);
         let recipe = restore_train::recipe_training_config();
         assert_eq!(engine.learning_rate, restore_train::RECIPE_LR);
         assert_eq!(engine.learning_rate, recipe.learning_rate);
@@ -1521,7 +1521,10 @@ mod tests {
     fn task_alpha_maps_integral_contract_numbers_exactly() {
         let mut config = sceneworks_core::training::iris::restore::iris_restore_target().defaults;
         config.alpha = serde_json::Number::from(7);
-        assert_eq!(sw_config_to_engine(&config).alpha, 7.0);
+        assert_eq!(
+            sw_config_to_engine(&config, IrisObjective::Restoration).alpha,
+            7.0
+        );
     }
 
     /// The depth target's defaults ARE the engine's paper recipe (`apply_paper_recipe`): the global
@@ -1531,7 +1534,10 @@ mod tests {
         use sceneworks_core::training::iris::depth as sw_depth;
         let target = sw_depth::iris_depth_target();
         let defaults = &target.defaults;
-        let engine = shape_task_config(sw_config_to_engine(defaults), IrisObjective::Depth);
+        let engine = shape_task_config(
+            sw_config_to_engine(defaults, IrisObjective::Depth),
+            IrisObjective::Depth,
+        );
         let mut recipe = TrainingConfig::default();
         depth_train::apply_paper_recipe(&mut recipe);
         assert_eq!(engine.learning_rate, depth_train::PAPER_LEARNING_RATE);

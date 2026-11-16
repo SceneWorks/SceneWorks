@@ -83,6 +83,29 @@ fn with_field(mut spec: Yue2JobSpec, field: &str) -> Yue2JobSpec {
 }
 
 #[test]
+fn native_job_facade_agrees_with_portable_policy_for_all_kinds_and_fields() {
+    for kind in Yue2JobKind::ALL {
+        for (field, _) in FIELD_KINDS {
+            let spec = with_field(base(kind), field);
+            let portable = sceneworks_options::yue2_validation::validate_request(&spec);
+            let native = validate_request(&spec);
+            assert_eq!(
+                native
+                    .as_ref()
+                    .err()
+                    .map(|error| (error.code, error.field.as_str())),
+                portable
+                    .as_ref()
+                    .err()
+                    .map(|error| (error.code, error.field.as_str())),
+                "kind={} field={field}",
+                kind.as_str(),
+            );
+        }
+    }
+}
+
+#[test]
 fn every_kind_accepts_its_minimal_request() {
     for kind in Yue2JobKind::ALL {
         validate_request(&base(kind)).unwrap_or_else(|e| panic!("{kind:?}: {e}"));

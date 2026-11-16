@@ -93,14 +93,49 @@ pub(crate) fn resolve_lane_request_controls(
 ) -> WorkerResult<LaneRequestControls> {
     let refuse =
         |message: String| WorkerError::InvalidPayload(format!("{}: {message}", request.model));
-    let cfg_interval = controls::requested_cfg_interval(&request.advanced).map_err(refuse)?;
-    let caption_overflow =
-        controls::requested_caption_overflow(&request.advanced).map_err(refuse)?;
+    let cfg_interval = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .cfg_interval
+        .as_ref()
+        .map(|bound| {
+            let pair = &bound.value;
+            match pair.as_slice() {
+                [lo, hi]
+                    if lo.is_finite() && hi.is_finite() && 0.0 <= *lo && lo < hi && *hi <= 1.0 =>
+                {
+                    Ok((*lo as f32, *hi as f32))
+                }
+                _ => Err(refuse(format!(
+                    "advanced.{CFG_INTERVAL_KEY} must satisfy 0 <= start < end <= 1"
+                ))),
+            }
+        })
+        .transpose()?;
+    let caption_overflow = request
+        .advanced_text(CAPTION_OVERFLOW_KEY)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "default")
+        .map(|name| {
+            CaptionOverflow::from_name(name).ok_or_else(|| {
+                refuse(format!(
+                    "advanced.{CAPTION_OVERFLOW_KEY} is not a caption-overflow policy"
+                ))
+            })
+        })
+        .transpose()?;
+    if controls::supports_scheduler_shift(&request.model_manifest_entry)
+        && request
+            .advanced_f64("schedulerShift")
+            .is_some_and(|shift| !shift.is_finite() || shift <= 0.0)
+    {
+        return Err(refuse(
+            "advanced.schedulerShift must be a finite value > 0".to_owned(),
+        ));
+    }
     let h3_image_sampler =
         controls::requested_h3_image_sampler(&request.advanced).map_err(refuse)?;
-    if controls::supports_scheduler_shift(&request.model_manifest_entry) {
-        controls::requested_scheduler_shift(&request.advanced).map_err(refuse)?;
-    }
     if cfg_interval.is_some() && !caps.supports_cfg_interval {
         return Err(refuse(format!(
             "the engine does not honour a guidance interval (advanced.{CFG_INTERVAL_KEY})"
@@ -120,12 +155,10 @@ pub(crate) fn resolve_lane_request_controls(
     // default, LCM 1.1 / 0.9 / 0, the same default the engine applies. An `advanced.sampler` of
     // `euler` keeps meaning Euler.
     let h3_image_sampler = h3_image_sampler.or_else(|| {
-        let named = request
-            .advanced
-            .get("sampler")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
+        let named =
+            sceneworks_core::image_sampling_controls::authored_sampler_name(&request.advanced)
+                .map(str::trim)
+                .unwrap_or_default();
         if !caps.supports_h3_image_sampler || !(named.is_empty() || named == "default") {
             return None;
         }
@@ -438,7 +471,8 @@ mod tests {
             "advanced": advanced,
             "modelManifestEntry": { "id": "m", "image": image },
         });
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        let payload = payload.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     fn sized_request(candle: Value) -> ImageRequest {
@@ -448,7 +482,8 @@ mod tests {
             "prompt": "x",
             "modelManifestEntry": { "id": "iris_3b", "candle": candle },
         });
-        ImageRequest::from_payload(payload.as_object().unwrap())
+        let payload = payload.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     /// sc-25684: one declared per-megapixel term charges every image-megapixel beyond the one 1024²

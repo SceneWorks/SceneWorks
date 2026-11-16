@@ -17,9 +17,10 @@ use serde_json::Value;
 
 use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
 use crate::payload_util::{
-    array_or_empty, declared_resolution, int_array, nonempty_string_or, object_or_empty,
-    optional_i64, optional_id, string_list, string_or,
+    array_or_empty, int_array, nonempty_string_or, object_or_empty, optional_i64, optional_id,
+    string_list, string_or,
 };
+use crate::resolved_options::{BindingError, BindingInput, Bound, Origin};
 
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
@@ -46,18 +47,18 @@ const DEFAULT_DIMENSION: u32 = 1024;
 /// historical blanket, kept for models that declare no `defaults.count`.
 const DEFAULT_COUNT: u32 = 4;
 
+pub use sceneworks_options::image_request::authored_quant_tier;
 /// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
 /// still unread (sc-12335 — a menu, and a separate question from this default).
-const MIN_COUNT: u32 = 1;
 /// `pub(crate)` so `workflow_share`'s pose budget can be derived from it rather than restate it:
 /// a pose set is the pose lane's batch size (one image per pose), so this is the ceiling it is
 /// measured against.
-pub(crate) const MAX_COUNT: u32 = 8;
+pub use sceneworks_options::image_request::MAX_COUNT;
 
 /// The historical ceiling on `advanced.steps` the generic image lane forwards (raised to a model's
 /// own default where that is higher). The worker clamps above it; Image Studio's Steps input
 /// mirrors it (`BASE_MAX_STEPS`), and Supra2's request boundary refuses above it (sc-24215).
-pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
+pub use sceneworks_options::image_request::BASE_MAX_IMAGE_STEPS;
 
 /// The maximum number of strict poses one image-generation job may render.
 ///
@@ -69,7 +70,7 @@ pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
 ///
 /// This is the product/request contract. The workflow-share envelope derives its entry cap from
 /// this value, and the web's mechanically pinned twin is checked by a cross-file drift test.
-pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
+pub use sceneworks_options::MAX_JOB_POSES;
 
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
@@ -92,22 +93,7 @@ pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
 ///
 /// Same never-invent-from-a-typo posture as its siblings: a declared count outside
 /// [`MIN_COUNT`]`..=`[`MAX_COUNT`] is not a batch anyone meant, so it falls back to the blanket.
-pub fn default_count(model_manifest_entry: &JsonObject) -> Option<u32> {
-    model_manifest_entry
-        .get("defaults")
-        .and_then(Value::as_object)
-        .and_then(|defaults| defaults.get("count"))
-        .and_then(Value::as_u64)
-        .filter(|count| (u64::from(MIN_COUNT)..=u64::from(MAX_COUNT)).contains(count))
-        .map(|count| count as u32)
-}
-
-/// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
-/// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
-/// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
-/// sharing one envelope across lanes.
-const MIN_DIMENSION: u32 = 256;
-const MAX_DIMENSION: u32 = 4096;
+pub use sceneworks_options::image_request::default_count;
 
 /// `defaults.resolution` from a resolved manifest entry as `(width, height)`, or `None` for the
 /// blanket [`DEFAULT_DIMENSION`] square.
@@ -120,8 +106,358 @@ const MAX_DIMENSION: u32 = 4096;
 /// `768x768`.
 ///
 /// Same never-invent-from-a-typo posture as its video twin; see [`declared_resolution`].
-pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32)> {
-    declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
+pub use sceneworks_options::image_request::default_resolution;
+
+/// The two caller-selectable PiD checkpoint fields; filename confinement remains a native
+/// artifact-selection check after binding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PidCheckpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+/// A nested control-weight field retains the shape distinction needed by tolerant legacy
+/// routes and by SDXL's strict refusal. Malformed content is never used as a path or revision.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ControlWeightField<T> {
+    #[default]
+    Absent,
+    Null,
+    Valid(T),
+    Invalid,
+}
+
+impl<T> ControlWeightField<T> {
+    pub fn valid(&self) -> Option<&T> {
+        match self {
+            Self::Valid(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid)
+    }
+}
+
+impl ControlWeightField<String> {
+    pub fn valid_trimmed(&self) -> Option<&str> {
+        self.valid()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+}
+
+/// Typed view of the resolved control-weight carrier. Parsing never grants trust to `path`,
+/// `revision`, or `_catalogAuthorized`; native route checks still confine and authorize them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlWeightsFields {
+    pub repo: ControlWeightField<String>,
+    pub filename: ControlWeightField<String>,
+    pub path: ControlWeightField<String>,
+    pub revision: ControlWeightField<String>,
+    pub overlay_id: ControlWeightField<String>,
+    pub catalog_authorized: ControlWeightField<bool>,
+}
+
+impl<'de> serde::Deserialize<'de> for ControlWeightsFields {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = JsonObject::deserialize(deserializer)?;
+        fn text(map: &JsonObject, key: &str) -> ControlWeightField<String> {
+            match map.get(key) {
+                None => ControlWeightField::Absent,
+                Some(Value::Null) => ControlWeightField::Null,
+                Some(Value::String(value)) => ControlWeightField::Valid(value.clone()),
+                Some(_) => ControlWeightField::Invalid,
+            }
+        }
+        let catalog_authorized = match map.get("_catalogAuthorized") {
+            None => ControlWeightField::Absent,
+            Some(Value::Null) => ControlWeightField::Null,
+            Some(Value::Bool(value)) => ControlWeightField::Valid(*value),
+            Some(_) => ControlWeightField::Invalid,
+        };
+        Ok(Self {
+            repo: text(&map, "repo"),
+            filename: text(&map, "filename"),
+            path: text(&map, "path"),
+            revision: text(&map, "revision"),
+            overlay_id: text(&map, "overlayId"),
+            catalog_authorized,
+        })
+    }
+}
+
+impl serde::Serialize for ControlWeightsFields {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = JsonObject::new();
+        fn put<T: serde::Serialize>(
+            map: &mut JsonObject,
+            key: &str,
+            field: &ControlWeightField<T>,
+        ) {
+            match field {
+                ControlWeightField::Valid(value) => {
+                    map.insert(
+                        key.to_owned(),
+                        serde_json::to_value(value).expect("typed field serializes"),
+                    );
+                }
+                ControlWeightField::Null => {
+                    map.insert(key.to_owned(), Value::Null);
+                }
+                ControlWeightField::Absent | ControlWeightField::Invalid => {}
+            }
+        }
+        put(&mut map, "repo", &self.repo);
+        put(&mut map, "filename", &self.filename);
+        put(&mut map, "path", &self.path);
+        put(&mut map, "revision", &self.revision);
+        put(&mut map, "overlayId", &self.overlay_id);
+        put(&mut map, "_catalogAuthorized", &self.catalog_authorized);
+        serde::Serialize::serialize(&map, serializer)
+    }
+}
+
+/// Image options lowered once from the shared resolver's canonical effective request.
+/// Each value retains whether the caller supplied it or the resolver applied a default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ImageAdvanced {
+    pub sampler: Option<Bound<String>>,
+    pub scheduler: Option<Bound<String>>,
+    pub scheduler_shift: Option<Bound<f64>>,
+    /// SenseNova interleave reads the legacy alias itself, independently of schedulerShift.
+    pub interleave_timestep_shift: Option<Bound<f64>>,
+    pub steps: Option<Bound<i64>>,
+    pub guidance_scale: Option<Bound<f64>>,
+    pub guidance_method: Option<Bound<String>>,
+    pub cfg_interval: Option<Bound<Vec<f64>>>,
+    pub caption_overflow: Option<Bound<String>>,
+    pub num_inference_steps: Option<Bound<i64>>,
+    pub enhance_prompt: Option<Bound<bool>>,
+    pub enhance_max_tokens: Option<Bound<i64>>,
+    pub enhance_temperature: Option<Bound<f64>>,
+    pub decoder: Option<Bound<String>>,
+    pub use_pid: Option<Bound<bool>>,
+    pub pid_target: Option<Bound<String>>,
+    pub pid_checkpoint: Option<Bound<PidCheckpoint>>,
+    pub pid_gemma: Option<Bound<String>>,
+    pub ip_adapter_scale: Option<Bound<f64>>,
+    pub ip_adapter_repo: Option<Bound<String>>,
+    pub controlnet_conditioning_scale: Option<Bound<f64>>,
+    pub true_cfg_scale: Option<Bound<f64>>,
+    pub strength: Option<Bound<f64>>,
+    pub reference_strength: Option<Bound<f64>>,
+    pub denoising_strength: Option<Bound<f64>>,
+    pub image_strength: Option<Bound<f64>>,
+    pub ip_adapter_scale_legacy: Option<Bound<f64>>,
+    pub text_style_gain: Option<Bound<f64>>,
+    pub view_angle: Option<Bound<String>>,
+    pub view_angles: Option<Bound<Vec<String>>>,
+    pub poses: Option<Bound<Vec<Value>>>,
+    pub face_restore: Option<Bound<bool>>,
+    pub control_mode: Option<Bound<String>>,
+    pub control_image: Option<Bound<String>>,
+    pub control_weights: Option<Bound<ControlWeightsFields>>,
+    pub control_scale: Option<Bound<f64>>,
+    pub open_pose_scale: Option<Bound<f64>>,
+    pub cn_scale: Option<Bound<f64>>,
+    pub tile: Option<Bound<i64>>,
+    pub overlap: Option<Bound<i64>>,
+    pub prompt: Option<Bound<String>>,
+    pub negative_prompt: Option<Bound<String>>,
+    pub tile_control_net_repo: Option<Bound<String>>,
+    pub id_weight: Option<Bound<f64>>,
+    pub timestep_to_start_cfg: Option<Bound<i64>>,
+    pub angle_set: Option<Bound<bool>>,
+    pub keypoint_collection_id: Option<Bound<String>>,
+    pub system_message: Option<Bound<String>>,
+    pub image_guidance_scale: Option<Bound<f64>>,
+    pub max_images: Option<Bound<i64>>,
+    pub max_new_tokens: Option<Bound<i64>>,
+    pub think_mode: Option<Bound<bool>>,
+    pub phases: Option<Bound<Vec<Value>>>,
+    pub flash_attn: Option<Bound<bool>>,
+    /// Outer `None` means absent; inner `None` means an authored null that suppresses
+    /// fallback to the verified portable bound tier.
+    pub mlx_quantize: Option<Bound<Option<i64>>>,
+    pub mlx_quantize_explicit: Option<Bound<bool>>,
+    pub conv_rot: Option<Bound<bool>>,
+    pub quant_tier: Option<Bound<String>>,
+    pub quant: Option<Bound<String>>,
+    pub model_path: Option<Bound<String>>,
+    pub text_encoder_model: Option<Bound<String>>,
+    pub transparent_background: Option<Bound<bool>>,
+    pub structured_prompt: Option<Bound<JsonObject>>,
+    pub flux3_layout: Option<Bound<JsonObject>>,
+    pub flux3_reference_ids: Option<Bound<Vec<String>>>,
+    pub moss_image: Option<Bound<gen_core::moss_image::MossImageOptions>>,
+    pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
+    pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
+}
+
+impl ImageAdvanced {
+    /// Serialize the resolved typed fields at the provider and workflow wire boundary.
+    /// This never reads the authored option bag and does not parse a serialized value back.
+    pub fn provider_wire(&self) -> JsonObject {
+        let mut wire = JsonObject::new();
+        macro_rules! put {
+            ($field:ident, $key:literal) => {
+                if let Some(value) = &self.$field {
+                    wire.insert(
+                        $key.to_owned(),
+                        serde_json::to_value(&value.value).expect("bound image option serializes"),
+                    );
+                }
+            };
+        }
+        put!(sampler, "sampler");
+        put!(scheduler, "scheduler");
+        put!(scheduler_shift, "schedulerShift");
+        put!(interleave_timestep_shift, "timestepShift");
+        put!(steps, "steps");
+        put!(guidance_scale, "guidanceScale");
+        put!(guidance_method, "guidanceMethod");
+        put!(cfg_interval, "cfgInterval");
+        put!(caption_overflow, "captionOverflow");
+        put!(num_inference_steps, "numInferenceSteps");
+        put!(enhance_prompt, "enhancePrompt");
+        put!(enhance_max_tokens, "enhanceMaxTokens");
+        put!(enhance_temperature, "enhanceTemperature");
+        put!(decoder, "decoder");
+        put!(use_pid, "usePid");
+        put!(pid_target, "pidTarget");
+        put!(pid_checkpoint, "pidCheckpoint");
+        put!(pid_gemma, "pidGemma");
+        put!(ip_adapter_scale, "ipAdapterScale");
+        put!(ip_adapter_repo, "ipAdapterRepo");
+        put!(controlnet_conditioning_scale, "controlnetConditioningScale");
+        put!(true_cfg_scale, "trueCfgScale");
+        put!(strength, "strength");
+        put!(reference_strength, "referenceStrength");
+        put!(denoising_strength, "denoisingStrength");
+        put!(image_strength, "imageStrength");
+        put!(ip_adapter_scale_legacy, "ip_adapter_scale");
+        put!(text_style_gain, "textStyleGain");
+        put!(view_angle, "viewAngle");
+        put!(view_angles, "viewAngles");
+        put!(poses, "poses");
+        put!(face_restore, "faceRestore");
+        put!(control_mode, "controlMode");
+        put!(control_image, "controlImage");
+        put!(control_weights, "controlWeights");
+        put!(control_scale, "controlScale");
+        put!(open_pose_scale, "openPoseScale");
+        put!(cn_scale, "cnScale");
+        put!(tile, "tile");
+        put!(overlap, "overlap");
+        put!(prompt, "prompt");
+        put!(negative_prompt, "negativePrompt");
+        put!(tile_control_net_repo, "tileControlNetRepo");
+        put!(id_weight, "idWeight");
+        put!(timestep_to_start_cfg, "timestepToStartCfg");
+        put!(angle_set, "angleSet");
+        put!(keypoint_collection_id, "keypointCollectionId");
+        put!(system_message, "systemMessage");
+        put!(image_guidance_scale, "imageGuidanceScale");
+        put!(max_images, "maxImages");
+        put!(max_new_tokens, "maxNewTokens");
+        put!(think_mode, "thinkMode");
+        put!(phases, "phases");
+        put!(flash_attn, "flashAttn");
+        put!(mlx_quantize, "mlxQuantize");
+        put!(mlx_quantize_explicit, "mlxQuantizeExplicit");
+        put!(conv_rot, "convRot");
+        put!(quant_tier, "quantTier");
+        put!(quant, "quant");
+        put!(model_path, "modelPath");
+        put!(text_encoder_model, "textEncoderModel");
+        put!(transparent_background, "transparentBackground");
+        put!(structured_prompt, "structuredPrompt");
+        put!(flux3_layout, "flux3_layout");
+        put!(flux3_reference_ids, "flux3_reference_ids");
+        put!(moss_image, "mossImage");
+        put!(moss_image_edit, "mossImageEdit");
+        put!(moss_image_advanced, "mossImageAdvanced");
+        wire
+    }
+
+    pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+        Ok(Self {
+            sampler: input.text("advanced", "sampler")?,
+            scheduler: input.text("advanced", "scheduler")?,
+            scheduler_shift: input.number("advanced", "schedulerShift")?,
+            interleave_timestep_shift: input.number_exact_alias("advanced", "timestepShift")?,
+            steps: input.integer("advanced", "steps")?,
+            guidance_scale: input.number("advanced", "guidanceScale")?,
+            guidance_method: input.text("advanced", "guidanceMethod")?,
+            cfg_interval: input.structured("advanced", "cfgInterval")?,
+            caption_overflow: input.text("advanced", "captionOverflow")?,
+            num_inference_steps: input.integer("advanced", "numInferenceSteps")?,
+            enhance_prompt: input.boolean("advanced", "enhancePrompt")?,
+            enhance_max_tokens: input.integer("advanced", "enhanceMaxTokens")?,
+            enhance_temperature: input.number("advanced", "enhanceTemperature")?,
+            decoder: input.text("advanced", "decoder")?,
+            use_pid: input.boolean("advanced", "usePid")?,
+            pid_target: input.text("advanced", "pidTarget")?,
+            pid_checkpoint: input.structured("advanced", "pidCheckpoint")?,
+            pid_gemma: input.text("advanced", "pidGemma")?,
+            ip_adapter_scale: input.number("advanced", "ipAdapterScale")?,
+            ip_adapter_repo: input.text("advanced", "ipAdapterRepo")?,
+            controlnet_conditioning_scale: input
+                .number("advanced", "controlnetConditioningScale")?,
+            true_cfg_scale: input.number("advanced", "trueCfgScale")?,
+            strength: input.number("advanced", "strength")?,
+            reference_strength: input.number("advanced", "referenceStrength")?,
+            denoising_strength: input.number("advanced", "denoisingStrength")?,
+            image_strength: input.number("advanced", "imageStrength")?,
+            ip_adapter_scale_legacy: input.number("advanced", "ip_adapter_scale")?,
+            text_style_gain: input.number("advanced", "textStyleGain")?,
+            view_angle: input.text("advanced", "viewAngle")?,
+            view_angles: input.structured("advanced", "viewAngles")?,
+            poses: input.structured("advanced", "poses")?,
+            face_restore: input.boolean("advanced", "faceRestore")?,
+            control_mode: input.text("advanced", "controlMode")?,
+            control_image: input.text("advanced", "controlImage")?,
+            control_weights: input.structured("advanced", "controlWeights")?,
+            control_scale: input.number("advanced", "controlScale")?,
+            open_pose_scale: input.number("advanced", "openPoseScale")?,
+            cn_scale: input.number("advanced", "cnScale")?,
+            tile: input.integer("advanced", "tile")?,
+            overlap: input.integer("advanced", "overlap")?,
+            prompt: input.text("advanced", "prompt")?,
+            negative_prompt: input.text("advanced", "negativePrompt")?,
+            tile_control_net_repo: input.text("advanced", "tileControlNetRepo")?,
+            id_weight: input.number("advanced", "idWeight")?,
+            timestep_to_start_cfg: input.integer("advanced", "timestepToStartCfg")?,
+            angle_set: input.boolean("advanced", "angleSet")?,
+            keypoint_collection_id: input.text("advanced", "keypointCollectionId")?,
+            system_message: input.text("advanced", "systemMessage")?,
+            image_guidance_scale: input.number("advanced", "imageGuidanceScale")?,
+            max_images: input.integer("advanced", "maxImages")?,
+            max_new_tokens: input.integer("advanced", "maxNewTokens")?,
+            think_mode: input.boolean("advanced", "thinkMode")?,
+            phases: input.structured("advanced", "phases")?,
+            flash_attn: input.boolean("advanced", "flashAttn")?,
+            mlx_quantize: input.nullable_integer("advanced", "mlxQuantize")?,
+            mlx_quantize_explicit: input.boolean("advanced", "mlxQuantizeExplicit")?,
+            conv_rot: input.boolean("advanced", "convRot")?,
+            quant_tier: input.text("advanced", "quantTier")?,
+            quant: input.text("advanced", "quant")?,
+            model_path: input.text("advanced", "modelPath")?,
+            text_encoder_model: input.text("advanced", "textEncoderModel")?,
+            transparent_background: input.boolean("advanced", "transparentBackground")?,
+            structured_prompt: input.structured("advanced", "structuredPrompt")?,
+            flux3_layout: input.structured("advanced", "flux3_layout")?,
+            flux3_reference_ids: input.structured("advanced", "flux3_reference_ids")?,
+            moss_image: input.structured("advanced", "mossImage")?,
+            moss_image_edit: input.structured("advanced", "mossImageEdit")?,
+            moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
+        })
+    }
 }
 
 /// A typed image-generation request, parsed from a job payload.
@@ -173,6 +509,11 @@ pub struct ImageRequest {
     pub model_manifest_entry: JsonObject,
     /// Per-family advanced knobs (steps, guidanceScale, mlxQuantize, …), passed through.
     pub advanced: JsonObject,
+    /// Canonical effective options for execution. `None` denotes a legacy authoring/parser
+    /// request that has not crossed the shared resolver boundary.
+    pub resolved_advanced: Option<ImageAdvanced>,
+    /// Worker-verified local sources. The API never binds client-authored path claims.
+    pub portable_aux: crate::portable_aux_bindings::PortableAuxBindings,
     /// Image Studio "Upscale" toggle (sc-8091): when `enabled`, the worker upscales each
     /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
     /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
@@ -182,10 +523,201 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    pub fn resolved_flux3_tier(&self) -> Result<Flux3Tier, String> {
+        flux3_requested_tier_resolved(
+            self.resolved_advanced
+                .as_ref()
+                .expect("image options must be resolved"),
+        )
+    }
+
+    pub fn effective_advanced_wire(&self) -> JsonObject {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .provider_wire()
+    }
+
+    /// Access canonical scalar options only after `from_resolved`. A missing binding is a
+    /// programming error at an execution boundary, not a reason to reinterpret authored JSON.
+    pub fn advanced_bool(&self, key: &'static str) -> Option<bool> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "enhancePrompt" => &options.enhance_prompt,
+            "usePid" => &options.use_pid,
+            "faceRestore" => &options.face_restore,
+            "angleSet" => &options.angle_set,
+            "thinkMode" => &options.think_mode,
+            "flashAttn" => &options.flash_attn,
+            "mlxQuantizeExplicit" => &options.mlx_quantize_explicit,
+            "convRot" => &options.conv_rot,
+            "transparentBackground" => &options.transparent_background,
+            _ => panic!("undeclared image boolean accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value)
+    }
+
+    pub fn advanced_i64(&self, key: &'static str) -> Option<i64> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        if key == "mlxQuantize" {
+            return options.mlx_quantize.as_ref().and_then(|bound| bound.value);
+        }
+        let value = match key {
+            "steps" => &options.steps,
+            "enhanceMaxTokens" => &options.enhance_max_tokens,
+            "numInferenceSteps" => &options.num_inference_steps,
+            "tile" => &options.tile,
+            "overlap" => &options.overlap,
+            "timestepToStartCfg" => &options.timestep_to_start_cfg,
+            "maxImages" => &options.max_images,
+            "maxNewTokens" => &options.max_new_tokens,
+            _ => panic!("undeclared image integer accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value)
+    }
+
+    /// A route with its own sampling recipe can ignore another model's materialized step default.
+    pub fn authored_advanced_steps(&self) -> Option<i64> {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .steps
+            .as_ref()
+            .filter(|bound| matches!(bound.origin, Origin::Authored { .. }))
+            .map(|bound| bound.value)
+    }
+
+    pub fn advanced_f64(&self, key: &'static str) -> Option<f64> {
+        self.advanced_f64_bound(key).map(|bound| bound.value)
+    }
+
+    /// Use an authored override ahead of another option's materialized model default.
+    pub fn authored_advanced_f64(&self, key: &'static str) -> Option<f64> {
+        self.advanced_f64_bound(key)
+            .filter(|bound| matches!(bound.origin, Origin::Authored { .. }))
+            .map(|bound| bound.value)
+    }
+
+    fn advanced_f64_bound(&self, key: &'static str) -> Option<&Bound<f64>> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "schedulerShift" | "timestepShift" => &options.scheduler_shift,
+            "guidanceScale" => &options.guidance_scale,
+            "enhanceTemperature" => &options.enhance_temperature,
+            "ipAdapterScale" => &options.ip_adapter_scale,
+            "controlnetConditioningScale" => &options.controlnet_conditioning_scale,
+            "trueCfgScale" => &options.true_cfg_scale,
+            "strength" => &options.strength,
+            "referenceStrength" => &options.reference_strength,
+            "denoisingStrength" => &options.denoising_strength,
+            "imageStrength" => &options.image_strength,
+            "ip_adapter_scale" => &options.ip_adapter_scale_legacy,
+            "textStyleGain" => &options.text_style_gain,
+            "controlScale" => &options.control_scale,
+            "openPoseScale" => &options.open_pose_scale,
+            "cnScale" => &options.cn_scale,
+            "idWeight" => &options.id_weight,
+            "imageGuidanceScale" => &options.image_guidance_scale,
+            _ => panic!("undeclared image number accessor: {key}"),
+        };
+        value.as_ref()
+    }
+
+    pub fn advanced_text(&self, key: &'static str) -> Option<&str> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "sampler" => &options.sampler,
+            "scheduler" => &options.scheduler,
+            "guidanceMethod" => &options.guidance_method,
+            "captionOverflow" => &options.caption_overflow,
+            "decoder" => &options.decoder,
+            "pidTarget" => &options.pid_target,
+            "pidGemma" => &options.pid_gemma,
+            "ipAdapterRepo" => &options.ip_adapter_repo,
+            "viewAngle" => &options.view_angle,
+            "controlMode" => &options.control_mode,
+            "controlImage" => &options.control_image,
+            "prompt" => &options.prompt,
+            "negativePrompt" => &options.negative_prompt,
+            "tileControlNetRepo" => &options.tile_control_net_repo,
+            "keypointCollectionId" => &options.keypoint_collection_id,
+            "systemMessage" => &options.system_message,
+            "quantTier" => &options.quant_tier,
+            "quant" => &options.quant,
+            "modelPath" => &options.model_path,
+            "textEncoderModel" => &options.text_encoder_model,
+            _ => panic!("undeclared image text accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value.as_str())
+    }
+
+    /// Bind a request after portable validation has produced `effective`. The legacy parser
+    /// remains available to authoring and persistence callers; execution uses these typed fields.
+    pub fn from_resolved(
+        authored: &JsonObject,
+        effective: &JsonObject,
+    ) -> Result<Self, BindingError> {
+        let mut request = Self::from_payload_internal(effective, false);
+        request.resolved_advanced = Some(ImageAdvanced::bind(&BindingInput::new(
+            authored, effective,
+        ))?);
+        if flux3::is_model(&request.model) {
+            request.flux3_reference_request = Some(flux3::parse_resolved(
+                effective,
+                request.resolved_advanced.as_ref().expect("bound above"),
+            ));
+        }
+        // Keep exactly what the caller authored for upgrade and persistence. Execution reads
+        // only `resolved_advanced` and other typed fields from the effective request.
+        request.advanced = object_or_empty(authored, "advanced");
+        Ok(request)
+    }
+
+    /// Legacy authoring/persistence reader. Execution uses [`Self::resolved_quant_bits`].
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
         crate::payload_util::request_quant_bits(&self.advanced)
+    }
+
+    /// Precision for native execution, including the verified portable tier only when the
+    /// caller left `mlxQuantize` absent. Authored null deliberately suppresses that fallback.
+    pub fn resolved_quant_bits(&self) -> Option<i64> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        crate::payload_util::request_quant_bits_typed(
+            options.mlx_quantize.as_ref(),
+            self.portable_aux.bound_tier(),
+        )
+    }
+
+    /// Probe one exact artifact tier without rewriting the authored request or its verified
+    /// source binding. The probe is transient and cannot be persisted as user intent.
+    pub fn with_probe_quant_bits(&self, bits: i64) -> Self {
+        let mut probe = self.clone();
+        probe
+            .resolved_advanced
+            .as_mut()
+            .expect("image options must be resolved")
+            .mlx_quantize = Some(Bound {
+            value: Some(bits),
+            origin: crate::resolved_options::Origin::Internal("artifact tier probe"),
+        });
+        probe
     }
 
     /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
@@ -210,16 +742,15 @@ impl ImageRequest {
     pub fn image_count(&self) -> u32 {
         let embedding_batch =
             if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
-                self.advanced
-                    .get(crate::moss_image_advanced::KEY)
-                    .and_then(|v| v.get("positive"))
-                    .and_then(|v| v.get("values"))
-                    .and_then(|v| v.get("metadata"))
-                    .and_then(|v| v.get("shape"))
-                    .and_then(|v| v.get(0))
-                    .and_then(Value::as_u64)
-                    .filter(|n| *n <= 8)
-                    .unwrap_or(1) as usize
+                self.resolved_advanced
+                    .as_ref()
+                    .and_then(|options| options.moss_image_advanced.as_ref())
+                    .and_then(|bound| bound.value.positive.as_ref())
+                    .and_then(|positive| positive.values.metadata.as_ref())
+                    .and_then(|metadata| metadata.shape.first())
+                    .copied()
+                    .filter(|count| *count <= 8)
+                    .unwrap_or(1)
             } else {
                 1
             };
@@ -232,6 +763,10 @@ impl ImageRequest {
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
     pub fn from_payload(payload: &JsonObject) -> Self {
+        Self::from_payload_internal(payload, true)
+    }
+
+    fn from_payload_internal(payload: &JsonObject, parse_flux3: bool) -> Self {
         // Hoisted above the struct literal because the geometry now depends on it — the same shape
         // `VideoRequest::from_payload` uses, and the reason the field is read here rather than in
         // field order below.
@@ -269,16 +804,15 @@ impl ImageRequest {
             source_asset_id: optional_id(payload, "sourceAssetId"),
             reference_asset_id: optional_id(payload, "referenceAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
-            flux3_reference_request: flux3::is_model(&nonempty_string_or(
-                payload,
-                "model",
-                DEFAULT_MODEL,
-            ))
+            flux3_reference_request: (parse_flux3
+                && flux3::is_model(&nonempty_string_or(payload, "model", DEFAULT_MODEL)))
             .then(|| flux3::parse(payload)),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
+            resolved_advanced: None,
+            portable_aux: Default::default(),
             upscale: parse_upscale(payload),
             hires_fix: parse_hires_fix(payload),
         }
@@ -329,6 +863,10 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
             "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
         );
     }
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("Hires.fix execution options must be resolved");
     let advertises_img2img = request
         .model_manifest_entry
         .get("ui")
@@ -347,43 +885,34 @@ pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<S
         || request.mask_asset_id.is_some()
         || request.character_id.is_some()
         || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("poses")
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
-        || request
-            .advanced
-            .get("controlImage")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
+        || options
+            .poses
+            .as_ref()
+            .is_some_and(|poses| !poses.value.is_empty())
+        || options
+            .control_image
+            .as_ref()
+            .is_some_and(|id| !id.value.trim().is_empty());
     if has_edit_or_control_input {
         return Some(
             "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
                 .to_owned(),
         );
     }
-    if request
-        .advanced
-        .get("usePid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if options.use_pid.as_ref().is_some_and(|value| value.value) {
         return Some("Hires.fix and PiD super-resolution are mutually exclusive.".to_owned());
     }
-    if request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty())
+    if options
+        .phases
+        .as_ref()
+        .is_some_and(|phases| !phases.value.is_empty())
     {
         return Some("Hires.fix cannot be combined with multi-phase sampling.".to_owned());
     }
-    let acceleration_sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let acceleration_sampler = options
+        .sampler
+        .as_ref()
+        .map(|sampler| sampler.value.trim())
         .map(str::to_ascii_lowercase)
         .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
     if !model_supports_hires_fix(request) || acceleration_sampler {
@@ -417,9 +946,7 @@ fn model_supports_hires_fix(request: &ImageRequest) -> bool {
 
 /// The post-first-pass target side: `dimension × upscale_by`, rounded. Shared by the enqueue
 /// gate above and the worker's HiresFixPlan.
-pub fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
-    (dimension as f64 * upscale_by as f64).round() as u32
-}
+pub use sceneworks_options::image_request::hires_fix_target_dimension;
 
 pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
     let normalized = value
@@ -439,284 +966,49 @@ pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
 /// why the order is semantic rather than bookkeeping.
 pub use crate::jobs_store::qwen_image_2_1_reference_ids as ordered_image_reference_ids;
 
-/// The family-specific flattened list. FLUX.3 retains duplicate slots and refuses masks; the
-/// historical Qwen helper deliberately deduplicates and treats a mask as an ordinary reference.
-/// These policies must not be shared merely because both engines consume an ordered list.
-pub fn ordered_image_reference_ids_for_model(
-    model: &str,
-    payload: &JsonObject,
-) -> Option<Vec<String>> {
-    if flux3::is_model(model) {
-        flux3::reference_ids(payload).ok()
-    } else {
-        ordered_image_reference_ids(payload)
-    }
-}
+pub use sceneworks_options::image_request::{
+    ordered_image_reference_error, ordered_image_reference_ids_for_model,
+};
 
-/// Reject an `edit_image` / `character_image` request for a model whose route is ONE ordered
-/// conditioning list, or `None` when the request is admissible (sc-24110).
-///
-/// The SHAPE half only. **Counting is not done here** — the cap lives in
-/// `limits.maxReferenceAssets` and is enforced once, by
-/// [`crate::image_limits::image_reference_limit_error`], so there is exactly one place that knows
-/// what the ceiling is. What is left is everything else an ordered list can be wrong about:
-///
-///   1. **no references at all.** The conditioned modes ARE the conditioning call; with nothing to
-///      condition on there is no request to make. A 400 rather than a silent fall-back to
-///      text-to-image, which would render something the caller did not ask for.
-///   2. **a per-reference strength.** Upstream's condition images carry no strength and the engine
-///      refuses anything but unset-or-1.0; this says so at enqueue in the engine's own terms.
-///   3. **a malformed carrier**, which fails closed.
-///
-/// `None` for every model that declares no `limits.maxReferenceAssets` — the same declaration that
-/// arms the cap arms this, so the two halves can never be armed separately and the image models
-/// neither story touches are byte-for-byte unchanged.
-///
-/// Per-reference GEOMETRY and FORMAT are not judged here either — that needs the asset store, so it
-/// lives beside the call site (`apps/rust-api`'s `validate_ordered_image_references`).
-pub fn ordered_image_reference_error(
-    model: &str,
-    payload: &JsonObject,
-    model_manifest_entry: &JsonObject,
-) -> Option<String> {
-    if flux3::is_model(model) {
-        return flux3::parse(payload).err();
-    }
-    if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(|advanced| {
-            ["flux3_layout", "flux3_reference_ids"]
-                .iter()
-                .any(|key| advanced.get(*key).is_some_and(|value| !value.is_null()))
-        })
-    {
-        return Some(format!("{model}: FLUX.3 layout and attachment-instance controls are unsupported; remove them or select FLUX.3."));
-    }
-    let cap = crate::image_limits::image_max_reference_assets(model_manifest_entry)?;
-    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
-    // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
-    // a CONDITIONED mode exactly like the edit modes (it needs at least one reference).
-    let conditioned_mode = matches!(mode, "edit_image" | "character_image" | "image_to_image");
-    let Some(ids) = ordered_image_reference_ids(payload) else {
-        return Some(format!(
-            "{model}: one of sourceAssetId / maskAssetId / referenceAssetId / referenceAssetIds is \
-             malformed — each must be a non-blank asset id string, and referenceAssetIds must be an \
-             array of them."
-        ));
-    };
-    if ids.is_empty() {
-        if !conditioned_mode {
-            // A plain text-to-image request: nothing to condition on, nothing to judge.
-            return None;
-        }
-        return Some(format!(
-            "{model} conditions on an ordered list of 1 to {cap} reference images, but this \
-             {mode} request supplies none. Add at least one reference, or send a text-to-image \
-             request instead."
-        ));
-    }
-    // A non-empty list IS the conditioning call whatever the mode says (the router claims it
-    // mode-independently), so a strength is refused on every mode that carries references.
-    ordered_image_reference_strength_error(model, payload)
-}
+pub use sceneworks_options::image_request::{
+    flux3_requested_tier, requests_fp8r_tier, Flux3Tier, FLUX3_PRECISION_CARRIERS,
+    FLUX3_TIERED_MODEL_IDS, FP8R_QUANT_TIER,
+};
 
-/// The strength half of [`ordered_image_reference_error`], split out so the four carriers the UI
-/// and the API have historically used for this one quantity are read in one place.
-///
-/// The refusal carries the ENGINE's reason, not a SceneWorks-flavored restatement of it: a
-/// condition image on this route is composed at full weight because upstream's pipeline has no
-/// strength input at all — there is nothing to turn down. A value of exactly 1.0 is accepted (it is
-/// what "full weight" spells), and so is an absent one.
-fn ordered_image_reference_strength_error(model: &str, payload: &JsonObject) -> Option<String> {
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    for key in ["strength", "referenceStrength"] {
-        let Some(value) = payload
-            .get(key)
-            .or_else(|| advanced.and_then(|advanced| advanced.get(key)))
-            .filter(|value| !value.is_null())
-        else {
-            continue;
-        };
-        let Some(strength) = value.as_f64() else {
-            return Some(format!("{model}: `{key}` must be a number, or absent."));
-        };
-        if (strength - 1.0).abs() > f64::EPSILON {
-            return Some(format!(
-                "{model} conditions on a reference at full weight — upstream's condition images \
-                 have no strength, so `{key}: {strength}` has nothing to apply to. Drop the field \
-                 (or send 1.0)."
-            ));
-        }
-    }
-    None
-}
-
-/// The `advanced.quantTier` label of the publisher FP8 rowwise package (sc-26241): the inference
-/// `Quant::Fp8Rowwise` tier, wire key `fp8r`. It is a tier IDENTITY, never a point on the
-/// `mlxQuantize` bits ladder — aliasing it to q8 would load different numerics than the request
-/// named.
-pub const FP8R_QUANT_TIER: &str = "fp8r";
-
-/// The image models whose precision is one of the [`Flux3Tier`] packages (sc-26241). FLUX 3 Image
-/// Klein (distilled) is the only catalog FLUX 3 model; it is also the only model that ships a
-/// publisher FP8R package, so `quantTier: "fp8r"` anywhere else is refused rather than run at some
-/// other precision.
-pub static FLUX3_TIERED_MODEL_IDS: std::sync::LazyLock<Vec<&'static str>> =
-    std::sync::LazyLock::new(|| {
-        crate::registry::builtin_model_specs()
-            .filter(|spec| spec.product.family == "flux3" && spec.product.model_type == "image")
-            .map(|spec| spec.product.id.as_str())
-            .collect()
-    });
-
-/// The `advanced` keys that select a FLUX 3 precision. A consumer that judges the rest of the
-/// request surface strips exactly these once [`flux3_requested_tier`] has accepted them.
-pub const FLUX3_PRECISION_CARRIERS: &[&str] =
-    &["quantTier", "mlxQuantize", "mlxQuantizeExplicit", "convRot"];
-
-/// One FLUX 3 Image Klein weight package (sc-26241). Every tier is a DIFFERENT artifact, never a
-/// load-time transform of another:
-///
-/// * `bf16` — the dense package at the pinned snapshot root (both backends);
-/// * `q4` / `q8` — native packages converted on this machine from that dense package
-///   (`localDerivation`): Candle GGML Q4_1 / Q8_0 off-Mac, MLX affine W4/W8 (group 64) on macOS;
-/// * `fp8r` / `nvfp4` — the publisher packages at `variants/<tier>` inside the same snapshot, loaded
-///   as shipped by the Candle provider on CUDA hardware that clears their device floor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Flux3Tier {
-    Bf16,
-    Q4,
-    Q8,
-    Fp8Rowwise,
-    Nvfp4,
-}
-
-impl Flux3Tier {
-    pub const ALL: [Self; 5] = [
-        Self::Bf16,
-        Self::Q4,
-        Self::Q8,
-        Self::Fp8Rowwise,
-        Self::Nvfp4,
-    ];
-
-    /// The tier key every consumer names it by (manifest `variant`, fit gate, telemetry).
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Bf16 => "bf16",
-            Self::Q4 => "q4",
-            Self::Q8 => "q8",
-            Self::Fp8Rowwise => FP8R_QUANT_TIER,
-            Self::Nvfp4 => "nvfp4",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tier| tier.key() == key)
-    }
-
-    /// Whether the native MLX provider has this package (its descriptor advertises q4/q8 only).
-    pub const fn served_by_mlx(self) -> bool {
-        matches!(self, Self::Bf16 | Self::Q4 | Self::Q8)
-    }
-
-    /// Whether the native Candle provider has this package (q4/q8 on every build; fp8r/nvfp4 on
-    /// CUDA, gated per worker by [`Self::required_worker_capability`]).
-    pub const fn served_by_candle(self) -> bool {
-        true
-    }
-
-    /// The `mlxQuantize` bit width the recipe records, when the tier has an honest one.
-    pub const fn recipe_bits(self) -> Option<i64> {
-        match self {
-            Self::Q4 => Some(4),
-            Self::Q8 => Some(8),
-            Self::Bf16 | Self::Fp8Rowwise | Self::Nvfp4 => None,
-        }
-    }
-
-    /// The device-floor marker a Candle worker must advertise to be handed this tier: FP8R needs
-    /// sm_89+ and NVFP4 sm_120+ (the inference `DitFormat::check_device` floors). `None` for the
-    /// tiers every Candle device runs.
-    pub const fn required_worker_capability(self) -> Option<&'static str> {
-        match self {
-            Self::Fp8Rowwise => Some(FP8R_QUANT_TIER),
-            Self::Nvfp4 => Some("flux3_nvfp4"),
-            Self::Bf16 | Self::Q4 | Self::Q8 => None,
-        }
-    }
-
-    /// A publisher package shipped inside the pinned snapshot at `variants/<key>`.
-    pub const fn is_publisher_variant(self) -> bool {
-        matches!(self, Self::Fp8Rowwise | Self::Nvfp4)
-    }
-
-    /// A package converted locally from the dense one (a `localDerivation` catalog row).
-    pub const fn is_local_derivation(self) -> bool {
-        matches!(self, Self::Q4 | Self::Q8)
-    }
-}
-
-/// Whether `advanced.quantTier` names the FP8R tier (trimmed, ASCII case-insensitive — the same
-/// normalization every other named-tier reader applies).
-pub fn requests_fp8r_tier(advanced: &JsonObject) -> bool {
-    advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(FP8R_QUANT_TIER))
-}
-
-/// The FLUX 3 package a request's precision carriers name. Both public spellings are accepted —
-/// the named `quantTier` and the studio's `mlxQuantize` bit width (`0` dense, `4`, `8`) — and they
-/// must agree when both are present. Absent carriers mean the dense `bf16` package, never the
-/// app-wide `q8` default: a FLUX 3 tier is an installed artifact the request chooses.
-pub fn flux3_requested_tier(advanced: &JsonObject) -> Result<Flux3Tier, String> {
-    let named = match advanced.get("quantTier") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(tier)) if tier.trim().is_empty() => None,
-        Some(Value::String(tier)) => {
-            let key = tier.trim().to_ascii_lowercase();
-            Some(match key.as_str() {
-                "dense" => Flux3Tier::Bf16,
+pub fn flux3_requested_tier_resolved(options: &ImageAdvanced) -> Result<Flux3Tier, String> {
+    let named = options
+        .quant_tier
+        .as_ref()
+        .map(|bound| bound.value.trim())
+        .filter(|tier| !tier.is_empty())
+        .map(|tier| {
+            let key = tier.to_ascii_lowercase();
+            match key.as_str() {
+                "dense" => Ok(Flux3Tier::Bf16),
                 other => Flux3Tier::from_key(other).ok_or_else(|| {
                     format!(
                         "advanced.quantTier {tier:?} is not a FLUX 3 Image Klein package; the \
                          packages are bf16, q4, q8, fp8r and nvfp4"
                     )
-                })?,
-            })
-        }
-        Some(other) => {
-            return Err(format!(
-                "advanced.quantTier must be a tier name, not {other}"
-            ))
-        }
-    };
-    let bits = match advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => None,
-        Some(value) => {
-            let bits = value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .ok_or_else(|| format!("advanced.mlxQuantize must be an integer, not {value}"))?;
-            Some(match bits {
-                bits if bits <= 0 => Flux3Tier::Bf16,
-                4 => Flux3Tier::Q4,
-                8 => Flux3Tier::Q8,
-                other => {
-                    return Err(format!(
-                        "advanced.mlxQuantize {other} is not a FLUX 3 Image Klein package; the bit \
-                         tiers are 0 (bf16), 4 and 8"
-                    ))
-                }
-            })
-        }
-    };
-    if advanced
-        .get("convRot")
-        .is_some_and(|convrot| !matches!(convrot, Value::Null | Value::Bool(false)))
-    {
+                }),
+            }
+        })
+        .transpose()?;
+    let bits = options
+        .mlx_quantize
+        .as_ref()
+        .and_then(|bound| bound.value)
+        .map(|bits| match bits {
+            bits if bits <= 0 => Ok(Flux3Tier::Bf16),
+            4 => Ok(Flux3Tier::Q4),
+            8 => Ok(Flux3Tier::Q8),
+            other => Err(format!(
+                "advanced.mlxQuantize {other} is not a FLUX 3 Image Klein package; the bit \
+                 tiers are 0 (bf16), 4 and 8"
+            )),
+        })
+        .transpose()?;
+    if options.conv_rot.as_ref().is_some_and(|bound| bound.value) {
         return Err("advanced.convRot is not a FLUX 3 Image Klein package".to_owned());
     }
     match (named, bits) {
@@ -732,28 +1024,24 @@ pub fn flux3_requested_tier(advanced: &JsonObject) -> Result<Flux3Tier, String> 
     }
 }
 
-/// The request-shape rule for named precision tiers, shared by the API (typed 400), routing (the
-/// candle gap wording) and the worker trust boundary (raw queue writes, stored jobs). `None` =
-/// acceptable; `Some(reason)` = refuse.
-///
-/// * A [`FLUX3_TIERED_MODEL_IDS`] model must name exactly one of its packages
-///   ([`flux3_requested_tier`]).
-/// * Only those models ship a publisher FP8R package.
-///
-/// Backend capability (MLX serves bf16/q4/q8; FP8R/NVFP4 need a CUDA worker past their device
-/// floor) is NOT judged here: routing owns which lane and worker may run the tier.
-pub fn image_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<String> {
+pub use sceneworks_options::image_request::image_quant_tier_refusal;
+
+pub fn image_quant_tier_refusal_resolved(model: &str, options: &ImageAdvanced) -> Option<String> {
     if FLUX3_TIERED_MODEL_IDS.contains(&model) {
-        return flux3_requested_tier(advanced)
+        return flux3_requested_tier_resolved(options)
             .err()
             .map(|reason| format!("{model}: {reason}"));
     }
-    requests_fp8r_tier(advanced).then(|| {
-        format!(
-            "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
-             {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
-        )
-    })
+    options
+        .quant_tier
+        .as_ref()
+        .is_some_and(|tier| tier.value.trim().eq_ignore_ascii_case(FP8R_QUANT_TIER))
+        .then(|| {
+            format!(
+                "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
+                 {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
+            )
+        })
 }
 
 /// Refuse a FLUX 3 package absent from the authoritative catalog. Tier routing is a native
@@ -773,6 +1061,29 @@ pub fn flux3_catalog_tier_refusal(
         Ok(tier) => tier,
         Err(reason) => return Some(format!("{model}: {reason}")),
     };
+    flux3_catalog_tier_refusal_for_tier(model, tier, manifest)
+}
+
+pub fn flux3_catalog_tier_refusal_resolved(
+    model: &str,
+    options: &ImageAdvanced,
+    manifest: &Value,
+) -> Option<String> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    let tier = match flux3_requested_tier_resolved(options) {
+        Ok(tier) => tier,
+        Err(reason) => return Some(format!("{model}: {reason}")),
+    };
+    flux3_catalog_tier_refusal_for_tier(model, tier, manifest)
+}
+
+fn flux3_catalog_tier_refusal_for_tier(
+    model: &str,
+    tier: Flux3Tier,
+    manifest: &Value,
+) -> Option<String> {
     let declared =
         manifest
             .get("downloads")
@@ -805,6 +1116,249 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn resolved_image_options_preserve_effective_values_and_authored_origin() {
+        let authored = payload(json!({
+            "projectId": "p",
+            "advanced": {"steps": "8", "timestepShift": "2.5", "enhancePrompt": true}
+        }));
+        let effective = payload(json!({
+            "projectId": "p",
+            "advanced": {"steps": 8, "schedulerShift": 2.5, "enhancePrompt": true, "decoder": "native"}
+        }));
+        let request = ImageRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.advanced.get("steps"), Some(&json!("8")));
+        assert_eq!(request.advanced_i64("steps"), Some(8));
+        assert_eq!(request.advanced_f64("timestepShift"), Some(2.5));
+        assert_eq!(request.advanced_bool("enhancePrompt"), Some(true));
+        assert_eq!(request.advanced_text("decoder"), Some("native"));
+        assert_eq!(
+            request.effective_advanced_wire(),
+            effective
+                .get("advanced")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        let options = request.resolved_advanced.unwrap();
+        assert_eq!(
+            options.scheduler_shift.unwrap().origin,
+            crate::resolved_options::Origin::Authored {
+                spelling: "timestepShift"
+            }
+        );
+        assert!(matches!(
+            options.decoder.unwrap().origin,
+            crate::resolved_options::Origin::Default(_)
+        ));
+    }
+
+    #[test]
+    fn resolved_image_options_reject_noncanonical_effective_numbers() {
+        let payload = payload(json!({"advanced": {"steps": "8"}}));
+        assert!(matches!(
+            ImageRequest::from_resolved(&payload, &payload),
+            Err(BindingError::InvalidEffectiveValue { .. })
+        ));
+    }
+
+    #[test]
+    fn resolved_image_options_preserve_explicit_null_quantization() {
+        let authored = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
+        assert_eq!(request.advanced_i64("mlxQuantize"), None);
+        assert_eq!(request.resolved_quant_bits(), None);
+        assert_eq!(
+            request.effective_advanced_wire().get("mlxQuantize"),
+            Some(&Value::Null)
+        );
+        assert!(matches!(
+            request
+                .resolved_advanced
+                .unwrap()
+                .mlx_quantize
+                .unwrap()
+                .origin,
+            crate::resolved_options::Origin::Authored {
+                spelling: "mlxQuantize"
+            }
+        ));
+        let absent = payload(json!({"advanced": {}}));
+        assert!(ImageRequest::from_resolved(&absent, &absent)
+            .unwrap()
+            .resolved_advanced
+            .unwrap()
+            .mlx_quantize
+            .is_none());
+    }
+
+    #[test]
+    fn verified_bound_tier_fills_only_absent_quantization() {
+        let trusted = payload(json!({"advanced": {
+            "__portableFrozenSources": true,
+            "__portableBoundTier": "q4"
+        }}));
+        let portable_aux =
+            crate::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(&trusted)
+                .unwrap();
+        let empty = payload(json!({"advanced": {}}));
+        let mut request = ImageRequest::from_resolved(&empty, &empty).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.resolved_quant_bits(), Some(4));
+
+        let explicit = payload(json!({"advanced": {"mlxQuantize": 8}}));
+        let mut request = ImageRequest::from_resolved(&explicit, &explicit).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.resolved_quant_bits(), Some(8));
+
+        let null = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let mut request = ImageRequest::from_resolved(&null, &null).unwrap();
+        request.portable_aux = portable_aux;
+        assert_eq!(request.resolved_quant_bits(), None);
+    }
+
+    #[test]
+    fn artifact_probe_changes_only_typed_quantization() {
+        let payload = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let probe = request.with_probe_quant_bits(4);
+        assert_eq!(probe.resolved_quant_bits(), Some(4));
+        assert_eq!(request.resolved_quant_bits(), None);
+        assert_eq!(probe.advanced, request.advanced);
+        assert_eq!(
+            probe.effective_advanced_wire().get("mlxQuantize"),
+            Some(&json!(4))
+        );
+        assert_eq!(
+            probe
+                .resolved_advanced
+                .unwrap()
+                .mlx_quantize
+                .unwrap()
+                .origin,
+            crate::resolved_options::Origin::Internal("artifact tier probe")
+        );
+    }
+
+    #[test]
+    fn typed_flux3_tier_preserves_named_bits_and_conflict() {
+        for (advanced, expected) in [
+            (json!({}), Ok(Flux3Tier::Bf16)),
+            (json!({"quantTier":"Q4"}), Ok(Flux3Tier::Q4)),
+            (json!({"mlxQuantize":8}), Ok(Flux3Tier::Q8)),
+            (
+                json!({"quantTier":"dense","mlxQuantize":0}),
+                Ok(Flux3Tier::Bf16),
+            ),
+            (json!({"quantTier":"q4","mlxQuantize":8}), Err(())),
+            (json!({"convRot":true}), Err(())),
+        ] {
+            let authored = payload(json!({"advanced": advanced}));
+            let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
+            assert_eq!(request.resolved_flux3_tier().map_err(|_| ()), expected);
+            assert_eq!(
+                request.resolved_flux3_tier(),
+                flux3_requested_tier(&request.advanced)
+            );
+        }
+    }
+
+    #[test]
+    fn flux3_reference_request_uses_bound_advanced_fields() {
+        let valid = payload(json!({
+            "model": "flux3_klein", "mode": "edit_image",
+            "referenceAssetId": "asset-a",
+            "advanced": {"flux3_reference_ids": ["slot-a"]}
+        }));
+        let request = ImageRequest::from_resolved(&valid, &valid).unwrap();
+        let references = request.flux3_reference_request.unwrap().unwrap();
+        assert_eq!(references.asset_ids, vec!["asset-a"]);
+        assert_eq!(references.reference_ids, Some(vec!["slot-a".to_owned()]));
+
+        let unsupported = payload(json!({
+            "model": "flux3_klein", "referenceAssetId": "asset-a",
+            "advanced": {"strength": 1.0}
+        }));
+        let request = ImageRequest::from_resolved(&unsupported, &unsupported).unwrap();
+        assert!(request
+            .flux3_reference_request
+            .unwrap()
+            .unwrap_err()
+            .contains("strength"));
+
+        let authored =
+            payload(json!({"model":"flux3_klein","referenceAssetId":"asset-a","advanced":{}}));
+        let effective = payload(
+            json!({"model":"flux3_klein","referenceAssetId":"asset-a","advanced":{"strength":0.5}}),
+        );
+        assert!(ImageRequest::from_resolved(&authored, &effective)
+            .unwrap()
+            .flux3_reference_request
+            .unwrap()
+            .is_ok());
+    }
+
+    #[test]
+    fn pid_checkpoint_binds_named_fields() {
+        let payload = payload(json!({"advanced": {"pidCheckpoint": {
+            "repo": "SceneWorks/pid-flux", "filename": "student.safetensors"
+        }}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let checkpoint = &request
+            .resolved_advanced
+            .unwrap()
+            .pid_checkpoint
+            .unwrap()
+            .value;
+        assert_eq!(checkpoint.repo.as_deref(), Some("SceneWorks/pid-flux"));
+        assert_eq!(checkpoint.filename.as_deref(), Some("student.safetensors"));
+    }
+
+    #[test]
+    fn control_weights_preserve_nested_shape_for_route_specific_checks() {
+        let payload = payload(json!({"advanced": {"controlWeights": {
+            "repo": 7, "filename": " ../escape ", "overlayId": " depth ",
+            "_catalogAuthorized": "yes", "revision": null
+        }}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let weights = &request
+            .resolved_advanced
+            .as_ref()
+            .unwrap()
+            .control_weights
+            .as_ref()
+            .unwrap()
+            .value;
+        assert!(weights.repo.is_invalid());
+        assert_eq!(weights.filename.valid_trimmed(), Some("../escape"));
+        assert_eq!(weights.overlay_id.valid_trimmed(), Some("depth"));
+        assert!(weights.catalog_authorized.is_invalid());
+        assert_eq!(weights.revision, ControlWeightField::Null);
+        assert_eq!(
+            request
+                .effective_advanced_wire()
+                .get("controlWeights")
+                .unwrap(),
+            &json!({"filename":" ../escape ","overlayId":" depth ","revision":null})
+        );
+    }
+
+    #[test]
+    fn moss_embedding_batch_count_uses_bound_metadata() {
+        let request = payload(json!({
+            "model": "moss_image_sft",
+            "mode": "edit_image",
+            "count": 2,
+            "advanced": {"mossImageAdvanced": {"positive": {"values": {
+                "assetId": "embedding-1", "sha256": "abc",
+                "metadata": {"dtype": "f32", "shape": [3, 64], "byteLength": 768, "sha256": "abc"}
+            }}}}
+        }));
+        let bound = ImageRequest::from_resolved(&request, &request).unwrap();
+        assert_eq!(bound.image_count(), 6);
     }
 
     #[test]
@@ -878,7 +1432,7 @@ mod tests {
     #[test]
     fn hires_fix_refusal_follows_the_immutable_supports_hires_fix_fact() {
         let hires = |model: &str, entry: Value| {
-            ImageRequest::from_payload(&payload(json!({
+            let payload = payload(json!({
                 "projectId": "p",
                 "model": model,
                 "mode": "text_to_image",
@@ -886,7 +1440,8 @@ mod tests {
                 "height": 1024,
                 "modelManifestEntry": entry,
                 "hiresFix": { "enabled": true, "upscaleBy": 1.5 }
-            })))
+            }));
+            ImageRequest::from_resolved(&payload, &payload).unwrap()
         };
         let lightning = crate::registry::builtin_model_spec("realvisxl_lightning").unwrap();
         assert!(!lightning.product.supports_hires_fix());
@@ -1235,68 +1790,9 @@ mod tests {
     }
 }
 
-fn unsigned_or(value: Option<&Value>, default: u32) -> u32 {
-    value
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(default)
-}
-
-/// Count validation shared by typed HTTP requests and raw worker payloads.
-pub fn image_count_error(count: u32) -> Option<String> {
-    (!(MIN_COUNT..=MAX_COUNT).contains(&count)).then(|| "count must be between 1 and 8".to_owned())
-}
-
-/// Validate raw queued intent before tolerant parsing can hide malformed fields. Uses the canonical
-/// manifest's existing per-model envelope and FLUX.3's reference-derived geometry contract.
-pub fn validate_image_request_payload(
-    payload: &JsonObject,
-    entry: &JsonObject,
-) -> Result<(), String> {
-    for key in ["count", "width", "height"] {
-        if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
-            if value.as_u64().and_then(|n| u32::try_from(n).ok()).is_none() {
-                return Err(format!("{key} must be an unsigned integer"));
-            }
-        }
-    }
-    let count = unsigned_or(
-        payload.get("count"),
-        default_count(entry).unwrap_or(DEFAULT_COUNT),
-    );
-    if let Some(error) = image_count_error(count) {
-        return Err(error);
-    }
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_MODEL);
-    let reference_derived = flux3::is_model(model) && !flux3::parse(payload)?.asset_ids.is_empty();
-    if !reference_derived {
-        let (width, height) =
-            default_resolution(entry).unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
-        if let Some(error) = crate::image_limits::image_dimension_error(
-            model,
-            unsigned_or(payload.get("width"), width),
-            unsigned_or(payload.get("height"), height),
-            entry,
-            MIN_DIMENSION,
-            MAX_DIMENSION,
-        ) {
-            return Err(error);
-        }
-    }
-    let upscale = match payload.get("upscale").filter(|v| !v.is_null()) {
-        None => ImageUpscaleRequest::default(),
-        Some(value) => serde_json::from_value::<ImageUpscaleRequest>(value.clone())
-            .map_err(|error| format!("upscale: {error}"))?,
-    };
-    upscale.validate()
-}
+pub use sceneworks_options::image_request::{
+    image_count_error, unsigned_or, validate_image_request_payload,
+};
 
 #[cfg(test)]
 mod request_validation_tests {

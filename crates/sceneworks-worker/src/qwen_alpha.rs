@@ -57,7 +57,9 @@
 //! channels as an RGBA PNG. An alpha-carrying reference travels as `Conditioning::ReferenceRgba`
 //! (see `image_jobs::build_qwen_image_2_1_conditioning`).
 
-use serde_json::{Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::Value;
 
 use crate::{WorkerError, WorkerResult};
 
@@ -127,6 +129,7 @@ pub(crate) fn engine_advertises_alpha_output(model_id: &str) -> bool {
 /// Reads the SceneWorks request axis, not the engine field. Absent, null, `false` and any
 /// non-boolean all mean "no": a toggle that arrives malformed must not silently change what the
 /// render emits.
+#[cfg(test)]
 pub(crate) fn transparency_requested(advanced: &Map<String, Value>) -> bool {
     advanced
         .get(ADVANCED_TRANSPARENT_BACKGROUND)
@@ -144,11 +147,20 @@ pub(crate) fn transparency_requested(advanced: &Map<String, Value>) -> bool {
 /// cut-out and got an opaque render on a white background has to discover that by looking; a job
 /// that fails saying the model cannot do it is actionable. This mirrors the steps-floor decision in
 /// `create_image_job` (reject, never clamp).
+#[cfg(test)]
 pub(crate) fn resolve_output_channels(
     model_id: &str,
     advanced: &Map<String, Value>,
 ) -> WorkerResult<u8> {
-    if !transparency_requested(advanced) {
+    resolve_output_channels_typed(model_id, transparency_requested(advanced))
+}
+
+/// Resolve from the already-bound effective transparency control.
+pub(crate) fn resolve_output_channels_typed(
+    model_id: &str,
+    transparent_requested: bool,
+) -> WorkerResult<u8> {
+    if !transparent_requested {
         return Ok(CHANNELS_RGB);
     }
     if engine_advertises_alpha_output(model_id) {

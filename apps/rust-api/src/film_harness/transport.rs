@@ -364,12 +364,12 @@ impl JobView {
             result: snapshot.get("result").cloned().unwrap_or(Value::Null),
             reference_image_resize_mode: snapshot
                 .get("payload")
-                .and_then(|payload| payload.get("advanced"))
                 .and_then(Value::as_object)
-                .and_then(|advanced| {
-                    sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
-                        .ok()
-                        .flatten()
+                .and_then(|payload| {
+                    match sceneworks_core::resolved_options::PersistedVideoResizeModeFact::from_payload_syntax(payload).mode {
+                        sceneworks_core::resolved_options::RouteField::Valid(mode) => Some(mode),
+                        _ => None,
+                    }
                 }),
         })
     }

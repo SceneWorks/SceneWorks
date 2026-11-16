@@ -6,6 +6,8 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 vi.mock("./api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(async () => ({})) }));
 import old from "./testUtils/catalogBaseline/old-catalog.json";
 import { population, unionPopulation, requireOldPopulation, keyFor, observe } from "./testUtils/catalogBaseline/harness.jsx";
+import { controlInventory } from "./testUtils/catalogBaseline/controlInventory.js";
+import { frozenControlInventory } from "./testUtils/catalogBaseline/frozenControlInventory.js";
 const observationsPath = "src/testUtils/catalogBaseline/old-observations.json";
 const candidate = currentCandidate();
 const candidateRows = population(candidate);
@@ -13,11 +15,47 @@ const baseline = existsSync(observationsPath) ? JSON.parse(readFileSync(observat
 const capture = process.env.CAPTURE_OLD_CATALOG === old.source.revision;
 const oldRows = capture ? population(old.catalog) : baseline.population;
 const captured = {};
+const inventoryPath = "src/testUtils/catalogBaseline/old-control-inventory.json";
+const captureInventory = process.env.CAPTURE_OLD_CONTROLS === old.source.revision;
+const inventory = existsSync(inventoryPath) ? JSON.parse(readFileSync(inventoryPath, "utf8")) : {};
+const capturedInventory = {};
+// Many surfaces share identical controls, so store each distinct control group only once.
+function packInventory(rows) {
+  const groups = [];
+  const seen = new Map();
+  const intern = (group) => {
+    const key = JSON.stringify(group);
+    if (!seen.has(key)) { seen.set(key, groups.length); groups.push(group); }
+    return seen.get(key);
+  };
+  return { source: old.source, groups, rows: Object.fromEntries(Object.entries(rows).map(
+    ([key, { backend, controls, menus }]) => [key, { backend, controls: intern(controls),
+      menus: menus.map((menu) => ({ ...menu, controls: intern(menu.controls) })) }])) };
+}
 function unpack(row) { return { ...row, controls: row.controls.map((id) => baseline.controls[id]),
   submission: { ...row.submission, calls: baseline.calls[row.submission.calls] },
   changes: row.changes.map((change) => ({ ...change, calls: baseline.calls[change.calls], persisted: change.persisted == null ? null : baseline.states[change.persisted] })),
   persisted: baseline.states[row.persisted],
 }; }
+// New H3-only UI state is persisted even on old models. Assert its default before
+// projecting it out of persisted state; every old field and request stays compared.
+function oldPersistedState(value) {
+  if (Array.isArray(value)) return value.map(oldPersistedState);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "h3ImageSampler") {
+      expect(child).toEqual({ sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+    } else if (key === "h3ExpandOpen") {
+      expect(child).toBe(false);
+    } else result[key] = oldPersistedState(child);
+  }
+  return result;
+}
+function oldSurface(actual) {
+  return { ...actual, persisted: oldPersistedState(actual.persisted),
+    changes: actual.changes.map((change) => ({ ...change, persisted: oldPersistedState(change.persisted) })) };
+}
 function pack(rows) {
   const controls = [], calls = [], states = [], indices = [new Map(), new Map(), new Map()];
   const intern = (pool, index, value) => { const key = JSON.stringify(value); if (!index.has(key)) { index.set(key, pool.length); pool.push(value); } return index.get(key); };
@@ -34,7 +72,7 @@ beforeAll(() => {
   vi.spyOn(Date, "now").mockReturnValue(1794000000000);
   vi.spyOn(Math, "random").mockReturnValue(0.25);
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("Baseline fixture must not fetch or execute a model"); }));
-  if (capture) {
+  if (capture || captureInventory) {
     expect(execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(old.source.revision);
     expect(execFileSync("git", ["diff", old.source.revision, "--", ...Object.keys(old.source.trees)], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })).toBe("");
   } else requireOldPopulation(old.catalog, candidate, oldRows);
@@ -42,6 +80,8 @@ beforeAll(() => {
 describe("pinned public catalog (SW-7028)", () => {
   it("retains every old catalog model even when no generation studio uses it", () => {
     expect(old.catalog.models).toHaveLength(143);
+    expect(old.catalog.trainingTargets.targets).toHaveLength(26);
+    expect(oldRows).toHaveLength(1197);
     expect(old.source.revision).toBe("d3f7b05bf22826e44fd43da19cff0985fb17d68b");
     expect(old.source.inferenceSource).toContain("4a36a7f8c9645110df4df656ca9d492e55ab6c7c");
     expect(() => requireOldPopulation(old.catalog, { ...candidate, models: candidate.models.filter((m) => m.id !== "starvector_1b") })).toThrow(/starvector_1b/);
@@ -50,12 +90,40 @@ describe("pinned public catalog (SW-7028)", () => {
   });
   for (const row of unionPopulation(oldRows, candidateRows)) {
     it(keyFor(row), async () => {
-      const actual = await observe(capture ? old.catalog : candidate, row);
+      const actual = await observe(capture || captureInventory ? old.catalog : candidate, row);
       if (capture) captured[keyFor(row)] = actual;
-      else expect(actual).toEqual(unpack(baseline.rows[keyFor(row)]));
+      else {
+        const catalog = captureInventory ? old.catalog : candidate;
+        const snapshot = controlInventory(actual, catalog.platforms[row.platform], row);
+        if (captureInventory) capturedInventory[keyFor(row)] = snapshot;
+        else {
+          for (const controls of [snapshot.controls, ...snapshot.menus.map((menu) => menu.controls)]) {
+            expect(controls.every(({ id, controlId }) => Boolean(id) && Boolean(controlId))).toBe(true);
+            expect(new Set(controls.map(({ controlId }) => controlId)).size).toBe(controls.length);
+          }
+          if (inventory.rows[keyFor(row)]) {
+            expect(snapshot).toEqual(frozenControlInventory(keyFor(row)));
+          } else {
+            // This model landed after the pinned capture; its dedicated mounted tests own
+            // behavior. Keep its controls in the explicit identity inventory.
+            expect(row.model).toMatch(/^minimax_h3_image/);
+            const ids = snapshot.controls.map((control) => control.id);
+            if (row.studio === "image") expect(ids).toContain("h3ImageSampler");
+            if (row.studio === "training") expect(ids).toContain("h3ImageLicenseAccepted");
+          }
+        }
+        if (baseline.rows[keyFor(row)]) expect(oldSurface(actual)).toEqual(unpack(baseline.rows[keyFor(row)]));
+      }
     });
   }
   it("publishes only explicit old-tree captures", () => {
+    if (captureInventory) {
+      expect(Object.keys(capturedInventory)).toEqual(oldRows.map(keyFor));
+      writeFileSync(inventoryPath, renderBaseline(packInventory(capturedInventory)) + "\n");
+    } else if (!capture) {
+      expect(inventory.source).toEqual(old.source);
+      expect(Object.keys(inventory.rows)).toEqual(oldRows.map(keyFor));
+    }
     if (capture) { expect(Object.keys(captured)).toEqual(oldRows.map(keyFor)); writeFileSync(observationsPath, `${renderBaseline({ source: old.source, population: oldRows, ...pack(captured) })}\n`); }
     else expect(Object.keys(baseline.rows)).toEqual(oldRows.map(keyFor));
   });

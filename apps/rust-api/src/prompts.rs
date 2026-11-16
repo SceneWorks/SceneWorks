@@ -4,7 +4,9 @@ use super::*;
 /// reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so the cost scales with N; this bounds
 /// the vision attention + context a single request can demand. The Image Studio picker enforces the same
 /// ceiling client-side — this is the authoritative server-side guard.
-pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
+pub(crate) use sceneworks_core::request_validation::utility_validation::{
+    MAX_MOOD_BOARD_IMAGES, MAX_QWEN_REWRITE_IMAGES,
+};
 
 // The API and worker classify the same core-owned discriminator.
 pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;
@@ -12,16 +14,6 @@ pub(crate) use sceneworks_core::contracts::{
     MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, MINIMAX_H3_IMAGE_EXPAND_TASK,
     MINIMAX_H3_IMAGE_MODEL_ID, MINIMAX_H3_IMAGE_PE_MODEL_ID,
 };
-
-/// Maximum reference images on a Qwen-Image 2.1 rewrite request.
-///
-/// TEN, not [`MAX_MOOD_BOARD_IMAGES`], and the difference is not a loosened guard but a different
-/// contract. A mood board is a synthesis whose cost the 6 bounds; a rewrite must be shown EXACTLY
-/// the ordered list the render will condition on (S3 edit contract: 1–10), or its `ratio_follow`
-/// ("<image2>") names a different picture than the one the user attached. The engine and the image
-/// enqueue path both cap at 10, so this is the same number stated at the third seam rather than a
-/// new one.
-pub(crate) const MAX_QWEN_REWRITE_IMAGES: usize = 10;
 
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
@@ -31,11 +23,14 @@ pub(crate) async fn create_prompt_refine_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<PromptRefineRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let task = payload
-        .task
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let effective = sceneworks_core::request_validation::resolve(
+        "promptRefine",
+        &to_json_object(&payload)?,
+        &JsonObject::new(),
+    )
+    .map_err(ApiError::from)?;
+    // Keep the authored DTO for persistence; use the owner's effective view for decisions.
+    let task = effective.get("task").and_then(Value::as_str);
     // The reference-image vision tasks — `image_caption` (epic 8102, sc-8108) → JSON caption, and
     // `image_describe` (epic 8203, sc-8206) → plain-text description — are driven by an image, not a
     // text prompt: they carry a project `sourceAssetId` instead. Resolve that to the worker's confined
@@ -53,9 +48,6 @@ pub(crate) async fn create_prompt_refine_job(
     let carries_reference_images = is_vision_task || is_qwen_rewrite || is_h3_expand;
 
     let prompt = payload.prompt.trim();
-    if prompt.is_empty() && !is_vision_task {
-        return Err(ApiError::bad_request("Prompt cannot be empty"));
-    }
 
     let mut job_payload = JsonObject::new();
     if !prompt.is_empty() {
@@ -200,11 +192,6 @@ pub(crate) async fn create_prompt_refine_job(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if !matches!(thinking_mode, "disabled" | "enabled" | "auto") {
-                return Err(ApiError::bad_request(
-                    "thinkingMode must be disabled, enabled, or auto",
-                ));
-            }
             job_payload.insert(
                 "thinkingMode".to_owned(),
                 Value::String(thinking_mode.to_owned()),
@@ -220,25 +207,20 @@ pub(crate) async fn create_prompt_refine_job(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        if !matches!(kv_compression, "off" | "qualified") {
-            return Err(ApiError::bad_request(
-                "kvCompression must be off or qualified",
-            ));
-        }
         job_payload.insert(
             "kvCompression".to_owned(),
             Value::String(kv_compression.to_owned()),
         );
     }
 
-    let workflow = payload
-        .workflow
-        .as_deref()
+    if let Some(workflow) = effective
+        .get("workflow")
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("image")
-        .to_owned();
-    job_payload.insert("workflow".to_owned(), Value::String(workflow));
+    {
+        job_payload.insert("workflow".to_owned(), Value::String(workflow.to_owned()));
+    }
 
     if let Some(model_id) = payload.model_id.as_deref() {
         if !model_id.trim().is_empty() {

@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_spec::attach_manifest_text_encoder;
 #[cfg(target_os = "macos")]
@@ -8,8 +9,8 @@ use super::qwen::QWEN_CONTROL_ENGINE_ID;
 #[cfg(target_os = "macos")]
 use super::qwen::QWEN_CONTROL_FILE;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 use super::tier_resolver::qwen_control_tier_subdir;
@@ -22,7 +23,6 @@ use super::Progress;
 use super::QwenFunControl;
 use super::QwenFunControlPaths;
 use super::QwenFunControlRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
@@ -115,10 +115,15 @@ fn resolve_qwen_control_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen control modelPath").map(Some);
@@ -135,20 +140,35 @@ fn resolve_qwen_control_base(
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::qwen_control_candle_eligible` so the worker and router agree.
 pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    qwen_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn qwen_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    qwen_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn qwen_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_qwen_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_qwen_control_base(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → default (30).
 fn qwen_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", QWEN_CONTROL_DEFAULT_STEPS, 1..=100)
+    resolved_option_or_manifest_u32(request, "steps", QWEN_CONTROL_DEFAULT_STEPS, 1..=100)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
 fn qwen_control_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         QWEN_CONTROL_DEFAULT_GUIDANCE,
@@ -168,14 +188,14 @@ pub(super) fn qwen_control_repo_file(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .map(str::to_owned)
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .map(str::to_owned)
     };
     let repo = pick("repo").unwrap_or_else(|| QWEN_CONTROL_REPO.to_owned());
     let file = match pick("filename") {
@@ -228,8 +248,11 @@ async fn ensure_qwen_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -444,13 +467,16 @@ impl CandleStrictControl for QwenStrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = self.control_request(seed, cancel, preview);
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!(
-                "Qwen 2512-Fun strict-control generation failed: {error}"
-            ))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!(
+                    "Qwen 2512-Fun strict-control generation failed: {error}"
+                ))
+            })?;
+        completed_control_image(completed)
     }
 }
 
@@ -460,11 +486,13 @@ impl CandleStrictControl for QwenStrictControl {
 /// `qwen_image_control`'s `supported_kinds`, per-pose preprocessing, scoring). `generate` takes the
 /// per-job `CancelFlag` + a `Progress` callback (per-step streaming + mid-denoise cancel). The pose path
 /// is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_qwen_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -477,8 +505,8 @@ pub(super) async fn generate_candle_qwen_control_stream(
 
     let steps = qwen_control_steps(request);
     let guidance = qwen_control_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         QWEN_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
@@ -489,7 +517,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         })
         .to_owned();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
     // The adapter stack rides the LoadSpec, not `QwenFunControlPaths`: `load_with_spec` rebuilds the
@@ -528,6 +556,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await
@@ -539,11 +568,22 @@ mod qwen_control_tier_tests {
     use serde_json::json;
 
     fn request(advanced: serde_json::Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "qwen_image", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let value = json!({ "model": "qwen_image", "advanced": advanced });
+        let authored = value.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some("0") = effective
+            .get("advanced")
+            .and_then(|value| value.get("mlxQuantize"))
+            .and_then(serde_json::Value::as_str)
+        {
+            effective
+                .get_mut("advanced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("mlxQuantize".to_owned(), json!(0));
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// Write a present `<tier>/model.safetensors` overlay so [`qwen_control_tier_subdir`]'s clamp sees

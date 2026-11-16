@@ -1,3 +1,4 @@
+import { isSettingsRefusal, SettingsRefusal } from "./SettingsRefusal.jsx";
 import React, { useState } from "react";
 
 const pendingScreenImports = new Set();
@@ -22,6 +23,10 @@ class LazyLoadErrorBoundary extends React.Component {
   render() {
     if (!this.state.error) {
       return this.props.children;
+    }
+
+    if (isSettingsRefusal(this.state.error)) {
+      return <SettingsRefusal error={this.state.error} />;
     }
 
     if (this.props.interaction) {

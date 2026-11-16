@@ -85,11 +85,40 @@ const cases = [
       requestedGpu: "gpu-2",
     },
   },
+  {
+    key: "vectorPrompt",
+    args: [{ rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo" }],
+    path: "/api/v1/image/vectorize/prompt/jobs",
+    body: {
+      rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo",
+      projectId: "project-7", projectName: "Project Seven", requestedGpu: "gpu-2",
+    },
+  },
 ];
 
 describe("makeCreateJob", () => {
   beforeEach(() => {
     apiFetch.mockReset();
+  });
+
+  it("surfaces the authoritative server refusal without trusting client catalog facts", async () => {
+    const refusal = { code: "invalid_generation_option", field: "width", detail: "width exceeds the model limit" };
+    apiFetch.mockRejectedValue(Object.assign(new Error(refusal.detail), refusal));
+    const setError = vi.fn();
+    const creator = makeCreateJob({
+      definition: CREATE_JOB_DEFINITIONS.image,
+      token: "token-1",
+      project,
+      requestedGpu: "auto",
+      setJobs: vi.fn(),
+      setError,
+    });
+
+    await expect(creator.withResult([{ model: "model-a", width: 2048 }])).resolves.toMatchObject({
+      error: refusal.detail,
+    });
+    expect(apiFetch).toHaveBeenCalledOnce();
+    expect(setError).toHaveBeenCalledWith(refusal.detail);
   });
 
   it.each(cases)("preserves the $key route and request body", async ({ key, args, path, body }) => {

@@ -44,6 +44,7 @@ for (const contract of [
   "ghcr.io/sceneworks/sceneworks-runpod",
   "actions/checkout@",
   "actions/setup-node@",
+  'node-version: "22"',
   "docker/login-action@",
   "registry: ghcr.io",
   "username: ${{ github.actor }}",

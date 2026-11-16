@@ -423,7 +423,7 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
 fn minimax_h3_image_targets_train_t2i_and_edit_pairs_at_2048_under_the_community_licence() {
     use sceneworks_core::training::{
         training_target_max_reference_images, training_target_requires_license_acknowledgment,
-        validate_training_config_for_target, MINIMAX_H3_IMAGE_LICENSE,
+        validate_training_config_for_target, TrainingPlanError, MINIMAX_H3_IMAGE_LICENSE,
         MINIMAX_H3_IMAGE_LICENSE_URL, MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES,
     };
     let registry = builtin_training_targets();
@@ -532,12 +532,15 @@ fn minimax_h3_image_targets_train_t2i_and_edit_pairs_at_2048_under_the_community
         ] {
             let mut config = target.defaults.clone();
             config.advanced.insert("baseTier".to_owned(), json!(tier));
-            assert_eq!(
-                validate_training_config_for_target(target, &config).is_ok(),
-                ok,
-                "{}: baseTier {tier}",
-                target.id
-            );
+            let outcome = validate_training_config_for_target(target, &config);
+            assert_eq!(outcome.is_ok(), ok, "{}: baseTier {tier}", target.id);
+            if !ok {
+                assert!(
+                    matches!(outcome, Err(TrainingPlanError::InvalidField { field, .. }) if field == "baseTier"),
+                    "{}: baseTier {tier} needs a field refusal",
+                    target.id
+                );
+            }
         }
     }
     assert_ne!(t2i.kernel, edit.kernel, "edit training has its own kernel");
@@ -556,7 +559,10 @@ fn minimax_h3_image_targets_train_t2i_and_edit_pairs_at_2048_under_the_community
     let other = find("qwen_image_2_1_lora");
     let mut config = other.defaults.clone();
     config.advanced.insert("baseTier".to_owned(), json!("q4"));
-    assert!(validate_training_config_for_target(other, &config).is_err());
+    assert!(matches!(
+        validate_training_config_for_target(other, &config),
+        Err(TrainingPlanError::InvalidField { field, .. }) if field == "baseTier"
+    ));
 
     // Edit-pair shape floor on the H3-Image kernels: an edit item needs references, a T2I item none.
     use sceneworks_core::training::edit_pair_kernel_shape_error;

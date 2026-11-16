@@ -567,6 +567,23 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam2::PROVIDER_ID,";
   assert.doesNotThrow(() => assertFor("fam2_img"));
   assert.throws(() => assertFor("fam_img"), /never names it/);
+  // SW-7158: the native family can re-export one serde-only policy owner.
+  sources["crates/contracts/gen-core-checkpoint/src/fam2.rs"] =
+    "pub use gen_core_fam2_policy::PROVIDER_ID;\n";
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "fam2_img";\n';
+  assert.doesNotThrow(() => assertFor("fam2_img"));
+  assert.throws(() => assertFor("fam_img"), /never names it/);
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "wrong_img";\n';
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
+  delete sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"];
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "fam2_img";\n';
+  sources["crates/contracts/gen-core-checkpoint/src/fam2.rs"] =
+    "use gen_core_fam2_policy::PROVIDER_ID;\n";
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
   // A sibling reference to a family the sibling crate does not declare still refuses.
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam::PROVIDER_ID,";
   assert.throws(() => assertFor("fam_img"), /never names it/);

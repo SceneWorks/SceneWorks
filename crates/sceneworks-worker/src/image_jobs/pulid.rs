@@ -14,9 +14,9 @@ use super::quantization::resolve_quant;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_cached_gen_stream_with_request_state;
@@ -30,7 +30,6 @@ use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
 use super::WeightsSource;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
 use crate::ApiClient;
@@ -125,13 +124,7 @@ fn resolve_pulid_flux_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "PuLID-FLUX modelPath").map(Some);
     }
     let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
@@ -161,24 +154,19 @@ pub(super) fn pulid_flux_available(request: &ImageRequest, settings: &Settings) 
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG; the engine's fake-CFG single forward consumes it).
 fn pulid_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
+    resolved_option_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
 }
 
 /// The PuLID identity-strength knob → the reference conditioning's `strength` (the engine reads
 /// it as `id_weight`). Torch clamp band 0.0–3.0 (the upstream gradio slider), default 1.0.
 fn pulid_id_weight(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(
-        &request.advanced,
-        "idWeight",
-        PULID_DEFAULT_ID_WEIGHT,
-        0.0..=3.0,
-    )
+    super::sampling::resolved_f32_clamped(request, "idWeight", PULID_DEFAULT_ID_WEIGHT, 0.0..=3.0)
 }
 
 /// `timestep_to_start_cfg` (higher = identity injected later = more editable / weaker identity).
@@ -187,8 +175,8 @@ fn pulid_id_weight(request: &ImageRequest) -> f32 {
 /// no-op on output — but it is forwarded + recorded for parity and forward-compat with the
 /// real-CFG path (sc-3075).
 fn pulid_timestep_to_start_cfg(request: &ImageRequest) -> u32 {
-    advanced::u32_clamped(
-        &request.advanced,
+    super::sampling::resolved_u32_clamped(
+        request,
         "timestepToStartCfg",
         PULID_DEFAULT_TIMESTEP_TO_START_CFG,
         0..=20,
@@ -297,7 +285,7 @@ fn pulid_raw_settings(
     id_weight: f32,
     timestep_to_start_cfg: u32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("pulidFlux".to_owned(), Value::Bool(true));
@@ -406,9 +394,9 @@ pub(super) async fn generate_pulid_flux_stream(
     )?;
 
     let mut _portable_face_lease = None;
-    let weights = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+    let weights = if request.portable_aux.has_paths() {
         let (adapter, eva, face_dir, lease) =
-            crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
+            crate::portable_aux_sources::bound_pulid_weights_typed(&request.portable_aux)?;
         _portable_face_lease = Some(lease);
         PulidWeights {
             adapter,
@@ -448,7 +436,7 @@ pub(super) async fn generate_pulid_flux_stream(
     // N3-normalize against the shared curated menu (an unknown name drops to the engine default + emits
     // an event). N1: unset ⇒ `None` ⇒ the native flow-match default loop runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -499,6 +487,7 @@ pub(super) async fn generate_pulid_flux_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         true,
         "PuLID-FLUX face-stack staging failed; likeness scores omitted",
     )

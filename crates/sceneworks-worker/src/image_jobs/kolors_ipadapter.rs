@@ -11,19 +11,19 @@ use super::memory::candle_resolved_tier_key;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::IpAdapterKolors;
 use super::IpAdapterKolorsPaths;
 use super::IpAdapterKolorsRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::resolve_app_managed_model_dir;
 use crate::ApiClient;
@@ -95,13 +95,7 @@ fn resolve_kolors_ipadapter_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "Kolors IP-Adapter modelPath")
             .map(Some);
     }
@@ -130,12 +124,12 @@ pub(super) fn kolors_ipadapter_available(request: &ImageRequest, settings: &Sett
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
 fn kolors_ipadapter_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KOLORS_IPADAPTER_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", KOLORS_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn kolors_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         KOLORS_IPADAPTER_DEFAULT_GUIDANCE,
@@ -152,14 +146,15 @@ async fn ensure_kolors_ipadapter_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-            return crate::portable_aux_sources::bound_aux_path(advanced, "kolors_ip_adapter")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
-                });
-        }
+    if portable_aux.has_paths() {
+        return portable_aux
+            .path("kolors_ip_adapter")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
+            });
     }
     let has_layout = |dir: &Path| {
         dir.join(KOLORS_IPADAPTER_BUNDLE).is_file()
@@ -225,7 +220,7 @@ fn kolors_ipadapter_raw_settings(
     guidance: f32,
     ip_scale: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -271,7 +266,8 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         reference_id,
         project_path,
     )?;
-    let ip_adapter = ensure_kolors_ipadapter_weights(api, settings, job).await?;
+    let ip_adapter =
+        ensure_kolors_ipadapter_weights(api, settings, job, &request.portable_aux).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle Kolors IP-Adapter
     // lane is the With-Character route for a Kolors model — score every output against the reference face
@@ -289,6 +285,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -298,8 +295,8 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
 
     let steps = kolors_ipadapter_steps(request);
     let guidance = kolors_ipadapter_guidance(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         KOLORS_IPADAPTER_IP_SCALE,
         0.0..=1.0,
@@ -308,7 +305,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
     // honors a curated solver/scheduler via the shared `denoise_curated` primitive (#130). Read +
     // N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the native default, byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -509,9 +506,9 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -529,13 +526,13 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                         preview,
                         cancel: cancel.clone(),
                     };
-                    let out = match model.generate_with_memory_context(
+                    let completed = match model.generate_with_memory_context_with_execution_report(
                         &memory_context,
                         &req,
                         &reference,
                         &mut *on_progress,
                     ) {
-                        Ok(out) => out,
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -543,6 +540,22 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "Kolors IP-Adapter returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid
                     // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {

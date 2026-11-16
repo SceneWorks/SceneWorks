@@ -400,7 +400,7 @@ pub(super) async fn generate_bernini(
     // sc-9945: fetch the requested quant tier subdir (q8/bf16) if it isn't the shipped q4 default, then
     // descend into it — a pre-packed tier loads with `quant = None` (config sidecars authoritative); a
     // legacy flat snapshot keeps load-time quant.
-    let bits = request.quant_bits();
+    let bits = request.resolved_quant_bits();
     ensure_bernini_tier_present(api, settings, job, bits).await?;
     // Video lane: no explicit pick defaults q4-first (sc-10859 OOM carve-out), unlike the image lane.
     let (model_dir, quant) = resolve_bernini_tier_dir_and_quant(
@@ -426,7 +426,16 @@ pub(super) async fn generate_bernini(
         video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +580,7 @@ pub(super) async fn generate_candle_bernini(
         resolve_candle_bernini_conditioning(api, settings, job, request, project_path).await?;
     // Select the published tier subfolder + matching load quant (sc-11003): parse `mlxQuantize` (int
     // or numeric string) the same way the still lane does, defaulting to bf16 dense.
-    let tier_bits = request.quant_bits();
+    let tier_bits = request.resolved_quant_bits();
     let (model_dir, quant) =
         crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let adapters = resolve_wan_adapters(settings, request, engine_id)?;
@@ -593,5 +602,14 @@ pub(super) async fn generate_candle_bernini(
         video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }

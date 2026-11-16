@@ -237,6 +237,7 @@ POST	/api/v1/video/jobs	token
 POST	/api/v1/audio/jobs	token
 POST	/api/v1/prompts/refine	token
 POST	/api/v1/face-likeness/compare	token
+POST	/api/v1/options/validate	token
 POST	/api/v1/poses	token
 POST	/api/v1/poses/sources	token
 GET	/api/v1/poses/preview/:job_id/:file_name	token
@@ -328,6 +329,9 @@ POST	/api/v1/jobs/events/ticket	token
 POST	/api/v1/files/ticket	token
 GET	/api/v1/jobs/:job_id	token
 HEAD	/api/v1/jobs/:job_id	token
+POST	/api/v1/jobs/:job_id/exact-replay	token
+GET	/api/v1/jobs/:job_id/execution-receipt	token
+HEAD	/api/v1/jobs/:job_id/execution-receipt	token
 POST	/api/v1/jobs/:job_id/cancel	token
 POST	/api/v1/jobs/:job_id/clear	token
 POST	/api/v1/jobs/:job_id/retry	token

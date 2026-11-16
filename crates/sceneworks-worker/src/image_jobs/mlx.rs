@@ -107,9 +107,9 @@ use super::sampling::mlx_raw_settings_for_bundle;
 #[cfg(target_os = "macos")]
 use super::sampling::normalize_sampling_knob;
 #[cfg(target_os = "macos")]
-use super::sampling::read_advanced_guidance_method;
+use super::sampling::read_resolved_image_guidance_method;
 #[cfg(target_os = "macos")]
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 #[cfg(target_os = "macos")]
 use super::sampling::recover_ideogram_placeholder;
 #[cfg(target_os = "macos")]
@@ -393,7 +393,7 @@ pub(super) async fn generate_stream_using(
     };
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     // RealVisXL Lightning (sc-6075): a standalone few-step *distilled checkpoint* (the
     // SDXL-Lightning distillation is baked into the weights — no acceleration LoRA). It must run
     // on the engine's `lightning` (Euler-trailing) few-step schedule, not the 30-step
@@ -431,7 +431,7 @@ pub(super) async fn generate_stream_using(
     // recipe, a per-backend gap, or a method gated to an incompatible sampler) drops to the engine
     // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
     let guidance_method = normalize_sampling_knob(
-        read_advanced_guidance_method(&request.advanced),
+        read_resolved_image_guidance_method(request),
         &caps.supported_guidance_methods,
         "guidanceMethod",
         &request.model,
@@ -486,7 +486,12 @@ pub(super) async fn generate_stream_using(
     // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
     // alpha — for every model but Qwen-Image 2.1.
     let rgba_output_channels = crate::qwen_alpha::request_output_channels(
-        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+        crate::qwen_alpha::resolve_output_channels_typed(
+            &request.model,
+            request
+                .advanced_bool("transparentBackground")
+                .unwrap_or(false),
+        )?,
     );
     // The CFG scale passed to the engine as `true_cfg`: the FLUX.1-dev reference path's scale if
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
@@ -511,7 +516,7 @@ pub(super) async fn generate_stream_using(
     let adapter_count = adapters.len();
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
-    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+    let enhance = PromptEnhance::from_resolved(request)?;
     // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
     // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
@@ -798,7 +803,7 @@ pub(super) async fn generate_stream_using(
         })
     };
     let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
-    let explicit_pick = flux3_plan.is_some() || mlx_tier_pick_is_exact(&request.advanced);
+    let explicit_pick = flux3_plan.is_some() || mlx_resolved_tier_pick_is_exact(request);
     let tiers = default_tier
         .filter(|_| !explicit_pick)
         .map(|tier| downtier_candidate_tiers(request, settings, tier, min_quality_floor(request)))
@@ -969,6 +974,7 @@ pub(super) async fn generate_stream_using(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -1065,6 +1071,7 @@ pub(super) async fn generate_stream_using(
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                        let execution_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -1097,12 +1104,13 @@ pub(super) async fn generate_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
                             on_progress,
                         )?;
-                        let facts = lane_controls::image_facts(
+                        let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
@@ -1110,8 +1118,12 @@ pub(super) async fn generate_stream_using(
                                 memory_evaluation.prefix_kv_cache,
                                 prefix_kv_cache_report.take().as_ref(),
                             ),
-                        );
-                        Ok((images, facts))
+                        )
+                        .unwrap_or_default();
+                        if let Some(report) = execution_report.take() {
+                            report.insert_image_facts(&mut facts)?;
+                        }
+                        Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
             }
@@ -1152,6 +1164,7 @@ pub(super) async fn generate_stream_using(
                     let warnings = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                    let execution_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -1188,6 +1201,7 @@ pub(super) async fn generate_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: None,
                             },
                             &cancel,
@@ -1234,6 +1248,9 @@ pub(super) async fn generate_stream_using(
                         ),
                     )
                     .unwrap_or_default();
+                    if let Some(report) = execution_report.take() {
+                        report.insert_image_facts(&mut facts)?;
+                    }
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(
                             flux3_references::FACT_KEY.to_owned(),
@@ -1279,7 +1296,15 @@ mod mlx_request_tier_tests;
 /// (`mlxQuantizeExplicit`), or a portable job whose verified binding froze a tier. The latter is
 /// served in place from the hub snapshot, so a downtier would load a sibling tier the guard never
 /// verified.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
+fn mlx_resolved_tier_pick_is_exact(request: &ImageRequest) -> bool {
+    request
+        .advanced_bool("mlxQuantizeExplicit")
+        .unwrap_or(false)
+        || request.portable_aux.bound_tier().is_some()
+}
+
+#[cfg(test)]
 pub(super) fn mlx_tier_pick_is_exact(advanced: &crate::JsonObject) -> bool {
     advanced
         .get("mlxQuantizeExplicit")

@@ -26,6 +26,7 @@ export function useJobActions({
         setError("");
         return updatedJob;
       } catch (err) {
+        if (action === "exact-replay" && err.code === "replay_unavailable") return err;
         setError(err.message);
         if (action === "continue-training") throw err;
       }

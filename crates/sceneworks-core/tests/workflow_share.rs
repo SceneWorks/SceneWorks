@@ -1490,13 +1490,13 @@ fn an_unrelated_object_assign_is_not_an_invisible_advanced_write() {
 #[test]
 #[should_panic(expected = "builds a SECOND `advanced` map")]
 fn a_second_map_inside_a_declared_builder_is_refused() {
-    // Shaped like `DocumentStudio.submit`: the registered `AssignedObject` initializer, plus a
+    // Shaped like `buildInterleaveAdvanced`: the registered `AssignedObject` initializer, plus a
     // nested helper with its own literal that the arm never reads. Verified against the real lint:
-    // inserting this into the real `submit` left 27/27 green before this refusal existed.
+    // inserting this into the real builder left 27/27 green before this refusal existed.
     emitted_keys(
         builder_for(AdvancedKeySource::InterleaveBuilder),
         r#"
-async function submit(event) {
+function buildInterleaveAdvanced(trimmedSystem, sourceAssetIds, referenceGuidance) {
   const advanced = {};
   advanced.systemMessage = trimmedSystem;
   advanced.imageGuidanceScale = referenceGuidance;
@@ -1996,11 +1996,19 @@ fn the_phase_cap_matches_the_multi_phase_validators() {
 /// so a valid UI/API job can never first discover a stale limit when it is shared.
 #[test]
 fn the_pose_cap_matches_the_request_and_web_validators() {
-    let request = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    let request = read_repo_file("crates/sceneworks-options/src/image_request.rs");
+    let options = read_repo_file("crates/sceneworks-options/src/lib.rs");
     assert!(
-        request.contains("pub(crate) const MAX_COUNT: u32 = 8;")
-            && request.contains("pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;"),
+        request.contains("pub const MAX_COUNT: u32 = 8;")
+            && options.contains("pub const MAX_JOB_POSES: usize = 64;")
+            && sceneworks_options::MAX_JOB_POSES
+                == 8 * sceneworks_options::image_request::MAX_COUNT as usize,
         "the Rust pose-output ceiling moved; reconcile the API, share envelope, and web picker"
+    );
+    let facade = read_repo_file("crates/sceneworks-core/src/image_request.rs");
+    assert!(
+        facade.contains("pub use sceneworks_options::MAX_JOB_POSES;"),
+        "the core request contract must reexport the portable pose cap"
     );
     let share = read_repo_file("crates/sceneworks-core/src/workflow_share.rs");
     assert!(

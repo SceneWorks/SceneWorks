@@ -1,14 +1,16 @@
 #[cfg(not(target_os = "macos"))]
 use super::admit_candle_load_spec_floor;
 use super::checkpoint_plan::checkpoint_plan_bespoke_primary_dir;
+#[cfg(test)]
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::events::consume_gen_events;
 use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::resolve_seed;
+#[cfg(test)]
 use super::routing::imported_generate_request_supported;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::start_cached_gen_stream_with_request_state;
 use super::CancelFlag;
@@ -146,16 +148,22 @@ pub(super) fn resolve_mage_finetuned_transformer(
         return Ok(None);
     }
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -306,21 +314,52 @@ pub(super) fn mage_finetuned_available(request: &ImageRequest, settings: &Settin
 /// Validate the exact registered Mage generate shape and retain its pinned transformer files for
 /// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
 /// cannot retarget the payload-selected directory between route selection and provider load.
+#[cfg(test)]
 pub(super) fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    prepare_mage_finetuned_transformer_with_shape(
+        request,
+        settings,
+        request_is_checkpoint_plan_backed(request),
+        imported_generate_request_supported(
+            request,
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    )
+}
+
+pub(super) fn prepare_mage_finetuned_transformer_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    prepare_mage_finetuned_transformer_with_shape(
+        execution,
+        settings,
+        super::checkpoint_plan::request_is_checkpoint_plan_backed_resolved(execution),
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    )
+}
+
+fn prepare_mage_finetuned_transformer_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    plan_backed: bool,
+    descriptor: Option<gen_core::ModelDescriptor>,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
     // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
     // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
     // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
-    if request_is_checkpoint_plan_backed(request) {
+    if plan_backed {
         return Ok(None);
     }
-    let Some(descriptor) = imported_generate_request_supported(
-        request,
-        "mage-flow",
-        gen_core::ImportedModelSource::TransformerDirectory,
-    ) else {
+    let Some(descriptor) = descriptor else {
         return Ok(None);
     };
     if imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_err() {
@@ -343,7 +382,7 @@ fn mage_finetuned_raw_settings(
     guidance: f32,
     quant_bits: Option<i64>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert("guidanceScale".to_owned(), json!(guidance));
@@ -464,10 +503,10 @@ pub(super) async fn generate_mage_finetuned_stream(
 
     let (width, height) = (request.width, request.height);
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", MAGE_FINETUNED_DEFAULT_STEPS, 1..=100);
+        resolved_option_or_manifest_u32(request, "steps", MAGE_FINETUNED_DEFAULT_STEPS, 1..=100);
     // Undistilled Base runs TRUE CFG, so guidance is a live knob: `advanced.guidanceScale`, else
     // the catalog entry's `defaults.guidanceScale`, else the published Base default.
-    let guidance = resolve_advanced_or_manifest_f32(
+    let guidance = resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         MAGE_FINETUNED_DEFAULT_GUIDANCE,

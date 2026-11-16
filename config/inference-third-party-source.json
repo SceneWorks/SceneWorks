@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory reviewed at inference revision 3dae89c9: 807 provenance candidates and 139 production-Rust crate prefixes. This pin adds first-party terminal LoRA recovery checkpoints and focused continuation/export-retry tests in the shared MLX loop and Candle flow-match driver. The provenance inventory changes only the Candle driver blob; normalized markers, production crate population, dependencies, notices and include sites are unchanged. Existing Iris, MOSS, FLUX.3 and runtime source classifications remain as reviewed at the previous pin; unclassified source areas remain open items reported by check-license-coverage.",
   "inferenceRevision": "b387b95ac7ed06cb84502a90876a669fb54fd79a",
-  "auditDigest": "fe4e85748b78ba03f606116a11d726f2763e64a312e340730057ee0417846b7b",
+  "auditDigest": "b9fe565355112d5a062a224bc2c497db17ad74f1143eaa507f01bd82e50c37c1",
   "artifacts": [
     {
       "id": "cmudict",
@@ -1107,6 +1107,53 @@
       "evidence": "SceneWorks-authored conformance harness for the core-llm TextLlm contract. Tensor-free, drives providers through the public trait only; no upstream source."
     },
     {
+      "prefix": "crates/contracts/gen-core-checkpoint",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Holds the Supra2-IMG checkpoint conversion/pin contract (`supra2`) and the `.pth` reader (`pth`): backend-neutral conversion of pinned upstream checkpoints whose model terms are already mapped in the About manifest; no upstream source is copied and no file carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-dist",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored TCP collective for distributed Iris training (inference sc-27252 split it out of gen-core): socket plumbing and keepalive only, no model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-flux3",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. FLUX 3 [klein] resources, conversion, prompt-upsampler and training contracts; backend-neutral, no tensors. The FLUX 3 model terms are the same open item the flux3 backend crates carry; no file in this crate carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-h3",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved out of `crates/contracts/gen-core` by inference epic sc-27252: MiniMax-H3 memory pricing, pruned AdaLN, chunking/keyframe/schedule/reference helpers and the Veda predictor. Backend-neutral, no tensors; the MiniMax-H3 terms are mapped in the About manifest. Its one marker-bearing file, `src/veda/topk.rs`, carries the Veda-on-ComfyUI / LLVM notices and is classified file-by-file in the `veda-sparse-source` area (a `paths` area, so this crate-level decision is still owed)."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-memory-wan",
+      "disposition": "first-party-original",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. SceneWorks-authored Wan I2V memory-receipt contract (routes, fingerprints, inventories, receipts): accounting only, no model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. MOSS-Image schedule, guidance, DMD and package helpers and the training contract; backend-neutral, no tensors; MOSS-Image terms are already mapped in the About manifest and no file carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-moss-image-policy",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Inference SW-7157 (0514e07bc) extracted backend-neutral MOSS-Image option normalization and validation from the existing gen-core MOSS implementation. This is the same independently written architecture reimplementation under the existing MOSS Image Base/SFT model terms shown by the moss-image-sft About component; no upstream source is copied."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-supra2-policy",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "supra2-img",
+      "evidence": "Inference SW-7158 (46d8dae7a) extracted backend-neutral Supra2-IMG option policy from gen-core-checkpoint/src/supra2.rs, preserving its CFG branching and request rules. This is the same independently written architecture reimplementation under the existing Supra2-IMG model terms shown by the supra2-img About component; no upstream source is copied."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-telemetry",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored host telemetry collector (process RSS sampling) split out of gen-core by inference sc-27252; no model architecture, no upstream source."
+    },
+    {
       "prefix": "crates/contracts/gen-core-testkit",
       "disposition": "first-party-original",
       "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source — which is why the marker vocabulary deliberately anchors `derived from` to a port object."
@@ -1115,6 +1162,11 @@
       "prefix": "crates/llm/mlx-llm/server",
       "disposition": "first-party-original",
       "evidence": "SceneWorks-authored HTTP server that speaks the OpenAI chat-completions WIRE FORMAT. An API request/response shape is an interface, not upstream source; the transforms and the socket wiring are first-party."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "SceneWorks Rust/Candle body-loss implementation of frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals, backed by the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
     },
     {
       "prefix": "crates/media/candle-gen/candle-gen-catalog",
@@ -1133,6 +1185,28 @@
       "evidence": "Candle/CUDA Mage-Flow provider — the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
     },
     {
+      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks Candle trainer composition seam: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
+    },
+    {
+      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
+      "disposition": "upstream-content-existing-terms",
+      "component": "candle-transformers-source",
+      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "SceneWorks Rust/MLX body-loss twin implements frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals against the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
+    },
+    {
       "prefix": "crates/media/mlx-gen/mlx-gen-catalog",
       "disposition": "first-party-original",
       "evidence": "SceneWorks composition root for the MLX media lane: provider registration and ordering only."
@@ -1148,77 +1222,15 @@
       "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
     },
     {
-      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
-      "disposition": "upstream-content-existing-terms",
-      "component": "candle-transformers-source",
-      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-body",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "SceneWorks Rust/Candle body-loss implementation of frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals, backed by the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-body",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "SceneWorks Rust/MLX body-loss twin implements frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals against the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks Candle trainer composition seam: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks MLX trainer composition twin: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "component": "moss-image-sft",
-      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
-    },
-    {
       "prefix": "crates/media/mlx-gen/mlx-gen-moss-image",
       "disposition": "architecture-reimplementation-existing-terms",
       "component": "moss-image-sft",
       "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
     },
     {
-      "prefix": "crates/contracts/gen-core-checkpoint",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Holds the Supra2-IMG checkpoint conversion/pin contract (`supra2`) and the `.pth` reader (`pth`): backend-neutral conversion of pinned upstream checkpoints whose model terms are already mapped in the About manifest; no upstream source is copied and no file carries a port marker."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-dist",
+      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
       "disposition": "first-party-original",
-      "evidence": "SceneWorks-authored TCP collective for distributed Iris training (inference sc-27252 split it out of gen-core): socket plumbing and keepalive only, no model architecture, no upstream source."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-flux3",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. FLUX 3 [klein] resources, conversion, prompt-upsampler and training contracts; backend-neutral, no tensors. The FLUX 3 model terms are the same open item the flux3 backend crates carry; no file in this crate carries a port marker."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-memory-wan",
-      "disposition": "first-party-original",
-      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. SceneWorks-authored Wan I2V memory-receipt contract (routes, fingerprints, inventories, receipts): accounting only, no model architecture, no upstream source."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-moss-image",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. MOSS-Image schedule, guidance, DMD and package helpers and the training contract; backend-neutral, no tensors; MOSS-Image terms are already mapped in the About manifest and no file carries a port marker."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-telemetry",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks-authored host telemetry collector (process RSS sampling) split out of gen-core by inference sc-27252; no model architecture, no upstream source."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-h3",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Moved out of `crates/contracts/gen-core` by inference epic sc-27252: MiniMax-H3 memory pricing, pruned AdaLN, chunking/keyframe/schedule/reference helpers and the Veda predictor. Backend-neutral, no tensors; the MiniMax-H3 terms are mapped in the About manifest. Its one marker-bearing file, `src/veda/topk.rs`, carries the Veda-on-ComfyUI / LLVM notices and is classified file-by-file in the `veda-sparse-source` area (a `paths` area, so this crate-level decision is still owed)."
+      "evidence": "SceneWorks MLX trainer composition twin: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
     }
   ]
 }

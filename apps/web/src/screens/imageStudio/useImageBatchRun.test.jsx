@@ -2,6 +2,10 @@ import React, { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
 import { useImageBatchRun } from "./useImageBatchRun.js";
+import { validatePortableRequest } from "../../portableValidation.js";
+vi.mock("../../portableValidation.js", () => ({
+  validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
+}));
 let root, container;
 beforeEach(() => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; ({ root, container } = mountRoot()); });
 afterEach(() => unmountRoot(root, container));
@@ -34,12 +38,48 @@ it("continues the committed project's batch while a different project render sus
   }
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector("button").click());
-  expect(createImageJob).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
+  expect(validatePortableRequest).toHaveBeenCalledWith(expect.objectContaining({
+    kind: "image", payload: { prompt: "one", count: 1, projectId: "A" }, token: "", signal: expect.any(AbortSignal),
+  }));
   await act(async () => React.startTransition(() => changeProject("B")));
   await act(async () => { resolveFirst({ id: "first", status: "queued" }); await running; });
   expect(createImageJob).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(validatePortableRequest).mock.calls.map(([request]) => request.payload.projectId))
+    .toEqual(["A", "A"]);
   expect(cancelA).not.toHaveBeenCalled();
   expect(cancelB).not.toHaveBeenCalled();
   await act(async () => release());
   expect(cancelB.mock.calls.map(([job]) => job.id)).toEqual(["first", "second"]);
+});
+
+it("stops before enqueue when request 257 receives a typed refusal", async () => {
+  vi.mocked(validatePortableRequest).mockClear();
+  const refusal = { code: "invalid_generation_option", field: "width", detail: "Invalid request 257" };
+  vi.mocked(validatePortableRequest).mockImplementation(async ({ payload }) => payload.prompt === "256"
+    ? { state: "invalid", refusal } : { state: "valid" });
+  const createImageJob = vi.fn(async (request) => ({ id: `job-${request.prompt}`, status: "queued" }));
+  const prompts = Array.from({ length: 260 }, (_, index) => String(index));
+  let run;
+  function Owner() {
+    const [batchRun, setBatchRun] = React.useState(null);
+    ({ runBatch: run } = useImageBatchRun({
+      batchRun, setBatchRun, activeProject: { id: "project" }, jobs: [], jobAction: vi.fn(),
+      BATCH_ACTIVE_JOB_LIMIT: 300, preflightError: () => "", setBatchError: vi.fn(),
+      batchTotal: 260, BATCH_RENDER_CAP: 1000, setBatchConfirmPending: vi.fn(),
+      batchPrompts: prompts, batchVariables: {}, resolutionOptions: [],
+      composeJobPrompt: ({ promptToSend }) => ({ composedPrompt: promptToSend }),
+      stylePreviewActive: false, structuredPromptModel: false, batchJobCount: 260,
+      BATCH_PREFLIGHT_YIELD_INTERVAL: 100, selectedModel: null,
+      buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }),
+      onMagicExpand: vi.fn(), createImageJob,
+    }));
+    return null;
+  }
+  await act(async () => root.render(<Owner />));
+  await act(async () => run(true));
+  expect(validatePortableRequest).toHaveBeenCalledTimes(257);
+  expect(createImageJob).toHaveBeenCalledTimes(256);
+  expect(createImageJob.mock.calls.every(([request]) => request.prompt !== "256")).toBe(true);
+  vi.mocked(validatePortableRequest).mockReset();
 });

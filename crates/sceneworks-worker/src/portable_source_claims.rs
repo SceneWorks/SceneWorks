@@ -1251,18 +1251,14 @@ pub(crate) fn registered_control_overlay_path(
     overlay_id: &str,
     frozen_files: &[PortableArtifactFile],
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(weights) = payload
-        .get("advanced")
-        .and_then(|advanced| advanced.get("controlWeights"))
-        .and_then(serde_json::Value::as_object)
+    let sceneworks_core::resolved_options::RouteField::Valid(weights) =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
+            .control_weights
     else {
         return Ok(None);
     };
-    if weights.get("overlayId").and_then(serde_json::Value::as_str) != Some(overlay_id)
-        || weights
-            .get("_catalogAuthorized")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
+    if weights.overlay_id.valid().map(String::as_str) != Some(overlay_id)
+        || weights.catalog_authorized.valid() != Some(&true)
     {
         return Ok(None);
     }
@@ -1768,11 +1764,30 @@ pub(crate) fn capture_selected_source(
         })?;
         return Ok(Some((claim, selected)));
     }
+    let image_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let plan_options = payload
+        .get("plan")
+        .and_then(serde_json::Value::as_object)
+        .map(sceneworks_core::resolved_options::TrainingRouteFacts::from_plan_syntax);
+    let tile_repo = match &image_options.tile_control_net_repo {
+        sceneworks_core::resolved_options::RouteField::Valid(value) => Some(value.as_str()),
+        _ => None,
+    };
+    let base_model_path = plan_options.as_ref().and_then(|options| {
+        if let sceneworks_core::resolved_options::RouteField::Valid(path) = &options.base_model_path
+        {
+            Some(path.as_str())
+        } else {
+            None
+        }
+    });
     let Some((selected, operator_selected)) =
-        crate::portable_aux_sources::resolve_selected_aux_source(
+        crate::portable_aux_sources::resolve_selected_aux_source_typed(
             source_id,
             &settings.data_dir,
-            payload,
+            tile_repo,
+            base_model_path,
         )
     else {
         return Ok(None);

@@ -247,8 +247,8 @@ async fn moss_field_shapes_refuse_submission_before_queueing() {
             for dry_run in [false, true] {
                 for (field, invalid, remedy) in [
                     ("cacheLatents", json!("false"), "true or false"),
-                    ("cacheTextEmbeddings", json!(0), "true or false"),
-                    ("loraTargetModules", json!([7]), "only strings"),
+                    ("cacheTextEmbeddings", json!(0), "must be a boolean"),
+                    ("loraTargetModules", json!([7]), "wrong JSON type"),
                     (
                         "modelOptions",
                         json!({"vae_posterior":"sample"}),
@@ -5200,8 +5200,20 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
     let evil_manifest = temp_dir.path().join("evil-manifest.jsonc");
 
-    // Raw training jobs have no server-built plan or frozen base source. Reject each
-    // attacker-authored manifest at admission, before a worker can register anything.
+    // Supply a valid target and config so the test reaches the missing frozen-source guard.
+    let targets = sceneworks_core::training::effective_training_targets_for_candle(!cfg!(
+        target_os = "macos"
+    ));
+    let target = targets
+        .targets
+        .iter()
+        .find(|target| target.kernel == "z_image_lora")
+        .expect("Z-Image training target");
+    let plan = json!({
+        "target": {"targetId": target.id, "kernel": target.kernel, "baseModel": target.base_model},
+        "config": target.defaults,
+    });
+    // Reject each attacker-authored manifest before a worker can register anything.
     for manifest_entry in [
         json!({
             "id": "lora_crafted01", "name": "Crafted LoRA", "scope": "project",
@@ -5227,6 +5239,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
                 "projectName": "Training Project", "requestedGpu": "auto",
                 "payload": {
                     "dryRun": false,
+                    "plan": plan,
                     "manifestPath": evil_manifest.display().to_string(),
                     "manifestEntry": manifest_entry
                 }

@@ -546,7 +546,7 @@ impl Case {
         app: &axum::Router,
         worker: &sceneworks_worker::Settings,
         expected: &str,
-    ) -> Result<sceneworks_core::contracts::JobSnapshot> {
+    ) -> Result<(sceneworks_core::contracts::JobSnapshot, Option<String>)> {
         self.check_clock()?;
         let (status, value) = self
             .api(
@@ -560,7 +560,13 @@ impl Case {
             status == StatusCode::OK && value["job"]["id"] == expected,
             format!("claim did not select exact owned job {expected}: {value}"),
         )?;
-        serde_json::from_value(value["job"].clone()).map_err(|e| e.to_string())
+        let job = serde_json::from_value(value["job"].clone()).map_err(|e| e.to_string())?;
+        Ok((
+            job,
+            value["executionClaimCapability"]
+                .as_str()
+                .map(str::to_owned),
+        ))
     }
 }
 
@@ -1023,6 +1029,7 @@ async fn utility(
     case: &Case,
     worker: &sceneworks_worker::Settings,
     job: sceneworks_core::contracts::JobSnapshot,
+    execution_claim_capability: Option<String>,
 ) -> Result<()> {
     case.check_clock()?;
     let id = job.id.clone();
@@ -1030,7 +1037,7 @@ async fn utility(
     let stopped = Arc::clone(&stop);
     let cancel_file = case.cancel_file()?;
     let execute = async {
-        native::run_acceptance_utility_job(worker, job).await;
+        native::run_acceptance_utility_job(worker, job, execution_claim_capability).await;
         stopped.store(true, Ordering::Release);
     };
     let (_, result) = tokio::join!(
@@ -1061,7 +1068,7 @@ async fn execute(
     mode: Execution,
 ) -> Result<(Option<Run>, Value)> {
     let job_id = text(submitted, "id")?.to_owned();
-    let snapshot = case.claim(app, worker, &job_id).await?;
+    let (snapshot, execution_claim_capability) = case.claim(app, worker, &job_id).await?;
     let plan: sceneworks_core::training::TrainingPlan =
         serde_json::from_value(submitted["payload"]["plan"].clone()).map_err(|e| e.to_string())?;
     let request_slot = Arc::new(Mutex::new(None::<gen_core::TrainingRequest>));
@@ -1134,8 +1141,10 @@ async fn execute(
             }
         },
     );
+    let terminal_capability = execution_claim_capability.clone();
     let execution = async {
-        let result = execution.await;
+        let result =
+            native::with_acceptance_execution_claim(execution_claim_capability, execution).await;
         driver_stop.store(true, Ordering::Release);
         result
     };
@@ -1180,7 +1189,7 @@ async fn execute(
             // terminal progress POST the normal outer utility dispatcher owns.
             // Retain the original loader error verbatim; do not turn it into a
             // fabricated native run receipt or a completed model job.
-            let (status,terminal)=case.api(app,"POST",&format!("/api/v1/jobs/{job_id}/progress"),json!({"workerId":worker.worker_id,"status":"failed","stage":"failed","progress":1.0,"message":"Owned acceptance execution returned","error":error.to_string()})).await?;
+            let (status,terminal)=case.api(app,"POST",&format!("/api/v1/jobs/{job_id}/progress"),json!({"workerId":worker.worker_id,"status":"failed","stage":"failed","progress":1.0,"message":"Owned acceptance execution returned","error":error.to_string(),"executionClaimCapability":terminal_capability})).await?;
             require(
                 status == StatusCode::OK,
                 format!("real terminal failure reconciliation failed: {terminal}"),
@@ -1503,8 +1512,8 @@ async fn import_adapter(
     case.record["raw"]["utilityWorkerRegistrations"][label] =
         serde_json::to_value(registration).map_err(|e| e.to_string())?;
     case.persist()?;
-    let claimed = case.claim(app, &import_worker, &id).await?;
-    let execution = utility(case, &import_worker, claimed).await;
+    let (claimed, capability) = case.claim(app, &import_worker, &id).await?;
+    let execution = utility(case, &import_worker, claimed, capability).await;
     let completed = case.get_job(app, &id).await?;
     case.record["raw"]["utilityTerminal"][&id] = completed.clone();
     case.persist()?;
@@ -1784,8 +1793,8 @@ pub(super) async fn generate_with_controls(
         .await?;
     }
     preload?;
-    let claimed = case.claim(app, worker, &id).await?;
-    let execution = utility(case, worker, claimed).await;
+    let (claimed, capability) = case.claim(app, worker, &id).await?;
+    let execution = utility(case, worker, claimed, capability).await;
     let completed = case.get_job(app, &id).await?;
     case.record["raw"]["utilityTerminal"][&id] = completed.clone();
     case.persist()?;

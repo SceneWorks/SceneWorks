@@ -117,8 +117,8 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
         assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {body}");
         assert!(body.to_string().contains(needle), "{extra}: {body}");
     }
-    // Retry/duplicate skip the typed route's blanket 1..=8 check, so the Supra2 boundary itself
-    // refuses a count the worker would otherwise clamp to 8 and silently under-render.
+    // Replay validates the merged request through the shared admission rules, so an oversized
+    // count is refused before the worker could clamp it to 8 and silently under-render.
     let duplicate = format!("/api/v1/jobs/{}/duplicate", full["id"].as_str().unwrap());
     let (status, body) = request(
         app.clone(),
@@ -128,7 +128,18 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.to_string().contains("exceeds the 8 images"), "{body}");
+    assert_eq!(body["code"], "invalid_generation_option", "{body}");
+    assert_eq!(body["field"], "count", "{body}");
+    assert_eq!(
+        body["context"],
+        json!({
+            "kind": "image",
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "field": "count",
+        }),
+        "{body}"
+    );
     let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().unwrap().len(),

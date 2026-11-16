@@ -51055,10 +51055,11 @@
     "supra2_img:candle": {
       "entryPoints": [
         "crates/contracts/gen-core-checkpoint/src/supra2.rs",
+        "crates/contracts/gen-core-supra2-policy/src/lib.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/model.rs"
       ],
-      "digest": "3444edf080896ee57be1a1e47532edaa71fe6f02cb9c4e9593536bfcea0c6f3b",
+      "digest": "f6fb22937df5391e1f18f34891f55006e57ffc980a8d74765dd43ced3504fb90",
       "closureFileCount": 412,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
