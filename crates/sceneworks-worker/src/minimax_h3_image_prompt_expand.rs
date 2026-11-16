@@ -35,7 +35,6 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 };
 
 /// The `task` discriminator that selects this path on a `prompt_refine` job.
-#[cfg(any(test, native_lane))]
 use sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID as TARGET_MODEL_ID;
 /// The expander's catalog id.
 pub(crate) use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID as PE_MODEL_ID;
