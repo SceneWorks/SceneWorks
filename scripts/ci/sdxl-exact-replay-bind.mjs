@@ -151,19 +151,30 @@ async function main() {
     }
     assert(healthy, 'API did not become healthy');
     assert.deepEqual(await api('GET', '/api/v1/workers'), [], 'isolated API has a worker');
-    stage = 'enqueue';
+    stage = 'create-project';
     const project = await api('POST', '/api/v1/projects', { name: 'SDXL metadata-only source binding' });
+    stage = 'admit-image';
     const accepted = await api('POST', '/api/v1/image/jobs', { ...REQUEST, projectId: project.id, requestedGpu: '0' });
+    stage = 'open-job-db';
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(env.SCENEWORKS_JOBS_DB_PATH, { readOnly: true });
     let row;
+    stage = 'query-job-row';
     try { row = db.prepare('select status, portable_model_binding_json from jobs where id=?').get(accepted.id); }
     finally { db.close(); }
+    stage = 'check-queued-status';
+    failureHint = row ? (['queued', 'pending_caption', 'failed', 'canceled'].includes(row.status) ? row.status : 'unexpected-status') : 'missing-row';
     assert.equal(row?.status, 'queued', 'request was not left queued');
+    failureHint = '';
+    stage = 'parse-binding';
     const binding = JSON.parse(row.portable_model_binding_json);
+    stage = 'select-route';
     const routes = Object.values(binding.routes).filter((route) => route.backend === 'candle' && route.platform === 'windows');
+    failureHint = `${routes.length} Windows Candle routes`;
     assert.equal(routes.length, 1, 'ambiguous server-issued route');
+    failureHint = '';
     const route = routes[0];
+    stage = 'verify-source-identity';
     const sourceIdentitySha256 = digest(sourceIdentity(route));
     stage = 'members';
     const files = await mapSelectedFiles(route, prior.hub, roots);
