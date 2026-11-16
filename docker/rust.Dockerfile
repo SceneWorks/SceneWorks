@@ -303,6 +303,7 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 # apps/desktop/scripts/build-sidecar.mjs).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/root/.cache/sceneworks/flash-attn \
     --mount=type=cache,target=/app/target \
     set -eu; \
     (while sleep 120; do \
