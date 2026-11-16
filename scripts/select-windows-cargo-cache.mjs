@@ -3,6 +3,7 @@ import { appendFile, lstat, mkdir, readFile, readdir, realpath } from "node:fs/p
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { candleFlashSourceSha256, fetchPrebuilt } from "./fetch-flash-prebuilt.mjs";
 
 const execute = promisify(execFile);
 const fail = () => { throw new Error("Windows Cargo cache requires a safe listener identity and physical persistent directory"); };
@@ -88,9 +89,13 @@ async function main() {
   const flashAttention = flashAttentionBuildDirectory(selected.cache);
   await ensurePhysicalCargoCache(flashAttention);
   await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\nCANDLE_FLASH_ATTN_BUILD_DIR=${flashAttention}\n`);
+  process.env.CARGO_HOME = selected.cache;
+  const sourceSha256 = await candleFlashSourceSha256();
+  const prebuilt = await fetchPrebuilt({ sourceSha256, target: "x86_64-pc-windows-msvc", cacheRoot: path.join(selected.cache, "flash-attn-prebuilt") });
+  if (prebuilt) await appendFile(process.env.GITHUB_ENV, `CANDLE_FLASH_ATTN_PREBUILT_DIR=${prebuilt}\n`);
   console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, flash_attention_build: flashAttention, inference_revision: revision, inference_commit_present: present }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(() => { console.error("Windows Cargo cache selection failed; no shared-cache fallback was applied"); process.exitCode = 1; });
+  main().catch(error => { console.error(`Windows Cargo and FlashAttention selection failed: ${error.message}`); process.exitCode = 1; });
 }

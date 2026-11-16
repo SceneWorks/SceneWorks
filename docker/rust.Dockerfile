@@ -215,7 +215,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # — the Windows host build uses schannel instead, so this only surfaces here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config libssl-dev procps \
+        ca-certificates curl git build-essential pkg-config libssl-dev procps python3 \
     && rm -rf /var/lib/apt/lists/*
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
@@ -267,6 +267,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo fetch --locked
 
 COPY crates ./crates
+COPY scripts/fetch-flash-prebuilt.py ./scripts/fetch-flash-prebuilt.py
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
@@ -309,6 +310,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     done) & monitor=$!; \
     trap 'kill "$monitor" 2>/dev/null || true' EXIT; \
     cargo fetch --locked \
+    && flash_dir="$(python3 scripts/fetch-flash-prebuilt.py)" \
+    && if [ -n "$flash_dir" ]; then export CANDLE_FLASH_ATTN_PREBUILT_DIR="$flash_dir"; fi \
     && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \
