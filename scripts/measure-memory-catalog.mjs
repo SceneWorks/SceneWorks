@@ -90,7 +90,7 @@ import { createHash } from "node:crypto";
 // ONE spelling of the refusal signature, shared with the arm that records it (sc-22738). The runner
 // classifies a failure by it and the harness re-checks the same stderr before writing a bound, so a
 // second transcription here would be a way for the two to disagree about what a refusal even is.
-import { metalSubmissionsIgnored } from "./memory-calibration-harness.mjs";
+import { metalSubmissionsIgnored, plannedAnchorStrategy } from "./memory-calibration-harness.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/memory-calibration-plan.json";
@@ -221,9 +221,15 @@ export const SDXL_COMPONENTS = Object.freeze([
  * exactly the repositories `classifyAnchor` probes for the same cell — a component this lane never
  * opens is neither a `weights_missing` reason nor a `--download-missing` fetch.
  */
-export function requiredComponentsFor(family, backend) {
+export function requiredComponentsFor(family, backend, tier) {
   if (!Array.isArray(family?.components)) return [];
-  return family.components.filter((component) => (component.arms ?? [backend]).includes(backend));
+  // SW-7100: a component may also be scoped to `tiers` — MiniMax-H3-Image stages MiniMax-H3's text
+  // encoder from a DIFFERENT repository at bf16 than at q4/q8. Without a tier, every lane component.
+  return family.components.filter(
+    (component) =>
+      (component.arms ?? [backend]).includes(backend)
+      && (tier === undefined || (component.tiers ?? [tier]).includes(tier)),
+  );
 }
 
 /** The ONE upstream repository all three Iris-3B task routes load from (sc-25690). */
@@ -991,6 +997,35 @@ export const QWEN_EDIT_LIGHTNING_LORA = Object.freeze({
 });
 
 /**
+ * The community LoRA the MiniMax-H3-Image `:lora` regime rows install (SW-F363): a ComfyUI-layout
+ * file (`diffusion_model.blocks.*`, fused qkv, no alpha), 155 MB at rank 16 — the inference repo's
+ * `minimax-h3-image-community-lora-tanaami` row in `release/real-weight-models.toml`, at the same
+ * revision and file. It is not a manifest download: a user installs a LoRA, so the capture is handed
+ * its snapshot through its own `SCENEWORKS_MINIMAX_H3_IMAGE_LORA_*` family, exactly as the Qwen edit
+ * Lightning distill is. `protocol::MINIMAX_H3_IMAGE_LORA_*` names the same three values and a test
+ * binds the two, because a drift would send the capture at a file the arm refuses after the load.
+ */
+export const MINIMAX_H3_IMAGE_COMMUNITY_LORA = Object.freeze({
+  env: "MINIMAX_H3_IMAGE_LORA",
+  repo: "syntaxdiffusion/tanaami-style-h3-image-lora",
+  revision: "3804b381526a3e537c7961942ba4861a831b2d39",
+  file: "tanaami_h3_image_lora_2000.safetensors",
+});
+
+/**
+ * The second root one plan row needs that the manifest does not ship: a member's `sideArtifact`
+ * (keyed by model id — the Qwen edit Lightning distill), else the family's `overlayArtifact` for the
+ * overlay the ROW declares (keyed by overlay — SW-F363's `:lora` regime rows). An overlay-free row
+ * never resolves an overlay artifact.
+ */
+export function sideArtifactFor(family, row) {
+  const member = family?.sideArtifact?.[row.modelId];
+  if (member) return member;
+  if (!row.overlay || row.overlay === "none") return undefined;
+  return family?.overlayArtifact?.[row.overlay];
+}
+
+/**
  * The converter-written marker every SenseNova `_fast` rehost tier subdir carries (sc-22734). Both
  * engines read it by this exact name (`DISTILL_MERGED_MARKER` in `mlx-gen-sensenova` and
  * `candle-gen-sensenova`), and both WITHHOLD the production calibration identity when it is absent —
@@ -1144,6 +1179,8 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * `sideArtifact` is a second root a family member needs that the MANIFEST does not ship — today only
  * the Qwen edit Lightning distill LoRA, which the worker fetches lazily at a pinned revision. It is
  * keyed by model id because it belongs to one member of a shared-provider family, not to the family.
+ * `overlayArtifact` is the same kind of root keyed by the OVERLAY a plan row declares instead
+ * (SW-F363: the community LoRA a `:lora` regime row installs). See `sideArtifactFor`.
  *
  * Rows are keyed by PROVIDER by default; sc-22734 adds MODEL-keyed rows (which must declare their
  * `provider`) for the case where several catalog models ride one engine id but ship their own
@@ -1447,6 +1484,42 @@ export const PROVIDER_FAMILIES = Object.freeze({
     // Dropping the base entry's candle-bf16 override is therefore not a tidy-up: it is the whole
     // difference between the two entries' artifact axes.
     variants: { minimax_h3_ref: { artifacts: undefined } },
+  },
+  // MiniMax-H3-Image (SW-7100, feature SW-F363). The load ROOT on every tier is the upstream
+  // `MiniMaxAI/MiniMax-H3-Image` snapshot (`vae_diffusers/`, `tokenizer/`), whose own
+  // `transformer_diffusers/` IS the bf16 tier — hence the flat bf16 override bound through the
+  // upstream env family. `q8`/`q4` are the `<tier>/` subdirs of the SceneWorks re-host, published at
+  // a pinned revision (`SceneWorks/minimax-h3-image-mlx`) and resolved like any other tier row.
+  // The text encoder is MiniMax-H3's OWN, at the same tier, from a different repository
+  // per tier — the worker's `image_jobs::minimax_h3_image::text_encoder_dir` — so it is a
+  // tier-scoped component whose env names the encoder directory itself. Both lanes load the same
+  // roots. The text encoder is probed as a directory only: the macOS bf16 row deliberately omits
+  // shard 13, so its own index would report a mirror the engine loads as incomplete.
+  minimax_h3_image: {
+    env: "MINIMAX_H3_IMAGE", repo: "SceneWorks/minimax-h3-image-mlx", arms: ["mlx", "candle"],
+    // SW-F363: the `:lora` regime rows install one pinned community LoRA through LoadSpec adapters.
+    overlayArtifact: { lora: MINIMAX_H3_IMAGE_COMMUNITY_LORA },
+    tiers: {
+      bf16: {
+        env: "MINIMAX_H3_IMAGE_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3-Image", layout: "flat",
+        requiredTierFiles: ["transformer_diffusers/config.json"],
+      },
+    },
+    requiredTierFiles: ["transformer_diffusers/config.json"],
+    upstream: {
+      env: "MINIMAX_H3_IMAGE_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3-Image",
+      requiredFiles: ["vae_diffusers/config.json", "tokenizer/tokenizer.json"],
+    },
+    components: [
+      {
+        env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "SceneWorks/minimax-h3-mlx",
+        tiers: ["q4", "q8"], subdirByTier: { q4: "q4/text_encoder", q8: "q8/text_encoder" },
+      },
+      {
+        env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "MiniMaxAI/MiniMax-H3",
+        tiers: ["bf16"], subdir: "text_encoder",
+      },
+    ],
   },
   // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
   // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
@@ -1771,9 +1844,20 @@ export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) 
 }
 
 export function anchorParts(key) {
-  const match = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$/.exec(key);
+  // SW-F363: the optional fourth segment names one of the cell's regime anchors (`resident`,
+  // `optimized`, `lora`); see `parseAnchorKey` in memory-calibration-harness.mjs.
+  const match = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)(?::(resident|optimized|lora))?$/.exec(key);
   if (!match) fail(`not an anchor key: ${key}`);
-  return { modelId: match[1], tier: match[2], backend: match[3] };
+  return { modelId: match[1], tier: match[2], backend: match[3], regime: match[4] ?? null };
+}
+
+/**
+ * The plan key a RECORD (or a store row) answers for: its cell, plus the regime it was captured as
+ * (`target.anchorRegime`, SW-F363). A base-row record carries no regime and keys on its cell, so a
+ * regime capture can never mark its base row captured or current, nor the reverse.
+ */
+export function recordAnchorKey(modelId, tier, backend, regime = null) {
+  return `${modelId}:${tier}:${backend}${regime ? `:${regime}` : ""}`;
 }
 
 /** `--adapter` is a binary path, or a JSON array command (the way the harness fixtures are driven). */
@@ -1926,6 +2010,35 @@ export async function readMatrixCurrency(root = ROOT) {
 }
 
 /**
+ * Currency of the REGIME anchors (SW-F363), keyed like their plan rows
+ * (`<modelId>:<tier>:<backend>:<regime>`). They are not matrix anchors — the matrix publishes the
+ * cell's derivation anchor only — so `readMatrixCurrency` cannot see them; they live in the store's
+ * `regimeAnchors`, and their currency is the same rule a measured lower bound's is
+ * (`readExceededBounds`): the row's stamped `source.loaderClosureDigest` against the digest
+ * `config/anchor-loader-closures.json` carries for its `(modelId, backend)` at the pin.
+ */
+export async function readRegimeAnchorCurrency(root = ROOT) {
+  const current = new Map();
+  let store;
+  let closures;
+  try {
+    store = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
+    closures = JSON.parse(await readFile(path.join(root, ANCHOR_LOADER_CONFIG_PATH), "utf8"));
+  } catch {
+    return current;
+  }
+  for (const anchor of store.regimeAnchors ?? []) {
+    if (!anchor.modelId || !anchor.tier || !anchor.backend || !anchor.regime) continue;
+    const declared = closures.models?.[`${anchor.modelId}:${anchor.backend}`]?.digest;
+    current.set(
+      recordAnchorKey(anchor.modelId, anchor.tier, anchor.backend, anchor.regime),
+      declared !== undefined && declared === anchor.source?.loaderClosureDigest,
+    );
+  }
+  return current;
+}
+
+/**
  * Currency of the TASK-ROUTE cells (sc-25690), keyed like an anchor (`<modelId>:<tier>:<backend>`).
  *
  * A task route (`matrix.summary.taskRouteEntries` — the Iris-3B depth and restoration tasks) is a
@@ -2017,7 +2130,8 @@ export async function readExceededBounds(root = ROOT) {
     if (!bound.modelId || !bound.tier || !bound.backend) continue;
     const declared = closures.models?.[`${bound.modelId}:${bound.backend}`]?.digest;
     const current = declared !== undefined && declared === bound.source?.loaderClosureDigest;
-    const key = `${bound.modelId}:${bound.tier}:${bound.backend}`;
+    // SW-F363: a regime row's stop classifies that regime row, never its cell's base row.
+    const key = recordAnchorKey(bound.modelId, bound.tier, bound.backend, bound.regime);
     // A cell can carry more than one bound (stops at more than one geometry, or a stale stop
     // beside the current one that superseded it at a wider geometry). The cell is `exceeded_current`
     // if ANY of them is current — the adapter's seam consults only the current bounds, so this
@@ -2542,6 +2656,11 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   const parts = anchorParts(key);
   const row = {
     key, ...parts, provider: planned.provider, status: "runnable", reason: null, env: {}, roots: [],
+    // SW-F363: what this row RENDERS beyond its cell — the overlay it loads, its load shape and the
+    // one composition (rung, engaged set, exact parameters) `planAnchor` will send — so `--dry-run`
+    // states it for every row and the overlay artifact below can be resolved from the row alone.
+    overlay: planned.overlay, loadShape: planned.loadShape,
+    strategy: plannedAnchorStrategy(planned, parts.backend),
     // sc-22738: an arm that emits a provider `sourceCapture` is the one that needs the raw-log pair
     // and the capture-dir environment. Defaulted here so no early-return row can reach
     // `measureAnchor` with the flag undefined; both terminal paths below set it from the family.
@@ -2811,12 +2930,21 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // sc-22738: only on the lane whose engine opens them (`requiredComponentsFor`). An MLX SDXL cell
   // was reported `weights_missing` for a CLIP-bigG / fp16-fix-VAE snapshot that `mlx-gen-sdxl`
   // never reads — it declares `required_components: &[]` and loads both out of its own tier root.
-  for (const component of requiredComponentsFor(family, backend)) {
+  for (const component of requiredComponentsFor(family, backend, parts.tier)) {
     const download = tierDownload(models, parts.modelId, component.repo, parts.tier);
-    const root = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, component.repo, download.revision)));
-    row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
+    // SW-7100: `subdir` binds ONE folder of the component snapshot (MiniMax-H3's `<tier>/text_encoder`)
+    // rather than the snapshot itself, which is the directory the worker stages as the component.
+    const subdir = component.subdirByTier?.[parts.tier] ?? component.subdir;
+    const expected = snapshotPath(hubs[0], component.repo, download.revision, ...(subdir ? [subdir] : []));
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, component.repo, download.revision, ...(subdir ? [subdir] : []))),
+    );
+    row.roots.push({ label: `component ${component.env}`, path: root ?? expected });
     if (!root) {
-      return { ...row, status: "weights_missing", reason: `no ${component.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${component.repo}@${download.revision.slice(0, 8)}${subdir ? `/${subdir}` : ""} snapshot on this host`,
+      };
     }
     // sc-25690: a component that declares the `files` its engine opens in it by name is checked for
     // them and for every shard its own index names — a config-only or half-fetched text encoder is
@@ -2920,9 +3048,10 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     }
     row.env[name] = root;
   }
-  // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA):
-  // its repository and revision are pinned in the family row, so the root is the snapshot itself.
-  const side = family.sideArtifact?.[parts.modelId];
+  // A member-specific artifact the manifest does not ship (the Qwen edit Lightning distill LoRA), or
+  // the overlay artifact this row's declared overlay installs (SW-F363): its repository and revision
+  // are pinned in the family row, so the root is the snapshot itself.
+  const side = sideArtifactFor(family, row);
   if (side) {
     const sideRoot = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, side.repo, side.revision)));
     row.roots.push({ label: "side artifact", path: sideRoot ?? snapshotPath(hubs[0], side.repo, side.revision) });
@@ -2939,7 +3068,7 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     if (side.file && !(await isFile(path.join(sideRoot, side.file)))) {
       return {
         ...row, status: "weights_missing",
-        reason: `${side.repo} snapshot ${sideRoot} is missing ${side.file}, which the adapter arm attaches as this member's distill LoRA`,
+        reason: `${side.repo} snapshot ${sideRoot} is missing ${side.file}, which the adapter arm attaches as this row's LoRA`,
       };
     }
     row.env[`SCENEWORKS_${side.env}_REPOSITORY`] = side.repo;
@@ -3067,7 +3196,7 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
   if (family.ltx25) repositories.push({ label: "ltx25 snapshot", repo: family.repo });
   else repositories.push({ label: "tier root", repo: familyArtifact(family, row.backend, row.tier).repo });
   if (family.upstream) repositories.push({ label: "upstream root", repo: family.upstream.repo });
-  for (const component of requiredComponentsFor(family, row.backend)) {
+  for (const component of requiredComponentsFor(family, row.backend, row.tier)) {
     repositories.push({ label: `component ${component.env}`, repo: component.repo });
   }
   if (family.components && !Array.isArray(family.components)) {
@@ -3116,9 +3245,9 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
   }
 
   // Not a manifest download: the member's own pinned side artifact (the Qwen edit Lightning distill
-  // LoRA), whose repository, revision and file the family row pins because the worker fetches it
-  // lazily rather than declaring it.
-  const side = family.sideArtifact?.[row.modelId];
+  // LoRA) or the row's overlay artifact (SW-F363), whose repository, revision and file the family
+  // row pins because neither is a catalog download.
+  const side = sideArtifactFor(family, row);
   if (side && !seen.has(`${side.repo}@${side.revision}`)) {
     seen.add(`${side.repo}@${side.revision}`);
     targets.push({
@@ -3487,7 +3616,10 @@ export async function capturedInCampaign(root, campaignDir) {
     for (const record of bundle.records ?? []) {
       const target = record.target ?? {};
       if (target.modelId && target.tier && record.backend) {
-        captured.set(`${target.modelId}:${target.tier}:${record.backend}`, `${campaignDir}/${name}`);
+        captured.set(
+          recordAnchorKey(target.modelId, target.tier, record.backend, target.anchorRegime),
+          `${campaignDir}/${name}`,
+        );
       }
     }
   }
@@ -4234,9 +4366,12 @@ export async function extractSeedingNewAnchors(exec, root, log, limit = 8) {
       // sc-22738: a measured lower bound is seeded into ITS OWN array. The extractor reads the
       // currency key out of whichever array the row lives in, so seeding a bound among the anchors
       // would leave the extractor still refusing it on the next attempt and burn the retry budget.
+      // SW-F363: and a regime anchor (`regime:`-prefixed id) into `regimeAnchors`, for the same reason.
       const rows = match[1].startsWith("exceeded:")
         ? (store.exceededBounds ??= [])
-        : store.anchors;
+        : match[1].startsWith("regime:")
+          ? (store.regimeAnchors ??= [])
+          : store.anchors;
       if (rows.some((row) => row.id === match[1])) throw error;
       rows.push({ id: match[1], source: { loaderClosureDigest: SEED_DIGEST } });
       await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`);
@@ -4376,17 +4511,63 @@ export function failureReason(error) {
       .split("\n").map((line) => line.trim()).filter(Boolean)
       .join(" ").slice(0, FAILURE_REASON_LIMIT) || "unknown failure";
   }
-  const lines = stderr
+  // SW-F363 (campaign run 43794810762): Node prints a thrown error's own properties AFTER its stack
+  // as an object literal whose opening brace ends the LAST STACK FRAME (`    at fn (file) {`), then
+  // `  errno: -28,` … `}` — nested `[cause]:` errors, `details: { … }` and arrays included. Four
+  // `ingest_failed` rows quoted the bare `}`. So the literal is stripped from the RAW lines first —
+  // before frames are filtered, or its opening brace would be filtered with them and the depth count
+  // would never close — and when one was stripped, the reason is the error's own header line plus
+  // any continuation of its message (an AssertionError's `1 !== 2`), not whatever came last.
+  const raw = stderr
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !/^(at |Node\.js v)/.test(line));
+    .filter((line) => line && !/^Node\.js v/.test(line));
+  const stripped = withoutTrailingLiteral(raw);
+  const lines = stripped.filter((line) => !/^at /.test(line) && !/^\.\.\. \d+ lines? matching /.test(line));
   // sc-22738, the SECOND half of the same defect. Reading from the end fixed the ordering, and
   // then `protocol::fail` was taught to defer its informational notes until AFTER the failure
   // line — so the last line became the sc-22414 coherence tally again, this time by construction.
   // Informational lines are not outcomes: skip them and quote the last line that is one. Falling
   // back to the last line overall keeps a stderr that is ONLY notes from reporting nothing.
   const outcome = lines.filter((line) => !INFORMATIONAL_LINE_PATTERN.test(line));
-  return ((outcome.at(-1) ?? lines.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+  if (stripped.length !== raw.length) {
+    const header = outcome.findLastIndex((line) => /^(?:[A-Z][A-Za-z]*)?Error\b/.test(line));
+    if (header !== -1) return outcome.slice(header).join(" ").slice(0, FAILURE_REASON_LIMIT);
+  }
+  return ((outcome.at(-1) ?? lines.at(-1) ?? raw.at(-1)) ?? "unknown failure").slice(0, FAILURE_REASON_LIMIT);
+}
+
+/**
+ * `lines` minus a trailing object/array literal (see `failureReason`), balanced from its closing
+ * line back to the line whose trailing `{`/`[` opens it; that line's other text is kept. Unchanged
+ * when the last line does not close a literal, or the literal never balances.
+ */
+export function withoutTrailingLiteral(lines) {
+  if (lines.length === 0 || !/^[\]})]+[,;]?$/.test(lines.at(-1))) return lines;
+  let depth = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    depth += (line.match(/[\]}]/g) ?? []).length - (line.match(/[[{]/g) ?? []).length;
+    if (depth <= 0) {
+      const opener = line.replace(/[[{]\s*$/, "").trim();
+      return opener ? [...lines.slice(0, index), opener] : lines.slice(0, index);
+    }
+  }
+  return lines;
+}
+
+/** How many trailing stderr lines of a failed ingest the walk prints into the step log. */
+export const INGEST_STDERR_TAIL_LINES = 60;
+
+/**
+ * The last `limit` lines of a failed child's stderr (or its message when it had none), for the
+ * job's step log. SW-F363: the per-anchor log lives in the work dir — an artifact — and the
+ * one-line summary row cannot hold a multi-line error, so without this the CI log carried nothing
+ * but the summary for four `ingest_failed` rows.
+ */
+export function stderrTail(error, limit = INGEST_STDERR_TAIL_LINES) {
+  const text = String(error?.stderr ?? "").trim() || String(error?.message ?? "unknown failure");
+  return text.split("\n").slice(-limit).join("\n");
 }
 
 export async function measureAnchor(row, context) {
@@ -4491,7 +4672,7 @@ export async function measureAnchor(row, context) {
         "scripts/anchor-loader-closure.mjs", "--repo", path.resolve(args.inferenceRepo), "--stamp-anchors",
       ], { log });
       const stamped = JSON.parse(await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8"));
-      const seeded = [...stamped.anchors, ...(stamped.exceededBounds ?? [])]
+      const seeded = [...stamped.anchors, ...(stamped.regimeAnchors ?? []), ...(stamped.exceededBounds ?? [])]
         .some((entry) => entry.source?.loaderClosureDigest === SEED_DIGEST);
       if (seeded) {
         fail("a seeded placeholder currency key survived --stamp-anchors; refusing to commit it");
@@ -4519,6 +4700,11 @@ export async function measureAnchor(row, context) {
       } catch (rollbackError) {
         state.halt = `rollback failed for ${row.key}: ${rollbackError.message}`;
       }
+      // SW-F363: the step log is the only window a CI run gives into an ingest failure.
+      process.stdout.write(
+        `--- ${row.key}: ingest failed (${subject}); last ${INGEST_STDERR_TAIL_LINES} stderr lines:\n`
+          + `${stderrTail(error)}\n--- end ${row.key} ingest stderr\n`,
+      );
       return finish("ingest_failed", failureReason(error));
     }
   };
@@ -4746,7 +4932,11 @@ export async function planRun(args, root = ROOT) {
   const plan = await readPlan(root);
   const models = await readManifestModels(root);
   // sc-25690: store anchors first, then the task-route cells the store cannot carry.
-  const current = new Map([...(await readTaskRouteCurrency(root)), ...(await readMatrixCurrency(root))]);
+  const current = new Map([
+    ...(await readTaskRouteCurrency(root)),
+    ...(await readMatrixCurrency(root)),
+    ...(await readRegimeAnchorCurrency(root)),
+  ]);
   const campaign = args.campaign ?? `catalog-${new Date().toISOString().slice(0, 10)}`;
   const campaignDir = `docs/calibration/${campaign}`;
   const captured = await capturedInCampaign(root, campaignDir);
@@ -4851,6 +5041,14 @@ export async function planRun(args, root = ROOT) {
   return { plan, rows, campaign, campaignDir, campaignPrefix: campaignDir, hubs };
 }
 
+/** One `--dry-run` line: the strategy, parameters, overlay and load shape a row is captured at. */
+export function dryRunCompositionLine(row) {
+  const strategy = row.strategy ?? { rung: "?", engagedRungs: [], parameters: {} };
+  return `strategy=${strategy.rung} engaged=[${strategy.engagedRungs.join(",")}] `
+    + `parameters=${JSON.stringify(strategy.parameters ?? {})} overlay=${row.overlay ?? "?"} `
+    + `loadShape=${row.loadShape ?? "?"}${row.regime ? ` regime=${row.regime}` : ""}`;
+}
+
 function table(rows, columns) {
   const widths = columns.map((column) => Math.max(column.length, ...rows.map((row) => String(row[column] ?? "").length)));
   const line = (cells) => cells.map((cell, index) => String(cell ?? "").padEnd(widths[index])).join("  ").trimEnd();
@@ -4891,6 +5089,10 @@ export async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`${table(rows, ["key", "status", "reason"])}\n\n`);
   const runnable = rows.filter((row) => row.status === "runnable");
   if (args.dryRun) {
+    // SW-F363: the composition EVERY listed row is captured at — runnable or not — so a regime row
+    // reads as a different render of its cell rather than a duplicate key, on any host.
+    for (const row of rows) process.stdout.write(`${row.key}: ${dryRunCompositionLine(row)}\n`);
+    process.stdout.write("\n");
     for (const row of runnable) {
       process.stdout.write(`${row.key}\n  sourceCapture=${row.sourceCapture} physical=${row.physical} ltx25=${Boolean(row.ltx25SnapshotRoot)} budget=${probeBudgetMinutes(row, args.probeBudgetMinutes)}m\n`);
       for (const root of row.roots) process.stdout.write(`  ${root.label}: ${root.path}\n`);

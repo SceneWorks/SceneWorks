@@ -1373,9 +1373,14 @@ fn selected_portable_aux_ids(
     Ok(ids)
 }
 
+/// The tier `slot` (holding `model_id`) was admitted with: the one selection the API's portable
+/// admission froze the binding from (`admitted_runtime_variant`: a training base's plan tier, a
+/// prompt expansion's `peTier`, else the request's explicit tier), so this guard re-derives the
+/// closure the API bound rather than a default of its own.
 fn selected_runtime_variant(
     job_type: &JobType,
     payload: &JsonObject,
+    slot: &str,
     model_id: &str,
     options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
@@ -1392,33 +1397,15 @@ fn selected_runtime_variant(
             },
         )
     };
-    if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
-        return Ok(requested());
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+        || (*job_type == JobType::PromptRefine && slot == "modelManifestEntry")
+    {
+        return sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
+            job_type, payload, slot, model_id,
+        )
+        .map_err(invalid_binding);
     }
-    let target = payload
-        .get("plan")
-        .and_then(|plan| plan.get("target"))
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| invalid_binding("training plan has no canonical target"))?;
-    let base = target
-        .get("baseModel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no base model"))?;
-    if base != model_id {
-        return Ok(requested());
-    }
-    let kernel = target
-        .get("kernel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no native kernel"))?;
-    Ok(Some(
-        if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
-            "q4"
-        } else {
-            "bf16"
-        }
-        .to_owned(),
-    ))
+    Ok(requested())
 }
 
 /// The tier this request runs. An image request that names no tier runs the worker's implicit
@@ -1439,7 +1426,7 @@ fn bound_runtime_variant(
         .get("id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id, options)? {
+    if let Some(variant) = selected_runtime_variant(job_type, payload, slot, model_id, options)? {
         return Ok(Some(variant));
     }
     if slot != "modelManifestEntry"
@@ -1460,6 +1447,17 @@ fn bound_runtime_variant(
         .filter(|binding| standard_tier_layout && binding.model_id == model_id)
         .and_then(|binding| binding.tier.clone())
         .filter(|tier| matches!(tier.as_str(), "bf16" | "q8" | "q4")))
+}
+
+pub(crate) fn bound_runtime_variant_from_payload(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &serde_json::Value,
+    binding: Option<&PortableModelBinding>,
+) -> WorkerResult<Option<String>> {
+    let options = SourceOptionFacts::resolve(job_type, payload)?;
+    bound_runtime_variant(job_type, payload, slot, entry, binding, &options)
 }
 
 fn prepare_portable_snapshot(
@@ -5523,6 +5521,7 @@ mod tests {
         let selected = selected_runtime_variant(
             &JobType::LoraTrain,
             &payload,
+            "modelManifestEntry",
             "z_image_turbo",
             &SourceOptionFacts::syntax(&payload),
         )

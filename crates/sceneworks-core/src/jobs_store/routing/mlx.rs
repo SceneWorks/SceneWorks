@@ -165,6 +165,7 @@ fn image_request_mlx_eligible_with_context(
             flux3_mlx_eligible_with_facts(payload, context.options)
         }
         "supra2_img" => supra2_mlx_eligible_with_facts(payload, context.options),
+        "minimax_h3_image" => minimax_h3_image_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -650,6 +651,35 @@ pub(crate) fn supra2_mlx_eligible_with_facts(
         && !has_nonempty_array(payload, "loras")
         && !facts.mlx_quantize.is_present_nonnull()
         && !facts.quant_tier.is_present_nonnull()
+}
+
+/// MiniMax-H3-Image (SW-7100, SW-7101): text-to-image and the 1..=16-reference edit are ONE
+/// engine call — an empty ordered reference list is text-to-image and a non-empty one is the edit
+/// (the engine's `edit_reference_images`), so both claim through the same predicate, exactly as
+/// Qwen-Image 2.1 does ([`qwen_image_2_1_mlx_eligible`]). The ordered list is the shared
+/// [`qwen_image_2_1_reference_ids`] the
+/// API caps (`limits.maxReferenceAssets`) and the worker renders; only a MALFORMED carrier refuses
+/// here. User LoRAs route (SW-7096 installs them on every tier) and a tier carrier (`mlxQuantize` /
+/// `quantTier`) is admitted: both engines read the pre-packed q8/q4 DiT tiers. Still refused: a
+/// control, a pose, a multi-phase schedule, and hires fix (its second pass is an img2img
+/// refinement this engine does not take).
+pub(crate) fn minimax_h3_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    matches!(
+        payload.get("mode").and_then(Value::as_str),
+        None | Some("text_to_image" | "edit_image")
+    ) && !hires_fix_enabled
+        && !has_nonempty_array(payload, "controls")
+        && !has_nonempty_array(payload, "controlnets")
+        && !crate::jobs_store::routing::route_nested_array_nonempty(&facts, "poses")
+        && !crate::jobs_store::routing::route_nested_array_nonempty(&facts, "phases")
+        && qwen_image_2_1_reference_ids(payload).is_some()
 }
 
 fn mage_flow_edit_mlx_eligible_with_facts(

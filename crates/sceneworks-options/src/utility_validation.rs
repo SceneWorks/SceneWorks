@@ -7,6 +7,7 @@ use crate::{
 use serde_json::{json, Value};
 pub const MAX_MOOD_BOARD_IMAGES: usize = 6;
 pub const MAX_QWEN_REWRITE_IMAGES: usize = 10;
+pub const MAX_H3_IMAGE_EXPAND_IMAGES: usize = 16;
 
 pub fn validate_character_test(request: &CharacterTestRequest) -> Result<(), ValidationRefusal> {
     if request.prompt.is_empty() || request.prompt.chars().count() > crate::MAX_PROMPT_CHARS {
@@ -118,6 +119,7 @@ pub fn prompt_refine_task(task: Option<&str>) -> &'static str {
         "image_describe" => "image_describe",
         "film_plan" => "film_plan",
         "qwen_image_rewrite" => "qwen_image_rewrite",
+        "minimax_h3_image_expand" => "minimax_h3_image_expand",
         _ => "refine",
     }
 }
@@ -167,7 +169,7 @@ pub fn resolve_prompt_refine(payload: &JsonObject) -> JsonObject {
     }
     if matches!(
         task,
-        "image_caption" | "image_describe" | "qwen_image_rewrite"
+        "image_caption" | "image_describe" | "qwen_image_rewrite" | "minimax_h3_image_expand"
     ) {
         resolved
             .entry("sourceAssetIds")
@@ -207,7 +209,7 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
     };
     let task = prompt_refine_task(Some(text("task")));
     let vision = matches!(task, "image_caption" | "image_describe");
-    let rewrite = task == "qwen_image_rewrite";
+    let rewrite = matches!(task, "qwen_image_rewrite" | "minimax_h3_image_expand");
     if text("prompt").is_empty() && !vision {
         return Err(ValidationRefusal::new("prompt", "Prompt cannot be empty"));
     }
@@ -236,7 +238,9 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
                 "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
             ));
         }
-        let cap = if rewrite {
+        let cap = if task == "minimax_h3_image_expand" {
+            MAX_H3_IMAGE_EXPAND_IMAGES
+        } else if rewrite {
             MAX_QWEN_REWRITE_IMAGES
         } else {
             MAX_MOOD_BOARD_IMAGES
@@ -250,7 +254,9 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
             };
             return Err(ValidationRefusal::new(
                 field,
-                if rewrite {
+                if task == "minimax_h3_image_expand" {
+                    format!("MiniMax-H3-Image prompt expansion accepts at most {cap} reference images — the same ordered list the render takes")
+                } else if rewrite {
                     format!("Qwen Image 2.1 prompt rewriting accepts at most {cap} reference images — the same ordered list the render takes")
                 } else {
                     format!("A mood board accepts at most {cap} reference images")
@@ -558,6 +564,7 @@ fn prompt_reference_paths_refuse_malformed_members_and_enforce_task_caps() {
     for (task, cap) in [
         ("image_describe", MAX_MOOD_BOARD_IMAGES),
         ("qwen_image_rewrite", MAX_QWEN_REWRITE_IMAGES),
+        ("minimax_h3_image_expand", MAX_H3_IMAGE_EXPAND_IMAGES),
     ] {
         let mut payload = json!({"task":task,"prompt":"tree","sourceAssetIds":["asset"],"imagePaths":vec!["image.png";cap]});
         validate_shape("promptRefine", payload.as_object().unwrap()).unwrap();

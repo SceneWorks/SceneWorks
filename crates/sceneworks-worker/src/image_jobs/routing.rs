@@ -22,6 +22,8 @@ use super::conditioning::grouped_edit_image_count;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_mage_edit_model;
 #[cfg(not(target_os = "macos"))]
+use super::conditioning::is_minimax_h3_image_edit;
+#[cfg(not(target_os = "macos"))]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::kolors_edit_candle_available;
@@ -984,6 +986,10 @@ pub(super) enum CandleImageRoute {
     /// it as plain text-to-image and silently drop every reference. Uses the same generic registry
     /// stream once the ordered conditioning list is resolved.
     QwenImage21Edit,
+    /// MiniMax-H3-Image edit (SW-7101): 1..=16 ordered references. `minimax_h3_image` is ALSO a
+    /// candle txt2img id, so an edit diverts here first for the same reason as
+    /// [`Self::QwenImage21Edit`]; it uses the same generic registry stream.
+    MinimaxH3ImageEdit,
     /// Ordered FLUX.3 reference conditioning through the ordinary registered generator.
     Flux3Reference,
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
@@ -1121,6 +1127,7 @@ impl CandleImageRoute {
             // real-weight evidence run caught it).
             CandleImageRoute::CandleTxt2Img
             | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::MinimaxH3ImageEdit
             | CandleImageRoute::Flux3Reference => {
                 mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
@@ -1239,6 +1246,7 @@ impl CandleImageRoute {
             CandleImageRoute::MossImageEdit
             | CandleImageRoute::MageEdit
             | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::MinimaxH3ImageEdit
             | CandleImageRoute::Flux3Reference
             | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
@@ -1379,6 +1387,11 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // through would be rendered as plain T2I with every reference silently dropped. The core
         // router's `CandleImageLane::QwenImage21Edit` claims exactly these shapes.
         Some(CandleImageRoute::QwenImage21Edit)
+    } else if is_minimax_h3_image_edit(request) {
+        // MiniMax-H3-Image edit (SW-7101): a conditioned request on a candle txt2img id, named so it
+        // can never fall through as plain T2I with its references dropped. The core router's
+        // `CandleImageLane::MinimaxH3ImageEdit` claims exactly these shapes.
+        Some(CandleImageRoute::MinimaxH3ImageEdit)
     } else if request.model == "kolors"
         && ((non_empty(&request.reference_asset_id)
             && execution.map_or_else(
@@ -1771,6 +1784,8 @@ pub(super) fn candle_adapter_label(model: &str) -> &'static str {
         "moss_image_base" | "moss_image_sft" => moss_adapter_label(model, "candle"),
         // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
         "supra2_img" => "candle_supra2",
+        // MiniMax-H3-Image (SW-7100): the off-Mac sibling of the `mlx_minimax_h3_image` label.
+        "minimax_h3_image" => "candle_minimax_h3_image",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",

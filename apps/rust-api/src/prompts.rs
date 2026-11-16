@@ -4,13 +4,16 @@ use super::*;
 /// reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so the cost scales with N; this bounds
 /// the vision attention + context a single request can demand. The Image Studio picker enforces the same
 /// ceiling client-side — this is the authoritative server-side guard.
-#[cfg(test)]
 pub(crate) use sceneworks_core::request_validation::utility_validation::{
     MAX_MOOD_BOARD_IMAGES, MAX_QWEN_REWRITE_IMAGES,
 };
 
 // The API and worker classify the same core-owned discriminator.
 pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;
+pub(crate) use sceneworks_core::contracts::{
+    MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, MINIMAX_H3_IMAGE_EXPAND_TASK,
+    MINIMAX_H3_IMAGE_MODEL_ID, MINIMAX_H3_IMAGE_PE_MODEL_ID,
+};
 
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
@@ -38,7 +41,11 @@ pub(crate) async fn create_prompt_refine_job(
     // references is not an error — it is the legitimate text-to-image case, and it is what selects
     // the T2I rewriter over the editing one in the worker.
     let is_qwen_rewrite = task == Some(QWEN_IMAGE_REWRITE_TASK);
-    let carries_reference_images = is_vision_task || is_qwen_rewrite;
+    // MiniMax-H3-Image's prompt expansion (SW-7102) has the same shape: driven by the user's text,
+    // with zero references meaning text-to-image and one or more meaning an edit whose instruction
+    // names them as `<Picture N>` in order.
+    let is_h3_expand = task == Some(MINIMAX_H3_IMAGE_EXPAND_TASK);
+    let carries_reference_images = is_vision_task || is_qwen_rewrite || is_h3_expand;
 
     let prompt = payload.prompt.trim();
 
@@ -74,6 +81,43 @@ pub(crate) async fn create_prompt_refine_job(
         // A VISION task has nothing to look at without a reference. A rewrite with none is the
         // text-to-image case and proceeds — so this requirement, and everything below it that needs
         // a project to resolve asset ids against, is skipped when the list is legitimately empty.
+        if asset_ids.is_empty() && is_vision_task {
+            return Err(ApiError::bad_request(
+                "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
+            ));
+        }
+        // Bound the board: each reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so N
+        // references cost ~N MP of vision attention + context. Cap it so a runaway list cannot exhaust
+        // memory. The UI enforces the same ceiling; this is the server-side guard.
+        //
+        // The rewrite's ceiling is 10 rather than 6, and for a different reason — see
+        // `MAX_QWEN_REWRITE_IMAGES`: it must be shown exactly the ordered list the render will use.
+        let (cap, cap_message) = if is_h3_expand {
+            (
+                MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES,
+                format!(
+                    "MiniMax-H3-Image prompt expansion accepts at most \
+                     {MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES} reference images — the same ordered \
+                     list the render takes"
+                ),
+            )
+        } else if is_qwen_rewrite {
+            (
+                MAX_QWEN_REWRITE_IMAGES,
+                format!(
+                    "Qwen Image 2.1 prompt rewriting accepts at most {MAX_QWEN_REWRITE_IMAGES} \
+                     reference images — the same ordered list the render takes"
+                ),
+            )
+        } else {
+            (
+                MAX_MOOD_BOARD_IMAGES,
+                format!("A mood board accepts at most {MAX_MOOD_BOARD_IMAGES} reference images"),
+            )
+        };
+        if asset_ids.len() > cap {
+            return Err(ApiError::bad_request(cap_message));
+        }
         if !asset_ids.is_empty() {
             let project_id = payload
                 .project_id
@@ -90,7 +134,7 @@ pub(crate) async fn create_prompt_refine_job(
             }
             // A single reference keeps the scalar `imagePath` (byte-identical to the pre-mood-board path);
             // multiple references ride the `imagePaths` array the worker prefers.
-            if image_paths.len() == 1 && !is_qwen_rewrite {
+            if image_paths.len() == 1 && !is_qwen_rewrite && !is_h3_expand {
                 job_payload.insert(
                     "imagePath".to_owned(),
                     Value::String(image_paths.into_iter().next().unwrap()),
@@ -207,6 +251,10 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    if is_h3_expand {
+        prepare_h3_image_expand(&state, &payload, &mut job_payload).await?;
+    }
+
     let job = create_generation_job(
         state,
         JobType::PromptRefine,
@@ -217,6 +265,120 @@ pub(crate) async fn create_prompt_refine_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// The MiniMax-H3-Image expansion's own admission (SW-7102): it serves only `minimax_h3_image`,
+/// its edit aspect selection is `adaptive` or a positive-integer `W:H`, its licence must be
+/// accepted before it runs, and the worker receives its server-owned catalog entry (tiers and the
+/// upstream `prompt/` co-requisite) as `modelManifestEntry`.
+async fn prepare_h3_image_expand(
+    state: &AppState,
+    payload: &PromptRefineRequest,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let target = payload
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MINIMAX_H3_IMAGE_MODEL_ID);
+    if target != MINIMAX_H3_IMAGE_MODEL_ID {
+        return Err(ApiError::bad_request(format!(
+            "MiniMax-H3-Image prompt expansion only applies to {MINIMAX_H3_IMAGE_MODEL_ID}; this \
+             request targets {target}"
+        )));
+    }
+    job_payload.insert(
+        "modelId".to_owned(),
+        Value::String(MINIMAX_H3_IMAGE_MODEL_ID.to_owned()),
+    );
+    if let Some(aspect) = payload
+        .aspect_ratio
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if aspect != "adaptive" && !is_positive_ratio(aspect) {
+            return Err(ApiError::bad_request(
+                "aspectRatio for MiniMax-H3-Image prompt expansion must be adaptive or a \
+                 positive-integer W:H",
+            ));
+        }
+    }
+    let entry =
+        crate::models::resolve_model_manifest_entry(state, MINIMAX_H3_IMAGE_PE_MODEL_ID).await?;
+    let object = entry
+        .as_object()
+        .filter(|object| !object.is_empty())
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "the {MINIMAX_H3_IMAGE_PE_MODEL_ID} catalog entry is missing"
+            ))
+        })?;
+    crate::models::ensure_run_license_acknowledged(state, object).await?;
+    // Freeze the tier the worker will load BEFORE admission binds the job's sources. The request
+    // names no tier, and portable admission has no implicit expander choice of its own, so without
+    // this it would bind the catalog's default download (the unpublished bf16 row on macOS, NVFP4
+    // on Windows/Linux) while the worker loaded whichever tier is actually installed.
+    let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
+    let nvfp4_worker = can_run_nvfp4_expansion(&workers);
+    if let Some(tier) = expander_tier(&entry, &state.settings.data_dir, nvfp4_worker) {
+        job_payload.insert(
+            sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY.to_owned(),
+            Value::String(tier.to_owned()),
+        );
+    }
+    job_payload.insert("modelManifestEntry".to_owned(), entry);
+    Ok(())
+}
+
+/// Whether one available worker can run an NVFP4 expansion: it must advertise BOTH the
+/// `prompt_refine` provider and the NVFP4 device marker. The marker is derived from GPU compute
+/// capability alone, so a worker advertising it may still have no text provider linked.
+fn can_run_nvfp4_expansion(workers: &[WorkerSnapshot]) -> bool {
+    workers.iter().any(|worker| {
+        let advertises = |wanted: &str| {
+            worker
+                .capabilities
+                .iter()
+                .any(|capability| capability.as_str() == wanted)
+        };
+        !matches!(
+            worker.status,
+            WorkerStatus::Offline | WorkerStatus::Unhealthy
+        ) && advertises(JobType::PromptRefine.as_str())
+            && advertises(sceneworks_core::contracts::NVFP4_WORKER_CAPABILITY)
+    })
+}
+
+/// The expander tier an unselected expansion runs: the worker's own order
+/// ([`sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS`]) over the tiers installed for this
+/// host's platform, with NVFP4 only when a registered worker can run it. `None` when no tier is
+/// installed, which leaves the worker's "install the expander" refusal to explain it.
+fn expander_tier(
+    entry: &Value,
+    data_dir: &std::path::Path,
+    nvfp4_worker: bool,
+) -> Option<&'static str> {
+    let mut host = entry.clone();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let installed = crate::models::installed_variant_keys(&host, data_dir);
+    sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS
+        .into_iter()
+        .filter(|tier| *tier != "nvfp4" || nvfp4_worker)
+        .find(|tier| installed.iter().any(|variant| variant == tier))
+}
+
+/// Whether `value` is a positive-integer `W:H`.
+fn is_positive_ratio(value: &str) -> bool {
+    let positive = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && part.parse::<u64>().is_ok_and(|number| number > 0)
+    };
+    value
+        .split_once(':')
+        .is_some_and(|(width, height)| positive(width) && positive(height))
 }
 
 /// Resolve an `image_caption` reference asset to an absolute on-disk path. Mirrors the worker's
@@ -244,6 +406,43 @@ mod tests {
     /// board's. Asserting both together is what stops a future "unify the caps" cleanup from
     /// silently cutting what the rewriter is allowed to see — at which point its `<imageN>`
     /// numbering would stop matching the references the render conditions on.
+    #[test]
+    fn the_expansion_aspect_selection_is_a_positive_integer_ratio() {
+        for ratio in ["1:1", "16:9", "21:9", "4736:3552"] {
+            assert!(is_positive_ratio(ratio), "{ratio}");
+        }
+        for value in ["", "16", "0:1", "1:0", "16:9:1", "a:b", "1.5:1", "-1:2"] {
+            assert!(!is_positive_ratio(value), "{value}");
+        }
+        assert_eq!(MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, 16);
+    }
+
+    /// NVFP4 is offered to an expansion only when ONE available worker advertises both the
+    /// text provider and the NVFP4 marker; the two on different workers, or the marker alone,
+    /// never select it.
+    #[test]
+    fn nvfp4_expansion_needs_one_worker_with_the_provider_and_the_marker() {
+        let worker = |id: &str, status: &str, capabilities: &[&str]| -> WorkerSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "gpuId": "0", "status": status, "capabilities": capabilities,
+                "loadedModels": [], "registeredAt": "2026-11-15T00:00:00Z",
+                "lastSeenAt": "2026-11-15T00:00:00Z",
+            }))
+            .unwrap()
+        };
+        let marker_only = worker("a", "idle", &["gpu", "candle", "nvfp4"]);
+        let provider_only = worker("b", "idle", &["gpu", "candle", "prompt_refine"]);
+        let both = worker("c", "idle", &["gpu", "candle", "prompt_refine", "nvfp4"]);
+        assert!(!can_run_nvfp4_expansion(std::slice::from_ref(&marker_only)));
+        assert!(!can_run_nvfp4_expansion(&[
+            marker_only.clone(),
+            provider_only.clone()
+        ]));
+        assert!(can_run_nvfp4_expansion(&[marker_only, both.clone()]));
+        let offline = worker("d", "offline", &["gpu", "candle", "prompt_refine", "nvfp4"]);
+        assert!(!can_run_nvfp4_expansion(&[offline, provider_only]));
+    }
+
     #[test]
     fn the_rewrite_ceiling_is_the_renders_not_the_mood_boards() {
         assert_eq!(MAX_QWEN_REWRITE_IMAGES, 10);

@@ -2197,6 +2197,67 @@ async fn canonical_model_provenance(
     .map_err(ApiError::bad_request)
 }
 
+/// The server-owned marker recording that `advanced.mlxQuantize` was frozen by
+/// [`freeze_minimax_h3_image_implicit_tier`] rather than chosen by the user.
+const MLX_QUANTIZE_FROZEN_KEY: &str = "mlxQuantizeFrozen";
+
+/// MiniMax-H3-Image renders an unselected request from its densest installed tier (bf16, q8, q4;
+/// the worker's `minimax_h3_image::resolve_tier_dir`). It does not declare
+/// `mlx.standardTierLayout` (its tiers are the upstream snapshot root plus a re-host's `{tier}/`,
+/// not one turnkey's `q4/ q8/ bf16/`), so portable admission's implicit standard-tier rule does not
+/// apply and the binding would freeze the catalog's bf16 default. Freeze the installed tier into
+/// the request instead, as the explicit `advanced.mlxQuantize` the loader, the binding and the
+/// worker's portable guard all read, so the three select one tier. The tier is the render loader's
+/// own choice (`minimax_h3_image_installed_render_tier`), so a partial install cannot read as one
+/// tier here and another there.
+///
+/// A frozen tier is marked `advanced.mlxQuantizeFrozen`, which only this function sets. Every pass
+/// drops a marked value (and any marker a client sent) before judging the request, so a retry or
+/// duplicate re-freezes against what is installed now, and a duplicate that switches to another
+/// model does not carry the frozen tier as if the user had picked it. A tier the user chose is
+/// never marked and is left unchanged; so is a host with no tier installed.
+fn freeze_minimax_h3_image_implicit_tier(
+    state: &AppState,
+    job_type: &JobType,
+    model_id: &str,
+    entry: &Value,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
+        if advanced
+            .remove(MLX_QUANTIZE_FROZEN_KEY)
+            .is_some_and(|marker| marker.as_bool() == Some(true))
+        {
+            advanced.remove("mlxQuantize");
+        }
+    }
+    if model_id != sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID
+        || !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit)
+        || sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant(payload)
+            .is_some()
+    {
+        return Ok(());
+    }
+    let Some(bits) =
+        sceneworks_worker::minimax_h3_image_installed_render_tier(&state.settings.data_dir, entry)
+            .map(|tier| match tier {
+                "q4" => 4,
+                "q8" => 8,
+                _ => 0,
+            })
+    else {
+        return Ok(());
+    };
+    let advanced = payload
+        .entry("advanced".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+    advanced.insert("mlxQuantize".to_owned(), json!(bits));
+    advanced.insert(MLX_QUANTIZE_FROZEN_KEY.to_owned(), json!(true));
+    Ok(())
+}
+
 /// Resolve and stamp the authoritative catalog entry at every image-job creation boundary.
 ///
 /// The typed image route, raw Batch Detail route, retry, and duplicate all reach this seam. That is
@@ -2334,6 +2395,13 @@ pub(crate) async fn canonicalize_image_model_payload(
     ) {
         return Err(ApiError::bad_request(reason));
     }
+    freeze_minimax_h3_image_implicit_tier(
+        state,
+        job_type,
+        &model_id,
+        &model_manifest_entry,
+        payload,
+    )?;
 
     if !matches!(job_type, JobType::ImageDetail) {
         if let Some(entry) = model_manifest_entry.as_object() {

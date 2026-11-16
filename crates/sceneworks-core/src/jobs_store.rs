@@ -480,7 +480,8 @@ pub struct PlatformReachabilitySweepStats {
 /// out of the latency-sensitive claim transaction.
 // sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
 // eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 3;
+// SW-7102: version 4 adds `requires_nvfp4` (an NVFP4-frozen MiniMax-H3-Image expansion).
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 4;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -497,6 +498,8 @@ struct ClaimRoutingFacts {
     seedvr2_upscale: bool,
     required_capability: String,
     real_training: bool,
+    /// The job additionally needs the NVFP4 device marker (an NVFP4-frozen prompt expansion).
+    requires_nvfp4: bool,
     model_keys: Vec<String>,
 }
 
@@ -836,6 +839,7 @@ impl JobsStore {
             ("claim_seedvr2_upscale", "integer not null default 0"),
             ("claim_required_capability", "text not null default ''"),
             ("claim_real_training", "integer not null default 0"),
+            ("claim_requires_nvfp4", "integer not null default 0"),
             ("claim_model_key_1", "text"),
             ("claim_model_key_2", "text"),
             ("claim_model_key_3", "text"),
@@ -1400,7 +1404,7 @@ impl JobsStore {
                     claim_seedvr2_upscale = ?8, claim_required_capability = ?9,
                     claim_real_training = ?10, claim_model_key_1 = ?11,
                     claim_model_key_2 = ?12, claim_model_key_3 = ?13,
-                    claim_model_key_4 = ?14, updated_at = ?15
+                    claim_model_key_4 = ?14, updated_at = ?15, claim_requires_nvfp4 = ?17
               where id = ?16 and status = 'queued' and portable_model_binding_json is null",
             params![
                 dumps(canonical_payload)?,
@@ -1419,6 +1423,7 @@ impl JobsStore {
                 facts.model_key(3),
                 utc_now(),
                 original.id,
+                i64::from(facts.requires_nvfp4),
             ],
         )?;
         transaction.commit()?;
@@ -1632,7 +1637,8 @@ impl JobsStore {
                        claim_model_key_1 = ?12,
                        claim_model_key_2 = ?13,
                        claim_model_key_3 = ?14,
-                       claim_model_key_4 = ?15
+                       claim_model_key_4 = ?15,
+                       claim_requires_nvfp4 = ?16
                  where id = ?3 and status = 'pending_caption'
                 ",
                     params![
@@ -1651,6 +1657,7 @@ impl JobsStore {
                         facts.model_key(1),
                         facts.model_key(2),
                         facts.model_key(3),
+                        i64::from(facts.requires_nvfp4),
                     ],
                 )?
             }
@@ -1711,7 +1718,8 @@ impl JobsStore {
                     claim_model_key_1 = ?12,
                     claim_model_key_2 = ?13,
                     claim_model_key_3 = ?14,
-                    claim_model_key_4 = ?15
+                    claim_model_key_4 = ?15,
+                    claim_requires_nvfp4 = ?16
               where id = ?3 and status = 'pending_workflow'",
             params![
                 dumps(&payload)?,
@@ -1729,6 +1737,7 @@ impl JobsStore {
                 facts.model_key(1),
                 facts.model_key(2),
                 facts.model_key(3),
+                i64::from(facts.requires_nvfp4),
             ],
         )?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
@@ -3803,8 +3812,8 @@ impl JobsStore {
                    claim_mlx_eligible, claim_candle_eligible,
                    claim_candle_pose_reject, claim_training_mlx_only,
                    claim_seedvr2_upscale, claim_required_capability,
-                   claim_real_training, claim_model_key_1, claim_model_key_2,
-                   claim_model_key_3, claim_model_key_4
+                   claim_real_training, claim_requires_nvfp4, claim_model_key_1,
+                   claim_model_key_2, claim_model_key_3, claim_model_key_4
               from jobs
              where status = 'queued'
                and (exact_replay_expected_json is null
@@ -5001,7 +5010,7 @@ impl JobsStore {
               requested_gpu, claim_facts_version, claim_mlx_eligible, claim_candle_eligible,
               claim_candle_pose_reject, claim_training_mlx_only, claim_seedvr2_upscale,
               claim_required_capability, claim_real_training, claim_model_key_1,
-              claim_model_key_2, claim_model_key_3, claim_model_key_4,
+              claim_model_key_2, claim_model_key_3, claim_model_key_4, claim_requires_nvfp4,
               progress, stage, message, attempts, source_job_id, duplicate_of_job_id,
               created_at, updated_at, model_provenance_json
             ) values (
@@ -5010,7 +5019,7 @@ impl JobsStore {
                    then (select coalesce(max(queue_rank), 0) + 1 from jobs)
                    else 0 end,
               ?3, ?4, ?5, '{}', ?6,
-              ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
+              ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?27,
               0, ?12, ?7, ?8, ?9, ?10, ?11, ?11, ?26
             )
             ",
@@ -5041,6 +5050,7 @@ impl JobsStore {
                 claim_facts.model_key(2),
                 claim_facts.model_key(3),
                 optional_dumps(provenance)?,
+                i64::from(claim_facts.requires_nvfp4),
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -5328,6 +5338,7 @@ fn row_to_claim_candidate(row: &Row<'_>) -> rusqlite::Result<ClaimCandidate> {
             seedvr2_upscale: row.get::<_, i64>("claim_seedvr2_upscale")? != 0,
             required_capability: row.get("claim_required_capability")?,
             real_training: row.get::<_, i64>("claim_real_training")? != 0,
+            requires_nvfp4: row.get::<_, i64>("claim_requires_nvfp4")? != 0,
             model_keys,
         },
     })
@@ -5693,7 +5704,8 @@ fn persist_claim_routing_facts(
                 claim_model_key_1 = ?9,
                 claim_model_key_2 = ?10,
                 claim_model_key_3 = ?11,
-                claim_model_key_4 = ?12
+                claim_model_key_4 = ?12,
+                claim_requires_nvfp4 = ?14
           where id = ?13",
         params![
             CLAIM_ROUTING_FACTS_VERSION,
@@ -5709,6 +5721,7 @@ fn persist_claim_routing_facts(
             facts.model_key(2),
             facts.model_key(3),
             job_id,
+            i64::from(facts.requires_nvfp4),
         ],
     )?;
     Ok(())
@@ -6389,6 +6402,7 @@ impl ClaimRoutingFacts {
             seedvr2_upscale: upscale_job_requests_seedvr2(job),
             required_capability: required_capability(job).to_owned(),
             real_training: is_real_training_job(job),
+            requires_nvfp4: prompt_expansion_needs_nvfp4(job),
             model_keys: desired_model_keys(&job.payload),
         }
     }
@@ -6673,6 +6687,11 @@ fn worker_supports_claim_routing_facts(worker: &WorkerSnapshot, job: &ClaimRouti
     // available. Dry-run plan validation needs just the base `lora_train`
     // capability. This keeps a real run queued for a capable worker instead of
     // failing terminally after a worker without a matching native engine claims it.
+    // SW-7102: an NVFP4-frozen MiniMax-H3-Image expansion runs only on a Blackwell CUDA worker,
+    // in addition to the `prompt_refine` provider checked above.
+    if job.requires_nvfp4 && !advertises(crate::contracts::NVFP4_WORKER_CAPABILITY) {
+        return false;
+    }
     if job.real_training {
         return advertises(WorkerCapability::LoraTrainExecute.as_str());
     }
@@ -6755,6 +6774,19 @@ fn required_capability(job: &JobSnapshot) -> &str {
         }
         _ => job.job_type.as_str(),
     }
+}
+
+/// Whether a prompt-refine job is a MiniMax-H3-Image expansion frozen to the NVFP4 tier. Such a job
+/// still requires `prompt_refine` (the linked text provider) and ALSO the NVFP4 device marker:
+/// the marker is advertised from GPU compute capability alone, so neither implies the other.
+pub(crate) fn prompt_expansion_needs_nvfp4(job: &JobSnapshot) -> bool {
+    job.payload.get("task").and_then(Value::as_str)
+        == Some(crate::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK)
+        && job
+            .payload
+            .get(crate::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY)
+            .and_then(Value::as_str)
+            .is_some_and(|tier| tier.trim().eq_ignore_ascii_case("nvfp4"))
 }
 
 /// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).

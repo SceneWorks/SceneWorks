@@ -122,6 +122,15 @@ mod candle_supra2;
 /// file.
 const SUPRA2_ID: &str = "supra2_img";
 
+#[path = "candle_minimax_h3_image.rs"]
+mod candle_minimax_h3_image;
+
+/// MiniMax-H3-Image (SW-7100, feature SW-F363), served by `candle_minimax_h3_image`:
+/// `candle-gen-minimax-h3::image_model::IMAGE_MODEL_ID`, which is also the catalog model id. Spelled
+/// here, as a const, for the reason the Iris ids above are: `adapterCapturableProviders` reads the
+/// pre-gate off this file.
+const MINIMAX_H3_IMAGE_ID: &str = "minimax_h3_image";
+
 /// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
 /// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
 const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";

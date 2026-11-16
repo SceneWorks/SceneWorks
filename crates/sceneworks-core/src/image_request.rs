@@ -47,6 +47,7 @@ const DEFAULT_DIMENSION: u32 = 1024;
 /// historical blanket, kept for models that declare no `defaults.count`.
 const DEFAULT_COUNT: u32 = 4;
 
+pub use sceneworks_options::image_request::authored_quant_tier;
 /// The payload-sanity bounds on batch size. NOT a model's limit: that is `limits.count`, which is
 /// still unread (sc-12335 — a menu, and a separate question from this default).
 /// `pub(crate)` so `workflow_share`'s pose budget can be derived from it rather than restate it:
@@ -1830,6 +1831,28 @@ mod request_validation_tests {
         assert!(check(json!({"width":17,"height":32}), entry.clone()).is_err());
         assert!(check(json!({"width":16,"height":32}), json!({})).is_err());
         assert!(check(json!({"width":2049,"height":32}), entry).is_err());
+    }
+    /// SW-7100 (E25): the shipped MiniMax-H3-Image entry admits its 6272 px preset; the same size
+    /// stays refused for a model that declares no `maxDimension` (the 4096 blanket).
+    #[test]
+    fn minimax_h3_image_declared_edge_is_its_own() {
+        let manifest =
+            crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").expect("embedded");
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "minimax_h3_image")
+            .expect("shipped entry")
+            .clone();
+        let preset = json!({"model":"minimax_h3_image","width":6272,"height":2688,"count":1});
+        assert!(check(preset.clone(), entry.clone()).is_ok());
+        assert!(check(json!({"width":6273,"height":2688}), entry.clone()).is_err());
+        assert!(check(json!({"width":6272,"height":2688}), json!({})).is_err());
+        assert_eq!(
+            default_resolution(entry.as_object().unwrap()),
+            Some((2048, 2048))
+        );
     }
     #[test]
     fn flux3_reference_floor_and_omitted_sides_keep_provider_contract() {

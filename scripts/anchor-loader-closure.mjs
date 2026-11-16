@@ -957,7 +957,8 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
   // sc-22738: bounds are stamped by the SAME walk as anchors. A measured lower bound goes stale
   // exactly as a measured point does, and a second stamping pass would be a second place for the
   // two to disagree about what "current" means.
-  const stampable = [...store.anchors, ...(store.exceededBounds ?? [])];
+  // SW-F363: and so are the regime anchors — each is a measured point like any other anchor.
+  const stampable = [...store.anchors, ...(store.regimeAnchors ?? []), ...(store.exceededBounds ?? [])];
   const byRevision = new Map();
   for (const anchor of stampable) {
     const corpus = corpora.get(anchor.source?.path);
@@ -1040,11 +1041,13 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
     return { ...anchor, source: stamped };
   };
   const anchors = store.anchors.map(stamp);
+  const regimeAnchors = (store.regimeAnchors ?? []).map(stamp);
   const exceededBounds = (store.exceededBounds ?? []).map(stamp);
   return {
     store: {
       ...store,
       anchors,
+      ...(store.regimeAnchors === undefined ? {} : { regimeAnchors }),
       // Absent stays absent: a store written before the migration must round-trip byte-identically
       // through a stamp, or `--check` would red on every checkout that has not regenerated yet.
       ...(store.exceededBounds === undefined ? {} : { exceededBounds }),
@@ -1094,7 +1097,7 @@ export async function main(argv = process.argv.slice(2)) {
     );
     const corpora = new Map();
     const revisions = new Set();
-    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
+    for (const anchor of [...store.anchors, ...(store.regimeAnchors ?? []), ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));
@@ -1144,7 +1147,7 @@ export async function main(argv = process.argv.slice(2)) {
     const storePath = path.join(root, ANCHOR_STORE_PATH);
     const store = JSON.parse(await readFile(storePath, "utf8"));
     const corpora = new Map();
-    for (const anchor of [...store.anchors, ...(store.exceededBounds ?? [])]) {
+    for (const anchor of [...store.anchors, ...(store.regimeAnchors ?? []), ...(store.exceededBounds ?? [])]) {
       const cited = anchor.source?.path;
       if (cited && !corpora.has(cited)) {
         corpora.set(cited, JSON.parse(await readFile(path.join(root, cited), "utf8")));

@@ -1985,3 +1985,27 @@ test("every evidence pointer in the anchor store resolves inside the file it nam
     }
   }
 });
+
+// SW-F363. A stop on a REGIME row is retained (tagged with its regime) and is retired only by a
+// completed render of the SAME regime: an optimized render completing says nothing about whether
+// the cell's own composition completes, and a base render says nothing about the LoRA row.
+test("a regime row's stop is retired only by a completion of the same regime", () => {
+  const regimeTarget = (anchorRegime) => ({
+    modelId: "bernini", tier: "bf16", mode: "text_to_video", provider: "bernini", overlay: "none",
+    geometry: { width: 848, height: 480, frames: 49 }, ...(anchorRegime ? { anchorRegime } : {}),
+  });
+  const bound = stop("exc-1", "2026-09-06T10:00:00.000Z", { target: regimeTarget("optimized") });
+  const later = "2026-09-07T10:00:00.000Z";
+  assert.deepEqual(retainExceededBounds([bound], [completion(later)]), [bound], "a base render keeps a regime stop");
+  assert.deepEqual(
+    retainExceededBounds([bound], [completion(later, { target: regimeTarget("optimized") })]),
+    [],
+    "a later completion of the same regime retires it",
+  );
+  const base = stop("exc-2", "2026-09-06T10:00:00.000Z");
+  assert.deepEqual(
+    retainExceededBounds([base], [completion(later, { target: regimeTarget("optimized") })]),
+    [base],
+    "a regime render never retires the cell's own stop",
+  );
+});

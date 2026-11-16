@@ -1008,6 +1008,7 @@ pub(super) async fn execute_candle_image_route(
                 CandleImageRoute::MageEdit
                 | CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
+                | CandleImageRoute::MinimaxH3ImageEdit
                 | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit

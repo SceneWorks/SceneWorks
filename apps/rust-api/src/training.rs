@@ -2663,7 +2663,7 @@ struct PreparedTrainingSubmission {
 async fn prepare_training_submission(
     state: AppState,
     project_id: String,
-    payload: LoraTrainingRequest,
+    mut payload: LoraTrainingRequest,
     validated: ValidatedTrainingSubmission,
 ) -> Result<PreparedTrainingSubmission, ApiError> {
     let ValidatedTrainingSubmission {
@@ -2716,7 +2716,23 @@ async fn prepare_training_submission(
     // Resolve absolute on-host paths and ids the kernel will consume. The job id
     // is pre-allocated so the plan can embed its own `jobId`/`sourceJobId`.
     let data_dir = state.settings.data_dir.clone();
-    let base_model_path = resolve_base_model_path(target, &data_dir);
+    let mut base_model_path = resolve_base_model_path(target, &data_dir);
+    // MiniMax-H3-Image (SW-7103) trains over an installed tier, which may be a packed q8/q4
+    // directory of the re-host rather than the bf16 snapshot `resolve_base_model_path` names.
+    // Freeze the tier the trainer will load (`advanced.baseTier`) and its directory into the plan,
+    // so portable admission binds and verifies that tier's sources. With no installed tier the plan
+    // keeps the request's own choice; a real run is refused below with the install step.
+    if sceneworks_core::training::is_minimax_h3_image_training_kernel(&target.kernel) {
+        if let Ok((tier, dir)) =
+            sceneworks_worker::minimax_h3_image_training_base(&data_dir, &payload.config)
+        {
+            payload.config.advanced.insert(
+                sceneworks_core::training::MINIMAX_H3_IMAGE_BASE_TIER_KEY.to_owned(),
+                Value::String(tier.to_owned()),
+            );
+            base_model_path = dir.display().to_string();
+        }
+    }
     // The output id is also the on-disk directory name AND — for a full fine-tune — the catalog
     // model id the user sees in the Studio picker, so it carries what the artifact IS rather than
     // labelling an 8 GB base checkpoint `lora_…`.
@@ -2850,6 +2866,16 @@ async fn prepare_training_submission(
                 &payload.config,
             ) {
                 return Err(crate::iris_curricula::iris_install_refused(refusal));
+            }
+        } else if sceneworks_core::training::is_minimax_h3_image_training_kernel(&target.kernel) {
+            // MiniMax-H3-Image (SW-7103) trains over whichever tier is installed (or the one
+            // `advanced.baseTier` names), with MiniMax-H3's text encoder at that tier — the worker's
+            // own resolution, so the gate and the trainer load agree on one tier.
+            if let Some(message) = sceneworks_worker::minimax_h3_image_training_install_refusal(
+                &data_dir,
+                &payload.config,
+            ) {
+                return Err(ApiError::bad_request(message));
             }
         } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),

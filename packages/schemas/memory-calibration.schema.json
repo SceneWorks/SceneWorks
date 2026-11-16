@@ -629,6 +629,10 @@
           "overlay": { "type": "string", "minLength": 1 },
           "transformerVariant": { "enum": ["distilled", "dev"] },
           "decoder": { "enum": ["conv", "diffvae"] },
+          "anchorRegime": {
+            "$comment": "SW-F363: the regime anchor of its cell this capture is — the fourth segment of the plan key it was planned from (`<cell>:resident|optimized|lora`). ABSENT on a base-row capture, which is every record written before it existed, so no retained record id moves. scripts/extract-memory-anchors.mjs files a record that carries it under `regimeAnchors`, never under the cell's derivation anchor.",
+            "enum": ["resident", "optimized", "lora"]
+          },
           "geometry": {
             "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
             "properties": {
@@ -760,7 +764,16 @@
           "properties": {
             "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
             "variant": { "type": "string", "minLength": 1 },
-            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "overlay": {
+              "$comment": "SW-F363: the overlay artifact a `lora` capture installed beside the base artifact — its repository, revision and file — so the record names which LoRA its overlay bytes are. Absent on every overlay-free capture.",
+              "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "file"],
+              "properties": {
+                "repository": { "type": "string", "minLength": 1 },
+                "resolvedRevision": { "type": "string", "minLength": 1 },
+                "file": { "type": "string", "minLength": 1 }
+              }
+            }
           }
         },
         "target": { "$ref": "#/$defs/target" },

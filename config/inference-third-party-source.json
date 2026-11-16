@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 354b41cc (inference main after the sc-27934 external MOSS LoRA engines; it contains 56dd728f, SceneWorks/inference#1389, the MLX tiled int8 GEMM the sc-26691 campaign needs): 804 provenance candidates and 137 production-Rust crate prefixes. Since 0b80ec51 inference epic sc-27252 split gen-core into sibling backend-neutral crates (crates/contracts/gen-core-*); that is first-party code moved out of gen-core, not new third-party source, so each sibling keeps the classification its code had (per-crate architecture areas or crate decisions), and the Veda top-k and InstantID OpenCV-kps ports follow their files into gen-core-h3 / gen-core-family. Incoming iOS/runtime, Iris quantization, SDXL memory contracts and source-bound security changes are retained alongside MOSS training. FLUX 3 (candle-gen-flux3, mlx-gen-flux3), iOS-runtime (runtime-ios, mlx-gen-ios-catalog) and vendored clip-regex sources are not classified by this review; check-license-coverage reports them as open items.",
+  "_comment": "Audit inventory reviewed at inference revision 3dae89c9: 807 provenance candidates and 139 production-Rust crate prefixes. This pin adds first-party terminal LoRA recovery checkpoints and focused continuation/export-retry tests in the shared MLX loop and Candle flow-match driver. The provenance inventory changes only the Candle driver blob; normalized markers, production crate population, dependencies, notices and include sites are unchanged. Existing Iris, MOSS, FLUX.3 and runtime source classifications remain as reviewed at the previous pin; unclassified source areas remain open items reported by check-license-coverage.",
   "inferenceRevision": "101975c301686467f089cf8c0e3c4a9e33846b6d",
-  "auditDigest": "862f80ddbe118b193223eb702fe75bc1b9edd1f796c5a9ea3f4c1f65c29260ca",
+  "auditDigest": "6c7f7ce520e3f98982c1de891f63933b9dea8788f2fca44587f5f80b1bd907b6",
   "artifacts": [
     {
       "id": "cmudict",
@@ -852,7 +852,7 @@
         "crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs",
         "crates/media/mlx-gen/src/caption/joycaption.rs"
       ],
-      "provenance": "BOTH JoyCaption prompt modules — the Candle lane's and its MLX twin — reproduce the caption-type taxonomy, prompt template bodies and name options from fpgaminer/joycaption's gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION), Apache-2.0. sc-15443 added byte-identical Apache Sec. 4(b) modification notices to both, which made them marker-bearing and is why they enter the inventory at this revision. Near-verbatim reproduced CONTENT, not an architectural port, so both carry the upstream licence rather than a crate-prefix architecture disposition. The MLX twin is named here rather than left to the `architecture:crates/media/mlx-gen` prefix area: sc-15191 left it to that prefix on the explicit ground that it carried no marker sentence and so could never enter the inventory, and sc-15443 retired that premise. The two files normalize to the same marker sha256, so splitting them across areas would have the inventory assert that identical notices carry different obligations.",
+      "provenance": "BOTH JoyCaption prompt modules \u2014 the Candle lane's and its MLX twin \u2014 reproduce the caption-type taxonomy, prompt template bodies and name options from fpgaminer/joycaption's gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION), Apache-2.0. sc-15443 added byte-identical Apache Sec. 4(b) modification notices to both, which made them marker-bearing and is why they enter the inventory at this revision. Near-verbatim reproduced CONTENT, not an architectural port, so both carry the upstream licence rather than a crate-prefix architecture disposition. The MLX twin is named here rather than left to the `architecture:crates/media/mlx-gen` prefix area: sc-15191 left it to that prefix on the explicit ground that it carried no marker sentence and so could never enter the inventory, and sc-15443 retired that premise. The two files normalize to the same marker sha256, so splitting them across areas would have the inventory assert that identical notices carry different obligations.",
       "disposition": "about-license",
       "component": "joycaption-source"
     },
@@ -1079,12 +1079,12 @@
     {
       "prefix": "crates/audio/candle-audio-clap",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "LAION CLAP (`laion/clap-htsat-unfused`) audio+text embedder — an architecture reimplementation of the CLAP towers and projection in candle (sc-12851). Its headers describe it as a port in prose the marker vocabulary does not match, so it is classified here explicitly; the CLAP model terms are mapped in the About manifest."
+      "evidence": "LAION CLAP (`laion/clap-htsat-unfused`) audio+text embedder \u2014 an architecture reimplementation of the CLAP towers and projection in candle (sc-12851). Its headers describe it as a port in prose the marker vocabulary does not match, so it is classified here explicitly; the CLAP model terms are mapped in the About manifest."
     },
     {
       "prefix": "crates/bundles/runtime-catalog",
       "disposition": "first-party-original",
-      "evidence": "SceneWorks bundle composition contract — validates that a platform bundle's registries belong to the declared backend. Tensor-neutral, no upstream source."
+      "evidence": "SceneWorks bundle composition contract \u2014 validates that a platform bundle's registries belong to the declared backend. Tensor-neutral, no upstream source."
     },
     {
       "prefix": "crates/bundles/runtime-cpu",
@@ -1107,94 +1107,9 @@
       "evidence": "SceneWorks-authored conformance harness for the core-llm TextLlm contract. Tensor-free, drives providers through the public trait only; no upstream source."
     },
     {
-      "prefix": "crates/contracts/gen-core-testkit",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source — which is why the marker vocabulary deliberately anchors `derived from` to a port object."
-    },
-    {
-      "prefix": "crates/llm/mlx-llm/server",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks-authored HTTP server that speaks the OpenAI chat-completions WIRE FORMAT. An API request/response shape is an interface, not upstream source; the transforms and the socket wiring are first-party."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-catalog",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks composition root for the Candle media lane: provider registration and ordering only."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-joycaption",
-      "disposition": "upstream-content-existing-terms",
-      "component": "joycaption-source",
-      "evidence": "NOT first-party: `src/prompt.rs` REPRODUCES upstream JoyCaption content, and that content IS licensed — Apache-2.0. Provenance chain re-verified 2026-07-27: the model card at https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava (rev ebf414ea497a020da0f82df3913e5b6cb8e9663a) declares no `license:` in cardData but links https://github.com/fpgaminer/joycaption as the project source; that repository carries a root LICENSE = Apache License 2.0 (GitHub API `license.spdx_id: Apache-2.0`, and the fetched text carries the real copyright line `Copyright 2024 fpgaminer@bitcoin-mining.com`, not the unfilled template). The reproduced content lives in that repo at `gradio-app/app.py`, git blob d50843fab9dbe0a4389d1be33de7aae0260c85ff at commit 8445b2e55db7856d522e44ae84e7415fcf3413f6 (826 lines; `CAPTION_TYPE_MAP` at line 194, `NAME_OPTION` at line 256) — byte-identical to the same map the `fancyfeast/joy-caption-beta-one` Space serves at revision d0a1b8c39494884aa6ad4ff768189076ad054794. The 12 `CAPTION_TYPES` keys and the `PROMPT_TEMPLATES` bodies are upstream's `CAPTION_TYPE_MAP`, same entries in the same order, near-verbatim (punctuation normalized: em-dash to hyphen, curly to straight quotes, backticks dropped, `(if any)` to `, if any,`); the sole substantive SceneWorks MODIFICATION is in the Straightforward body, which folds upstream's `Note any watermarks, signatures, or compression artifacts.` into its `Never mention...` clause. `JOY_NAME_OPTION` is character-for-character upstream's `NAME_OPTION`. `CAPTION_LENGTHS` is upstream's length dropdown minus `very long`. `build_prompt` reproduces upstream's index-0/1/2 template selection, extra-option join, and {name}/{length}/{word_count} substitution with the `{NAME}` placeholder. `SYSTEM_PROMPT` is verbatim from the model card usage example. First-party here is only the capability bounds, the trigger-word post-processing, and the gen-core contract adaptation. Apache-2.0 §4 obligations: (a) the license text ships — the verbatim upstream LICENSE, copyright line included, is mapped as the `joycaption-source` About component (apps/desktop/licenses/joycaption-source/Apache-2.0.txt); (b) attribution is retained in that component (publisher fpgaminer, homepage github.com/fpgaminer/joycaption); (c) upstream ships NO NOTICE file, so §4(d) does not apply; (d) MODIFICATION MARKING was owed in the inference repo and is now SATISFIED — sc-15443 (inference `478d127f`) gave `src/prompt.rs` and the MLX sibling `crates/media/mlx-gen/src/caption/joycaption.rs` byte-identical module-header attribution/modification notices; it was tracked separately because inference is a separate repository (sc-15191 follow-up). Those notices are what make both files marker-bearing, so both are now named directly in this component's `paths` rather than the MLX sibling being covered indirectly via the `architecture:crates/media/mlx-gen` area. SEPARATE QUESTION, still open: the JoyCaption model WEIGHTS declare no license of their own — that remains in check-license-coverage.mjs's UNDETERMINED list and is NOT settled by this entry."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-mage",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Candle/CUDA Mage-Flow provider — the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-catalog",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks composition root for the MLX media lane: provider registration and ordering only."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-clip",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "OpenAI CLIP ViT-L/14 image embedder (`openai/clip-vit-large-patch14`): the transformer body and preprocessing are reused from the audited `architecture:crates/media/mlx-gen/mlx-gen-sdxl` area, and this crate adds the projection head — an architecture reimplementation with no copied source. CLIP's upstream terms are tracked with the model entry."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
-      "disposition": "first-party-original",
-      "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
-    },
-    {
-      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
-      "disposition": "upstream-content-existing-terms",
-      "component": "candle-transformers-source",
-      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-body",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "SceneWorks Rust/Candle body-loss implementation of frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals, backed by the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-body",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "SceneWorks Rust/MLX body-loss twin implements frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals against the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks Candle trainer composition seam: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
-      "disposition": "first-party-original",
-      "evidence": "SceneWorks MLX trainer composition twin: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
-    },
-    {
-      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "component": "moss-image-sft",
-      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
-    },
-    {
-      "prefix": "crates/media/mlx-gen/mlx-gen-moss-image",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "component": "moss-image-sft",
-      "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
-    },
-    {
       "prefix": "crates/contracts/gen-core-checkpoint",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Holds the Supra2-IMG checkpoint conversion/pin contract (`supra2`) and the `.pth` reader (`pth`): backend-neutral conversion of pinned upstream checkpoints whose model terms are already mapped in the About manifest; no upstream source is copied and no file carries a port marker."
-    },
-    {
-      "prefix": "crates/contracts/gen-core-supra2-policy",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "component": "supra2-img",
-      "evidence": "Inference SW-7158 (46d8dae7a) extracted backend-neutral Supra2-IMG option policy from gen-core-checkpoint/src/supra2.rs, preserving its CFG branching and request rules. This is the same independently written architecture reimplementation under the existing Supra2-IMG model terms shown by the supra2-img About component; no upstream source is copied."
     },
     {
       "prefix": "crates/contracts/gen-core-dist",
@@ -1205,6 +1120,11 @@
       "prefix": "crates/contracts/gen-core-flux3",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. FLUX 3 [klein] resources, conversion, prompt-upsampler and training contracts; backend-neutral, no tensors. The FLUX 3 model terms are the same open item the flux3 backend crates carry; no file in this crate carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-h3",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved out of `crates/contracts/gen-core` by inference epic sc-27252: MiniMax-H3 memory pricing, pruned AdaLN, chunking/keyframe/schedule/reference helpers and the Veda predictor. Backend-neutral, no tensors; the MiniMax-H3 terms are mapped in the About manifest. Its one marker-bearing file, `src/veda/topk.rs`, carries the Veda-on-ComfyUI / LLVM notices and is classified file-by-file in the `veda-sparse-source` area (a `paths` area, so this crate-level decision is still owed)."
     },
     {
       "prefix": "crates/contracts/gen-core-memory-wan",
@@ -1223,14 +1143,94 @@
       "evidence": "Inference SW-7157 (0514e07bc) extracted backend-neutral MOSS-Image option normalization and validation from the existing gen-core MOSS implementation. This is the same independently written architecture reimplementation under the existing MOSS Image Base/SFT model terms shown by the moss-image-sft About component; no upstream source is copied."
     },
     {
+      "prefix": "crates/contracts/gen-core-supra2-policy",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "supra2-img",
+      "evidence": "Inference SW-7158 (46d8dae7a) extracted backend-neutral Supra2-IMG option policy from gen-core-checkpoint/src/supra2.rs, preserving its CFG branching and request rules. This is the same independently written architecture reimplementation under the existing Supra2-IMG model terms shown by the supra2-img About component; no upstream source is copied."
+    },
+    {
       "prefix": "crates/contracts/gen-core-telemetry",
       "disposition": "first-party-original",
       "evidence": "SceneWorks-authored host telemetry collector (process RSS sampling) split out of gen-core by inference sc-27252; no model architecture, no upstream source."
     },
     {
-      "prefix": "crates/contracts/gen-core-h3",
+      "prefix": "crates/contracts/gen-core-testkit",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source \u2014 which is why the marker vocabulary deliberately anchors `derived from` to a port object."
+    },
+    {
+      "prefix": "crates/llm/mlx-llm/server",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored HTTP server that speaks the OpenAI chat-completions WIRE FORMAT. An API request/response shape is an interface, not upstream source; the transforms and the socket wiring are first-party."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-body",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Moved out of `crates/contracts/gen-core` by inference epic sc-27252: MiniMax-H3 memory pricing, pruned AdaLN, chunking/keyframe/schedule/reference helpers and the Veda predictor. Backend-neutral, no tensors; the MiniMax-H3 terms are mapped in the About manifest. Its one marker-bearing file, `src/veda/topk.rs`, carries the Veda-on-ComfyUI / LLVM notices and is classified file-by-file in the `veda-sparse-source` area (a `paths` area, so this crate-level decision is still owed)."
+      "evidence": "SceneWorks Rust/Candle body-loss implementation of frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals, backed by the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks composition root for the Candle media lane: provider registration and ordering only."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-joycaption",
+      "disposition": "upstream-content-existing-terms",
+      "component": "joycaption-source",
+      "evidence": "NOT first-party: `src/prompt.rs` REPRODUCES upstream JoyCaption content, and that content IS licensed \u2014 Apache-2.0. Provenance chain re-verified 2026-07-27: the model card at https://huggingface.co/fancyfeast/llama-joycaption-beta-one-hf-llava (rev ebf414ea497a020da0f82df3913e5b6cb8e9663a) declares no `license:` in cardData but links https://github.com/fpgaminer/joycaption as the project source; that repository carries a root LICENSE = Apache License 2.0 (GitHub API `license.spdx_id: Apache-2.0`, and the fetched text carries the real copyright line `Copyright 2024 fpgaminer@bitcoin-mining.com`, not the unfilled template). The reproduced content lives in that repo at `gradio-app/app.py`, git blob d50843fab9dbe0a4389d1be33de7aae0260c85ff at commit 8445b2e55db7856d522e44ae84e7415fcf3413f6 (826 lines; `CAPTION_TYPE_MAP` at line 194, `NAME_OPTION` at line 256) \u2014 byte-identical to the same map the `fancyfeast/joy-caption-beta-one` Space serves at revision d0a1b8c39494884aa6ad4ff768189076ad054794. The 12 `CAPTION_TYPES` keys and the `PROMPT_TEMPLATES` bodies are upstream's `CAPTION_TYPE_MAP`, same entries in the same order, near-verbatim (punctuation normalized: em-dash to hyphen, curly to straight quotes, backticks dropped, `(if any)` to `, if any,`); the sole substantive SceneWorks MODIFICATION is in the Straightforward body, which folds upstream's `Note any watermarks, signatures, or compression artifacts.` into its `Never mention...` clause. `JOY_NAME_OPTION` is character-for-character upstream's `NAME_OPTION`. `CAPTION_LENGTHS` is upstream's length dropdown minus `very long`. `build_prompt` reproduces upstream's index-0/1/2 template selection, extra-option join, and {name}/{length}/{word_count} substitution with the `{NAME}` placeholder. `SYSTEM_PROMPT` is verbatim from the model card usage example. First-party here is only the capability bounds, the trigger-word post-processing, and the gen-core contract adaptation. Apache-2.0 \u00a74 obligations: (a) the license text ships \u2014 the verbatim upstream LICENSE, copyright line included, is mapped as the `joycaption-source` About component (apps/desktop/licenses/joycaption-source/Apache-2.0.txt); (b) attribution is retained in that component (publisher fpgaminer, homepage github.com/fpgaminer/joycaption); (c) upstream ships NO NOTICE file, so \u00a74(d) does not apply; (d) MODIFICATION MARKING was owed in the inference repo and is now SATISFIED \u2014 sc-15443 (inference `478d127f`) gave `src/prompt.rs` and the MLX sibling `crates/media/mlx-gen/src/caption/joycaption.rs` byte-identical module-header attribution/modification notices; it was tracked separately because inference is a separate repository (sc-15191 follow-up). Those notices are what make both files marker-bearing, so both are now named directly in this component's `paths` rather than the MLX sibling being covered indirectly via the `architecture:crates/media/mlx-gen` area. SEPARATE QUESTION, still open: the JoyCaption model WEIGHTS declare no license of their own \u2014 that remains in check-license-coverage.mjs's UNDETERMINED list and is NOT settled by this entry."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-mage",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Candle/CUDA Mage-Flow provider \u2014 the sibling of the already-audited `architecture:crates/media/mlx-gen/mlx-gen-mage` area, reimplementing the same NR-MMDiT / MSRoPE / one-step-VAE surfaces. It carries no marker sentence, so without this entry the Candle half of a port whose MLX half IS audited would be invisible; upstream Mage terms are mapped in the About manifest."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks Candle trainer composition seam: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
+    },
+    {
+      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
+      "disposition": "upstream-content-existing-terms",
+      "component": "candle-transformers-source",
+      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "SceneWorks Rust/MLX body-loss twin implements frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals against the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-catalog",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks composition root for the MLX media lane: provider registration and ordering only."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-clip",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "OpenAI CLIP ViT-L/14 image embedder (`openai/clip-vit-large-patch14`): the transformer body and preprocessing are reused from the audited `architecture:crates/media/mlx-gen/mlx-gen-sdxl` area, and this crate adds the projection head \u2014 an architecture reimplementation with no copied source. CLIP's upstream terms are tracked with the model entry."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
+      "disposition": "first-party-original",
+      "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only \u2014 `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` \u2014 the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry \u2014 and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks MLX trainer composition twin: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
     }
   ]
 }

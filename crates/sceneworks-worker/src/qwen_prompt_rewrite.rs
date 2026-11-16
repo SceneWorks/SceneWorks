@@ -59,6 +59,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) const MAX_REWRITE_REFERENCES: usize = 10;
+
 use serde_json::{Map, Value};
 
 use crate::{WorkerError, WorkerResult};

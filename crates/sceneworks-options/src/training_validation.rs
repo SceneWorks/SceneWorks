@@ -97,6 +97,31 @@ pub const GRADIENT_NOISE_SUPPORT_LIMIT: &str = "supportsGradientNoise";
 /// latent-perceptual losses) means exactly what an absent key means — off, or the knob's default.
 /// Every technique parser (submit-time validation and the worker's preflight alike) reads its keys
 /// through this one accessor, so the policy cannot differ between keys or between API and worker.
+/// Resolve the MiniMax-H3-Image training base tier before a native training plan is built.
+pub fn minimax_h3_image_base_tier(advanced: &JsonObject) -> Result<Option<&'static str>, String> {
+    const H3_BASE_TIER_KEY: &str = "baseTier";
+    const TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+    let Some(value) = advanced.get(H3_BASE_TIER_KEY) else {
+        return Ok(None);
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!(
+            "{H3_BASE_TIER_KEY} must be a string (auto, bf16, q8 or q4)."
+        ));
+    };
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    TIERS
+        .into_iter()
+        .find(|tier| tier.eq_ignore_ascii_case(text))
+        .map(Some)
+        .ok_or_else(|| {
+            format!("{H3_BASE_TIER_KEY} {text:?} is not a MiniMax-H3-Image tier (use auto, bf16, q8 or q4).")
+        })
+}
+
 pub fn technique_value<'a>(advanced: &'a JsonObject, key: &str) -> Option<&'a Value> {
     advanced.get(key).filter(|value| !value.is_null())
 }

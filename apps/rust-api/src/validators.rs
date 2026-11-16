@@ -361,6 +361,9 @@ pub(crate) fn validate_audio_job_for_model(
 /// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 pub(super) const MAX_IMAGE_DIMENSION: u32 = 4096;
+#[cfg(test)]
+pub(super) const SHAPE_MAX_IMAGE_DIMENSION: u32 =
+    sceneworks_core::request_validation::shape::SHAPE_MAX_IMAGE_DIMENSION;
 
 // ---------------------------------------------------------------------------
 // Reference-media payload-sanity blankets (sc-17160).

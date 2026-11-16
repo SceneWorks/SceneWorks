@@ -589,6 +589,15 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
   assert.throws(() => assertFor("fam_img"), /never names it/);
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core::absent::PROVIDER_ID,";
   assert.throws(() => assertFor("fam_img"), /never names it/);
+  // SW-F363: one hop of `pub use gen_core_<crate>::PROVIDER_ID;` (inference 4effdfb5 moved the
+  // Supra2 literal into gen-core-supra2-policy) is followed to that crate's lib.rs — and only to a
+  // declaration of exactly this provider id there.
+  sources["crates/m/src/lib.rs"] = "provider_id: gen_core_checkpoint::fam3::PROVIDER_ID,";
+  sources["crates/contracts/gen-core-checkpoint/src/fam3.rs"] = "pub use gen_core_fam3_policy::PROVIDER_ID;\n";
+  assert.throws(() => assertFor("fam3_img"), /never names it/, "no policy crate yet");
+  sources["crates/contracts/gen-core-fam3-policy/src/lib.rs"] = 'pub const PROVIDER_ID: &str = "fam3_img";\n';
+  assert.doesNotThrow(() => assertFor("fam3_img"));
+  assert.throws(() => assertFor("other_img"), /never names it/);
 });
 
 test("two providers in the SAME crate get distinct digests", () => {

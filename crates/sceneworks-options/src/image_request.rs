@@ -418,6 +418,11 @@ impl Flux3Tier {
     }
 }
 
+/// Preserve the authored tier spelling for the worker's model-specific tier validation.
+pub fn authored_quant_tier(advanced: &JsonObject) -> Option<&str> {
+    advanced.get("quantTier").and_then(Value::as_str)
+}
+
 /// Whether `advanced.quantTier` names the FP8R tier (trimmed, ASCII case-insensitive — the same
 /// normalization every other named-tier reader applies).
 pub fn requests_fp8r_tier(advanced: &JsonObject) -> bool {

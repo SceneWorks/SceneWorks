@@ -13,8 +13,8 @@ use crate::jobs_store::routing::catalog::{
 #[cfg(test)]
 use crate::jobs_store::routing::has_nonempty_nested_array;
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, pulid_flux_mlx_eligible, upscale_job_is_mlx_eligible,
-    video_upscale_job_is_mlx_eligible,
+    instantid_mlx_eligible, minimax_h3_image_mlx_eligible, pulid_flux_mlx_eligible,
+    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_nonempty_array, has_nonempty_or_malformed_array,
@@ -73,6 +73,7 @@ pub(crate) enum CandleImageLane {
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
+    QwenImage21Edit,
     SenseNovaEdit,
     ZImageEdit,
     ZImageIdentity,
@@ -80,11 +81,10 @@ pub(crate) enum CandleImageLane {
     IdeogramImg2Img,
     BooguEdit,
     MageEdit,
-    /// Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
-    /// images. A bespoke lane rather than a widening of the generic txt2img gate because that gate
-    /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
-    /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
-    QwenImage21Edit,
+    /// MiniMax-H3-Image edit (SW-7101): ONE ordered list of 1..=16 reference images. Bespoke for the
+    /// same reason as [`Self::QwenImage21Edit`]: the generic txt2img gate refuses `edit_image` and
+    /// every conditioning carrier, and the id is itself a candle txt2img id.
+    MinimaxH3ImageEdit,
     /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
     Flux3Reference,
     BooguImg2Img,
@@ -268,6 +268,14 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
             ) && crate::jobs_store::routing::qwen_image_2_1_reference_ids(context.payload)
                 .is_some_and(|ids| !ids.is_empty())
         },
+    },
+    // MiniMax-H3-Image edit (SW-7101): the Candle port registers the SAME engine id and the SAME
+    // `Reference` + `MultiReference` conditioning as MLX, so the shape is the MLX predicate plus a
+    // non-empty ordered list — one request contract on both backends.
+    CandleImageRoute {
+        lane: CandleImageLane::MinimaxH3ImageEdit,
+        models: ModelMatch::Any(&["minimax_h3_image"]),
+        shape: |context| minimax_h3_image_edit_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguImg2Img,
@@ -509,6 +517,10 @@ pub(crate) enum CandleImageRefusal {
     /// `quantTier`) or an enabled hires fix. Delegates to `supra2_mlx_eligible_with_facts` so the two lanes
     /// refuse exactly the same list.
     Supra2Surface,
+    /// MiniMax-H3-Image (SW-7100): anything outside the text-to-image surface the MLX arm admits
+    /// (an edit is claimed earlier, by [`CandleImageLane::MinimaxH3ImageEdit`]). Delegates to
+    /// [`minimax_h3_image_mlx_eligible`] so the two lanes refuse exactly the same list.
+    MinimaxH3ImageSurface,
 }
 
 impl CandleImageRefusal {
@@ -533,6 +545,9 @@ impl CandleImageRefusal {
                 "a carrier outside distilled FLUX 3's plain text-to-image surface"
             }
             Self::Supra2Surface => "a carrier outside Supra2-IMG's plain text-to-image surface",
+            Self::MinimaxH3ImageSurface => {
+                "a carrier outside MiniMax-H3-Image's text-to-image surface"
+            }
         }
     }
 }
@@ -614,6 +629,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
                 context.options,
             )
     }),
+    (
+        CandleImageRefusal::MinimaxH3ImageSurface,
+        |model, context| candle_refuses_minimax_h3_image_surface(model, context.payload),
+    ),
 ];
 
 fn candle_refuses_fp8r_tier_with_facts(
@@ -636,6 +655,22 @@ fn candle_image_quant_tier_refusal_with_facts(
     }
 }
 
+/// MiniMax-H3-Image (SW-7100): the candle lane serves exactly the MLX arm's text-to-image shape.
+fn candle_refuses_minimax_h3_image_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "minimax_h3_image" && !minimax_h3_image_mlx_eligible(payload)
+}
+
+/// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
+/// singular carrier is populated or malformed, do not let it fall through as txt2img.
+///
+/// sc-20525: this MUST use the same `has_nonempty_or_malformed_string` convention as
+/// `sana_has_unsupported_carrier` right below it. The original inline `match value.as_str()`
+/// returned "malformed" from its `None` arm, which `Value::Null` also lands in — and `null` is
+/// how the API normalizes every unset optional asset carrier before the job is stored, so it is
+/// the shape EVERY real text-to-image submission arrives in. Off-Mac that classified plain SANA
+/// t2i as a malformed conditioning shape and enforce-failed it `candle_unsupported`. Same defect
+/// class as sc-19712 F-1 on the MLX twin; sharing the helper is what stops the two SANA gates
+/// from drifting apart again.
 /// The reference-bearing modes whose whole point is a conditioning image. Not every candle family
 /// reserves them — see [`candle_reserves_reference_only_modes`].
 pub(crate) fn candle_reference_only_mode(payload: &Map<String, Value>) -> bool {
@@ -1994,6 +2029,14 @@ pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+/// MiniMax-H3-Image edit (SW-7101) on candle: the MLX arm's shape with a NON-EMPTY ordered
+/// reference list (an empty one is text-to-image, which the generic txt2img lane serves).
+pub(crate) fn minimax_h3_image_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    minimax_h3_image_mlx_eligible(payload)
+        && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
+            .is_some_and(|ids| !ids.is_empty())
+}
+
 /// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic
 /// 8588). The registered `boogu_image` (Base) and `boogu_image_turbo` candle generators serve registry
 /// img2img: a single `Conditioning::Reference` in a **non-edit** request VAE-encodes to the clean init
@@ -2428,6 +2471,11 @@ pub(crate) fn training_job_is_candle_eligible_with_facts(
         // sc-24162: the instruction-edit kernel trains on the same Candle trainer, same gate.
         "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => {
             base_model == "qwen_image_2_1" && is_adapter
+        }
+        // MiniMax-H3-Image (SW-7103): LoRA/LoKr on the `minimax_h3_image` base only, both the T2I
+        // and the edit-pair kernel (one `candle-gen-minimax-h3` trainer, SW-7098).
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora" => {
+            base_model == "minimax_h3_image" && is_adapter
         }
         // Existing native families keep their established admission. Their trainers perform the
         // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.

@@ -7,6 +7,7 @@ use serde_json::Value;
 pub const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 4096;
 pub const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
+pub const SHAPE_MAX_IMAGE_DIMENSION: u32 = 6272;
 pub const MAX_VIDEO_DIMENSION: u32 = 1920;
 pub const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
 pub const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
@@ -190,10 +191,10 @@ pub fn validate_image_job<A: Serialize, M: Serialize>(
         SHAPE_MIN_IMAGE_DIMENSION
     };
     if let Some(width) = payload.width {
-        validate_dimension_in(width, "width", shape_floor, MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(width, "width", shape_floor, SHAPE_MAX_IMAGE_DIMENSION)?;
     }
     if let Some(height) = payload.height {
-        validate_dimension_in(height, "height", shape_floor, MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(height, "height", shape_floor, SHAPE_MAX_IMAGE_DIMENSION)?;
     }
     payload.upscale.validate().map_err(ApiError::bad_request)?;
 

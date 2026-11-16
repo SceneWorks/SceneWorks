@@ -245,8 +245,8 @@
         {
           "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "    \"z_image_turbo_lora\": \"z_image_turbo\",\n    \"moss_image_base_lora\": \"moss_image_base\",\n    \"moss_image_sft_lora\": \"moss_image_sft\"\n",
-          "new": "    \"z_image_turbo_lora\": \"z_image_turbo\"\n"
+          "old": "    \"moss_image_base_lora\": \"moss_image_base\",\n    \"moss_image_sft_lora\": \"moss_image_sft\",\n",
+          "new": ""
         }
       ]
     },

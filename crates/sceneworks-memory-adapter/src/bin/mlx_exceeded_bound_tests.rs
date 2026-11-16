@@ -62,6 +62,7 @@ fn bernini_bound(
         tier: "bf16".to_owned(),
         transformer_variant: None,
         decoder: None,
+        regime: None,
         mode: "text_to_video".to_owned(),
         overlay: None,
         reference_count: 0,
@@ -96,6 +97,7 @@ fn store_of(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: bounds,
     }
@@ -110,6 +112,7 @@ fn bernini_bound_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: vec![anchor::ExceededBound {
             id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
@@ -121,6 +124,7 @@ fn bernini_bound_store() -> sceneworks_core::memory_anchor::MemoryAnchorStore {
             tier: "bf16".to_owned(),
             transformer_variant: None,
             decoder: None,
+            regime: None,
             mode: "text_to_video".to_owned(),
             overlay: None,
             reference_count: 0,

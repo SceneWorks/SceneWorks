@@ -165,6 +165,9 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .compat("Optional on the wire; may be populated from a preset")
         .effects(&[effect!("nonempty", "include trigger in captions and output metadata", "TrainingPlan.output.trigger_words")]),
     config!("advanced", Object("TrainingConfig.advanced"), WhatToMake, "model_options"),
+    advanced!("baseTier", Text, Provider("densest installed MiniMax-H3-Image tier"), MachineBudget, "MiniMax-H3-Image training base tier")
+        .applies(Any(&[TrainingKernel("minimax_h3_image_lora"), TrainingKernel("minimax_h3_image_edit_lora")]))
+        .limits(&["training::minimax_h3_image_base_tier: auto, bf16, q8 or q4"]),
     common!("weightDecay", Number, WhatToMake, "weight_decay", "0"),
     common!("lrScheduler", Text, WhatToMake, "lr_scheduler", "constant").limits(&["target.limits.lrSchedulers","training::SUPPORTED_LR_SCHEDULERS"]),
     common!("lrWarmupSteps", Integer, WhatToMake, "lr_warmup_steps", "0").limits(&[MICRO_STEPS]),

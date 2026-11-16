@@ -29,6 +29,18 @@ pub const CAPTION_OVERFLOW_KEY: &str = "captionOverflow";
 /// `advanced` key of the schedule shift (shared with the scheduler-menu models).
 pub const SCHEDULER_SHIFT_KEY: &str = "schedulerShift";
 
+/// Keep raw H3 sampler lookup at the portable boundary. The core translates the block to
+/// gen-core's engine enum, which this crate intentionally does not depend on.
+pub fn h3_sampler_block(advanced: &JsonObject) -> Option<&Value> {
+    advanced
+        .get("h3ImageSampler")
+        .filter(|value| !value.is_null())
+}
+
+pub fn authored_sampler_name(advanced: &JsonObject) -> Option<&str> {
+    advanced.get("sampler").and_then(Value::as_str)
+}
+
 /// What a text encoder with a fixed caption budget does with a prompt that tokenizes past it. The
 /// spellings are upstream Iris-3B's `text_encoder.on_caption_overflow` vocabulary (and gen-core's
 /// `CaptionOverflowPolicy::name`), verbatim.

@@ -1792,6 +1792,11 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "computed expression",
         ),
         (
+            "apps/rust-api/src/generation.rs",
+            "apply_recipe_preset_to_image_payload",
+            "H3_IMAGE_SAMPLER_KEY.to_owned(...)",
+        ),
+        (
             "crates/sceneworks-options/src/video_request.rs",
             "normalize_ltx25_generation_controls",
             "key",
@@ -1815,6 +1820,16 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "apps/rust-api/src/jobs.rs",
             "canonicalize_image_model_payload",
             "key",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "freeze_minimax_h3_image_implicit_tier",
+            "MLX_QUANTIZE_FROZEN_KEY",
+        ),
+        (
+            "apps/rust-api/src/jobs.rs",
+            "freeze_minimax_h3_image_implicit_tier",
+            "computed expression",
         ),
         (
             "apps/rust-api/src/jobs.rs",

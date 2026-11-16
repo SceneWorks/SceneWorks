@@ -177,6 +177,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .limits(&["0 <= start < end <= 1", "image_sampling_controls::requested_cfg_interval"]).effects(&[effect("CFG off", "disable", "advanced.cfgInterval")]).ui("Guidance interval", "numberPair"),
     opt!("captionOverflow", OneOf("warn | error | silent"), Provider("checkpoint caption policy"), ModelField("image.captionOverflowPolicies"), WhatToMake, "GenerationRequest.caption_overflow")
         .limits(&["image.captionOverflowPolicies"]),
+    opt!("h3ImageSampler", Object("MiniMax-H3-Image sampler and LCM noise controls"), Absent, ModelField("image.supportsH3ImageSampler"), WhatToMake, "gen_core::h3_image::H3ImageSampler")
+        .limits(&["image_sampling_controls::requested_h3_image_sampler"]),
     opt!("steps", Integer, Model("defaults.steps"), VISUAL, WhatToMake, "GenerationRequest.steps")
         .limits(&["limits.hardMinSteps", "limits.hardMaxSteps", "limits.steps", "sampling::max_requested_steps"]).compat(NUMBER_INPUT),
     opt!("guidanceScale", Number, Model("defaults.guidanceScale"), Any(&[All(&[IMAGE, ModelNotFalse("image.supportsGuidance")]), All(&[VIDEO, ModelNotFalse("video.supportsGuidance")]), INTERLEAVE]), WhatToMake, "GenerationRequest.guidance / InterleaveParams.cfg_scale")
