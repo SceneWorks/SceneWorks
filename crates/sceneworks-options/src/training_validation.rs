@@ -811,6 +811,22 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    if matches!(
+        target.kernel.as_str(),
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora"
+    ) {
+        minimax_h3_image_base_tier(&config.advanced).map_err(|message| {
+            TrainingPlanError::InvalidField {
+                field: "baseTier".to_owned(),
+                message,
+            }
+        })?;
+    } else if config.advanced.contains_key("baseTier") {
+        return Err(TrainingPlanError::InvalidField {
+            field: "baseTier".to_owned(),
+            message: "baseTier is supported only by MiniMax-H3-Image training targets.".to_owned(),
+        });
+    }
     if target.kernel == "moss_image_lora" {
         moss_training_seed(config.seed)?;
         validate_moss_training_field_shapes(&config.advanced)?;
