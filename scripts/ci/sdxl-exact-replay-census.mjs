@@ -13,6 +13,8 @@ import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const PIN = '101975c301686467f089cf8c0e3c4a9e33846b6d';
+export const RUNTIME_INPUTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'vendor',
+  'crates', 'apps', 'packages', 'config', 'docs/generated', 'docs/calibration', 'docker']);
 let stage = 'dispatch';
 let idleObservation = 'not observed';
 let idleLogSignals = [];
@@ -70,9 +72,7 @@ async function main() {
   assert.equal(binding.missing.includes('loadedRuntimeDllCensus'), true);
   stage = 'binding-source';
   // Only proof/workflow files may change after the server issued this source binding.
-  const runtimeInputs = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'vendor',
-    'crates', 'apps', 'packages', 'config', 'docs/generated', 'docs/calibration', 'docker'];
-  const sourceDiff = spawnSync('git', ['diff', '--quiet', binding.sourceSha, sourceSha, '--', ...runtimeInputs], { cwd: ROOT });
+  const sourceDiff = spawnSync('git', ['diff', '--quiet', binding.sourceSha, sourceSha, '--', ...RUNTIME_INPUTS], { cwd: ROOT });
   assert.equal(sourceDiff.status, 0, 'bound runtime source changed');
   stage = 'binding-binary';
   const binary = path.resolve(process.env.SDXL_REPLAY_BINARY);

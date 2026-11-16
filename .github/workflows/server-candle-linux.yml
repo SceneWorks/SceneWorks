@@ -65,7 +65,7 @@ on:
         default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       campaign_run_id:
-        description: StarVector identity, H3 request JSON, or SDXL {proof,phase,planPath,deviceUuid,ownerGo} JSON (keeps the ten standing dispatch keys; staging needs explicit asset/license inputs, not a stationary pair).
+        description: StarVector identity, H3 request JSON, or SDXL phase JSON (keeps the ten standing dispatch keys; staging needs explicit asset/license inputs, not a stationary pair).
         required: false
         type: string
 
@@ -193,6 +193,40 @@ jobs:
           path: ${{ env.SDXL_REPLAY_CENSUS_REPORT }}
           if-no-files-found: warn
 
+  # Metadata-only approval bridge: derive a private, time-bounded proof plan from
+  # the verified census. It never starts the API, a worker, a job, or a model.
+  sdxl-exact-replay-plan:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'plan' && fromJSON(inputs.campaign_run_id).ownerGo == true }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
+    timeout-minutes: 20
+    env:
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Derive a private proof plan from the verified census without starting a runtime
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-plan-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_PLAN_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_PLAN_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-plan.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL private plan refused' }
+      - name: Upload sanitized plan report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-plan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_PLAN_REPORT }}
+          if-no-files-found: error
+
   # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
   # on main; reuse its existing standard (compile-only) choice plus an exact marker so dispatch does
   # not depend on GitHub accepting a newly added branch-only choice value.
@@ -200,7 +234,7 @@ jobs:
   # The compile job excludes this prefix even when ownerGo is false. On an old/default ref this
   # selector can only compile; it never selects an unrelated model job. No command input.
   sdxl-exact-replay:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).ownerGo == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && (fromJSON(inputs.campaign_run_id).phase == 'qualify' || fromJSON(inputs.campaign_run_id).phase == 'replay') && fromJSON(inputs.campaign_run_id).ownerGo == true }}
     permissions:
       contents: read
     runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]

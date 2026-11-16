@@ -76,7 +76,9 @@ export function validatePlan(plan, sourceSha, pin, phase, now = Date.now()) {
   assert.equal(plan.requestSha256, digest(REQUEST), 'authored request changed');
   assert(/^GPU-[a-f0-9-]{36}$/i.test(plan.deviceUuid), 'physical device UUID missing');
   assert([0, 1].includes(plan.physicalIndex), 'unapproved physical ordinal');
-  assert(Number.isFinite(Date.parse(plan.goExpiresAt)) && now < Date.parse(plan.goExpiresAt), 'owner go window expired');
+  const starts = Date.parse(plan.goStartsAt), expires = Date.parse(plan.goExpiresAt);
+  assert(Number.isFinite(starts) && Number.isFinite(expires) && starts <= now && now < expires
+    && expires - starts <= 120 * 60 * 1000, 'owner go window unavailable');
   assert.equal(plan.ownerGo, true, 'owner go window not confirmed');
   assert(Array.isArray(plan.runtimeFiles) && plan.runtimeFiles.length > 0 && plan.runtimeFiles.every((file) => HEX.test(file.sha256)), 'pinned runtime library hashes missing');
   assert(Array.isArray(plan.files) && plan.files.length > 0, 'selected member map missing');

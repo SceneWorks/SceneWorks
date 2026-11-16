@@ -12,6 +12,7 @@ import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 import { validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
+import { validatePlanDispatch } from './sdxl-exact-replay-plan.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
 const sha = 'a'.repeat(40), pin = 'b'.repeat(40), uuid = 'GPU-00000000-0000-0000-0000-000000000001';
@@ -37,7 +38,8 @@ function fixture() {
     outputs: [{ outputIndex: 0, artifactIds: ['asset'], artifactSha256: [hash(png)] }] };
   const input = { job, receipt, route, png, workerId: 'worker', device: '1', pin, scheduleSha256: digest(schedule), payloadSha256: hash('payload') };
   const plan = { version: 1, sourceSha: sha, inferenceRevision: pin, requestSha256: digest(REQUEST), sourceIdentitySha256: digest(sourceIdentity(route)), scheduleSha256: digest(schedule),
-    deviceUuid: uuid, physicalIndex: 1, ownerGo: true, goExpiresAt: '2030-01-01T00:00:00Z',
+    deviceUuid: uuid, physicalIndex: 1, ownerGo: true,
+    goStartsAt: '2026-11-13T23:50:00Z', goExpiresAt: '2026-11-14T01:50:00Z',
     files: [{}], runtimeFiles: [{ path: 'private', sha256: hash('runtime') }] };
   return { input, plan };
 }
@@ -98,7 +100,10 @@ test('real member bytes must match the exact private route and cache, before and
 });
 test('source, pin, owner window and separate reviewed declaration are mandatory', () => {
   const { plan } = fixture(); const now = Date.parse('2026-11-14'); validatePlan(plan, sha, pin, 'qualify', now);
-  for (const mutation of [ { ownerGo: false }, { goExpiresAt: '2020-01-01' }, { sourceSha: pin }, { inferenceRevision: sha }, { requestSha256: hash('other') }, { scheduleSha256: '' }, { runtimeFiles: [] } ])
+  for (const mutation of [ { ownerGo: false }, { goStartsAt: '2026-11-14T00:01:00Z' },
+    { goExpiresAt: '2020-01-01' }, { goExpiresAt: '2026-11-14T02:01:00Z' },
+    { sourceSha: pin }, { inferenceRevision: sha }, { requestSha256: hash('other') },
+    { scheduleSha256: '' }, { runtimeFiles: [] } ])
     assert.throws(() => validatePlan({ ...plan, ...mutation }, sha, pin, 'qualify', now));
   assert.throws(() => validatePlan(plan, sha, pin, 'replay', now));
   Object.assign(plan, { qualificationSha256: hash('qualification'), declaration: { scope: SCOPE, candidateSourceSha: sha, candidateInferenceRevision: pin, reviewUrl: 'https://github.com/SceneWorks/inference/pull/1' } });
@@ -144,7 +149,9 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.match(workflow, /  sdxl-exact-replay-bind:\n    if:.*phase == 'bind'.*phase == 'census'.*ownerGo == false/);
   assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-bind.mjs/);
   assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-census.mjs/);
-  assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*ownerGo == true/);
+  assert.match(workflow, /  sdxl-exact-replay-plan:\n    if:.*phase == 'plan'.*ownerGo == true/);
+  assert.match(workflow, /node scripts\/ci\/sdxl-exact-replay-plan.mjs/);
+  assert.match(workflow, /  sdxl-exact-replay:\n    if:.*github.event_name == 'workflow_dispatch'.*inputs.starvector_terminal_operation == 'standard'.*startsWith.*phase == 'qualify'.*phase == 'replay'.*ownerGo == true/);
   assert.match(workflow, /  build-candle:\n    if:.*!startsWith/);
   assert.match(workflow, /cancel-in-progress:.*!startsWith/);
   assert.doesNotMatch(workflow, /options:.*sdxl-exact-replay/);
@@ -190,6 +197,20 @@ test('idle-worker census accepts only a private binding and no model approval', 
   }
 });
 
+test('private plan requires owner go for one bounded future GPU window', () => {
+  const starts = new Date(Date.now() + 60_000).toISOString();
+  const expires = new Date(Date.now() + 60 * 60_000).toISOString();
+  const input = { proof: 'sdxl-exact-replay', phase: 'plan', censusPath: 'C:\\private\\census.json',
+    deviceUuid: uuid, goStartsAt: starts, goExpiresAt: expires, ownerGo: true };
+  assert.deepEqual(validatePlanDispatch(JSON.stringify(input)), input);
+  for (const change of [{ ownerGo: false }, { censusPath: 'census.json' },
+    { goStartsAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() },
+    { goExpiresAt: new Date(Date.now() + 3 * 60 * 60_000).toISOString() },
+    { goExpiresAt: new Date(Date.now() - 1).toISOString() }, { command: 'run' }]) {
+    assert.throws(() => validatePlanDispatch(JSON.stringify({ ...input, ...change })));
+  }
+});
+
 test('accepted queued request preserves the fixed controls before claims are released', () => {
   verifyQueuedPayload({ ...REQUEST, projectId: 'owned', modelManifestEntry: {} });
   assert.throws(() => verifyQueuedPayload({ ...REQUEST, advanced: { ...REQUEST.advanced, sampler: 'euler' } }));
@@ -222,11 +243,16 @@ test('standard marker selects no unrelated model job and malformed plans fail be
   const condition = (job) => workflow.slice(workflow.indexOf(`  ${job}:\n`)).split('\n').find((line) => line.startsWith('    if:')).trim().slice(8, -3);
   const evaluate = (job, plan, event = 'workflow_dispatch') => Function('github', 'inputs', 'fromJSON', 'startsWith', `return (${condition(job)});`)(
     { event_name: event, repository: 'SceneWorks/SceneWorks' }, { starvector_terminal_operation: 'standard', campaign_run_id: plan }, JSON.parse, (value, prefix) => String(value ?? '').toLowerCase().startsWith(prefix.toLowerCase()));
-  const marker = JSON.stringify({ proof: 'sdxl-exact-replay', ownerGo: true });
+  const marker = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'qualify', ownerGo: true });
   assert.equal(evaluate('sdxl-exact-replay', marker), true);
+  assert.equal(evaluate('sdxl-exact-replay-plan', marker), false);
   assert.equal(evaluate('build-candle', marker), false);
   assert.equal(evaluate('h3-cuda-memory', marker), false);
-  const noGo = JSON.stringify({ proof: 'sdxl-exact-replay', ownerGo: false });
+  const approvedPlan = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'plan', ownerGo: true });
+  assert.equal(evaluate('sdxl-exact-replay-plan', approvedPlan), true);
+  assert.equal(evaluate('sdxl-exact-replay', approvedPlan), false);
+  assert.equal(evaluate('build-candle', approvedPlan), false);
+  const noGo = JSON.stringify({ proof: 'sdxl-exact-replay', phase: 'qualify', ownerGo: false });
   assert.equal(evaluate('sdxl-exact-replay', noGo), false);
   assert.equal(evaluate('build-candle', noGo), false);
   for (const plan of ['', '{}', '{"proof":"other"}', 'starvector-campaign-2026-11', '{', 'not-json']) {
