@@ -4507,7 +4507,7 @@ pub(crate) fn map_training_progress(
                 JobStatus::Running,
                 ProgressStage::CachingLatents,
                 0.18 + span,
-                format!("Caching dataset latents ({current}/{total})."),
+                format!("Caching training data ({current}/{total})."),
             )
         }
         TrainingProgress::Training { step, total, loss } => (
