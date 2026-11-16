@@ -36,12 +36,15 @@ test("a matching package is cached and a corrupt cached archive fails closed", a
       return true;
     };
     const cacheRoot = path.join(root, "cache");
-    const directory = await fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset });
+    const trustedArchiveSha256 = sha256(archive);
+    const directory = await fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset, trustedArchiveSha256 });
     assert.equal(downloads, 1);
-    assert.equal(await fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset }), directory);
+    assert.equal(await fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset, trustedArchiveSha256 }), directory);
     assert.equal(downloads, 1);
     await writeFile(path.join(directory, "libflashattention.a"), "tampered");
-    await assert.rejects(fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset }), /checksum mismatch/);
+    await assert.rejects(fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset, trustedArchiveSha256 }), /checksum mismatch/);
+    await writeFile(path.join(directory, "flash-attn-prebuilt.txt"), manifest.replace(trustedArchiveSha256, sha256("tampered")));
+    await assert.rejects(fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset, trustedArchiveSha256 }), /checksum mismatch/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -50,9 +53,10 @@ test("a matching package is cached and a corrupt cached archive fails closed", a
 test("missing release uses source fallback; wrong source and duplicate keys are rejected", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "flash-prebuilt-test-"));
   try {
-    assert.equal(await fetchPrebuilt({ sourceSha256, target, cacheRoot: root, downloadAsset: async () => false }), null);
+    assert.equal(await fetchPrebuilt({ sourceSha256, target, cacheRoot: root, downloadAsset: async () => false, trustedArchiveSha256: "d".repeat(64) }), null);
+    assert.equal(await fetchPrebuilt({ sourceSha256, target, cacheRoot: root, downloadAsset: async () => { throw new Error("must not download without trust pin"); } }), null);
     assert.throws(() => parseManifest("format=1\nformat=2\n"), /duplicate/);
-    assert.throws(() => validateManifest(parseManifest(`format=1\ninference_revision=${revision}\nsource_sha256=${"c".repeat(64)}\narchive_sha256=${"d".repeat(64)}\ntarget=${target}\ncuda_compute_cap=80\ncuda_version=12.9\nhost_compiler_version=11.4.0\n`), { sourceSha256, target, archiveSha256: "d".repeat(64) }), /does not match/);
+    assert.throws(() => validateManifest(parseManifest(`format=1\ninference_revision=${revision}\nsource_sha256=${"c".repeat(64)}\narchive_sha256=${"d".repeat(64)}\ntarget=${target}\ncuda_compute_cap=80\ncuda_version=12.9\nhost_compiler_version=11.4.0\n`), { sourceSha256, target, archiveSha256: "d".repeat(64), trustedArchiveSha256: "d".repeat(64) }), /does not match/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

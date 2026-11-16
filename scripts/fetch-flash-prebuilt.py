@@ -5,6 +5,7 @@ import hashlib
 import json
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -58,7 +59,15 @@ def pinned_crate():
     return pathlib.Path(matches[0]["manifest_path"]).parent
 
 
-def validate(directory, source):
+def trusted_archive(source):
+    pinned = json.loads((ROOT / "config/flash-attn-prebuilt.json").read_text())
+    expected = pinned.get(source, {}).get(TARGET)
+    if expected is not None and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("invalid trusted FlashAttention archive digest")
+    return expected
+
+
+def validate(directory, source, trusted_archive_sha256):
     entries = list(directory.iterdir())
     if {entry.name for entry in entries} != FILES or len(entries) != len(FILES):
         raise ValueError("FlashAttention package has missing or unexpected files")
@@ -72,17 +81,20 @@ def validate(directory, source):
         fields[key] = value
     if fields.get("format") != "1" or fields.get("source_sha256") != source or fields.get("target") != TARGET:
         raise ValueError("FlashAttention manifest source or target mismatch")
-    if sha256(directory / "libflashattention.a") != fields.get("archive_sha256"):
-        raise ValueError("FlashAttention archive checksum mismatch")
+    if sha256(directory / "libflashattention.a") != fields.get("archive_sha256") or fields.get("archive_sha256") != trusted_archive_sha256:
+        raise ValueError("FlashAttention archive checksum mismatch against trusted source pin")
 
 
 def fetch(crate, cache):
     if platform.machine() != "x86_64":
         return None
     source = source_sha256(crate)
+    trusted = trusted_archive(source)
+    if trusted is None:
+        return None
     destination = cache / source / TARGET
     if destination.exists():
-        validate(destination, source)
+        validate(destination, source, trusted)
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     asset = f"flash-attn-{TARGET}.tar.gz"
@@ -106,11 +118,11 @@ def fetch(crate, cache):
             for member in members:
                 with bundle.extractfile(member) as source_file, (unpacked / member.name).open("wb") as output:
                     shutil.copyfileobj(source_file, output)
-        validate(unpacked, source)
+        validate(unpacked, source, trusted)
         try:
             unpacked.rename(destination)
         except FileExistsError:
-            validate(destination, source)
+            validate(destination, source, trusted)
     return destination
 
 

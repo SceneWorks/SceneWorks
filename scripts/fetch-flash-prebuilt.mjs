@@ -52,7 +52,7 @@ export function parseManifest(text) {
   return fields;
 }
 
-export function validateManifest(fields, { sourceSha256, target, archiveSha256 }) {
+export function validateManifest(fields, { sourceSha256, target, archiveSha256, trustedArchiveSha256 }) {
   if (fields.format !== "1" || fields.source_sha256 !== sourceSha256 || fields.target !== target ||
       !/^[a-f0-9]{40}$/.test(fields.inference_revision ?? "") ||
       fields.cuda_compute_cap !== "80" || !/^[a-f0-9]{64}$/.test(fields.source_sha256 ?? "") ||
@@ -60,7 +60,9 @@ export function validateManifest(fields, { sourceSha256, target, archiveSha256 }
       !/^\d+(?:\.\d+)+$/.test(fields.host_compiler_version ?? "")) {
     throw new Error("FlashAttention manifest does not match the pinned revision and target");
   }
-  if (archiveSha256 !== fields.archive_sha256) throw new Error("FlashAttention archive checksum mismatch");
+  if (archiveSha256 !== fields.archive_sha256 || archiveSha256 !== trustedArchiveSha256) {
+    throw new Error("FlashAttention archive checksum mismatch against trusted source pin");
+  }
 }
 
 async function fileSha256(file) {
@@ -69,7 +71,7 @@ async function fileSha256(file) {
   return digest.digest("hex");
 }
 
-async function validateDirectory(directory, sourceSha256, target) {
+async function validateDirectory(directory, sourceSha256, target, trustedArchiveSha256) {
   const entries = await readdir(directory);
   if (entries.length !== names.size || entries.some(name => !names.has(name))) throw new Error("FlashAttention package has unexpected files");
   for (const name of entries) {
@@ -77,7 +79,12 @@ async function validateDirectory(directory, sourceSha256, target) {
     if (!file.isFile() || file.isSymbolicLink()) throw new Error("FlashAttention package contains a non-file");
   }
   const fields = parseManifest(await readFile(path.join(directory, "flash-attn-prebuilt.txt"), "utf8"));
-  validateManifest(fields, { sourceSha256, target, archiveSha256: await fileSha256(path.join(directory, "libflashattention.a")) });
+  validateManifest(fields, { sourceSha256, target, archiveSha256: await fileSha256(path.join(directory, "libflashattention.a")), trustedArchiveSha256 });
+}
+
+async function trustedArchive(sourceSha256, target) {
+  const pinned = JSON.parse(await readFile(path.join(root, "config", "flash-attn-prebuilt.json"), "utf8"));
+  return pinned[sourceSha256]?.[target] ?? null;
 }
 
 async function download(url, destination) {
@@ -88,16 +95,19 @@ async function download(url, destination) {
   return true;
 }
 
-export async function fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset = download }) {
+export async function fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadAsset = download, trustedArchiveSha256 }) {
   if (!/^[0-9a-f]{64}$/.test(sourceSha256)) throw new Error("invalid FlashAttention source digest");
   if (!["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"].includes(target)) return null;
+  const trusted = trustedArchiveSha256 ?? await trustedArchive(sourceSha256, target);
+  if (trusted === null) return null;
+  if (!/^[0-9a-f]{64}$/.test(trusted)) throw new Error("invalid trusted FlashAttention archive digest");
   const destination = path.join(cacheRoot, sourceSha256, target);
   const present = await lstat(destination).then(() => true, error => {
     if (error.code === "ENOENT") return false;
     throw error;
   });
   if (present) {
-    await validateDirectory(destination, sourceSha256, target);
+    await validateDirectory(destination, sourceSha256, target, trusted);
     return destination;
   }
   const parent = path.dirname(destination);
@@ -114,12 +124,12 @@ export async function fetchPrebuilt({ sourceSha256, target, cacheRoot, downloadA
     const unpacked = path.join(temporary, "unpacked");
     await mkdir(unpacked);
     execFileSync("tar", ["-xzf", path.join(temporary, asset), "-C", unpacked], { timeout: 120000 });
-    await validateDirectory(unpacked, sourceSha256, target);
+    await validateDirectory(unpacked, sourceSha256, target, trusted);
     try {
       await rename(unpacked, destination);
     } catch (error) {
       if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-      await validateDirectory(destination, sourceSha256, target);
+      await validateDirectory(destination, sourceSha256, target, trusted);
     }
     return destination;
   } finally {

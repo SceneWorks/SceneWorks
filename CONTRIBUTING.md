@@ -157,7 +157,10 @@ node scripts/fetch-flash-prebuilt.mjs -- cargo build --locked -p sceneworks-work
 ```
 
 The wrapper chooses the archive for the exact pinned FlashAttention source and
-host target, checks its contents, then runs Cargo with `CANDLE_FLASH_ATTN_PREBUILT_DIR`.
+host target, checks its contents against the library hashes in
+`config/flash-attn-prebuilt.json`, then runs Cargo with `CANDLE_FLASH_ATTN_PREBUILT_DIR`.
+When bumping inference to new FlashAttention source, add reviewed hashes from its
+verified release to that file. Without a trusted hash, Cargo builds from source.
 The crate also checks the CUDA and host compiler versions before linking. If no
 matching release exists, Cargo builds the kernels from source. A corrupt archive
 fails the build. Desktop sidecar builds fetch the archive automatically.
