@@ -67,6 +67,20 @@ pub(crate) async fn continue_training_job(
         .iter()
         .find(|target| target.id == plan.target.target_id)
         .ok_or_else(|| ApiError::bad_request("This training target is no longer available."))?;
+    // Stored Iris plans include paths resolved by the API. Validate the client-shaped
+    // options again, then resolve this continuation's immediate parent below.
+    if let Some(objective) = sceneworks_core::training::iris::iris_objective(target) {
+        if let Some(options) = plan
+            .config
+            .advanced
+            .get_mut(objective.options_key())
+            .and_then(Value::as_object_mut)
+        {
+            for key in sceneworks_core::training::iris::IRIS_API_OWNED_OPTION_KEYS {
+                options.remove(key);
+            }
+        }
+    }
     sceneworks_core::training::validate_training_config_for_target(target, &plan.config)
         .map_err(training_plan_error_to_api_error)?;
     let project_id = source

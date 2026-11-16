@@ -714,6 +714,60 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
         next["plan"]["config"]
     );
 
+    // A completed continuation carries API-resolved paths in its stored config. A further
+    // continuation must validate its client options and resolve the immediate parent's checkpoint.
+    let continued_id = continued["id"].as_str().unwrap();
+    let continued_dir = private_training_output_dir(&settings.data_dir, continued_id);
+    let continued_terminal = continued_dir.join(format!(
+        "{stem}.checkpoints/step_{:08}",
+        (total + 1000) / accumulation
+    ));
+    claim_training_job_as_mlx_worker(&app, continued_id).await;
+    std::fs::create_dir_all(&continued_terminal).unwrap();
+    std::fs::write(continued_terminal.join("state.json"), b"{}").unwrap();
+    write_test_safetensors(&continued_dir.join(&file_name));
+    complete(
+        &app,
+        continued_id,
+        "completed",
+        json!({"stepsCompleted": total + 1000}),
+    )
+    .await;
+    let (status, again) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/training/jobs/{continued_id}/continue"),
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    let latest = private_training_payload(&settings.data_dir, again["id"].as_str().unwrap());
+    assert_eq!(latest["plan"]["config"]["steps"], total + 2000);
+    assert_eq!(again["sourceJobId"], continued_id);
+    assert_eq!(
+        std::path::Path::new(
+            latest["plan"]["config"]["advanced"]["iris"]["resume_from"]
+                .as_str()
+                .unwrap()
+        )
+        .canonicalize()
+        .unwrap(),
+        continued_terminal.canonicalize().unwrap()
+    );
+    assert_eq!(
+        latest["plan"]["config"]["advanced"]["resumeFromJobId"],
+        continued_id
+    );
+    assert_ne!(
+        latest["plan"]["output"]["loraId"],
+        next["plan"]["output"]["loraId"]
+    );
+    assert_eq!(
+        private_training_payload(&settings.data_dir, continued_id),
+        next,
+        "continuing again preserves its parent's resolved plan"
+    );
+
     // Resume: the second run names the first; SceneWorks hands the trainer its checkpoint root.
     let mut resume = config.clone();
     resume["advanced"]["resumeFromJobId"] = json!(job_id);
