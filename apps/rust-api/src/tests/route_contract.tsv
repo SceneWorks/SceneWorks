@@ -106,6 +106,8 @@ POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/repoint	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/smart-crop	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/strip-exif	token
 POST	/api/v1/projects/:project_id/training/jobs	token
+GET	/api/v1/projects/:project_id/training/runs	token
+HEAD	/api/v1/projects/:project_id/training/runs	token
 GET	/api/v1/training/jobs/:job_id/iris-metrics	token
 HEAD	/api/v1/training/jobs/:job_id/iris-metrics	token
 POST	/api/v1/training/jobs/:job_id/continue	token

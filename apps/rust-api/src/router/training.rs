@@ -5,6 +5,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
         .route(
+            "/api/v1/projects/:project_id/training/runs",
+            get(crate::training::list_completed_training_runs),
+        )
+        .route(
             "/api/v1/training/describe-prompt/default",
             get(get_default_describe_prompt),
         )
