@@ -46,8 +46,13 @@ fn flux3_shared_memory_tier_is_the_loaded_package() {
     assert_eq!(candle_shared_memory_tier("z_image", "q4"), "q4");
 }
 
+fn bound_request(value: Value) -> ImageRequest {
+    let payload = value.as_object().expect("request object");
+    ImageRequest::from_resolved(payload, payload).expect("fixture options bind")
+}
+
 fn request(bits: i64) -> ImageRequest {
-    super::request(json!({
+    bound_request(json!({
         "model": "mage_flow_base",
         "advanced": { "mlxQuantize": bits },
         "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
@@ -96,7 +101,7 @@ fn packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
         "ideogram_4_turbo",
     ] {
         for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
-            let request = super::request(json!({
+            let request = bound_request(json!({
                 "model": model,
                 "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
             }));
@@ -280,7 +285,7 @@ fn flux1_request(model: &str, quantize: Option<Value>) -> ImageRequest {
     if let Some(quantize) = quantize {
         payload["advanced"] = json!({ "mlxQuantize": quantize });
     }
-    super::request(payload)
+    bound_request(payload)
 }
 
 #[test]

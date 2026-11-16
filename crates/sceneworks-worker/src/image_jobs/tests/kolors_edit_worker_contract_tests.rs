@@ -1,5 +1,6 @@
 use super::super::routing::resolve_candle_image_route;
 use super::super::routing::CandleImageRoute;
+use super::super::ImageRequest;
 use super::resolve_candle_kolors_edit_init;
 use crate::Path;
 use crate::PathBuf;
@@ -10,6 +11,21 @@ use crate::DEFAULT_HUGGINGFACE_BASE_URL;
 use crate::DEFAULT_MAX_LORA_URL_BYTES;
 use crate::DEFAULT_MAX_MODEL_URL_BYTES;
 use serde_json::json;
+
+fn bound_request(value: Value) -> ImageRequest {
+    let authored = value.as_object().expect("request object");
+    let mut effective = authored.clone();
+    if let Some(strength) = effective
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .and_then(|advanced| advanced.get_mut("strength"))
+    {
+        if let Some(number) = sceneworks_core::options::legacy_number(strength) {
+            *strength = json!(number);
+        }
+    }
+    ImageRequest::from_resolved(authored, &effective).expect("fixture options bind")
+}
 
 fn settings(data_dir: &Path) -> Settings {
     Settings {
@@ -54,7 +70,7 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
         )
         .expect("source asset");
     let asset_id = asset["id"].as_str().expect("asset id");
-    let request = super::request(json!({
+    let request = bound_request(json!({
         "projectId": project.id,
         "model": "kolors",
         "mode": "edit_image",
@@ -77,7 +93,7 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
     assert_eq!(source.pixels[0..3], [180, 40, 90]);
     assert!((strength - 0.72).abs() < f32::EPSILON);
 
-    let missing_source = super::request(json!({
+    let missing_source = bound_request(json!({
         "projectId": project.id,
         "model": "kolors",
         "mode": "edit_image",
@@ -101,7 +117,7 @@ fn kolors_ip_composites_refuse_before_provider_precedence() {
     let weights = data.path().join("models/kolors-test");
     std::fs::create_dir_all(&weights).expect("model path");
     let request = |advanced: Value| {
-        super::request(json!({
+        bound_request(json!({
             "projectId": "project",
             "model": "kolors",
             "mode": "character_image",

@@ -9,6 +9,7 @@ use super::super::stream::GenEvent;
 use super::super::zimage_identity_candle_strength;
 use super::super::AdapterKind;
 use super::super::AdapterSpec;
+use super::super::ImageRequest;
 use super::super::WeightsSource;
 use super::super::CANDLE_ADAPTER;
 use super::candle_adapter_label;
@@ -16,14 +17,21 @@ use super::resolve_candle_image_route_with_prepared_availability;
 use super::CandleImageRoute;
 use crate::PathBuf;
 use crate::Settings;
+use crate::Value;
 use serde_json::json;
+
+fn bound_request(value: Value) -> ImageRequest {
+    let payload = value.as_object().expect("request object");
+    ImageRequest::from_resolved(payload, payload).expect("fixture options bind")
+}
+
 #[test]
 fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
     let temp = tempfile::tempdir().unwrap();
     let mut settings = Settings::for_test(temp.path().join("data"));
     settings.backend_candle_enabled = true;
     for model in ["moss_image_base", "moss_image_sft"] {
-        let request = super::request(json!({"model":model,"mode":"edit_image",
+        let request = bound_request(json!({"model":model,"mode":"edit_image",
             "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
         }));
         let route = resolve_candle_image_route_with_prepared_availability(
@@ -34,7 +42,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         assert_eq!(route.image_count(&request, &settings), 4);
         assert_eq!(route.adapter_label(&request), candle_adapter_label(model));
         assert!(!route.applies_request_loras(&request));
-        let ordinary = super::request(json!({"model":model,"mode":"text_to_image"}));
+        let ordinary = bound_request(json!({"model":model,"mode":"text_to_image"}));
         assert_eq!(
             resolve_candle_image_route_with_prepared_availability(
                 &ordinary, None, &settings, false, false, false, false, false, false, false
@@ -44,7 +52,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
     }
     settings.backend_candle_enabled = false;
     let request =
-        super::request(json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"}));
+        bound_request(json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"}));
     assert_eq!(
         resolve_candle_image_route_with_prepared_availability(
             &request, None, &settings, false, false, false, false, false, false, false
@@ -57,7 +65,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
 /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.
 #[test]
 fn qwen_image_2_1_edit_route_admits_the_request_adapter_stack() {
-    let request = super::request(json!({
+    let request = bound_request(json!({
         "model": "qwen_image_2_1",
         "mode": "edit_image",
         "referenceAssetIds": ["asset_a", "asset_b"],
@@ -75,7 +83,7 @@ fn qwen_image_2_1_edit_route_admits_the_request_adapter_stack() {
 
 #[test]
 fn krea_convrot_load_spec_preserves_adapters() {
-    let request = super::request(json!({
+    let request = bound_request(json!({
         "model": "krea_2_turbo",
         "advanced": { "convRot": true }
     }));
@@ -133,7 +141,7 @@ fn krea_convrot_load_spec_preserves_adapters() {
 
 #[test]
 fn registered_zimage_identity_routes_scored_source_metadata() {
-    let request = super::request(json!({
+    let request = bound_request(json!({
         "model": "z_image_turbo",
         "mode": "character_image",
         "referenceAssetId": "character-42",
@@ -166,7 +174,7 @@ fn registered_zimage_identity_routes_scored_source_metadata() {
 
 #[test]
 fn mage_edit_preserves_primary_then_ordered_extra_references() {
-    let request = super::request(json!({
+    let request = bound_request(json!({
         "mode": "edit_image",
         "model": "mage_flow_edit_turbo",
         "sourceAssetId": "primary",
@@ -182,7 +190,7 @@ fn mage_edit_preserves_primary_then_ordered_extra_references() {
         "Mage edit assets and generation sets must retain the Candle family label"
     );
 
-    let missing_primary = super::request(json!({
+    let missing_primary = bound_request(json!({
         "mode": "edit_image",
         "model": "mage_flow_edit",
         "referenceAssetIds": ["orphan"]
