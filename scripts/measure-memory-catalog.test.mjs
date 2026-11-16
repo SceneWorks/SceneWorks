@@ -6694,6 +6694,10 @@ test("the mlx lane provisions an hf CLI only under download_missing and only int
   assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/python" -m pip install \\\n\s*--disable-pip-version-check --no-input -r \.github\/requirements-hf\.txt/,
     "installs the repo-pinned client into the venv");
   assert.match(step, /echo "\$RUNNER_TEMP\/hf-cli-venv\/bin" >> "\$GITHUB_PATH"/);
+  // huggingface_hub 0.36's `hf` has a `version` subcommand and REFUSES `--version` (exit 2), so the
+  // smoke check must use the subcommand or the step fails on every runner it provisions.
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/hf" version$/m, "smoke-checks with `hf version`");
+  assert.doesNotMatch(step, /bin\/hf" --version/, "`hf --version` exits 2 on huggingface_hub 0.36");
   // Nothing outside the job-private venv: no bare pip, no --user, no brew, no HF cache touch.
   const installs = step.match(/pip install/g) ?? [];
   assert.equal(installs.length, 1);

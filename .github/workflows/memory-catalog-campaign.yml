@@ -724,7 +724,7 @@ jobs:
           python3.12 -m venv "$RUNNER_TEMP/hf-cli-venv"
           "$RUNNER_TEMP/hf-cli-venv/bin/python" -m pip install \
             --disable-pip-version-check --no-input -r .github/requirements-hf.txt
-          "$RUNNER_TEMP/hf-cli-venv/bin/hf" --version
+          "$RUNNER_TEMP/hf-cli-venv/bin/hf" version
           echo "$RUNNER_TEMP/hf-cli-venv/bin" >> "$GITHUB_PATH"
 
       - name: Plan the walk
