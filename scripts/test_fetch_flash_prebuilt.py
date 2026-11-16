@@ -1,9 +1,11 @@
 """Metadata-only checks for the Docker FlashAttention fetcher."""
 
 import importlib.util
+import errno
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).with_name("fetch-flash-prebuilt.py")
@@ -27,6 +29,11 @@ class FlashPrebuiltTests(unittest.TestCase):
                 f"archive_sha256={trusted}\n"
             )
             FETCHER.validate(directory, source, trusted)
+            with mock.patch.object(pathlib.Path, "rename", side_effect=OSError(errno.ENOTEMPTY, "winner published")):
+                FETCHER.publish(directory.parent / "candidate", directory, source, trusted)
+            with mock.patch.object(pathlib.Path, "rename", side_effect=OSError(errno.EACCES, "permission denied")):
+                with self.assertRaises(OSError):
+                    FETCHER.publish(directory.parent / "candidate", directory, source, trusted)
             with self.assertRaisesRegex(ValueError, "source or target mismatch"):
                 FETCHER.validate(directory, "b" * 64, trusted)
             archive.write_bytes(b"tampered")

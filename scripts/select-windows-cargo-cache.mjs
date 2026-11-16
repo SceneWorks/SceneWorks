@@ -80,6 +80,8 @@ export async function cachedInferenceRevision(cache, revision) {
 }
 
 async function main() {
+  const cacheOnly = process.argv.length === 3 && process.argv[2] === "--cache-only";
+  if (process.argv.length > 2 && !cacheOnly) throw new Error("usage: select-windows-cargo-cache.mjs [--cache-only]");
   if (process.platform !== "win32") fail();
   const selected = selectWindowsCargoCache({ runnerName: process.env.RUNNER_NAME, cargoHome: process.env.CARGO_HOME, runnerToolCache: process.env.RUNNER_TOOL_CACHE });
   await ensurePhysicalCargoCache(selected.cache);
@@ -90,10 +92,13 @@ async function main() {
   await ensurePhysicalCargoCache(flashAttention);
   await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\nCANDLE_FLASH_ATTN_BUILD_DIR=${flashAttention}\n`);
   process.env.CARGO_HOME = selected.cache;
-  const sourceSha256 = await candleFlashSourceSha256(process.cwd());
-  const prebuilt = await fetchPrebuilt({ sourceSha256, target: "x86_64-pc-windows-msvc", cacheRoot: path.join(selected.cache, "flash-attn-prebuilt") });
-  if (prebuilt) await appendFile(process.env.GITHUB_ENV, `CANDLE_FLASH_ATTN_PREBUILT_DIR=${prebuilt}\n`);
-  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, flash_attention_build: flashAttention, inference_revision: revision, inference_commit_present: present }));
+  let prebuilt = null;
+  if (!cacheOnly) {
+    const sourceSha256 = await candleFlashSourceSha256(process.cwd());
+    prebuilt = await fetchPrebuilt({ sourceSha256, target: "x86_64-pc-windows-msvc", cacheRoot: path.join(selected.cache, "flash-attn-prebuilt") });
+    if (prebuilt) await appendFile(process.env.GITHUB_ENV, `CANDLE_FLASH_ATTN_PREBUILT_DIR=${prebuilt}\n`);
+  }
+  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, flash_attention_build: flashAttention, flash_attention_prebuilt: prebuilt, inference_revision: revision, inference_commit_present: present }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

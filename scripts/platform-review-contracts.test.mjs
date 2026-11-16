@@ -2444,6 +2444,19 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   const skip =
     /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
 
+  const selector = stepBody(workflow, "Isolate Cargo dependency checkout");
+  const cacheOnly = workflowExpression(selector, "FLASH_ATTN_CACHE_ONLY");
+  for (const [event, inputs, expected] of [
+    ["pull_request", {}, false], ["workflow_dispatch", {}, false],
+    ["workflow_dispatch", { provision_snapshot: true }, true],
+    ["workflow_dispatch", { provision_snapshot: true, run_five_rung_reference: true }, false],
+  ]) {
+    assert.equal(Boolean(evaluateWorkflow(cacheOnly, event, inputs)), expected,
+      `FlashAttention cache-only selection for ${event}: ${JSON.stringify(inputs)}`);
+  }
+  assert.match(selector, /if \(\$env:FLASH_ATTN_CACHE_ONLY -eq 'true'\) \{\s+node scripts\/select-windows-cargo-cache\.mjs --cache-only/);
+  assert.match(selector, /\} else \{\s+node scripts\/select-windows-cargo-cache\.mjs\s+\}/);
+
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
   // stays green. That is not hypothetical -- it is trap 1 from sc-18677's third review round, which

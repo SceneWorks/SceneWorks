@@ -2,6 +2,7 @@
 """Fetch the verified FlashAttention archive for a Linux Candle Docker build."""
 
 import hashlib
+import errno
 import json
 import pathlib
 import platform
@@ -85,6 +86,15 @@ def validate(directory, source, trusted_archive_sha256):
         raise ValueError("FlashAttention archive checksum mismatch against trusted source pin")
 
 
+def publish(unpacked, destination, source, trusted_archive_sha256):
+    try:
+        unpacked.rename(destination)
+    except OSError as error:
+        if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+            raise
+        validate(destination, source, trusted_archive_sha256)
+
+
 def fetch(crate, cache):
     if platform.machine() != "x86_64":
         return None
@@ -119,10 +129,7 @@ def fetch(crate, cache):
                 with bundle.extractfile(member) as source_file, (unpacked / member.name).open("wb") as output:
                     shutil.copyfileobj(source_file, output)
         validate(unpacked, source, trusted)
-        try:
-            unpacked.rename(destination)
-        except FileExistsError:
-            validate(destination, source, trusted)
+        publish(unpacked, destination, source, trusted)
     return destination
 
 

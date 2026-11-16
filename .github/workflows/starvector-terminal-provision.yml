@@ -197,7 +197,7 @@ jobs:
       - name: Isolate persistent Cargo dependency cache
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/select-windows-cargo-cache.mjs --cache-only
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Resolve immutable pin-keyed terminal inputs
         shell: powershell
