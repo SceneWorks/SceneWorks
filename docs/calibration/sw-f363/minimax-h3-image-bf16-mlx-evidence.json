@@ -1,0 +1,285 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "MiniMaxAI/MiniMax-H3-Image",
+        "resolvedRevision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+      "capturedAt": "2026-11-16T07:28:49Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:minimax-h3-image-staged",
+        "blockers": [
+          "the pinned MiniMax-H3-Image MLX route exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "gated rather than runtime_complete: the pinned provider publishes no calibration identity, so stale-evidence refusal is not demonstrable"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 53854308108
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 41565655702
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 2056801520
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 55522214444
+          },
+          {
+            "name": "loadWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 49
+          },
+          {
+            "name": "conditioningWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 452672
+          },
+          {
+            "name": "denoiseWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 21401
+          },
+          {
+            "name": "decodeWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 11856
+          },
+          {
+            "name": "renderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 485931
+          },
+          {
+            "name": "warmRenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 3350494
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 53854308108
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 1077086162
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 53854308108
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 91
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 1024
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 1024
+          }
+        ]
+      },
+      "evidenceScope": "candidate",
+      "fixture": "minimax-h3-image-mlx-bf16-1024-seed7100-step6",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "27.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c2dd1d5bd019bb543ed0",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "MiniMaxAI/MiniMax-H3-Image@492fd8c4eca666f1085f57e30738c1e0d86b3439:bf16+MiniMaxAI/MiniMax-H3-Image@492fd8c4eca666f1085f57e30738c1e0d86b3439",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-8d59b68697cc447044e5",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 53854308108,
+          "allocatorBytes": 55522214444,
+          "reclaimableBytes": 1667906336
+        },
+        "decode": {
+          "activeBytes": 2056801520,
+          "allocatorBytes": 2056899824,
+          "reclaimableBytes": 98304
+        },
+        "denoise": {
+          "activeBytes": 41565655702,
+          "allocatorBytes": 41565655702,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 53854308108,
+          "allocatorBytes": 55522214444,
+          "reclaimableBytes": 1667906336
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 58317602816,
+        "decode": 2214592512,
+        "denoise": 43687870464,
+        "overall": 58317602816
+      },
+      "quality": {
+        "contract": "identical artifact, request, geometry, tier, and loaded model; cold measured run versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "101975c301686467f089cf8c0e3c4a9e33846b6d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:e486a215d69661278af1f8d3a3a6b35b7ddd486d9037ff59ca395cd74a47692d",
+          "revision": "a1e4a3c10a9b89c2cc15f5eacb1a16ece2a7f283"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 58317602816,
+          "name": "exact_fit",
+          "predictedBytes": 58317602816,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned minimax_h3_image provider at inference 101975c301686467f089cf8c0e3c4a9e33846b6d publishes no calibration identity on a production load, so its admission carries no calibration handshake for stale evidence to fail",
+          "result": "not_applicable"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned MiniMax-H3-Image MLX route exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned MiniMax-H3-Image MLX route exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned MiniMax-H3-Image MLX route exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the minimax_h3_image staged text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "minimax_h3_image",
+        "overlay": "none",
+        "provider": "minimax_h3_image",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

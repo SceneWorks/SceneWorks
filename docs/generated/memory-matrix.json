@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e486a215d69661278af1f8d3a3a6b35b7ddd486d9037ff59ca395cd74a47692d",
+    "sceneWorksRevision": "source-tree:705ea8eb94e410051309f203d034bf361f946151bbd5851e8c0176cf7f7d19b8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,15 +85,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "436bbe2c9557e7a8d8a533ca7c55c8e77b41b6a502885c96b6b125aa572ce2a4"
+        "sha256": "021c1a0d7a8d3b4fbaf71884ad8a887d6842fefd206d9ea3c0f21bc135473f23"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "17db515f36d1345433cc4f70346b69a2a91c707824c7ffb75af1c1ad48569602"
+        "sha256": "20541d223b1d2cc64a3c67e3e45a49556e9f1e51e2e21ab6a5e3734eb60b19aa"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "4a41d86ec51dae51b9ef4edcf2b60cea05c27f61c81d6cf26f02a968583ca653"
+        "sha256": "0a3d7413ec81625daf60ff2d2eeeb1e20cf83949a441d385af34b46690cafde0"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -154,10 +154,10 @@
       "video": 11
     },
     "cells": 11150,
-    "publishedCells": 3988,
-    "elidedCells": 7162,
+    "publishedCells": 3996,
+    "elidedCells": 7154,
     "elidedByState": {
-      "Implemented": 1638,
+      "Implemented": 1630,
       "Missing": 5524
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -190,9 +190,9 @@
         "reason": "a utility-modality entry with its own engine memory-strategy contract (a composed, resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video matrix universe by modality, and anchored — planned, armed and closed over on both lanes"
       }
     ],
-    "anchors": 259,
-    "analyticOnlyCells": 130,
-    "anchoredCells": 3988,
+    "anchors": 260,
+    "analyticOnlyCells": 129,
+    "anchoredCells": 3996,
     "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -7919,6 +7919,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 9
+    },
+    {
+      "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+      "modelId": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "minimax_h3_image",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sw-f363/minimax-h3-image-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 8
     },
     {
       "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
@@ -16666,11 +16684,12 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 12,
-      "published": 0,
-      "elided": 12,
+      "published": 4,
+      "elided": 8,
       "implemented": 12,
       "states": {
-        "Implemented": 12
+        "Anchored/underived": 4,
+        "Implemented": 8
       }
     },
     {
@@ -16678,11 +16697,12 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 12,
-      "published": 0,
-      "elided": 12,
+      "published": 4,
+      "elided": 8,
       "implemented": 12,
       "states": {
-        "Implemented": 12
+        "Anchored/underived": 4,
+        "Implemented": 8
       }
     },
     {
@@ -147457,6 +147477,454 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:none:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:lora:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:none:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 7094,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_engages_staged_residency"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0"
+          }
+        ]
+      }
+    },
+    {
       "id": "qwen_image_2_1_turbo:qwen_image_2_1_turbo:candle:bf16:edit_image:lora:bounded_decode",
       "modelId": "qwen_image_2_1_turbo",
       "resolvedRoute": "qwen_image_2_1_turbo",
@@ -253498,7 +253966,16 @@
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:resident",
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "minimax_h3_image": [],
+    "minimax_h3_image": [
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:staged_residency",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:none:staged_residency",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:lora:staged_residency",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:mlx:bf16:text_to_image:none:staged_residency"
+    ],
     "moss_image_base": [],
     "moss_image_sft": [],
     "pulid_flux_dev": [],
