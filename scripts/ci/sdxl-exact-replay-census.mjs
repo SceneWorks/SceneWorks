@@ -12,7 +12,7 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = '96969df88f387505f3c5e2377e45442a70b51c87';
+const PIN = '101975c301686467f089cf8c0e3c4a9e33846b6d';
 let stage = 'dispatch';
 const publicReasons = new Set([
   'binding escaped private directory', 'inference pin changed', 'bound runtime source changed',
