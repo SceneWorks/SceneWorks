@@ -30,7 +30,8 @@ function fixture() {
     sampling: resolved(['ddim']), schedule: resolved(schedule), estimator: resolved('eps'),
     geometry: resolved([{ width: 1024, height: 1024, channels: 3, format: 'rgb8' }]),
     quality_policy: resolved({ compute: [{ device: 'Cuda(0)', dtype: 'F16' }], operations: [] }), output_policy: resolved(['rgb8']),
-    randomness: { kind: 'draws', scheme: 'fixture', draws: [{ output_index: 0, purpose: 'initial', seed: 16402, noise_sha256: hash('noise') }] },
+    randomness: { kind: 'draws', scheme: 'candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32',
+      draws: [{ output_index: 0, purpose: 'sdxl/pipeline', seed: 16402, noise_sha256: null }] },
     deterministic_replay: { kind: 'non_deterministic', reason: 'not qualified' } } };
   const job = { id: 'job-one', status: 'completed', workerId: 'worker', assignedGpu: '1', result: { adapter: 'candle_sdxl', assets: [{ id: 'asset' }] } };
   const receipt = { version: 1, jobId: job.id, workerId: 'worker', attemptId: hash('attempt-one'), acceptedBackend: 'candle', acceptedDevice: '1', inferenceRevision: pin,
@@ -71,6 +72,8 @@ test('completed witness rejects cancellation, fallback, missing facts and spoofe
     (x) => { x.receipt.execution.identity.sampling.value = ['euler']; },
     (x) => { x.receipt.execution.identity.schedule.value[0].schedule.count = 20; },
     (x) => { x.receipt.execution.identity.randomness.draws[0].seed++; },
+    (x) => { x.receipt.execution.identity.randomness.scheme = 'unverified-rng'; },
+    (x) => { x.receipt.execution.identity.randomness.draws[0].purpose = 'other'; },
     (x) => { x.receipt.execution.identity.geometry.state = 'unavailable'; },
     (x) => { x.receipt.execution.identity.quality_policy.value.compute = [{ device: 'Cpu' }]; },
   ];
@@ -111,7 +114,8 @@ test('source, pin, owner window and separate reviewed declaration are mandatory'
 });
 test('qualification is immutable and cannot manufacture a deterministic support declaration', () => {
   const { first, second, plan } = pair();
-  const qualification = { accepted: true, phase: 'qualify', deviceUuid: uuid, requestSha256: plan.requestSha256, sourceIdentitySha256: plan.sourceIdentitySha256, scheduleSha256: plan.scheduleSha256, jobs: [first, second] };
+  const qualification = { accepted: true, phase: 'qualify', deviceUuid: uuid, requestSha256: plan.requestSha256, sourceIdentitySha256: plan.sourceIdentitySha256,
+    scheduleSha256: plan.scheduleSha256, loadedRuntimeLibrariesSha256: hash('loaded-runtime'), jobs: [first, second] };
   plan.qualificationSha256 = digest(qualification); requireReplayQualification(plan, qualification);
   assert.equal(first.support.kind, 'non_deterministic');
   qualification.jobs[0].support.kind = 'deterministic';

@@ -154,7 +154,11 @@ export function completedWitness({ job, receipt, route, png, workerId, device, p
   same(fact(identity.geometry), [{ width: 1024, height: 1024, channels: 3, format: 'rgb8' }], 'output geometry changed');
   assert(fact(identity.quality_policy).compute?.some((entry) => /^Cuda/.test(entry.device)), 'no executed CUDA compute');
   assert.equal(identity.randomness?.kind, 'draws', 'draw identity missing');
-  assert(identity.randomness.draws?.length > 0 && identity.randomness.draws.every((draw) => draw.output_index === 0 && draw.seed === REQUEST.seed && HEX.test(draw.noise_sha256)), 'seed/draw binding changed');
+  assert.equal(identity.randomness.scheme, 'candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32', 'RNG scheme changed');
+  const draws = identity.randomness.draws;
+  assert(draws?.some((draw) => draw.output_index === 0 && draw.purpose === 'sdxl/pipeline' && draw.seed === REQUEST.seed)
+    && draws.every((draw) => draw.output_index === 0 && (draw.seed === REQUEST.seed || (draw.seed == null && HEX.test(draw.noise_sha256)))),
+  'seed/draw binding changed');
   // Only hashes and selected nonprivate identities are published, never source routes/results.
   return { jobId: job.id, attemptId: receipt.attemptId, executionSha256: digest(execution),
     executionWithoutSupportSha256: digest({ ...identity, deterministic_replay: undefined }),
@@ -188,6 +192,7 @@ export function requireReplayQualification(plan, qualification) {
   assert.equal(qualification.requestSha256, plan.requestSha256, 'qualification request changed');
   assert.equal(qualification.sourceIdentitySha256, plan.sourceIdentitySha256, 'qualification source changed');
   assert.equal(qualification.scheduleSha256, plan.scheduleSha256, 'qualification schedule changed');
+  assert(HEX.test(qualification.loadedRuntimeLibrariesSha256), 'qualified loaded runtime libraries missing');
   assert.equal(qualification.jobs?.length, 2, 'qualification cardinality invalid');
   compareFresh(qualification.jobs[0], qualification.jobs[1]);
 }
@@ -307,7 +312,13 @@ async function runProof() {
       const selected = names.filter((name) => /^(?:nv|cuda|cublas|cudnn|cufft|curand|cusolver|cusparse|vcruntime|msvcp).*\.dll$/i.test(path.basename(name)));
       assert(selected.some((name) => /^nvcuda/i.test(path.basename(name))), 'CUDA driver not loaded by worker');
       const actual = await Promise.all(selected.map(async (file) => ({ name: path.basename(file).toLowerCase(), sha256: await fileSha256(file) })));
-      same(actual.sort((a, b) => a.name.localeCompare(b.name)), libraries, 'executed runtime libraries changed');
+      assert.equal(new Set(actual.map((file) => file.name)).size, actual.length, 'duplicate loaded runtime libraries');
+      const byName = new Map(actual.map((file) => [file.name, file.sha256]));
+      for (const file of libraries) assert.equal(byName.get(file.name), file.sha256, 'censused runtime library changed');
+      const loadedDigest = digest(actual.sort((a, b) => a.name.localeCompare(b.name)));
+      if (qualification) assert.equal(loadedDigest, qualification.loadedRuntimeLibrariesSha256, 'qualified loaded runtime libraries changed');
+      if (evidence.loadedRuntimeLibrariesSha256) assert.equal(loadedDigest, evidence.loadedRuntimeLibrariesSha256, 'loaded runtime libraries changed between renders');
+      evidence.loadedRuntimeLibrariesSha256 = loadedDigest;
     };
     stage = 'project_create';
     const project = await api('POST', '/api/v1/projects', { name: 'SDXL exact replay proof' });
