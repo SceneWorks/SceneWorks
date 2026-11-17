@@ -6892,7 +6892,7 @@
         "decode": 2056899824
       },
       "overallAllocatorEnvelopeBytes": 55522214444,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "minimax_h3_image:mlx:q4:base:base:minimax-h3-image-mlx-v1:imc-eda0ce1f4c1eba2a53ce",
@@ -6938,7 +6938,7 @@
         "decode": 2024247528
       },
       "overallAllocatorEnvelopeBytes": 16496143916,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "minimax_h3_image:mlx:q8:base:base:minimax-h3-image-mlx-v1:imc-94104a22ab25bba46f2d",
@@ -6984,7 +6984,7 @@
         "decode": 2056899824
       },
       "overallAllocatorEnvelopeBytes": 28936060460,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
@@ -14923,7 +14923,8 @@
         "decode": 2056899824
       },
       "overallAllocatorEnvelopeBytes": 4758332990,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it",
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "regime:minimax_h3_image:mlx:q4:base:base:lora:minimax-h3-image-mlx-v1:imc-c1b9495bd68c3cc569b0",
@@ -14970,7 +14971,7 @@
         "decode": 2056899824
       },
       "overallAllocatorEnvelopeBytes": 16846742786,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "regime:minimax_h3_image:mlx:q4:base:base:optimized:minimax-h3-image-mlx-v1:imc-59bd7dc7b9524156fde1",
@@ -15017,7 +15018,8 @@
         "decode": 2023704808
       },
       "overallAllocatorEnvelopeBytes": 2289879834,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it",
+      "stagedResidencyUnconditional": true
     },
     {
       "id": "regime:minimax_h3_image:mlx:q8:base:base:optimized:minimax-h3-image-mlx-v1:imc-141be9cd45626491ccc6",
@@ -15064,7 +15066,8 @@
         "decode": 2056899824
       },
       "overallAllocatorEnvelopeBytes": 2748407612,
-      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it",
+      "stagedResidencyUnconditional": true
     }
   ]
 }

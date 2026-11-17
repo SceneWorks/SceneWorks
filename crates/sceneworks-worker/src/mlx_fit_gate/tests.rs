@@ -16090,3 +16090,101 @@ fn the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contra
              test would pass with or without the split it exists to pin"
     );
 }
+
+/// SW-F363: the real MLX fit gate prices a matching MiniMax-H3-Image request from the PACKAGED
+/// `minimax_h3_image` q4 anchor — a staged render, admissible because the engine stages every
+/// request (`enginesThatAlwaysStage.mlx`) — at the core law's STAGED-regime peak, ahead of the
+/// weights+headroom floor; a LoRA request keeps the floor (the anchor is overlay-free). Weights-free:
+/// the fixture contract is renamed to the provider, and the store is the shipped one.
+#[test]
+fn the_packaged_minimax_h3_image_anchor_prices_the_mlx_ladder() {
+    use crate::memory_strategy::CandidateBasis;
+    use sceneworks_core::memory_anchor::{
+        AnchorBackend, AnchorMlxImageDeriveRequest, ArchitectureFacts, ImageDeriveRequest,
+        RequestRegime,
+    };
+
+    let mut generator = fixture_generator();
+    let contract = generator.contract.as_mut().expect("fixture contract");
+    contract.provider_id = "minimax_h3_image".to_owned();
+    contract.load_shape = gen_core::LoadShape::EagerMaterialization;
+    generator.descriptor.id = "minimax_h3_image";
+    let plan = MlxRequestPlan {
+        engine_id: "minimax_h3_image",
+        model_id: "minimax_h3_image".to_owned(),
+        ..fixture_plan()
+    };
+    let geometry = MemoryGeometry {
+        width: 2048,
+        height: 2048,
+        batch: 1,
+        frames: 1,
+        reference_count: 0,
+    };
+    let components = crate::video_admission::anchor_component_bytes(
+        generator.contract.as_ref().expect("contract").asset_facts,
+    );
+    let anchor = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("the packaged anchor store")
+        .image_anchor_for("minimax_h3_image", AnchorBackend::Mlx, "q4")
+        .expect("the packaged minimax_h3_image q4 MLX anchor");
+    assert!(anchor.measured_regime.staged && anchor.staged_residency_unconditional);
+    let expected = anchor
+        .derive_mlx_image_phase_peaks(
+            AnchorMlxImageDeriveRequest {
+                width: geometry.width,
+                height: geometry.height,
+            },
+            components,
+        )
+        .expect("the staged anchor prices the request");
+    assert_eq!(
+        Some(expected),
+        anchor.derive_phase_peaks(
+            &ImageDeriveRequest::new(geometry.width, geometry.height, RequestRegime::staged()),
+            components,
+            ArchitectureFacts::default(),
+        ),
+        "the staged composition, never the co-resident one"
+    );
+
+    let contract = generator.contract.as_ref().expect("contract");
+    let (peak, anchor_id) =
+        mlx_image_anchor_derived_peak(contract, &plan, "text_to_image", None, geometry)
+            .expect("the gate selects the packaged anchor");
+    assert_eq!(anchor_id, anchor.id);
+    assert_eq!(peak, expected.peak_bytes());
+
+    let ladder = synthesize_estimate_ladder(
+        contract,
+        &plan,
+        "text_to_image",
+        None,
+        geometry,
+        false,
+        None,
+        &[],
+    );
+    assert!(!ladder.estimates.is_empty());
+    for estimate in &ladder.estimates {
+        assert_eq!(
+            estimate.basis,
+            CandidateBasis::EstimateAnchorDerived {
+                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+            },
+            "{:?}",
+            estimate.selection.strategy
+        );
+        assert_eq!(
+            estimate.evidence.predicted_peak_bytes,
+            expected.peak_bytes(),
+            "{:?}",
+            estimate.selection.strategy
+        );
+    }
+    assert!(
+        mlx_image_anchor_derived_peak(contract, &plan, "text_to_image", Some("lora"), geometry)
+            .is_none(),
+        "an overlay-free anchor never prices a LoRA request"
+    );
+}

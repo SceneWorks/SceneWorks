@@ -633,6 +633,7 @@ pub(crate) fn floor_pseudo_anchor(
         // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
         // residency structurally impossible, so it keeps the staged-only derivation law.
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 

@@ -1802,6 +1802,7 @@ fn candle_record_anchor(raw: &str) -> MemoryAnchor {
         // The retained corpus this fixture replays predates the structural-exemption fact and
         // carries no structurally-exempt cell, so every replayed row keeps the staged-only law.
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 
@@ -4115,6 +4116,7 @@ fn axis_free_video_anchor() -> MemoryAnchor {
         ),
         component_bytes: None,
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 
@@ -5198,4 +5200,152 @@ fn a_regime_rows_stop_binds_nothing_and_is_bound_to_its_entry() {
     }];
     let error = load_memory_anchors(&serde_json::to_string(&store).unwrap()).unwrap_err();
     assert!(error.contains("identity disagrees"), "{error}");
+}
+
+/// SW-F363: on an always-staging MLX engine (`enginesThatAlwaysStage.mlx`, bound to the descriptor's
+/// `unconditionally_engages_staged_residency`) the packaged STAGED eager unbounded anchor is the
+/// widest composition the engine runs, so the MLX entry points price the STAGED regime from it —
+/// exactly the candle law's staged split — and never a co-resident composition.
+///
+/// *Mutations this kills:* deriving the staged anchor at the resident regime; subtracting the
+/// whole resident set from a staged anchor's phases; accepting a staged anchor on a lane that can
+/// execute co-resident; accepting a resident anchor on an always-staging lane.
+#[test]
+fn an_always_staging_mlx_anchor_prices_the_staged_composition_and_only_it() {
+    let request = AnchorMlxImageDeriveRequest {
+        width: 2048,
+        height: 2048,
+    };
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("minimax_h3_image", AnchorBackend::Mlx, tier)
+            .unwrap_or_else(|| panic!("the minimax_h3_image {tier} MLX anchor is packaged"));
+        assert!(anchor.staged_residency_unconditional, "{tier}");
+        assert!(anchor.measured_regime.staged, "{tier}");
+        assert!(anchor.underived_reason.is_none(), "{tier}");
+        let derived = anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .unwrap_or_else(|| panic!("{tier}: the staged anchor derives"));
+        assert_eq!(
+            Some(derived),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::staged()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}: priced at the staged regime"
+        );
+        assert_ne!(
+            Some(derived),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}: never the co-resident regime"
+        );
+        // Each phase subtracts only its own component at the anchor's geometry.
+        let at_anchor = anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: anchor.geometry.width,
+                height: anchor.geometry.height,
+            },
+            components,
+        );
+        assert_eq!(
+            at_anchor,
+            [
+                Some(anchor.phase_active_peak_bytes.conditioning - 1),
+                Some(anchor.phase_active_peak_bytes.denoise - 1),
+                Some(anchor.phase_active_peak_bytes.decode - 1),
+            ],
+            "{tier}"
+        );
+
+        // A staged anchor on a lane that CAN execute co-resident must not price it.
+        let mut coresident_lane = anchor.clone();
+        coresident_lane.staged_residency_unconditional = false;
+        assert!(coresident_lane
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_none());
+        assert_eq!(
+            coresident_lane.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        // A resident anchor on an always-staging lane claims a render that cannot happen.
+        let mut impossible = anchor.clone();
+        impossible.measured_regime.staged = false;
+        assert!(impossible
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_none());
+        assert_eq!(
+            impossible.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        // ...and the loader refuses the flag on a row that is not a staged MLX render.
+        let mut candle = anchor.clone();
+        candle.backend = AnchorBackend::Candle;
+        assert!(validate_anchor(&candle)
+            .unwrap_err()
+            .contains("always-staging"));
+        assert!(validate_anchor(&impossible)
+            .unwrap_err()
+            .contains("always-staging"));
+    }
+}
+
+/// SW-F363: a non-staging MLX image lane is unchanged — the packaged `qwen_image_2_1` anchors carry
+/// no always-staging flag and still price the RESIDENT regime, subtracting the whole resident set
+/// from every phase.
+#[test]
+fn a_non_staging_mlx_anchor_keeps_the_resident_law() {
+    let request = AnchorMlxImageDeriveRequest {
+        width: 1536,
+        height: 1536,
+    };
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("qwen_image_2_1", AnchorBackend::Mlx, tier)
+            .unwrap_or_else(|| panic!("the qwen_image_2_1 {tier} MLX anchor is packaged"));
+        assert!(!anchor.staged_residency_unconditional, "{tier}");
+        assert!(!anchor.measured_regime.staged, "{tier}");
+        assert_eq!(
+            anchor.derive_mlx_image_phase_peaks(request, components),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}"
+        );
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_some());
+        let at_anchor = anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: anchor.geometry.width,
+                height: anchor.geometry.height,
+            },
+            components,
+        );
+        assert_eq!(
+            at_anchor,
+            [
+                Some(anchor.phase_active_peak_bytes.conditioning - 3),
+                Some(anchor.phase_active_peak_bytes.denoise - 3),
+                Some(anchor.phase_active_peak_bytes.decode - 3),
+            ],
+            "{tier}"
+        );
+    }
 }

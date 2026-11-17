@@ -2796,6 +2796,21 @@ pub struct MemoryAnchor {
     /// byte-identical, and keeps the old behaviour (`false` → the staged-only guard, unchanged).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub staged_residency_structurally_not_applicable: bool,
+    /// SW-F363: this anchor's MLX provider stages EVERY request whatever rung is selected — the
+    /// engine fact `enginesThatAlwaysStage.mlx` in `config/anchor-lane-default-strategy.json`,
+    /// which the worker binds to the provider descriptor's `unconditionally_engages_staged_residency`.
+    ///
+    /// The MLX image law's mirror of [`Self::staged_residency_structurally_not_applicable`]: on such
+    /// a lane the co-resident composition never executes, so the STAGED eager unbounded render is
+    /// the widest composition the engine runs and is the lane's admissible anchor — and the
+    /// resident one is not (it would claim a render the engine cannot produce).
+    /// [`MemoryAnchor::derive_mlx_image_phase_peaks`] and
+    /// [`MemoryAnchor::derive_mlx_image_activation_residues`] read it; nothing else does.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if`: emitted only when true, so every other packaged
+    /// row is byte-identical and keeps the resident-only MLX law.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged_residency_unconditional: bool,
 }
 
 /// Store-key spelling of the LTX-2.5 transformer variant, matching the retained evidence.
@@ -3466,6 +3481,16 @@ fn validate_anchor_with_sources(
         ));
     }
     validate_currency_attestation("memory anchor", &anchor.id, &anchor.source)?;
+    // SW-F363: an always-staging engine is an MLX descriptor fact, and such an engine cannot have
+    // produced an unstaged render.
+    if anchor.staged_residency_unconditional
+        && (anchor.backend != AnchorBackend::Mlx || !anchor.measured_regime.staged)
+    {
+        return Err(format!(
+            "memory anchor {} claims an always-staging engine but is not a staged MLX render",
+            anchor.id
+        ));
+    }
     let Some((_, source_raw)) = sources.iter().find(|(path, _)| *path == anchor.source.path) else {
         return Err(format!(
             "memory anchor {} cites source {} which is not a compiled retained-evidence file",
@@ -4692,12 +4717,6 @@ impl MemoryAnchor {
         components: ComponentBytes,
     ) -> [Option<u64>; 3] {
         if self.underived_reason.is_some()
-            || self.backend != AnchorBackend::Mlx
-            || self.load_shape != AnchorLoadShape::EagerMaterialization
-            || self.measured_regime.staged
-            || self.measured_regime.decode_tiled
-            || self.measured_regime.attention_chunked
-            || self.measured_regime.transformer_windowed
             || self.transformer_variant.is_some()
             || self.decoder.is_some()
             || self.geometry.frames != 1
@@ -4708,10 +4727,25 @@ impl MemoryAnchor {
         {
             return [None; 3];
         }
-        let resident = components
+        let Some(staged) = self.mlx_image_widest_composition_is_staged() else {
+            return [None; 3];
+        };
+        // The components the anchor's own composition held in each phase: all three throughout a
+        // resident render; on an always-staging engine only the phase's own component (the
+        // candle staged split, `derive_image_phase_split`).
+        let everything = components
             .conditioning
             .saturating_add(components.transformer)
             .saturating_add(components.decoder);
+        let resident = if staged {
+            [
+                components.conditioning,
+                components.transformer,
+                components.decoder,
+            ]
+        } else {
+            [everything; 3]
+        };
         let pixels = u128::from(request.width) * u128::from(request.height);
         let anchor_pixels = u128::from(self.geometry.width) * u128::from(self.geometry.height);
         let scale = |residue: u64, quadratic: bool| {
@@ -4732,16 +4766,42 @@ impl MemoryAnchor {
         [
             self.phase_active_peak_bytes
                 .conditioning
-                .checked_sub(resident),
+                .checked_sub(resident[0]),
             self.phase_active_peak_bytes
                 .denoise
-                .checked_sub(resident)
+                .checked_sub(resident[1])
                 .and_then(|r| scale(r, true)),
             self.phase_active_peak_bytes
                 .decode
-                .checked_sub(resident)
+                .checked_sub(resident[2])
                 .and_then(|r| scale(r, false)),
         ]
+    }
+
+    /// Whether this MLX image anchor is its lane's admissible composition, and if so whether that
+    /// composition is staged: `Some(false)` for the eager unbounded RESIDENT render (every ordinary
+    /// lane), `Some(true)` for the eager unbounded STAGED render of an always-staging engine
+    /// ([`Self::staged_residency_unconditional`], SW-F363), `None` otherwise. Mirrors the candle
+    /// law's two admissible shapes in [`Self::derive_image_phase_peaks`]: a staged anchor never
+    /// prices a co-resident composition on a lane that can execute one, and a resident anchor on
+    /// an always-staging lane claims a render that cannot happen, so both mixed shapes refuse.
+    fn mlx_image_widest_composition_is_staged(&self) -> Option<bool> {
+        if self.backend != AnchorBackend::Mlx
+            || self.load_shape != AnchorLoadShape::EagerMaterialization
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+        {
+            return None;
+        }
+        match (
+            self.measured_regime.staged,
+            self.staged_residency_unconditional,
+        ) {
+            (false, false) => Some(false),
+            (true, true) => Some(true),
+            _ => None,
+        }
     }
 
     /// Derive the MLX image lane's non-reclaimable active working set.
@@ -4755,19 +4815,18 @@ impl MemoryAnchor {
         request: AnchorMlxImageDeriveRequest,
         components: ComponentBytes,
     ) -> Option<AnchorDerivedPhases> {
-        if self.underived_reason.is_some() || self.backend != AnchorBackend::Mlx {
+        if self.underived_reason.is_some() {
             return None;
         }
-        if self.load_shape != AnchorLoadShape::EagerMaterialization
-            || self.measured_regime.staged
-            || self.measured_regime.decode_tiled
-            || self.measured_regime.attention_chunked
-            || self.measured_regime.transformer_windowed
-        {
-            return None;
-        }
+        // SW-F363: an always-staging engine's widest runnable composition is the staged one, so
+        // its staged anchor prices the staged regime; every other lane keeps the resident one.
+        let regime = if self.mlx_image_widest_composition_is_staged()? {
+            RequestRegime::staged()
+        } else {
+            RequestRegime::resident()
+        };
         self.derive_phase_peaks(
-            &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+            &ImageDeriveRequest::new(request.width, request.height, regime),
             components,
             ArchitectureFacts::default(),
         )
@@ -4941,8 +5000,9 @@ pub fn floor_weights_bytes(facts: FloorWeightsFacts, composition: FloorWeightsCo
 }
 
 /// The workload axes of [`MemoryAnchor::derive_mlx_image_phase_peaks`]: geometry only. The lane
-/// entry point prices the resident composition, which upper-bounds every composition the lane can
-/// execute.
+/// entry point prices the widest composition the lane can execute — the resident one, or the staged
+/// one on an always-staging engine ([`MemoryAnchor::staged_residency_unconditional`]) — which
+/// upper-bounds every composition the lane runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorMlxImageDeriveRequest {
     pub width: u32,
