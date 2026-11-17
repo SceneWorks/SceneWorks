@@ -324,6 +324,8 @@ pub(crate) fn combine_outcomes<T>(
 /// [`finish_scope`] on a path that is already leaving with its own outcome (a cancel or an
 /// ordinary failure): an ordinary cleanup error must not mask that outcome, but a typed
 /// `ProcessPoisoned` from the finish outranks it and is classified (and latched) here.
+/// Its only production caller is the InstantID lane, which exists only on a native lane.
+#[cfg(any(native_lane, test))]
 pub(crate) fn finish_scope_after_failure<S, E: ProviderError>(
     scope: S,
     finish: impl FnOnce(&mut S) -> Result<(), E>,
