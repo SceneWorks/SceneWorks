@@ -745,9 +745,10 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
   assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu1_lease/);
   for (const [key, value] of [["CUDA_VISIBLE_DEVICES", '"1"'], ["NVIDIA_VISIBLE_DEVICES", '"1"'], ["SCENEWORKS_GPU_ID", '"1"'], ["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
-  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --admission-policy shared-display --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- node scripts\/tier2-ab\.mjs --run/);
   assert.match(cuda, /\n      TIER2_AB_GPU_POLICY: shared-display\n/);
-  // shared-display is this profile's alone; every other wrapper caller keeps strict-idle or its own policy.
+  // The TIER2_AB_GPU_POLICY label is this profile's alone (its report wording); admission itself is the
+  // wrapper's one rule for every actor.
   for (const name of ["windows-candle.yml", "memory-catalog-campaign.yml", "load-progress-acceptance.yml"]) assert.doesNotMatch(await workflowText(name), /shared-display/);
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   assert.match(cuda, /vcvars64\.bat/);

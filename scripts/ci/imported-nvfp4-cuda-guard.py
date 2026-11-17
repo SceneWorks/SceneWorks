@@ -1,6 +1,7 @@
 """Fixed physical-GPU-1 adapter for the explicit NVFP4 proof, never ordinary CI.
 
-Reuses inference@91ff's UUID byte-lock/idle protocol and actual WindowsJob API.
+Reuses inference@91ff's UUID byte-lock protocol and actual WindowsJob API, admitted by the
+shared wrapper's one free-memory/stability rule (no idle card required).
 The Actions per-run key preserves requests; it is NOT a physical GPU mutex.
 """
 from __future__ import annotations
@@ -122,8 +123,8 @@ def main():
         }
         deadline = time.monotonic() + JOB_SECONDS
         device, handle, baseline, waited = claim_fixed(guard, out, deadline, public, msvcrt)
-        receipt.update(uuid=device["uuid"], lock_wait_seconds=waited,
-                       reserved_baseline_mib=baseline["reserved_baseline_mib"])
+        receipt.update(uuid=device["uuid"], lock_wait_seconds=waited, admission_policy=shared.SHARED_POLICY,
+                       admission=baseline)
         node = shutil.which("node")
         if not node:
             raise RuntimeError("prepared Node runtime is unavailable")
@@ -135,8 +136,9 @@ def main():
         result = execute_owned([node, str(root / "scripts/ci/imported-nvfp4-proof.mjs")],
                                out, deadline, windows.WindowsJob, child_env)
         receipt["child"] = result
-        guard.verify_idle(device, out, "after-owned-proof", baseline)
-        receipt["post_child_idle_verified"] = True
+        # Still under the lock: record how far the card moved over the proof (diagnostic only).
+        receipt["post_child"] = shared.post_child_sample(guard, out, [device], {device["uuid"]: baseline})
+        receipt["post_child_idle_verified"] = False
         receipt["accepted"] = result["returncode"] == 0 and not result["timeout"]
     except BaseException as error:
         receipt["error"] = f"{type(error).__name__}: {error}"
@@ -150,7 +152,8 @@ def main():
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
             summary.write(f"\n## Final physical CUDA proof verdict\n\nAccepted: **{str(accepted).lower()}**\n\n"
                           f"Physical GPU1 UUID: `{receipt.get('uuid', 'unverified')}`\n\n"
-                          "This final verdict includes owned-child drain and the post-child idle recheck.\n")
+                          "This final verdict includes the owned-child drain; the card was admitted on free "
+                          "memory and stability and may be shared with non-CI processes.\n")
     print(json.dumps({"accepted": accepted, "physical_uuid": receipt.get("uuid"),
                       "resource_evidence": str(output / "artifact/physical-device.json")}))
     return 0 if accepted else 1

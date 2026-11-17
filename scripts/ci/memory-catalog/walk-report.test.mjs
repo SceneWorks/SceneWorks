@@ -17,7 +17,7 @@ test("a failed walk prints the wrapper diagnostics, the walk log tail and every 
   const workDir = path.join(dir, "work");
   const receipt = path.join(dir, "resource-receipt.json");
   await writeFile(receipt, JSON.stringify({
-    resource_completed: false, admission_policy: "strict-idle", lock_wait_seconds: 3,
+    resource_completed: false, admission_policy: "shared-free-memory", lock_wait_seconds: 3,
     child: { returncode: 2, timeout: false, seconds: 14000, owned_tree_empty: true },
   }));
   const log = Array.from({ length: 300 }, (_, index) => `walk line ${index + 1}`);

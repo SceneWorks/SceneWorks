@@ -1017,8 +1017,13 @@ jobs:
         shell: powershell
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # The catalog measures on physical GPU1 whichever listener runs the job: PCI bus order makes
+          # CUDA_VISIBLE_DEVICES=1 (job env) mean nvidia-smi index 1, and --require-physical-index 1
+          # refuses before launch if the bound card is anything else.
+          CUDA_DEVICE_ORDER: PCI_BUS_ID
+          NVIDIA_VISIBLE_DEVICES: "1"
         run: |
-          python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 -- bash scripts/ci/memory-catalog/run.sh
+          python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 --require-physical-index 1 -- bash scripts/ci/memory-catalog/run.sh
           $walkStatus = $LASTEXITCODE
           if ($walkStatus -ne 0) {
             # The wrapper prints one JSON line; its receipt (error, child exit) and the walk's own

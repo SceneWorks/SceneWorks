@@ -77,21 +77,18 @@ export function validateResult(result, tier, imageSide = 'default', pinned = pin
   };
 }
 
-// The guard policy each GPU admission must have run under.
-export const ADMISSION_POLICIES = Object.freeze({ idle: 'strict-idle', shared: 'functional-coexistence' });
+// The guard policy each GPU admission must have run under. The wrapper has one admission rule for
+// every actor (free memory and a stable window, never an idle card), so a run is always `shared`.
+export const ADMISSION_POLICIES = Object.freeze({ shared: 'shared-free-memory' });
 
-export function validateReceipt(receipt, admission = 'idle') {
+export function validateReceipt(receipt, admission = 'shared') {
   assert.equal(receipt?.kind, 'cuda-execution-resource-lease-v1', 'not a CUDA guard receipt');
   assert.equal(receipt.actor, GUARD_ACTOR);
   assert.equal(receipt.resource_completed, true, `the CUDA guard did not complete: ${receipt.error ?? 'no error recorded'}`);
   assert.equal(receipt.admission_policy, ADMISSION_POLICIES[admission],
     `a ${admission} run must hold the card under the ${ADMISSION_POLICIES[admission]} policy`);
-  if (admission === 'shared') {
-    assert.equal(receipt.shared_device, true, 'a shared run receipt must record the shared card');
-    assert.equal(receipt.vram_measurement, false, 'a shared run receipt cannot claim a VRAM measurement');
-  } else {
-    assert.equal(receipt.post_child_idle_verified, true, 'an idle run must verify the card idle after the child');
-  }
+  assert.equal(receipt.shared_device, true, 'a shared run receipt must record the shared card');
+  assert.equal(receipt.isolated_device, false, 'a shared run receipt cannot claim an isolated card');
 }
 
 async function readBoundedJson(file) {
@@ -104,11 +101,9 @@ async function readBoundedJson(file) {
 export function summary(evidence) {
   const lines = [`## Qwen3.8 27B describer CUDA validation`, '', `Accepted: **${evidence.accepted}**`, ''];
   if (evidence.error) lines.push(`Error: ${evidence.error}`, '');
-  lines.push(evidence.gpu_admission === 'shared'
-    ? 'GPU admission: shared (functional-coexistence guard: per-GPU lock and owned child, no idle check; the '
-      + 'card was shared with the desktop). The peak below was measured on a shared card: card-wide, above the '
-      + 'smoke\'s own baseline.'
-    : 'GPU admission: idle (strict-idle guard: the card was idle before and after the run).', '');
+  lines.push('GPU admission: shared (shared-free-memory guard: per-GPU lock and owned child, admitted on free '
+    + 'memory and a stable window, no idle check; the card may be shared with the desktop). The peak below was '
+    + 'measured on a shared card: card-wide, above the smoke\'s own baseline.', '');
   const result = evidence.result;
   if (result) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
@@ -124,11 +119,11 @@ export function summary(evidence) {
 }
 
 // Stage only what was validated: evidence.json, plus a byte copy of the guard receipt.
-// `admission` is how the run took the card: `idle` under the guard's strict-idle policy, or `shared`
-// under its functional-coexistence policy (the per-GPU lock and owned child, no idle check). Both
-// need a completed receipt of the matching policy. A shared run's peak is still measured above the
-// smoke's own baseline, on a card other programs also use, so it is labelled as such.
-export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'idle') {
+// `admission` is how the run took the card: always `shared`, under the guard's one shared-free-memory
+// rule (the per-GPU lock and owned child, no idle check), and it needs a completed receipt of that
+// policy. The peak is measured above the smoke's own baseline, on a card other programs may also
+// use, so it is labelled as such.
+export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'shared') {
   assert(Object.hasOwn(ADMISSION_POLICIES, admission), `unsupported GPU admission ${admission}`);
   const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
     gpu_admission: admission };
@@ -138,8 +133,7 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
   try {
     evidence.result = validateResult(
       await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
-    evidence.result.gpu_memory = { ...evidence.result.gpu_memory,
-      measured_on: admission === 'shared' ? 'shared-card' : 'idle-card' };
+    evidence.result.gpu_memory = { ...evidence.result.gpu_memory, measured_on: 'shared-card' };
   } catch (error) {
     failure = error;
   }
@@ -169,8 +163,7 @@ export async function main(env = process.env) {
   const receiptFile = path.join(env.RUNNER_TEMP,
     `sceneworks-cuda-execution-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${GUARD_ACTOR}`, 'resource-receipt.json');
   const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
-  const admission = env.SCENEWORKS_QWEN38_DESCRIBER_GPU_ADMISSION?.trim() || 'idle';
-  const evidence = await stage(outputDir, receiptFile, tier, imageSide, admission);
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
   console.log(`Qwen3.8 27B describer validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
   if (!evidence.accepted) process.exitCode = 1;
