@@ -477,7 +477,9 @@ fn instantid_validate_admission(
     context: &gen_core::MemoryRunContext,
 ) -> WorkerResult<()> {
     instantid_memory::validate_context(contract, tier, identity, context).map_err(|error| {
-        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        })
     })
 }
 
@@ -490,7 +492,9 @@ fn instantid_validate_admission(
 ) -> WorkerResult<()> {
     let _ = tier;
     instantid_memory::validate_context(contract, identity, context).map_err(|error| {
-        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        })
     })
 }
 
@@ -1428,7 +1432,9 @@ pub(super) async fn generate_instantid_stream(
                 .with_component(COMPONENT_VAE_FP16_FIX, vae_fp16_fix),
         )
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
+            })
         })?
     };
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — candle only: the macOS MLX InstantID
@@ -1666,18 +1672,22 @@ pub(super) async fn generate_instantid_stream(
                         reference.width as usize,
                     )
                     .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "InstantID face-restore reference: {error}"
-                        ))
+                        crate::provider_error(error, |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID face-restore reference: {error}"
+                            ))
+                        })
                     })?
                     .embedding;
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 let embedding = model
                     .largest_face(&reference)
                     .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "InstantID face-restore reference: {error}"
-                        ))
+                        crate::provider_error(error, |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID face-restore reference: {error}"
+                            ))
+                        })
                     })?
                     .embedding;
                 Some(embedding)
@@ -1757,9 +1767,11 @@ pub(super) async fn generate_instantid_stream(
                     let mut scope = model
                         .begin_memory_request(&memory_context, &memory_identity, &req, memory_route)
                         .map_err(|error| {
-                            WorkerError::InvalidPayload(format!(
-                                "InstantID memory request refused: {error}"
-                            ))
+                            crate::provider_error(error, |error| {
+                                WorkerError::InvalidPayload(format!(
+                                    "InstantID memory request refused: {error}"
+                                ))
+                            })
                         })?;
                     let stage = match &action {
                         InstantIdAction::Identity => "identity",

@@ -824,12 +824,10 @@ pub(crate) fn drive_rank_fleet_with(
             Ok(child) => child,
             Err(error) => {
                 // `fleet` drops here: every rank already started is killed and reaped.
-                return Err(crate::provider_error(error, |error| {
-                    WorkerError::Engine(format!(
-                        "Iris distributed training could not start rank {rank} of {world_size}: \
+                return Err(WorkerError::Engine(format!(
+                    "Iris distributed training could not start rank {rank} of {world_size}: \
                      {error}"
-                    ))
-                }));
+                )));
             }
         };
         let stdout = child.stdout.take().expect("piped stdout");

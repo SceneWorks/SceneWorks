@@ -1210,6 +1210,9 @@ pub(crate) async fn run_prompt_refine_job(
     }
     .await;
     let (canceled, result) = supervisor.finish(handling).await?;
+    if let Some(fatal) = result.as_ref().ok().and_then(crate::process_fault) {
+        return Err(fatal);
+    }
     if canceled {
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
@@ -1361,8 +1364,9 @@ fn generate_refined(
         |output| output.kv_cache.as_ref(),
     );
     record.emit(job_id);
-    let output = generation
-        .map_err(|error| crate::generation_error("prompt-refine generation failed", error))?;
+    let output = generation.map_err(|error| {
+        WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
+    })?;
     Ok((output, record.block().clone()))
 }
 

@@ -977,6 +977,9 @@ pub(crate) async fn run_image_detail_job(
         .into_handle()
         .await
         .map_err(|error| task_join_error("detail task join", error))?;
+    if let Some(fatal) = crate::process_fault(&join) {
+        return Err(fatal);
+    }
     if canceled {
         // Refinement has actually stopped now — post the TERMINAL Canceled here. This terminal
         // write frees the worker row (`jobs_store::update_job_progress`) exactly as the worker

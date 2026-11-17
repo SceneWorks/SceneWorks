@@ -654,7 +654,7 @@ fn prepare_moss_preload_with_check(
             .ok_or_else(|| WorkerError::InvalidPayload("missing MOSS model".into()))?;
     let variant = MossImageVariant::from_provider_id(&request.model).expect("validated MOSS id");
     let resolved = MossImageResolved::resolve(variant, &native)
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
     let entry = sceneworks_core::moss_image::selected_components(
         &request.model_manifest_entry,
         native.moss_image.as_ref().expect("options"),
@@ -720,12 +720,12 @@ pub(crate) fn moss_generation_preload_for_test_with_check(
     let adapters = prepared.spec.adapters.iter().map(|adapter| {
         check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         let headers = gen_core::weightsmeta::safetensors_path_tensor_headers(&adapter.path)
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
         let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
             .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
         let pin=gen_core::PinnedWeightsFile::pin_with_check(&adapter.path, &mut *check).map_err(|e|crate::classify_engine_error("MOSS adapter preload canceled", e))?;
         let sha256=sceneworks_core::hashing::hex(pin.content_sha256());
-        pin.ensure_unchanged().map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
+        pin.ensure_unchanged().map_err(|e|crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
         Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
     }).collect::<WorkerResult<Vec<Value>>>()?;
     Ok(json!({
@@ -931,7 +931,9 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
                 resolved.max_sequence_length,
                 branches,
             )
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            .map_err(|e| {
+                crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string()))
+            })?;
             facts
                 .base_bytes
                 .checked_add(facts.overlay_bytes)
@@ -1050,7 +1052,7 @@ pub(super) async fn generate_moss_stream_with_runtime(
     };
     let variant = MossImageVariant::from_provider_id(&request.model).expect("validated MOSS id");
     let resolved = MossImageResolved::resolve(variant, &native)
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
     if edit {
         advanced
             .validate(&native, &resolved)

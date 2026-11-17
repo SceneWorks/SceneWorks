@@ -1679,9 +1679,9 @@ fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerErro
     match error {
         gen_core::Error::Unsupported(_)
         | gen_core::Error::GeometryRefused { .. }
-        | gen_core::Error::Msg(_) => {
+        | gen_core::Error::Msg(_) => crate::provider_error(error, |error| {
             WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
-        }
+        }),
         gen_core::Error::Backend(_)
         | gen_core::Error::MissingTensor(_)
         | gen_core::Error::Io(_) => {
@@ -1704,39 +1704,54 @@ fn validate_weights_free_training_request(
         ))
     })?;
     if engine_id == "flux3_klein_base" {
-        gen_core_flux3::training::options::TrainingOptions::parse(request)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        gen_core_flux3::training::options::TrainingOptions::parse(request).map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(error.to_string())
+            })
+        })?;
     }
     gen_core_train::validate_control_request(&descriptor, request).map_err(|error| {
-        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        })
     })?;
     gen_core_train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
-        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        })
     })?;
     // Epic 2123: the engine's own technique floor over the fully mapped request (weight / gradient
     // noise, schedule shape, declared support, aux model directories present), so the worker
     // refuses exactly what the trainer would — before any model load.
     gen_core_train::validate_training_techniques(&descriptor, request).map_err(|error| {
-        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        })
     })?;
     // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
     // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
     gen_core_train::validate_edit_request(&descriptor, request).map_err(|error| {
-        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        })
     })?;
 
     if plan.target.base_model == "ltx_2_5" {
         #[cfg(target_os = "macos")]
         mlx_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+                ))
+            })
         })?;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         candle_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+                ))
+            })
         })?;
     }
 
@@ -3573,12 +3588,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
                 };
                 trainer
                     .train(&request, &mut on_progress)
-                    .map_err(|error| match error {
-                        gen_core::Error::ProcessPoisoned(detail) => {
-                            WorkerError::ProcessPoisoned(detail)
-                        }
-                        other => crate::generation_error("training failed", other),
-                    })
+                    .map_err(|error| crate::generation_error("training failed", error))
             })();
             // The operation closure owns and drops the trainer on success, validation failure,
             // load failure, training failure, or cancellation. Drop the request next, then release
@@ -4202,6 +4212,12 @@ pub(crate) async fn consume_training_events(
     .await;
     let (_, task_result) = supervisor.finish_stream(handling, &mut rx).await?;
     let task_result = task_result.map_err(|error| task_join_error("training task join", error))?;
+    // A poisoned process outranks the user's cancel: a cancel-shaped terminal would skip the
+    // quarantine, terminal persistence and recycle `handle_job_failure` gives `ProcessPoisoned`,
+    // leaving the worker free to claim another GPU job on poisoned state.
+    if matches!(task_result, Err(WorkerError::ProcessPoisoned(_))) {
+        return task_result;
+    }
     if canceled {
         // Training has actually stopped now, so post the TERMINAL Canceled here (not at the
         // earlier cancel poll, which only tripped the flag + showed "Cancelling…"). This terminal

@@ -1346,7 +1346,9 @@ fn interleave_generate(
     let mut decoded = Vec::with_capacity(out.images.len());
     for image in &out.images {
         decoded.push(decoded_to_image(image).map_err(|error| {
-            WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+            })
         })?);
     }
     Ok((out.text, decoded, execution))
@@ -1674,15 +1676,26 @@ fn vqa_result_json(
 /// the torch adapter's `_load_model(distill_lora=None)`, keeping the VQA decode bit-identical.
 #[cfg(all(target_os = "macos", test))]
 fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextTokenizer)> {
-    let cfg = NeoChatConfig::from_dir(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}")))?;
-    let weights = load_raw(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}")))?;
-    let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
-        WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
+    let cfg = NeoChatConfig::from_dir(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}"))
+        })
     })?;
-    let tokenizer = load_tokenizer(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}")))?;
+    let weights = load_raw(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}"))
+        })
+    })?;
+    let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
+        })
+    })?;
+    let tokenizer = load_tokenizer(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}"))
+        })
+    })?;
     Ok((model, tokenizer))
 }
 
@@ -1702,7 +1715,11 @@ fn image_to_chw01(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult
         out_h as usize,
         out_w as usize,
     )
-    .map_err(|error| WorkerError::InvalidPayload(format!("image resize: {error}")))?;
+    .map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("image resize: {error}"))
+        })
+    })?;
     let hwc = Array::from_slice(&hwc, &[out_h, out_w, 3]);
     let chw = hwc
         .transpose_axes(&[2, 0, 1])

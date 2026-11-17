@@ -115,9 +115,28 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
             return Ok(());
         }
         if let Some(reason) = mlx_worker_recovery::global().quarantine_reason() {
-            // This is reachable only when shutdown interrupted the active job's terminal-write
-            // retry. Stay unclaimable rather than recycling on an unconfirmed failure or
-            // falling through to `poll_once`; the shutdown arm normally resolves immediately.
+            // No job runs here, so a quarantine without an armed recycle has one of two causes.
+            // (1) Shutdown interrupted the active job's terminal-write retry: stay unclaimable
+            //     rather than recycle on an unconfirmed failure; the shutdown arm below resolves
+            //     immediately.
+            // (2) An owner latched its fault after its job had already ended (a progress or
+            //     heartbeat POST failure aborted the cache waiter after the cancel grace while the
+            //     owner thread ran on). That job's own terminal handling already ran and no
+            //     consumer remains to persist anything, so adopt the quarantine and recycle.
+            if !crate::shutdown_requested()
+                && mlx_worker_recovery::global().adopt_unowned_quarantine()
+            {
+                emit_event_value(
+                    Level::ERROR,
+                    json!({
+                        "event": "native_owner_executor_late_fault_adopted",
+                        "workerId": settings.worker_id,
+                        "gpuId": settings.gpu_id,
+                        "reason": reason,
+                    }),
+                );
+                continue;
+            }
             let _ =
                 heartbeat_with_reason(&api, &settings, WorkerStatus::Unhealthy, None, Some(reason))
                     .await;

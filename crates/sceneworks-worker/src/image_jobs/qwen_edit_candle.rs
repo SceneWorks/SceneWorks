@@ -921,9 +921,11 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     attached_provider_spec
         .prepare_file_sources()
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "Qwen Edit could not retain the exact adapter file receipts: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit could not retain the exact adapter file receipts: {error}"
+                ))
+            })
         })?;
     let prepared_provider_spec = attached_provider_spec.into_load_spec();
 

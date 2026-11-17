@@ -534,9 +534,11 @@ pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerE
         gen_core::Error::Canceled => WorkerError::Canceled(format!(
             "{route}: generation canceled while compiling its render plan"
         )),
-        other => WorkerError::InvalidPayload(format!(
-            "{route}: cannot compile render plan before load: {other}"
-        )),
+        other => crate::provider_error(other, |other| {
+            WorkerError::InvalidPayload(format!(
+                "{route}: cannot compile render plan before load: {other}"
+            ))
+        }),
     }
 }
 

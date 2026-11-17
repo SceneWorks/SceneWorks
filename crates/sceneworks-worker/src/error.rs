@@ -167,16 +167,39 @@ pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> Wo
     }
 }
 
+/// The fatal process fault a finished task returned, if any. A consumer checks it BEFORE its
+/// user-cancel branch: a cancel-shaped terminal would skip the quarantine, terminal persistence
+/// and recycle that `handle_job_failure` gives `ProcessPoisoned`, leaving the worker free to claim
+/// another GPU job on poisoned state.
+pub(crate) fn process_fault<T>(result: &WorkerResult<T>) -> Option<WorkerError> {
+    match result {
+        Err(WorkerError::ProcessPoisoned(detail)) => {
+            Some(WorkerError::ProcessPoisoned(detail.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// A provider error type that can carry a typed `ProcessPoisoned` and bridges it 1:1 into
+/// [`gen_core::Error`]. Exactly the three provider error contracts with that variant implement it,
+/// so [`generation_error`] / [`provider_error`] cannot be applied to an error that never carries it.
+pub(crate) trait ProviderError: Into<gen_core::Error> + std::fmt::Display {}
+
+impl ProviderError for gen_core::Error {}
+
+#[cfg(target_os = "macos")]
+impl ProviderError for runtime_macos::media::Error {}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl ProviderError for runtime_cuda::media::CandleError {}
+
 /// Map a provider failure on a device path onto the worker's error classes. `E` is any provider
 /// error that bridges into [`gen_core::Error`] (`gen_core::Error` itself, `mlx_gen::Error`,
 /// `CandleError`, …); each bridge carries `ProcessPoisoned` across 1:1. A poisoned process keeps its
 /// typed recovery class through [`classify_engine_error`], which also marks owner cleanup unsafe on
 /// this thread. Every other failure is an engine error under `context` whose text is the provider
 /// error's own `Display`, byte-identical to the `format!("{context}: {error}")` seams this replaces.
-pub(crate) fn generation_error<E>(context: &str, error: E) -> WorkerError
-where
-    E: Into<gen_core::Error> + std::fmt::Display,
-{
+pub(crate) fn generation_error<E: ProviderError>(context: &str, error: E) -> WorkerError {
     provider_error(error, |detail| {
         WorkerError::Engine(format!("{context}: {detail}"))
     })
@@ -185,13 +208,10 @@ where
 /// [`generation_error`] for a lane whose ordinary failure has its own shape: `ordinary` receives the
 /// provider error's `Display` text and builds the error exactly as the lane always has. Only a
 /// typed `ProcessPoisoned` bypasses it.
-pub(crate) fn provider_error<E>(
+pub(crate) fn provider_error<E: ProviderError>(
     error: E,
     ordinary: impl FnOnce(String) -> WorkerError,
-) -> WorkerError
-where
-    E: Into<gen_core::Error> + std::fmt::Display,
-{
+) -> WorkerError {
     let detail = error.to_string();
     match error.into() {
         poisoned @ gen_core::Error::ProcessPoisoned(_) => {

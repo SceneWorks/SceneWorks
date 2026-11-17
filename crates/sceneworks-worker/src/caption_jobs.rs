@@ -408,6 +408,9 @@ async fn run_training_caption_job_using(
     .await;
     let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
     let result = result.map_err(|error| task_join_error("caption task join", error))?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if canceled {
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));

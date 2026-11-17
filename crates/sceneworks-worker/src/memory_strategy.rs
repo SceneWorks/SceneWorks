@@ -64,9 +64,9 @@ pub(crate) fn reference_workspace_bytes_using(
     };
     registry
         .reference_workspace_bytes(provider_id, spec, Some(resources))
-        .map_err(|error| crate::WorkerError::InvalidPayload(format!(
+        .map_err(|error| crate::provider_error(error, |error| crate::WorkerError::InvalidPayload(format!(
             "{provider_id}: cannot price the owned reference workload before admission: {error}"
-        )))?
+        ))))?
         .ok_or_else(|| crate::WorkerError::InvalidPayload(format!(
             "{provider_id}: this native provider has no reference-workspace pricer. Upgrade the worker or choose a model with reference-memory pricing; unpriced references cannot be admitted."
         )))

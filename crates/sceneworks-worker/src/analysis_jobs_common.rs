@@ -358,6 +358,9 @@ where
     .await;
     let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
     let result = result.map_err(|error| task_join_error(stream.join_error_label, error))?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if canceled {
         mark_job_canceled(api, &job.id, stream.cancel_message).await?;
         return Err(WorkerError::Canceled(stream.cancel_message.to_owned()));

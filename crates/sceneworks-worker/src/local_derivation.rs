@@ -125,7 +125,7 @@ pub(crate) async fn derive_local_tier(
     // One bounded, CPU-bound conversion with no step loop to interrupt: keep the heartbeat alive
     // while it runs (a multi-GB conversion outlasts the stale-worker timeout).
     let task = crate::load_progress::spawn_blocking(move || {
-        prepare(&spec).map_err(|error| crate::generation_error("tier derivation", error))
+        prepare(&spec).map_err(|error| WorkerError::Engine(format!("tier derivation: {error}")))
     });
     let derived = heartbeat_while_blocking(api, settings, &job.id, "tier derivation", task).await;
     if let Err(error) = derived {

@@ -1003,7 +1003,11 @@ pub(crate) async fn restore_with_progress(
                 &dir,
                 sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
             )
-            .map_err(|error| WorkerError::InvalidPayload(format!("Iris restoration: {error}")))?;
+            .map_err(|error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(format!("Iris restoration: {error}"))
+                })
+            })?;
             (dir, resources)
         }
         None => resolve_restore_export_dir(settings)?,

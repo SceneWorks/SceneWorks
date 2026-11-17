@@ -402,8 +402,11 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
                     Some(&entry),
                     shipped_provenance(engine, &tier, &revision),
                 );
-                let generator = crate::inference_runtime::load(engine, &spec)
-                    .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
+                let generator = crate::inference_runtime::load(engine, &spec).map_err(|error| {
+                    crate::provider_error(error, |error| {
+                        crate::WorkerError::InvalidPayload(error.to_string())
+                    })
+                })?;
                 let evaluation = crate::mlx_fit_gate::evaluate_request(
                     &*generator,
                     &plan,
@@ -1145,8 +1148,12 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
                     Some(&entry),
                     shipped_provenance(MEASURED_ENGINE, MEASURED_TIER, &revision),
                 );
-                let generator = crate::inference_runtime::load(MEASURED_ENGINE, &spec)
-                    .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
+                let generator =
+                    crate::inference_runtime::load(MEASURED_ENGINE, &spec).map_err(|error| {
+                        crate::provider_error(error, |error| {
+                            crate::WorkerError::InvalidPayload(error.to_string())
+                        })
+                    })?;
                 crate::mlx_fit_gate::evaluate_request(
                     &*generator,
                     &plan,

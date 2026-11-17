@@ -208,7 +208,11 @@ pub(super) fn ltx25_generation_options(
             gen_core::duration_head::AutoDurationRange::new(range.min_seconds, range.max_seconds)
         })
         .transpose()
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        .map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(error.to_string())
+            })
+        })?;
     let planning_frames = auto_range.map_or_else(
         || ltx_frame_count(request.raw_frame_count()),
         |range| {
@@ -1085,12 +1089,10 @@ fn install_portable_gemma(
         use sha2::{Digest, Sha256};
         use std::io::Read;
         let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-            crate::provider_error(error, |error| {
-                WorkerError::Engine(format!(
-                    "frozen Gemma file {} unavailable: {error}",
-                    path.display()
-                ))
-            })
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                path.display()
+            ))
         })?;
         if !metadata.is_file() || metadata.len() != expected.size_bytes {
             return Err(WorkerError::Engine(format!(
@@ -1099,9 +1101,8 @@ fn install_portable_gemma(
             )));
         }
         if let Some(store) = store {
-            let real = std::fs::canonicalize(path).map_err(|error| {
-                crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-            })?;
+            let real = std::fs::canonicalize(path)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
             store
                 .verify(&real, &expected.sha256, &|| Ok(()))
                 .map_err(|error| {
@@ -1113,15 +1114,14 @@ fn install_portable_gemma(
                 })?;
             return Ok(());
         }
-        let mut input = std::fs::File::open(path).map_err(|error| {
-            crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-        })?;
+        let mut input =
+            std::fs::File::open(path).map_err(|error| WorkerError::Engine(error.to_string()))?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 1024 * 1024];
         loop {
-            let count = input.read(&mut buffer).map_err(|error| {
-                crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-            })?;
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
             if count == 0 {
                 break;
             }
@@ -1193,12 +1193,12 @@ fn install_portable_gemma(
     }
     let store = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(data_dir);
     let parent = data_dir.join("models").join("mlx");
-    std::fs::create_dir_all(&parent).map_err(|error| {
-        crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-    })?;
+    std::fs::create_dir_all(&parent).map_err(|error| WorkerError::Engine(error.to_string()))?;
     let _lock =
         sceneworks_core::file_lock::FileLock::open_exclusive(&parent.join(".gemma.portable.lock"))
-            .map_err(|error| crate::generation_error("Gemma installation lock failed", error))?;
+            .map_err(|error| {
+                WorkerError::Engine(format!("Gemma installation lock failed: {error}"))
+            })?;
     let target = parent.join("gemma");
     if target.exists() {
         if !ltx_gemma_dir_is_complete(&target) {
@@ -1208,15 +1208,13 @@ fn install_portable_gemma(
         }
         let mut pending = vec![target.clone()];
         while let Some(directory) = pending.pop() {
-            for entry in std::fs::read_dir(&directory).map_err(|error| {
-                crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-            })? {
-                let entry = entry.map_err(|error| {
-                    crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-                })?;
-                let kind = entry.file_type().map_err(|error| {
-                    crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-                })?;
+            for entry in std::fs::read_dir(&directory)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?
+            {
+                let entry = entry.map_err(|error| WorkerError::Engine(error.to_string()))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
                 if kind.is_dir() {
                     pending.push(entry.path());
                 } else if !kind.is_file()
@@ -1245,32 +1243,25 @@ fn install_portable_gemma(
     let staging = tempfile::Builder::new()
         .prefix(".gemma-portable-")
         .tempdir_in(&parent)
-        .map_err(|error| {
-            crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-        })?;
+        .map_err(|error| WorkerError::Engine(error.to_string()))?;
     for (relative, file) in &members {
         let input = plain_member(source, relative)?;
         // A pinned Gemma member is served in place from the hub snapshot, whose files are links
         // into the repository's `blobs/`: read the file the link names, then hold it to this
         // ledger as before (`verify_file` refuses anything that is not a regular file).
         let input = std::fs::canonicalize(&input).map_err(|error| {
-            crate::provider_error(error, |error| {
-                WorkerError::Engine(format!(
-                    "frozen Gemma file {} unavailable: {error}",
-                    input.display()
-                ))
-            })
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                input.display()
+            ))
         })?;
         verify_file(Some(&store), &input, file)?;
         let output = staging.path().join(relative);
         if let Some(directory) = output.parent() {
-            std::fs::create_dir_all(directory).map_err(|error| {
-                crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-            })?;
+            std::fs::create_dir_all(directory)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
         }
-        std::fs::copy(&input, &output).map_err(|error| {
-            crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
-        })?;
+        std::fs::copy(&input, &output).map_err(|error| WorkerError::Engine(error.to_string()))?;
         // A fresh copy: hashed in full; it moves into place afterwards, so it is not recorded.
         verify_file(None, &output, file)?;
     }
@@ -1279,8 +1270,9 @@ fn install_portable_gemma(
             "frozen Gemma ledger does not form a complete installation".to_owned(),
         ));
     }
-    std::fs::rename(staging.path(), &target)
-        .map_err(|error| crate::generation_error("Gemma installation publish failed", error))?;
+    std::fs::rename(staging.path(), &target).map_err(|error| {
+        WorkerError::Engine(format!("Gemma installation publish failed: {error}"))
+    })?;
     Ok(())
 }
 

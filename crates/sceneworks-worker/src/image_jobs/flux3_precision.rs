@@ -258,10 +258,12 @@ mod native {
             None => QuantDevice::Cpu,
         };
         format.check_device(device).map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "{model}: the {} package cannot run on this worker's device: {error}",
-                tier.key()
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "{model}: the {} package cannot run on this worker's device: {error}",
+                    tier.key()
+                ))
+            })
         })
     }
 

@@ -531,12 +531,10 @@ pub(super) fn mirror_cached_sdxl_component_file_with_copy(
 ) -> WorkerResult<()> {
     let destination = destination_dir.join(file);
     let staging_failed = |path: &Path, error: std::io::Error| {
-        crate::provider_error(error, |error| {
-            WorkerError::Engine(format!(
-                "Checkpoint plan source preparation failed: {} ({error})",
-                path.display()
-            ))
-        })
+        WorkerError::Engine(format!(
+            "Checkpoint plan source preparation failed: {} ({error})",
+            path.display()
+        ))
     };
     let cached = crate::downloads::resolve_hf_component_file(settings, repo, revision, file)
         .ok_or_else(|| {

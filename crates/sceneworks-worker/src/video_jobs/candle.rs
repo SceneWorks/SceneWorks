@@ -2220,11 +2220,13 @@ pub(super) fn validate_candle_scail2_tier_dir(
     tier: Scail2CandleTier,
 ) -> WorkerResult<()> {
     runtime_cuda::providers::scail2::snapshot_layout(path).map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "scail2 (candle): {} is not a complete {} hosted package: {error}",
-            path.display(),
-            tier.key(),
-        ))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!(
+                "scail2 (candle): {} is not a complete {} hosted package: {error}",
+                path.display(),
+                tier.key(),
+            ))
+        })
     })?;
     let config_path = path.join("config.json");
     let config: Value = serde_json::from_slice(&std::fs::read(&config_path).map_err(|error| {
@@ -2269,10 +2271,12 @@ fn validate_candle_scail2_legacy_bf16_dir(path: &Path) -> WorkerResult<()> {
     runtime_cuda::providers::scail2::snapshot_layout(path)
         .map(|_| ())
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
-                path.display(),
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
+                    path.display(),
+                ))
+            })
         })
 }
 

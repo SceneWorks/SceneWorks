@@ -654,7 +654,11 @@ pub(super) fn resolve_lightning_loras(
     #[cfg(target_os = "macos")]
     {
         runtime_macos::providers::wan::product_load::lightning_lora_files(engine_id, &snapshot)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+            .map_err(|error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(error.to_string())
+                })
+            })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3042,7 +3046,9 @@ pub(super) async fn generate_video_using(
                         reference_image_short_edge: input.reference_image_short_edge,
                         reference_image_resize_mode: input.reference_image_resize_mode,
                     })
-                    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+                    .map_err(|e| {
+                        crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string()))
+                    })?;
                 let native_quant_request = generator
                     .memory_strategy_contract()
                     .and_then(|contract| contract.phase_facts.as_ref())
@@ -3146,7 +3152,11 @@ pub(super) async fn generate_video_using(
                                 .memory
                                 .is_some_and(|memory| memory.stream_transformer_blocks),
                         )
-                        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+                        .map_err(|error| {
+                            crate::provider_error(error, |error| {
+                                WorkerError::InvalidPayload(error.to_string())
+                            })
+                        })?;
                     crate::video_admission::admit_h3_host_bytes(
                         host_bytes,
                         host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
@@ -3475,6 +3485,9 @@ pub(super) async fn generate_video_using(
         .into_handle()
         .await
         .map_err(|error| task_join_error("video task join", error))?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if stalled {
         return Err(WorkerError::Engine(format!(
             "Video generation stalled: no progress for {}s. The job was canceled.",

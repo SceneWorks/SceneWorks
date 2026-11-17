@@ -618,7 +618,7 @@ fn run_vision_generation(
     .emit(job_id);
     generation
         .map(|output| output.text)
-        .map_err(|error| crate::generation_error("catalog vision inference failed", error))
+        .map_err(|error| WorkerError::Engine(format!("catalog vision inference failed: {error}")))
 }
 
 #[cfg(native_lane)]
@@ -690,6 +690,9 @@ async fn generate_vision_json(
         crate::StreamSupervisor::new(cancel, generation, std::time::Duration::from_secs(2), None)
             .wait(api, settings, &job.id)
             .await?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if canceled {
         crate::mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
