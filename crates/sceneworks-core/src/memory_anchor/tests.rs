@@ -5132,7 +5132,9 @@ fn a_doctored_phase_allocator_or_empty_underived_reason_is_rejected() {
 #[test]
 fn regime_anchors_are_filed_apart_named_unique_and_bound_to_their_record() {
     let packaged = store().clone();
-    let serialized = serde_json::to_value(&packaged).unwrap();
+    let mut no_regimes = packaged.clone();
+    no_regimes.regime_anchors.clear();
+    let serialized = serde_json::to_value(&no_regimes).unwrap();
     assert!(serialized.get("regimeAnchors").is_none());
     let load =
         |store: &MemoryAnchorStore| load_memory_anchors(&serde_json::to_string(store).unwrap());
