@@ -653,5 +653,122 @@ class SharedKernelTests(unittest.TestCase):
                 self.kernel.require_dispatch(wrong)
 
 
+class WaitReportingTests(unittest.TestCase):
+    """Every admission wait is visible in the job log; reporting never changes admission."""
+    setUp = CudaExecutionTests.setUp
+
+    def lines(self, stream):
+        prefix = "cuda-execution: "
+        return [json.loads(line[len(prefix):]) for line in stream.getvalue().splitlines() if line.startswith(prefix)]
+
+    def test_strict_idle_wait_names_the_blocking_process_every_interval_then_reports_the_end(self):
+        import io
+        vendor = shared.component("veda_cuda_guard.py", shared.GUARD_SHA)
+        busy = dict(self.two, used_mib=65000, total_mib=97887, utilization_percent=100)
+        foreign = [["GPU-two", "57052", "python.exe", "C"]]
+        now = [0.0]
+        # Busy for 150 s, then the foreign job exits and the device is idle.
+        self.guard.inventory.side_effect = lambda *_: (
+            ([self.one, busy], foreign) if now[0] < 150 else ([self.one, self.two], []))
+        self.guard.idle.side_effect = vendor.idle
+        (self.out / "uuid-admission-nvidia-smi.xml").write_text(
+            "<nvidia_smi_log><gpu><uuid>GPU-two</uuid><processes><process_info><pid>57052</pid>"
+            "<used_memory>62000 MiB</used_memory></process_info></processes></gpu></nvidia_smi_log>")
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def locking(self, *_): pass
+        stream = io.StringIO()
+        devices, handles, _, waited = shared.claim_uuids(["GPU-two"], self.guard, self.out, 3600, self.out,
+            Locker(), clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            reporter=shared.WaitReporter(stream))
+        shared.release_all(handles, Locker())
+        self.assertEqual(devices, [self.two]); self.assertEqual(waited, 150)
+        lines = self.lines(stream)
+        self.assertEqual([line["event"] for line in lines], ["wait-start", "waiting", "waiting", "wait-end"])
+        self.assertEqual([line.get("elapsed_seconds") for line in lines[:3]], [0, 60, 120])
+        self.assertEqual(lines[1]["remaining_budget_seconds"], 3540)
+        for line in lines[:3]:
+            self.assertEqual(line["wait"], "idle")
+            self.assertEqual(line["devices"], [{"index": 1, "uuid": "GPU-two"}])
+            self.assertEqual(line["blocking"], [{"index": 1, "uuid": "GPU-two", "used_mib": 65000, "total_mib": 97887,
+                "utilization_percent": 100,
+                "processes": [{"pid": "57052", "name": "python.exe", "type": "C", "used_mib": 62000}]}])
+        self.assertEqual(lines[3], {"event": "wait-end", "scope": "gpu", "wait_seconds": 150,
+                                    "devices": [{"index": 1, "uuid": "GPU-two"}]})
+
+    def test_uuid_lock_and_service_lock_waits_print_their_lines(self):
+        import io
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def __init__(self, busy): self.busy = busy
+            def locking(self, fd, mode, _):
+                if mode == self.LK_NBLCK and self.busy:
+                    self.busy -= 1; raise OSError("leased elsewhere")
+        now = [0.0]
+        clock, sleep = (lambda: now[0]), (lambda seconds: now.__setitem__(0, now[0] + seconds))
+        stream = io.StringIO()
+        reporter = shared.WaitReporter(stream)
+        service, info = shared.claim_service("http://127.0.0.1:17821", self.out, 600, Locker(70), clock, sleep,
+                                             reporter=reporter)
+        _, handles, _, waited = shared.claim_uuids(["GPU-two"], self.guard, self.out, 600, self.out, Locker(61),
+            clock=clock, sleep=sleep, reporter=reporter)
+        shared.release_transaction(handles, service, Locker(0))
+        self.assertEqual((info["wait_seconds"], waited), (70, 61))
+        lines = self.lines(stream)
+        self.assertEqual([(line["event"], line.get("wait") or line.get("scope")) for line in lines],
+            [("wait-start", "service"), ("waiting", "service"), ("wait-end", "service"),
+             ("wait-start", "lock"), ("waiting", "lock"), ("wait-end", "gpu")])
+        self.assertEqual(lines[0]["port"], 17821)
+        self.assertTrue(lines[0]["lock_path"].endswith("loopback-port-17821.lock"))
+        self.assertEqual(lines[1]["elapsed_seconds"], 60)
+        self.assertEqual(lines[3]["held_lock"]["uuid"], "GPU-two")
+        self.assertEqual(lines[3]["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertEqual(lines[4]["elapsed_seconds"], 60)
+
+    def test_main_prints_the_launch_line_and_a_cancel_prints_the_wait_and_partial_receipt(self):
+        import contextlib, io
+        env = {"GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.out), "PUBLIC": str(self.out)}
+        binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+        printed, logged = io.StringIO(), io.StringIO()
+        executor = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+        installed = []
+        with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+             patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                 "--cuda-ordinals", "0", "--", "bash", "run.sh"]), \
+             patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+             patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+             patch.object(shared, "resolve_binding", return_value=binding), \
+             patch.object(shared, "claim_uuids", return_value=([self.two], [], {"GPU-two": {}}, 12.34)), \
+             patch.object(shared, "complete_resource", return_value=0), \
+             patch.object(shared, "release_transaction"), \
+             patch.object(shared, "install_cancel_handler", side_effect=lambda handler: installed.append(handler) or {}), \
+             patch.object(shared, "execute_owned", executor), \
+             contextlib.redirect_stdout(printed), contextlib.redirect_stderr(logged):
+            shared.main()
+        launch = self.lines(logged)[-1]
+        self.assertEqual(launch["event"], "launch")
+        self.assertEqual(launch["lock_wait_seconds"], 12.3)
+        self.assertEqual(launch["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertEqual(executor.call_count, 1)
+
+        # A cancel mid-wait prints where it was and the receipt so far, then unwinds once.
+        stream = io.StringIO()
+        reporter = shared.WaitReporter(stream)
+        reporter.waiting("idle", 90, 0, 600, [self.two], lambda: {"blocking": []})
+        receipt = shared.resource_receipt("memory-catalog-candle", ["bash", "run.sh"], shared.STRICT_POLICY)
+        receipt["binding"] = binding
+        handler = shared.cancel_handler(receipt, reporter)
+        with self.assertRaises(KeyboardInterrupt):
+            handler(shared.signal.SIGTERM, None)
+        handler(shared.signal.SIGINT, None)  # a second signal only prints; cleanup is not interrupted
+        cancel, again = self.lines(stream)[1:]
+        self.assertEqual((cancel["event"], cancel["signal"]), ("cancel", "SIGTERM"))
+        self.assertEqual(cancel["wait"]["wait"], "idle")
+        self.assertEqual(cancel["wait"]["elapsed_seconds"], 90)
+        self.assertEqual(cancel["partial_receipt"]["binding"]["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertNotIn("argv", cancel["partial_receipt"])
+        self.assertEqual(again["signal"], "SIGINT")
+
+
 if __name__ == "__main__":
     unittest.main()
