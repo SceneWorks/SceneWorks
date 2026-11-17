@@ -4570,6 +4570,50 @@ export function stderrTail(error, limit = INGEST_STDERR_TAIL_LINES) {
   return text.split("\n").slice(-limit).join("\n");
 }
 
+/**
+ * Owner rule (no job requires an idle GPU): a Candle CUDA capture may share its card with a resident
+ * co-tenant -- the desktop app holding a loaded model, say. The engine's in-process probe measures
+ * peak - stable baseline, which is this capture's own footprint only while the co-tenant stays
+ * put. So the walker brackets every capture: a baseline window of the card BEFORE the adapter starts
+ * and another AFTER it exits (neither includes our process). If the co-tenant moved in between, the
+ * peak may hold someone else's allocation: the attempt is discarded and retried, and after
+ * `CO_TENANT_ATTEMPTS` moved attempts the cell is refused rather than committed with a bad number.
+ */
+export const CO_TENANT_WINDOW = Object.freeze({ samples: 5, intervalMs: 200 });
+export const CO_TENANT_MAX_SHIFT_MIB = 256;
+export const CO_TENANT_ATTEMPTS = 3;
+
+/** The physical GPU a Candle capture renders on, or `null` when the walker cannot bracket it. */
+export function coTenantGpu(row, env) {
+  if (anchorParts(row.key).backend !== "candle") return null;
+  const device = String(env.CUDA_VISIBLE_DEVICES ?? "").trim();
+  return /^\d+$/.test(device) ? device : null;
+}
+
+/** One baseline window of the card's device-level `memory.used` (MiB). */
+export async function sampleCardBaseline(gpu, { env = process.env, runCommand = run, sleep = (ms) => new Promise((done) => setTimeout(done, ms)) } = {}) {
+  const samples = [];
+  for (let index = 0; index < CO_TENANT_WINDOW.samples; index += 1) {
+    if (index) await sleep(CO_TENANT_WINDOW.intervalMs);
+    const { stdout } = await runCommand("nvidia-smi", ["-i", gpu, "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env });
+    const value = Number(String(stdout).trim());
+    if (!Number.isInteger(value) || value < 0) throw new Error(`unreadable memory.used for GPU ${gpu}: ${String(stdout).trim()}`);
+    samples.push(value);
+  }
+  return { samples, min: Math.min(...samples), max: Math.max(...samples) };
+}
+
+/** Why the co-tenant baseline moved across a capture, or `null` when it held. */
+export function coTenantShift(before, after, limit = CO_TENANT_MAX_SHIFT_MIB) {
+  const reasons = [];
+  for (const [name, window] of [["before", before], ["after", after]]) {
+    if (window.max - window.min > limit) reasons.push(`${name} window unstable (${window.min}-${window.max} MiB)`);
+  }
+  const shift = after.min - before.min;
+  if (Math.abs(shift) > limit) reasons.push(`baseline moved ${shift > 0 ? "+" : ""}${shift} MiB (${before.min} -> ${after.min} MiB, allowed ${limit})`);
+  return reasons.length ? reasons.join("; ") : null;
+}
+
 export async function measureAnchor(row, context) {
   // `platform` decides ONLY whether this capture runs under the footprint guard (`guardsCapture`),
   // and defaults to the host's. It is overridable for the same reason `guardsCapture` takes the
@@ -4732,7 +4776,11 @@ export async function measureAnchor(row, context) {
   // behind the guard's deadline; everywhere else it is the only thing that can end a wedge. See
   // `probeTimeoutMs` for the run it was written for.
   const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
+  const cardGpu = (context.coTenantGpu ?? coTenantGpu)(row, env);
+  let coTenantRefusal = null;
   try {
+    for (let attempt = 1; ; attempt += 1) {
+    const before = cardGpu === null ? null : await (context.sampleCardBaseline ?? sampleCardBaseline)(cardGpu, { env });
     await withMetalExecutionLease(budgetMinutes * 60, async () => {
     if (guarded) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
@@ -4751,6 +4799,16 @@ export async function measureAnchor(row, context) {
       await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
     });
+    if (cardGpu === null) break;
+    const after = await (context.sampleCardBaseline ?? sampleCardBaseline)(cardGpu, { env });
+    const shift = coTenantShift(before, after);
+    log.write(`co-tenant bracket GPU ${cardGpu} attempt ${attempt}: before ${JSON.stringify(before.samples)} after ${JSON.stringify(after.samples)}${shift ? ` MOVED: ${shift}` : " held"}\n`);
+    if (!shift) break;
+    process.stdout.write(`--- ${row.key}: co-tenant changed the card during attempt ${attempt}/${CO_TENANT_ATTEMPTS} (${shift})${attempt < CO_TENANT_ATTEMPTS ? "; discarding it and retrying" : ""}\n`);
+    if (attempt >= CO_TENANT_ATTEMPTS) { coTenantRefusal = shift; break; }
+    await rm(captureOutput, { force: true });
+    if (row.sourceCapture) await rm(rawLogDir, { recursive: true, force: true });
+    }
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
@@ -4900,6 +4958,9 @@ export async function measureAnchor(row, context) {
     });
   }
 
+  if (coTenantRefusal) {
+    return finish("capture_failed", `co-tenant changed the card in all ${CO_TENANT_ATTEMPTS} attempts, so the peak would be contaminated: ${coTenantRefusal}`.slice(0, FAILURE_REASON_LIMIT));
+  }
   // 2. check the raw bundle before touching the tree.
   const sourceRoot = row.sourceCapture ? ["--source-root", rawLogDir] : [];
   try {

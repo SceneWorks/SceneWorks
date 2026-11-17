@@ -164,6 +164,7 @@ import {
   gpuComputeProcesses,
   nameContaminatingProcesses,
   contaminatedHostHalt,
+  CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, coTenantGpu, coTenantShift, sampleCardBaseline,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -5917,6 +5918,64 @@ function stubContext({ root, workDir }, overrides = {}) {
     ...overrides,
   };
 }
+
+test("co-tenant bracket: only a Candle capture on one numbered card is bracketed", () => {
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "1" }), "1");
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "GPU-abc" }), null);
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, {}), null);
+  assert.equal(coTenantGpu({ key: "z_image_turbo:q4:mlx" }, { CUDA_VISIBLE_DEVICES: "1" }), null);
+});
+
+test("co-tenant bracket: a resident model that holds still is fine; one that moves or wobbles is named", () => {
+  const window = (...samples) => ({ samples, min: Math.min(...samples), max: Math.max(...samples) });
+  // A desktop app holding 31 GB on the card, idle: the capture's peak above it is its own.
+  assert.equal(coTenantShift(window(31_000, 31_010), window(31_020, 31_000)), null);
+  assert.match(coTenantShift(window(31_000), window(31_000 + CO_TENANT_MAX_SHIFT_MIB + 1)), /baseline moved \+257 MiB/);
+  assert.match(coTenantShift(window(31_000), window(20_000)), /baseline moved -11000 MiB/);
+  assert.match(coTenantShift(window(1_000, 1_400), window(1_000)), /before window unstable/);
+});
+
+test("co-tenant bracket: samples the card's memory.used through nvidia-smi and refuses an unreadable value", async () => {
+  const calls = [];
+  const runCommand = async (command, argv) => { calls.push([command, ...argv]); return { stdout: "2130\n" }; };
+  const window = await sampleCardBaseline("1", { runCommand, sleep: async () => {} });
+  assert.deepEqual(window, { samples: [2130, 2130, 2130, 2130, 2130], min: 2130, max: 2130 });
+  assert.deepEqual(calls[0], ["nvidia-smi", "-i", "1", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]);
+  await assert.rejects(sampleCardBaseline("1", { runCommand: async () => ({ stdout: "[N/A]" }), sleep: async () => {} }), /unreadable memory\.used/);
+});
+
+async function bracketedCapture(windows) {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  const row = { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot } };
+  const sampled = [];
+  const context = stubContext(checkout, {
+    coTenantGpu: () => "1",
+    sampleCardBaseline: async () => { const min = windows[sampled.length]; sampled.push(min); return { samples: [min], min, max: min }; },
+  });
+  return { result: await measureAnchor(row, context), context, sampled };
+}
+
+test("co-tenant bracket: a capture during which the co-tenant moved is discarded and retried, then committed", async () => {
+  const { result, context, sampled } = await bracketedCapture([31_000, 40_000, 40_000, 40_010]);
+  assert.equal(result.status, "committed", result.reason);
+  assert.equal(sampled.length, 4, "two attempts, each bracketed before and after");
+  assert.equal(context.state.commits.length, 1);
+  assert.match(await readFile(result.log, "utf8"), /attempt 1: .*MOVED: baseline moved \+9000 MiB[\s\S]*attempt 2: .* held/);
+});
+
+test("co-tenant bracket: a card that moves in every attempt refuses the cell instead of committing a bad peak", async () => {
+  const windows = [];
+  for (let attempt = 0; attempt < CO_TENANT_ATTEMPTS; attempt += 1) windows.push(1_000, 9_000 + attempt);
+  const { result, context, sampled } = await bracketedCapture(windows);
+  assert.equal(result.status, "capture_failed");
+  assert.match(result.reason, new RegExp(`co-tenant changed the card in all ${CO_TENANT_ATTEMPTS} attempts`));
+  assert.equal(sampled.length, 2 * CO_TENANT_ATTEMPTS);
+  assert.equal(context.state.commits.length, 0);
+});
 
 test("one anchor lands as one commit carrying the evidence, the packaged-source entry, and the regenerated files", async () => {
   const checkout = await stubCheckout();
