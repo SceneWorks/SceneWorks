@@ -827,6 +827,16 @@ fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others
     assert!(error.to_string().contains(JOYCAPTION_REPO), "{error}");
 }
 
+/// Only the Qwen3.8 27B describer asks for speculative decoding (`auto`: its MTP head, demoted by
+/// the engine when slower); the other describers keep the backend's default.
+#[test]
+fn only_the_qwen38_describer_requests_auto_speculation() {
+    use gen_core::core_llm::Speculative;
+    assert_eq!(DescribeModel::Qwen38.speculative(), Some(Speculative::Auto));
+    assert_eq!(DescribeModel::VisionCaptioner.speculative(), None);
+    assert_eq!(DescribeModel::JoyCaption.speculative(), None);
+}
+
 // ── JoyCaption's prompt and lenient parse ─────────────────────────────────────────────────────
 
 /// The prompt-length ceiling of both JoyCaption providers at the pinned inference rev

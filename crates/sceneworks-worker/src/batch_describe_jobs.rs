@@ -138,6 +138,18 @@ impl DescribeModel {
         }
     }
 
+    /// The speculative option this model's describe and condense requests carry. The Qwen3.8
+    /// 27B asks for `auto`: its native MTP head runs, and the engine's monitor demotes it to plain
+    /// decoding when it measures slower (on CUDA the q8 tier keeps it — t=0.4 + JSON 50.4 vs 39.4
+    /// tok/s plain — and the q4 tier drops it under the JSON constraint). `None` keeps the
+    /// backend's default for the other describers.
+    pub(crate) fn speculative(self) -> Option<gen_core::core_llm::Speculative> {
+        match self {
+            Self::Qwen38 => Some(gen_core::core_llm::Speculative::Auto),
+            Self::VisionCaptioner | Self::JoyCaption => None,
+        }
+    }
+
     /// The name a failure message gives this model.
     pub(crate) fn display_name(self) -> &'static str {
         match self {
@@ -1146,6 +1158,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
+        let speculative = self.model.speculative();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
@@ -1186,6 +1199,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     constraint,
                     cancel,
                     thinking,
+                    speculative,
                     kv_compression,
                     ..Default::default()
                 };
@@ -1228,6 +1242,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
+        let speculative = self.model.speculative();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
@@ -1245,6 +1260,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     constraint: None,
                     cancel,
                     thinking: ThinkingMode::Disabled,
+                    speculative,
                     kv_compression,
                     ..Default::default()
                 };
