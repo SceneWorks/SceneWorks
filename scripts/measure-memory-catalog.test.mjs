@@ -8205,7 +8205,7 @@ function assertOwnedCudaWalk(workflow) {
   const candle = workflow.slice(workflow.indexOf("\n  candle:"));
   assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "actual shared Windows job required");
   assert.doesNotMatch(candle, /gpu-preflight\.sh/, "no name-based reap or CVD-as-NVML-index census before/inside owned walk");
-  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- bash scripts\/ci\/memory-catalog\/run\.sh/,
+  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- \$gitBash scripts\/ci\/memory-catalog\/run\.sh/,
     "actual inherited CUDA ordinal UUID guard must own the WHOLE unchanged walk");
   assert.match(candle, /CUDA_VISIBLE_DEVICES: "1"/, "original device choice is not retargeted");
   assert.doesNotMatch(candle, /--physical-indices 1/, "legacy CUDA ordinal is not guessed as NVML index");
@@ -8218,7 +8218,7 @@ test("catalog walk uses exact-UUID owned lifetime instead of destructive name-ba
   assert.throws(() => assertOwnedCudaWalk(broadKill), /name-based reap/);
   const unguarded = workflow.replace(/python -I scripts\/ci\/windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- /, "");
   assert.throws(() => assertOwnedCudaWalk(unguarded), /WHOLE unchanged walk/);
-  const wrongBinding = workflow.replace("--cuda-ordinals 0 --require-physical-index 1 -- bash", "--physical-indices 1 -- bash");
+  const wrongBinding = workflow.replace("--cuda-ordinals 0 --require-physical-index 1 -- $gitBash", "--physical-indices 1 -- $gitBash");
   assert.throws(() => assertOwnedCudaWalk(wrongBinding), /WHOLE unchanged walk/);
 });
 

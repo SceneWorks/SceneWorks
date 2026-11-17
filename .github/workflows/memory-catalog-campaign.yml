@@ -1023,7 +1023,12 @@ jobs:
           CUDA_DEVICE_ORDER: PCI_BUS_ID
           NVIDIA_VISIBLE_DEVICES: "1"
         run: |
-          python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 --require-physical-index 1 -- bash scripts/ci/memory-catalog/run.sh
+          # The wrapper launches its child with CreateProcess, which searches System32 BEFORE PATH, so a
+          # bare `bash` is the WSL relay there (run 44078338103: "execvpe(/bin/bash) failed"). PowerShell
+          # resolves through PATH, where the Git Bash step above put Git's bin first: pass that path.
+          $gitBash = (Get-Command bash.exe -CommandType Application | Select-Object -First 1).Source
+          if ($gitBash -like "$env:SystemRoot*") { Write-Host "::error title=WSL bash::bash resolves to the WSL relay ($gitBash), not Git Bash"; exit 1 }
+          python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 --require-physical-index 1 -- $gitBash scripts/ci/memory-catalog/run.sh
           $walkStatus = $LASTEXITCODE
           if ($walkStatus -ne 0) {
             # The wrapper prints one JSON line; its receipt (error, child exit) and the walk's own
