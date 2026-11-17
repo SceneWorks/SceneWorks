@@ -34,7 +34,8 @@ import { useSimpleRefine } from "./useSimpleRefine.js";
 // the same transparency toggle and the same rewrite affordance; what it does NOT get is a second,
 // simplified version of either, which is why both reuse the advanced modules verbatim.
 import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
-import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
+import { maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
+import { usePromptTokenInsertion } from "../hooks/usePromptTokenInsertion.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
@@ -127,6 +128,8 @@ export function SimpleImageStudio() {
   // form, and a studio that remounted mid-request must not come back looking busy.
   const [mode, setMode] = useStudioState("image", "mode", "text_to_image");
   const [prompt, setPrompt] = useStudioState("image", "prompt", "");
+  // SW-7101: "Insert <Picture N>" lands at the prompt's caret, not always at the end.
+  const promptTokenInsertion = usePromptTokenInsertion(prompt, setPrompt);
   const [model, setModel] = useStudioState("image", "model", "");
   const [resolution, setResolution] = useStudioState("image", "resolution", "");
   const [variations, setVariations] = useStudioState("image", "variations", 1);
@@ -358,6 +361,13 @@ export function SimpleImageStudio() {
     () => ((mossEdit ? referenceAssetId != null : Boolean(referenceAssetId)) ? [referenceAssetId, ...extraReferenceIds] : [...extraReferenceIds]),
     [referenceAssetId, extraReferenceIds, mossEdit],
   );
+  // The tile owns the first slot, so a reorder or removal writes back through BOTH pieces of state
+  // rather than letting them drift apart.
+  const writeOrderedReferences = (next) => {
+    const [first, ...rest] = next;
+    setReferenceAssetId(first ?? null);
+    setExtraReferenceIds(rest);
+  };
 
   // sc-24113 — which Qwen rewriter this request selects, and whether it is installed. Selected by
   // the REQUEST (a reference attached means the editing half) and never by a picker, exactly as in
@@ -604,6 +614,7 @@ export function SimpleImageStudio() {
           </button>
         </div>
         <textarea
+          {...promptTokenInsertion.textareaProps}
           className="su-textarea"
           id="su-image-prompt"
           onChange={(event) => setPrompt(event.target.value)}
@@ -852,14 +863,14 @@ export function SimpleImageStudio() {
                 labelFor={(id) => assets.find((asset) => asset.id === id)?.name ?? id}
                 // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
                 tokenFor={(index) => referencePromptToken(selectedModel, index)}
-                onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
-                onChange={(next) => {
-                  // The tile owns the first slot, so a reorder writes back through BOTH pieces of
-                  // state rather than letting them drift apart.
-                  const [first, ...rest] = next;
-                  setReferenceAssetId(first ?? null);
-                  setExtraReferenceIds(rest);
-                }}
+                onInsertToken={promptTokenInsertion.insert}
+                onChange={writeOrderedReferences}
+                // A model whose prompt names its references (MiniMax-H3-Image) gets a Remove per
+                // row; other models' rails stay as the SW-7028 frozen baseline pins them. Removing
+                // image 1 promotes image 2 onto the tile, exactly as a reorder would.
+                onRemove={referencePromptToken(selectedModel, 0)
+                  ? (index) => writeOrderedReferences(orderedReferenceIds.filter((_, at) => at !== index))
+                  : undefined}
               />
               <SheetSelect
                 kind="grid"

@@ -46,7 +46,8 @@ import {
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 
 import { orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
-import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
+import { maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
+import { usePromptTokenInsertion } from "../hooks/usePromptTokenInsertion.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 
@@ -369,6 +370,8 @@ export function ImageStudio() {
   // The magic-prompt backend (utility model id) that drafted the current caption, recorded in the
   // structured-prompt recipe (sc-5997). Null until the user runs magic-prompt.
   const [magicPromptBackend, setMagicPromptBackend] = useState(saved.magicPromptBackend ?? null);
+  // SW-7101: "Insert <Picture N>" lands at the prompt's caret, not always at the end.
+  const promptTokenInsertion = usePromptTokenInsertion(prompt, setPrompt);
   const setPromptFromUser = (value) => {
     promptEdited.current = true;
     setPrompt(value);
@@ -3024,6 +3027,7 @@ export function ImageStudio() {
             promptMode={promptMode}
             setPromptMode={setPromptMode}
             prompt={prompt}
+            promptTextareaProps={promptTokenInsertion.textareaProps}
             setPromptFromUser={setPromptFromUser}
             magicPrompt={magicPrompt}
             onMagicExpand={onMagicExpand}
@@ -3124,12 +3128,17 @@ export function ImageStudio() {
                     assetIds={referenceAssetIds}
                     itemKeys={flux3LayoutAvailable ? layoutReferences.map(({ id }) => id) : undefined}
                     onMove={flux3LayoutAvailable ? moveFlux3Reference : undefined}
-                    onRemove={flux3LayoutAvailable ? removeFlux3Reference : undefined}
+                    // A model whose prompt names its references (MiniMax-H3-Image) gets a Remove
+                    // per row too. Other models' rails stay as the SW-7028 frozen baseline pins them.
+                    onRemove={flux3LayoutAvailable ? removeFlux3Reference
+                      : referencePromptToken(selectedModel, 0)
+                        ? (index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))
+                        : undefined}
                     labelFor={assetLabelFor}
                     onChange={changeReferenceAssetIds}
                     // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
                     tokenFor={(index) => referencePromptToken(selectedModel, index)}
-                    onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
+                    onInsertToken={promptTokenInsertion.insert}
                   />
                 ) : (
                   <>

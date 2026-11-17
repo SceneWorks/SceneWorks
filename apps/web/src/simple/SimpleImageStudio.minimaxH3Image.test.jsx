@@ -187,12 +187,23 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(container.querySelector("#su-image-negative")).toBeNull();
     await click(container.querySelector('button[aria-label="Insert <Picture 3> into the prompt"]'));
     expect(container.querySelector("#su-image-prompt").value).toBe("Put the hat from <Picture 3>");
+    const promptBox = container.querySelector("#su-image-prompt");
+    await act(async () => {
+      promptBox.focus();
+      promptBox.setSelectionRange("Put".length, "Put the hat".length);
+    });
+    await click(container.querySelector('button[aria-label="Insert <Picture 2> into the prompt"]'));
+    expect(promptBox.value).toBe("Put <Picture 2> from <Picture 3>");
+    // Removing image 1 promotes image 2 onto the tile; removing any other drops just that one.
+    await click(container.querySelector('button[aria-label="Remove Image 1"]'));
+    await click(container.querySelector('button[aria-label="Remove Image 15"]'));
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(14);
     await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
     // One ordered list, the armed reference first — the same payload the full studio sends.
     expect(request).toMatchObject({ model: "minimax_h3_image", mode: "edit_image", sourceAssetId: null });
-    expect(request.referenceAssetIds).toEqual(refs.slice(0, 16).map((ref) => ref.id));
+    expect(request.referenceAssetIds).toEqual(refs.slice(1, 15).map((ref) => ref.id));
     // Simple sends no sampler block for the edit, as for text-to-image: the worker runs (and
     // records) the LCM 1.1 / 0.9 default.
     expect(request.advanced?.h3ImageSampler).toBeUndefined();

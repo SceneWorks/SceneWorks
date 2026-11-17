@@ -76,7 +76,7 @@ export function OrderedReferenceList({
             >
               ↓
             </button>
-            {onRemove ? <button aria-label={`Remove ${referenceOrdinalLabel(index)}`}
+            {onRemove ? <button aria-label={`Remove ${referenceOrdinalLabel(index + firstOrdinal - 1)}`}
               className="secondary-action" type="button" onClick={() => onRemove(index)}>Remove</button> : null}
             {inserts && tokenFor(index + firstOrdinal - 1) ? (
               <button

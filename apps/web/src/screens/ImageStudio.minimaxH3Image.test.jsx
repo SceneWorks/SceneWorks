@@ -9,7 +9,7 @@ import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils
 import { evaluateModelDimensions } from "../resolutionOverride.js";
 import { fixedStepsForModel } from "../samplerOptions.js";
 import { MAX_USER_JOB_LORAS } from "../presetUtils.js";
-import { appendPromptToken, referencePromptToken } from "../imageReferenceLimits.js";
+import { appendPromptToken, insertPromptToken, referencePromptToken } from "../imageReferenceLimits.js";
 
 // SW-7100 (feature SW-F363): MiniMax-H3-Image text-to-image in the advanced Image Studio, from the
 // SHIPPED catalog entry — the published 16 MP presets up to a 6272 px edge, no Steps / Guidance /
@@ -399,6 +399,20 @@ describe("ImageStudio — MiniMax-H3-Image edit and LoRAs (SW-7101)", () => {
     expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe(
       "Put the hat from <Picture 2> <Picture 1>",
     );
+    // Once the user has placed a caret in the prompt, a token lands THERE, not at the end.
+    const promptBox = container.querySelector('textarea[aria-label="Prompt"]');
+    await act(async () => {
+      promptBox.focus();
+      promptBox.setSelectionRange("Put the hat".length, "Put the hat".length);
+    });
+    await click(insert("<Picture 3>"));
+    expect(promptBox.value).toBe("Put the hat <Picture 3> from <Picture 2> <Picture 1>");
+
+    // Every reference row is removable; the rest renumber and the request shrinks with them.
+    await click(container.querySelector('button[aria-label="Remove Image 16"]'));
+    await click(container.querySelector('button[aria-label="Remove Image 1"]'));
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(14);
+    expect(insert("<Picture 15>")).toBeNull();
 
     // Edit inherits the t2i sampler surface: LCM 1.1 / 0.9 by default, no steps / guidance / negative.
     await click(document.body.querySelector(".advanced-section-toggle"));
@@ -409,7 +423,7 @@ describe("ImageStudio — MiniMax-H3-Image edit and LoRAs (SW-7101)", () => {
     await click(generateButton());
     const request = createImageJob.mock.calls[0][0];
     expect(request).toMatchObject({ model: "minimax_h3_image", mode: "edit_image" });
-    expect(request.referenceAssetIds).toEqual(REFS.slice(0, 16).map((ref) => ref.id));
+    expect(request.referenceAssetIds).toEqual(REFS.slice(1, 15).map((ref) => ref.id));
     expect(request.advanced.h3ImageSampler).toEqual({ sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
     expect(request.advanced?.steps).toBeUndefined();
     expect(request.advanced?.guidanceScale).toBeUndefined();
@@ -447,6 +461,23 @@ describe("<Picture N> tokens are the H3-Image family's alone (SW-7101)", () => {
     expect(referencePromptToken(installed("qwen_image_2_1"), 0)).toBeNull();
     expect(referencePromptToken({ family: "minimax-h3" }, 0)).toBeNull();
     expect(referencePromptToken(H3_IMAGE, -1)).toBeNull();
+  });
+
+  it("inserts a token at the selection, padding it from adjacent words", () => {
+    const at = (start, end = start) => ({ start, end });
+    expect(insertPromptToken("hat from", "<Picture 1>", at(3))).toEqual({
+      prompt: "hat <Picture 1> from", caret: "hat <Picture 1>".length,
+    });
+    expect(insertPromptToken("put X here", "<Picture 2>", at(4, 5))).toEqual({
+      prompt: "put <Picture 2> here", caret: "put <Picture 2>".length,
+    });
+    expect(insertPromptToken("tail", "<Picture 1>", at(0)).prompt).toBe("<Picture 1> tail");
+    expect(insertPromptToken("head", "<Picture 1>", at(99)).prompt).toBe("head <Picture 1>");
+    expect(insertPromptToken("", "<Picture 1>", at(0)).prompt).toBe("<Picture 1>");
+    // No caret placed yet: append, exactly as before.
+    expect(insertPromptToken("the hat from  ", "<Picture 2>", null)).toEqual({
+      prompt: "the hat from <Picture 2>", caret: "the hat from <Picture 2>".length,
+    });
   });
 
   it("appends a token with one separating space", () => {
