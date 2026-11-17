@@ -431,8 +431,12 @@ pub(crate) fn resolve_restore_export_dir(
             )))
         }
     };
-    let resources = RestorationResources::from_dir(&dir, IRIS_RESTORE_MODEL_ID)
-        .map_err(|error| WorkerError::InvalidPayload(format!("Iris restoration: {error}")))?;
+    let resources =
+        RestorationResources::from_dir(&dir, IRIS_RESTORE_MODEL_ID).map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("Iris restoration: {error}"))
+            })
+        })?;
     Ok((dir, resources))
 }
 

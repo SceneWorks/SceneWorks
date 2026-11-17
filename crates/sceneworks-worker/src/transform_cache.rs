@@ -211,10 +211,10 @@ where
     let load = move || {
         load_transform(&engine_id, &spec).map_err(|error| match error {
             // A typed refusal (wrong task, missing file, unsupported option) stays user-facing.
-            gen_core::Error::Unsupported(_) => {
+            gen_core::Error::Unsupported(_) => crate::provider_error(error, |error| {
                 WorkerError::InvalidPayload(format!("{load_error_context}: {error}"))
-            }
-            other => WorkerError::Engine(format!("{load_error_context}: {other}")),
+            }),
+            other => crate::generation_error(&load_error_context, other),
         })
     };
     #[allow(clippy::borrowed_box)]

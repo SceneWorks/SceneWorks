@@ -53,7 +53,8 @@ if-addrs = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 serde_path_to_error = "0.1"
-# Shared AST parsing for the worker architecture guards and portable option coverage tests.
+# Shared AST parsing for the worker architecture guards, portable option coverage tests and the
+# core route reconciliation (SW-6931), which parses the worker's native dispatch arms.
 syn = { version = "2.0", features = ["full", "visit"] }
 uuid = { version = "1.11", features = ["v4"] }
 tokio = { version = "1.40", default-features = false }
@@ -195,9 +196,9 @@ all = "warn"
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "6f70e35526866bfa5a5b97f768436cba57b93d3b" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6f70e35526866bfa5a5b97f768436cba57b93d3b" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6f70e35526866bfa5a5b97f768436cba57b93d3b" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

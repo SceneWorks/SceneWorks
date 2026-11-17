@@ -571,9 +571,7 @@ fn sdxl_control_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| {
-            WorkerError::Engine(format!("SDXL pose-control generation failed: {error}"))
-        })?;
+        .map_err(|error| crate::generation_error("SDXL pose-control generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
@@ -718,11 +716,12 @@ pub(super) async fn generate_sdxl_control_stream(
             // immediately before load so a previous job's value can never leak into this pipeline.
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             apply_sdxl_control_flash_attn(flash_attn);
-            crate::inference_runtime::load(SDXL_CONTROL_ENGINE_ID, &spec).map_err(|error| {
-                WorkerError::Engine(format!("SDXL pose-control load failed: {error}"))
-            })
+            crate::inference_runtime::load(SDXL_CONTROL_ENGINE_ID, &spec)
+                .map_err(|error| crate::generation_error("SDXL pose-control load failed", error))
         },
         move |generator, tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let generator = crate::DeviceOwned::new(generator);
             drive_gen_items(
                 tx.clone(),
                 poses,

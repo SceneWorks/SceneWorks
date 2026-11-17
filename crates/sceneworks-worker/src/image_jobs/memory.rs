@@ -873,12 +873,18 @@ pub(crate) async fn admit_sdxl_bespoke_memory(
         false,
     );
     spec.prepare_file_sources().map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "SDXL could not retain exact component/adapter receipts: {error}"
-        ))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!(
+                "SDXL could not retain exact component/adapter receipts: {error}"
+            ))
+        })
     })?;
-    let contract = runtime_cuda::providers::sdxl::provider_contract_for_spec(&spec)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SDXL receipt refused: {error}")))?;
+    let contract =
+        runtime_cuda::providers::sdxl::provider_contract_for_spec(&spec).map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("SDXL receipt refused: {error}"))
+            })
+        })?;
     let runtime_overlay_bytes = contract.asset_facts.overlay_bytes;
     let artifact_is_certified = additional_artifacts_certified
         && candle_certified_load_spec("sdxl", settings, &spec, &request.model_manifest_entry, tier);

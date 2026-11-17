@@ -251,10 +251,12 @@ async fn run_training_caption_job_using(
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
         .map_err(|error| {
-            WorkerError::Engine(format!(
-                "JoyCaption {} load failed: {error}",
-                blocking_backend.to_uppercase()
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::Engine(format!(
+                    "JoyCaption {} load failed: {error}",
+                    blocking_backend.to_uppercase()
+                ))
+            })
         })?;
         emit_event(
             "caption_pipeline_load_complete",
@@ -314,10 +316,12 @@ async fn run_training_caption_job_using(
             let output = captioner
                 .caption(&request, &mut on_progress)
                 .map_err(|error| {
-                    WorkerError::Engine(format!(
-                        "JoyCaption {} generation failed: {error}",
-                        blocking_backend.to_uppercase()
-                    ))
+                    crate::provider_error(error, |error| {
+                        WorkerError::Engine(format!(
+                            "JoyCaption {} generation failed: {error}",
+                            blocking_backend.to_uppercase()
+                        ))
+                    })
                 })?;
             // The backend-neutral `gen-core` contract owns trigger-word normalization and complete
             // token/phrase matching, so the MLX and Candle job paths cannot drift.
@@ -404,6 +408,9 @@ async fn run_training_caption_job_using(
     .await;
     let (canceled, result) = supervisor.finish_stream(handling, &mut rx).await?;
     let result = result.map_err(|error| task_join_error("caption task join", error))?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if canceled {
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));

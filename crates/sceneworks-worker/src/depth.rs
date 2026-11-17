@@ -78,11 +78,11 @@ pub fn depth_control_image(
     // model, dominated by the diffusion cost around it, so it is left uncached; add a cache here
     // only if depth control becomes hot enough that the reload shows up in profiles.
     let model = depth_backend::DepthAnythingV2::from_dir(weights_dir)
-        .map_err(|error| WorkerError::Engine(format!("depth estimator load: {error}")))?;
+        .map_err(|error| crate::generation_error("depth estimator load", error))?;
     let (w, h) = (img.width(), img.height());
     let control = model
         .estimate_control_rgb8(img.as_raw(), w, h)
-        .map_err(|error| WorkerError::Engine(format!("depth estimate: {error}")))?;
+        .map_err(|error| crate::generation_error("depth estimate", error))?;
     image::RgbImage::from_raw(w, h, control).ok_or_else(|| {
         WorkerError::Engine("depth estimator returned a mis-sized control buffer".to_owned())
     })

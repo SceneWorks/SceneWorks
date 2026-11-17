@@ -278,11 +278,17 @@ pub(crate) fn pin_app_managed_model_file(
     let roots = allowed_model_roots(settings)?;
     let lexical = normalize_absolute_path(raw_path)?;
     ensure_path_under(lexical.clone(), &roots, label)?;
-    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
-        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{label}: {error}"))
+        })
+    })?;
     ensure_path_under(pin.canonical_target_path().to_path_buf(), &roots, label)?;
-    pin.ensure_unchanged()
-        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    pin.ensure_unchanged().map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{label}: {error}"))
+        })
+    })?;
     Ok(pin)
 }
 
@@ -299,10 +305,16 @@ pub(crate) fn pin_operator_model_file(
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
     let lexical = normalize_absolute_path(raw_path)?;
-    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
-        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
-    pin.ensure_unchanged()
-        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{label}: {error}"))
+        })
+    })?;
+    pin.ensure_unchanged().map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("{label}: {error}"))
+        })
+    })?;
     Ok(pin)
 }
 
@@ -607,9 +619,11 @@ pub fn latest_moss_training_resume_step(
     )
     .map(|state| state.map(|state| state.step))
     .map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "MOSS resume checkpoint verification failed: {error}"
-        ))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!(
+                "MOSS resume checkpoint verification failed: {error}"
+            ))
+        })
     })
 }
 
@@ -631,9 +645,11 @@ pub(crate) fn prepare_moss_training_resume_dir(
     }
     gen_core_moss_image::moss_image_training::recovery::clear_resume_states(output_dir, file_name)
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "Could not clear job-owned MOSS resume checkpoints: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "Could not clear job-owned MOSS resume checkpoints: {error}"
+                ))
+            })
         })?;
     Ok(None)
 }

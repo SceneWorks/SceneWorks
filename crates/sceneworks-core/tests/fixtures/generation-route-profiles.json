@@ -1,0 +1,47 @@
+{
+  "inferenceRevision": "2b09938e33370915d4f853389961709b8bbf8bf9",
+  "evidenceKind": "source-identified registration assertions; no execution or device-fit claim",
+  "sources": {
+    "crates/bundles/runtime-ios/src/lib.rs": "9f3806750e25de8560b196fc9f6034333da2b1d09e83253b6c23d175e3041204",
+    "crates/bundles/runtime-cpu/src/lib.rs": "ed9d7bb0d304e6060323a5ed0390f72b963255e5c790ac60a804ab5beddfd12f",
+    "crates/media/mlx-gen/mlx-gen-ios-catalog/src/lib.rs": "cb7f831497cc737c1117270da2891f59a14be43c94ba8a42ddc515ff40ff50a3",
+    "crates/media/mlx-gen/mlx-gen-flux/src/config.rs": "be3136b7c50f5f4ec281f1d3bf0a15b8ae25066c4ce84c9e81f5addc9e301237",
+    "crates/media/mlx-gen/mlx-gen-flux/src/model.rs": "37501fff59a5c815c6cddf137f6056af82a17174688de31902fd4f9da6d1f7ef",
+    "crates/media/candle-gen/candle-gen-flux/src/lib.rs": "0e229349192ca7e6f7f315de40af88a6836711d7f920549a7e9649f14012bc91",
+    "crates/media/mlx-gen/mlx-gen-flux2/src/config.rs": "ab0091c3547366b39a0aa3f8d040a6c8c8486658858ceb58af2bcbfa277b310c"
+  },
+  "ios": {
+    "generator_ids": [
+      "sana_1600m",
+      "sana_sprint_1600m",
+      "anima_turbo",
+      "sdxl",
+      "iris_3b",
+      "z_image_turbo",
+      "z_image_turbo_control"
+    ],
+    "text_llm_ids": [
+      "mlx-llama",
+      "mlx-joycaption",
+      "mlx-starvector-1b",
+      "mlx-starvector-8b"
+    ],
+    "transform_ids": [
+      "iris_3b_restore"
+    ],
+    "snapshot_preparer_backends": [
+      "mlx"
+    ]
+  },
+  "cpu": {
+    "text_llm_ids": [
+      "candle-llama",
+      "candle-llava",
+      "candle-starvector-1b"
+    ]
+  },
+  "cpuSharedCatalogs": [
+    "candle_gen_catalog::provider_registry()",
+    "candle_audio_catalog::provider_registry()"
+  ]
+}

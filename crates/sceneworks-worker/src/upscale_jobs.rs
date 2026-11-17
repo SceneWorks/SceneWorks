@@ -468,7 +468,7 @@ async fn run_seedvr2_upscale(
                 .generate_with_execution_report(&request, &mut |_progress| {})
                 .map_err(|error| match error {
                     gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
-                    other => WorkerError::Engine(format!("SeedVR2 upscale failed: {other}")),
+                    other => crate::generation_error("SeedVR2 upscale failed", other),
                 })?;
             let image = match completed.generation.output {
                 Some(GenerationOutput::Images(mut images)) if images.len() == 1 => images.remove(0),
@@ -1003,7 +1003,11 @@ pub(crate) async fn restore_with_progress(
                 &dir,
                 sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
             )
-            .map_err(|error| WorkerError::InvalidPayload(format!("Iris restoration: {error}")))?;
+            .map_err(|error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(format!("Iris restoration: {error}"))
+                })
+            })?;
             (dir, resources)
         }
         None => resolve_restore_export_dir(settings)?,

@@ -259,7 +259,7 @@ fn krea_edit_candle_generate_one(
         memory_strategy_context,
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
+    .map_err(|error| crate::generation_error("Krea edit generation failed", error))?;
     match output {
         gen_core::GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {

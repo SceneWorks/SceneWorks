@@ -350,7 +350,7 @@ fn resolve_imported_sdxl_conditioning(
             )?;
             let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
             mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
-                WorkerError::Engine(format!("Imported SDXL outpaint mask union failed: {error}"))
+                crate::generation_error("Imported SDXL outpaint mask union failed", error)
             })?;
         }
         conditioning.push(Conditioning::Mask { image: mask });
@@ -984,9 +984,10 @@ pub(super) async fn generate_sdxl_imported_stream(
                     let completed = model
                         .generate_with_execution_report(&request, &mut *on_progress)
                         .map_err(|error| {
-                            WorkerError::Engine(format!(
-                                "SDXL imported checkpoint generation failed: {error}"
-                            ))
+                            crate::generation_error(
+                                "SDXL imported checkpoint generation failed",
+                                error,
+                            )
                         })?;
                     match completed.generation.output {
                         Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {

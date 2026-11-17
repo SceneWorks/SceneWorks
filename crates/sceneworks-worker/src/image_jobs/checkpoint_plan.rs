@@ -2165,11 +2165,19 @@ pub(super) async fn generate_checkpoint_plan_stream(
             on_progress,
         ) {
             Ok(output) => output,
+            // A poisoned process keeps its fatal class even when cancellation raced it.
+            Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                return Err(super::render::generation_error(
+                    &format!("Checkpoint plan {checkpoint_id:?} generation failed"),
+                    error,
+                ));
+            }
             Err(_) if cancel.is_cancelled() => return Ok(None),
             Err(error) => {
-                return Err(WorkerError::Engine(format!(
-                    "Checkpoint plan {checkpoint_id:?} generation failed: {error}"
-                )));
+                return Err(crate::generation_error(
+                    &format!("Checkpoint plan {checkpoint_id:?} generation failed"),
+                    error,
+                ));
             }
         };
         match output {

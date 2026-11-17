@@ -401,13 +401,13 @@ fn reconcile_semantics_blocking(
         catalog_id,
         metadata.as_ref().ok().map(|_| cancel),
     );
-    match (metadata, index) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+    // A poisoned result on either side outranks the other; two ordinary failures are reported
+    // together as before.
+    crate::combine_outcomes(metadata, index, |primary, index| {
+        WorkerError::Engine(format!(
             "{primary}; embedding index reconciliation also failed: {index}"
-        ))),
-    }
+        ))
+    })
 }
 
 fn reconcile_semantic_records(
@@ -690,6 +690,9 @@ async fn generate_vision_json(
         crate::StreamSupervisor::new(cancel, generation, std::time::Duration::from_secs(2), None)
             .wait(api, settings, &job.id)
             .await?;
+    if let Some(fatal) = crate::process_fault(&result) {
+        return Err(fatal);
+    }
     if canceled {
         crate::mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
@@ -874,7 +877,7 @@ fn run_embedding_pass_blocking(
         CLIP_EMBEDDER_ID,
         &LoadSpec::new(WeightsSource::Dir(weights_dir)),
     )
-    .map_err(|error| WorkerError::Engine(format!("CLIP embedder load failed: {error}")))?;
+    .map_err(|error| crate::generation_error("CLIP embedder load failed", error))?;
     let descriptor = embedder.descriptor().clone();
     if descriptor.space != CLIP_SPACE {
         return Err(WorkerError::Engine(format!(
@@ -1103,13 +1106,13 @@ fn finish_with_index_reconciliation<T>(
     catalog_id: &str,
 ) -> WorkerResult<T> {
     let index = rebuild_embedding_index_streaming(registry, catalog_id, None);
-    match (primary, index) {
-        (Ok(counts), Ok(())) => Ok(counts),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+    // A poisoned result on either side outranks the other; two ordinary failures are reported
+    // together as before.
+    crate::combine_outcomes(primary, index, |primary, index| {
+        WorkerError::Engine(format!(
             "{primary}; embedding index reconciliation also failed: {index}"
-        ))),
-    }
+        ))
+    })
 }
 
 fn persist_embedding_failure(

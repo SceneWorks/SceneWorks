@@ -344,7 +344,7 @@ fn map_engine_error(stage: &str, error: gen_core::Error) -> WorkerError {
     match error {
         gen_core::Error::Canceled => WorkerError::Canceled("Depth estimation canceled.".to_owned()),
         gen_core::Error::Unsupported(detail) => typed(WRONG_TASK, detail),
-        other => WorkerError::Engine(format!("Iris depth {stage}: {other}")),
+        other => crate::generation_error(&format!("Iris depth {stage}"), other),
     }
 }
 

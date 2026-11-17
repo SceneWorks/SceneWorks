@@ -137,25 +137,28 @@ impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
     /// Must be called on EVERY error path — the `?` on a progress/heartbeat POST failure and the
     /// channel-close path alike — before the error propagates out of the job function.
     pub(crate) async fn cancel_and_join(&mut self) {
+        let _ = self.cancel_and_join_result().await;
+    }
+
+    /// The same bounded teardown, retaining a completed task result for consumers that must
+    /// distinguish a fatal owner fault from the error that initiated cancellation.
+    pub(crate) async fn cancel_and_join_result(
+        &mut self,
+    ) -> Option<Result<R, tokio::task::JoinError>> {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
-        let Some(mut handle) = self.handle.take() else {
-            return;
-        };
+        let mut handle = self.handle.take()?;
         // Bounded cooperative wind-down: await the task itself so the consumer does not return while
         // the GPU work is still live. A between-steps cancel poll resolves the handle here.
-        if tokio::time::timeout(CANCEL_JOIN_GRACE, &mut handle)
-            .await
-            .is_ok()
-        {
-            return;
+        if let Ok(result) = tokio::time::timeout(CANCEL_JOIN_GRACE, &mut handle).await {
+            return Some(result);
         }
         // Grace exceeded — the op did not reach a cancel checkpoint in time. `abort()` (inert on a
         // running blocking task, effective on a cooperative async one), then give the runtime a
         // bounded window to reap it before we abandon the wait and let the worker proceed.
         handle.abort();
-        let _ = tokio::time::timeout(CANCEL_JOIN_ABANDON, handle).await;
+        tokio::time::timeout(CANCEL_JOIN_ABANDON, handle).await.ok()
     }
 }
 

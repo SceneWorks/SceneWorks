@@ -208,7 +208,11 @@ pub(super) fn ltx25_generation_options(
             gen_core::duration_head::AutoDurationRange::new(range.min_seconds, range.max_seconds)
         })
         .transpose()
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        .map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(error.to_string())
+            })
+        })?;
     let planning_frames = auto_range.map_or_else(
         || ltx_frame_count(request.raw_frame_count()),
         |range| {

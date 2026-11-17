@@ -1869,6 +1869,98 @@ mod job_tests {
         assert!(last["result"].is_null(), "{last:#}");
     }
 
+    /// Codex P1 on PR #3434: a trainer that reports `ProcessPoisoned` after the user's cancel must
+    /// fail with that fatal class, not a terminal Canceled — `handle_job_failure` quarantines,
+    /// persists and recycles only `ProcessPoisoned`. Drives the REAL event consumer; no model runs.
+    #[test]
+    fn a_poisoned_trainer_after_cancel_fails_fatal_instead_of_canceled() {
+        use crate::training_jobs::{consume_training_events, TrainEvent};
+        let _env = isolated_env("64");
+        let data_holder = tempfile::tempdir().unwrap();
+        let data = data_holder.path().canonicalize().unwrap();
+        let install = stage_install(&data);
+        let mut plan = plan(&data, &install.backbone, 2, |_| {});
+        plan.target.kernel = "sdxl_lora".to_owned();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (outcome, posts) = runtime.block_on(async {
+            let user_cancel = CancelSwitch::default();
+            let (base_url, posts) = spawn_job_api(Arc::clone(&user_cancel)).await;
+            let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
+            // Off-Mac the Iris memory gate reads the worker's NVIDIA card; `isolated_env` caps it
+            // (`SCENEWORKS_CUDA_VRAM_CAP_GB`), so the bound is the test's, not the runner's.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                settings.gpu_id = "0".to_owned();
+            }
+            settings.api_url = base_url;
+            settings.data_dir = data.clone();
+            settings.heartbeat_seconds = 5;
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-iris-train", false))
+                    .unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let cancel = gen_core::CancelFlag::new();
+            let flag = cancel.clone();
+            let blocking = crate::load_progress::spawn_blocking(move || {
+                let training = |step| {
+                    TrainEvent::Progress(TrainingProgress::Training {
+                        step,
+                        total: 40,
+                        loss: 0.5,
+                    })
+                };
+                let _ = tx.blocking_send(training(1));
+                // Outlive the consumer's 2 s cancel-poll throttle, then "click Cancel".
+                std::thread::sleep(Duration::from_millis(2_300));
+                user_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.blocking_send(training(2));
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !flag.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert!(flag.is_cancelled(), "the worker tripped the cancel flag");
+                drop(tx);
+                Err(WorkerError::ProcessPoisoned(
+                    "trainer device lost".to_owned(),
+                ))
+            });
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(90),
+                consume_training_events(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    gen_core::TrainingConfig::default(),
+                    "mlx",
+                    40,
+                    None,
+                    rx,
+                    cancel,
+                    blocking,
+                    serde_json::Map::new(),
+                ),
+            )
+            .await
+            .expect("the consumer finished");
+            let posts = posts.lock().unwrap().clone();
+            (outcome, posts)
+        });
+        assert!(
+            matches!(outcome, Err(WorkerError::ProcessPoisoned(ref detail)) if detail == "trainer device lost"),
+            "{outcome:?}"
+        );
+        assert!(
+            posts.iter().all(|post| post["status"] != "canceled"),
+            "no cancel-shaped terminal for a poisoned process: {posts:#?}"
+        );
+    }
+
     // ------------------------------------------------------------------------------------------
     // Iris DEPTH (S9 sc-25687) and RESTORATION (S10 sc-25688) task runs through the same executor.
     // ------------------------------------------------------------------------------------------

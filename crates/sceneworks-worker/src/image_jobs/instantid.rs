@@ -477,7 +477,9 @@ fn instantid_validate_admission(
     context: &gen_core::MemoryRunContext,
 ) -> WorkerResult<()> {
     instantid_memory::validate_context(contract, tier, identity, context).map_err(|error| {
-        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        })
     })
 }
 
@@ -490,7 +492,9 @@ fn instantid_validate_admission(
 ) -> WorkerResult<()> {
     let _ = tier;
     instantid_memory::validate_context(contract, identity, context).map_err(|error| {
-        WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("InstantID memory admission: {error}"))
+        })
     })
 }
 
@@ -1428,7 +1432,9 @@ pub(super) async fn generate_instantid_stream(
                 .with_component(COMPONENT_VAE_FP16_FIX, vae_fp16_fix),
         )
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("InstantID SDXL components: {error}"))
+            })
         })?
     };
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — candle only: the macOS MLX InstantID
@@ -1583,20 +1589,20 @@ pub(super) async fn generate_instantid_stream(
                 load_memory_identity,
                 load_memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("InstantID load failed", error))?;
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = InstantId::load_with_memory_context(
                 &paths,
                 load_memory_identity,
                 load_memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("InstantID load failed", error))?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
             // before with_face (the engine's documented order). `with_openpose` is backend-neutral
             // (both engines take `&WeightsSource` and consume+return `self`).
             let model = match &openpose {
                 Some(source) => model.with_openpose(source).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID OpenPose load failed: {error}"))
+                    crate::generation_error("InstantID OpenPose load failed", error)
                 })?,
                 None => model,
             };
@@ -1604,9 +1610,9 @@ pub(super) async fn generate_instantid_stream(
             // `quantize` method (the candle lane already forced `quant_bits` out, above).
             #[cfg(target_os = "macos")]
             let model = match quant_bits {
-                Some(bits) => model.quantize(bits).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID quantize failed: {error}"))
-                })?,
+                Some(bits) => model
+                    .quantize(bits)
+                    .map_err(|error| crate::generation_error("InstantID quantize failed", error))?,
                 None => model,
             };
             // Attach the SCRFD + ArcFace face stack. The MLX engine loads the two weight files
@@ -1623,18 +1629,16 @@ pub(super) async fn generate_instantid_stream(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))
                 })?;
-                model.with_face(&scrfd, &arcface).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID face stack: {error}"))
-                })?
+                let with_face = model.with_face(&scrfd, &arcface);
+                with_face.map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
                 let _ = &arcface_path;
-                model.with_face(face_dir).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID face stack: {error}"))
-                })?
+                let with_face = model.with_face(face_dir);
+                with_face.map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371 mlx / sc-8373 candle):
             // the `sdxl` student InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some`
@@ -1650,7 +1654,7 @@ pub(super) async fn generate_instantid_stream(
             #[cfg(native_lane)]
             let mut model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
+                    crate::generation_error("InstantID PiD decoder load failed", error)
                 })?,
                 None => model,
             };
@@ -1666,18 +1670,22 @@ pub(super) async fn generate_instantid_stream(
                         reference.width as usize,
                     )
                     .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "InstantID face-restore reference: {error}"
-                        ))
+                        crate::provider_error(error, |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID face-restore reference: {error}"
+                            ))
+                        })
                     })?
                     .embedding;
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 let embedding = model
                     .largest_face(&reference)
                     .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "InstantID face-restore reference: {error}"
-                        ))
+                        crate::provider_error(error, |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID face-restore reference: {error}"
+                            ))
+                        })
                     })?
                     .embedding;
                 Some(embedding)
@@ -1705,6 +1713,8 @@ pub(super) async fn generate_instantid_stream(
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
@@ -1754,12 +1764,14 @@ pub(super) async fn generate_instantid_stream(
                     // for. `begin_memory_request` re-checks the route/composition and the request's
                     // own geometry + PiD route against the admitted context, so a request that
                     // crossed its admission fails here rather than allocating.
-                    let mut scope = model
+                    let scope = model
                         .begin_memory_request(&memory_context, &memory_identity, &req, memory_route)
                         .map_err(|error| {
-                            WorkerError::InvalidPayload(format!(
-                                "InstantID memory request refused: {error}"
-                            ))
+                            crate::provider_error(error, |error| {
+                                WorkerError::InvalidPayload(format!(
+                                    "InstantID memory request refused: {error}"
+                                ))
+                            })
                         })?;
                     let stage = match &action {
                         InstantIdAction::Identity => "identity",
@@ -1794,15 +1806,35 @@ pub(super) async fn generate_instantid_stream(
                         // still gets its terminal `finish`, which is what synchronizes the device and
                         // releases the request-local allocations. A cleanup error on an already-
                         // failing path is not allowed to mask the reason we are leaving.
+                        // A poisoned process keeps its fatal class even when cancellation raced it, and
+                        // its scope is never finished: like the shared memory-strategy seam, nothing may
+                        // submit more device work after the provider declared the process unsafe.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            std::mem::forget(scope);
+                            return Err(super::render::generation_error(
+                                "InstantID generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => {
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| scope.finish(gen_core::MemoryRunOutcome::Canceled),
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Ok(None);
                         }
                         Err(error) => {
                             let message = format!("InstantID generation failed: {error}");
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                message: message.clone(),
-                            });
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| {
+                                    scope.finish(gen_core::MemoryRunOutcome::Error {
+                                        message: message.clone(),
+                                    })
+                                },
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Err(WorkerError::Engine(message));
                         }
                     };
@@ -1811,9 +1843,15 @@ pub(super) async fn generate_instantid_stream(
                             images.remove(0)
                         }
                         _ => {
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                message: "InstantID returned an incomplete image".into(),
-                            });
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| {
+                                    scope.finish(gen_core::MemoryRunOutcome::Error {
+                                        message: "InstantID returned an incomplete image".into(),
+                                    })
+                                },
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Err(WorkerError::Engine(
                                 "InstantID returned an incomplete image".into(),
                             ));
@@ -1852,15 +1890,35 @@ pub(super) async fn generate_instantid_stream(
                             &mut *on_progress,
                         ) {
                             Ok(completed) => completed,
+                            // A poisoned process keeps its fatal class even when cancellation raced it, and
+                            // its scope is never finished: like the shared memory-strategy seam, nothing may
+                            // submit more device work after the provider declared the process unsafe.
+                            Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                                std::mem::forget(scope);
+                                return Err(super::render::generation_error(
+                                    "InstantID face-restore failed",
+                                    error,
+                                ));
+                            }
                             Err(_) if cancel.is_cancelled() => {
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| scope.finish(gen_core::MemoryRunOutcome::Canceled),
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Ok(None);
                             }
                             Err(error) => {
                                 let message = format!("InstantID face-restore failed: {error}");
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                    message: message.clone(),
-                                });
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| {
+                                        scope.finish(gen_core::MemoryRunOutcome::Error {
+                                            message: message.clone(),
+                                        })
+                                    },
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Err(WorkerError::InvalidPayload(message));
                             }
                         };
@@ -1869,10 +1927,16 @@ pub(super) async fn generate_instantid_stream(
                                 images.remove(0)
                             }
                             _ => {
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| {
+                                        scope.finish(gen_core::MemoryRunOutcome::Error {
                                     message: "InstantID face-restore returned an incomplete image"
                                         .into(),
-                                });
+                                })
+                                    },
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Err(WorkerError::Engine(
                                     "InstantID face-restore returned an incomplete image".into(),
                                 ));
@@ -1895,14 +1959,12 @@ pub(super) async fn generate_instantid_stream(
                     // (synchronize + release the request-local allocations) and drop it, so the next
                     // item begins from a released state. A cleanup failure fails the job — it means
                     // the release the admission promised did not happen.
-                    scope
-                        .finish(gen_core::MemoryRunOutcome::Complete)
-                        .map_err(|error| {
-                            WorkerError::Engine(format!(
-                                "InstantID memory scope cleanup failed: {error}"
-                            ))
-                        })?;
-                    drop(scope);
+                    crate::finish_scope(scope, |scope| {
+                        scope.finish(gen_core::MemoryRunOutcome::Complete)
+                    })
+                    .map_err(|error| {
+                        crate::generation_error("InstantID memory scope cleanup failed", error)
+                    })?;
                     let execution = if execution_stages.is_empty() {
                         base_execution
                     } else {

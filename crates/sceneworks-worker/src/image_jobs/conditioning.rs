@@ -1427,7 +1427,7 @@ pub(super) fn resolve_ideogram_edit(
             )?;
             let user_mask = fit_engine_image(user_mask, request.width, request.height, "pad")?;
             mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
-                WorkerError::Engine(format!("ideogram outpaint mask union failed: {error}"))
+                crate::generation_error("ideogram outpaint mask union failed", error)
             })?;
         }
         return Ok(Some((canvas, strength, Some(mask))));

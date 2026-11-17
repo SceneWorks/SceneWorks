@@ -677,7 +677,7 @@ pub(super) fn flux2_edit_generate_one(
         gen_core::Error::Unsupported(reason) if memory_context.is_some() => {
             WorkerError::InvalidPayload(reason)
         }
-        error => WorkerError::Engine(format!("edit generation failed: {error}")),
+        error => crate::generation_error("edit generation failed", error),
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -1333,7 +1333,7 @@ pub(super) fn flux2_control_generate_one_scoped(
         gen_core::Error::Unsupported(reason) if memory_context.is_some() => {
             WorkerError::InvalidPayload(reason)
         }
-        error => WorkerError::Engine(format!("FLUX.2-dev control generation failed: {error}")),
+        error => crate::generation_error("FLUX.2-dev control generation failed", error),
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
