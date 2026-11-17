@@ -6714,6 +6714,51 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
+        "sha256": "e4af93ee06cb0fc6bc1eb7f3abfc81379dda54ae6c8630a915e2d6c9591c1b4b",
+        "recordId": "imc-98a5935a8cf92c69fd05",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 67080552448,
+        "denoise": 43591401472,
+        "decode": 2599419904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 67080552448,
+        "denoise": 43591401472,
+        "decode": 2599419904
+      },
+      "overallAllocatorEnvelopeBytes": 67080552448
+    },
+    {
       "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -12939,17 +12984,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:minimax_h3_image:candle:bf16",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "candle",
-      "tier": "bf16",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
