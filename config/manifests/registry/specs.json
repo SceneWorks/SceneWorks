@@ -47793,6 +47793,36 @@
     "evidence": {
       "candle": {
         "measured": false,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "implementations": [
+            {
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "fingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+              "modes": [
+                "text_to_image",
+                "edit_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {},
+              "parameters": {},
+              "rung": "staged_residency",
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs",
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            }
+          ],
+          "provider": "minimax_h3_image"
+        },
         "minMemoryGb": 73,
         "minMemoryGbByTier": {
           "bf16": 73,

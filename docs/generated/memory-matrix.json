@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:390e2cf4db8bd7c6b6af9b9998eddb22f5053f3eff551d04fddf701ca195b60f",
+    "sceneWorksRevision": "source-tree:ae4cc133a239191dba9d121b1e7ef6cc95ead13431daf8a6c4edac45415888d2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -9,7 +9,7 @@
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
-        "sha256": "22b22d9eccb49c524bcf28ec19b554490dbfc74706615b8818872dbd4f3ae2ec"
+        "sha256": "a8d2f795073cbdab08aca466ceac7c045c38a7134821376f76d2fbb91e2024c9"
       },
       "routePolicy": {
         "path": "config/manifests/registry/route-policy.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "ccb7fc0f60084ccb74dfe1e4d4e014fd6e15282201130b08d214431f56efb4a4"
+        "sha256": "db3b07ad975f73c1e9d85f300e75c0acace1a796979b0d60239696bc09076cfc"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -154,11 +154,11 @@
       "video": 11
     },
     "cells": 11150,
-    "publishedCells": 4024,
-    "elidedCells": 7126,
+    "publishedCells": 4036,
+    "elidedCells": 7114,
     "elidedByState": {
       "Implemented": 1602,
-      "Missing": 5524
+      "Missing": 5512
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 53,
@@ -192,7 +192,7 @@
     ],
     "anchors": 265,
     "analyticOnlyCells": 124,
-    "anchoredCells": 4024,
+    "anchoredCells": 4036,
     "staleAnchors": 262,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -7936,7 +7936,7 @@
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
-      "cells": 4
+      "cells": 8
     },
     {
       "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
@@ -7954,7 +7954,7 @@
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
-      "cells": 4
+      "cells": 8
     },
     {
       "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
@@ -7972,7 +7972,7 @@
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
-      "cells": 4
+      "cells": 8
     },
     {
       "id": "minimax_h3_image:mlx:bf16:base:base:minimax-h3-image-mlx-v1:imc-c2dd1d5bd019bb543ed0",
@@ -16726,11 +16726,11 @@
       "backend": "candle",
       "rung": "staged_residency",
       "coordinates": 12,
-      "published": 0,
-      "elided": 12,
-      "implemented": 0,
+      "published": 12,
+      "elided": 0,
+      "implemented": 12,
       "states": {
-        "Missing": 12
+        "Anchored": 12
       }
     },
     {
@@ -147617,6 +147617,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -147658,6 +147712,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -147721,6 +147829,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -147762,6 +147924,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -147825,6 +148041,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -147866,6 +148136,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -147929,6 +148253,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -147970,6 +148348,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -148033,6 +148465,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -148074,6 +148560,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -148137,6 +148677,60 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:lora:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6"
+          }
+        ]
+      }
+    },
+    {
       "id": "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:none:resident",
       "modelId": "minimax_h3_image",
       "resolvedRoute": "minimax_h3_image",
@@ -148178,6 +148772,60 @@
         "staticImplementation": [
           {
             "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:none:staged_residency",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "tier": "q8",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
           }
         ],
         "structural": [],
@@ -255576,17 +256224,29 @@
     ],
     "minimax_h3_image": [
       "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q8:edit_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q8:text_to_image:none:staged_residency",
       "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:resident",
       "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:lora:staged_residency",
       "minimax_h3_image:minimax_h3_image:mlx:bf16:edit_image:none:resident",
