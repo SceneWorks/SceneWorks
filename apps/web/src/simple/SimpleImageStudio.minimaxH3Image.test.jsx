@@ -194,6 +194,14 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     });
     await click(container.querySelector('button[aria-label="Insert <Picture 2> into the prompt"]'));
     expect(promptBox.value).toBe("Put <Picture 2> from <Picture 3>");
+    // Re-inserting the token over its own selection changes nothing; the caret must land after it
+    // at once, not linger and jump on the user's next unrelated edit.
+    const at = "Put <Picture 2> from ".length;
+    await act(async () => promptBox.setSelectionRange(at, at + "<Picture 3>".length));
+    await click(container.querySelector('button[aria-label="Insert <Picture 3> into the prompt"]'));
+    expect(promptBox.value).toBe("Put <Picture 2> from <Picture 3>");
+    expect(document.activeElement).toBe(promptBox);
+    expect([promptBox.selectionStart, promptBox.selectionEnd]).toEqual([promptBox.value.length, promptBox.value.length]);
     // Removing image 1 promotes image 2 onto the tile; removing any other drops just that one.
     await click(container.querySelector('button[aria-label="Remove Image 1"]'));
     await click(container.querySelector('button[aria-label="Remove Image 15"]'));

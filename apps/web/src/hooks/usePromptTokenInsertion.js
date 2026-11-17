@@ -35,10 +35,18 @@ export function usePromptTokenInsertion(prompt, setPrompt) {
         ? { start: element.selectionStart, end: element.selectionEnd }
         : null;
       const { prompt: next, caret } = insertPromptToken(prompt, token, selection);
-      if (element) {
-        caretPlaced.current = true;
-        pendingCaret.current = caret;
+      if (element) caretPlaced.current = true;
+      // Replacing a selected token with the same token leaves the prompt unchanged, so no commit
+      // (and no layout effect) follows: restore the caret now rather than leave it pending for
+      // some later, unrelated edit to apply.
+      if (next === prompt) {
+        if (element) {
+          element.focus();
+          element.setSelectionRange(caret, caret);
+        }
+        return;
       }
+      if (element) pendingCaret.current = caret;
       setPrompt(next);
     },
     [prompt, setPrompt],
