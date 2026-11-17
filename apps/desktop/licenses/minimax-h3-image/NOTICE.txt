@@ -13,9 +13,9 @@ SceneWorks does not ship MiniMax-H3-Image weights in the application. On first
 use it downloads the diffusers-format image transformer, its per-step output
 heads, the image autoencoder, the tokenizer and the processor directly from the
 upstream MiniMaxAI/MiniMax-H3-Image repository; those bf16 files are not
-re-hosted. The Q8 and Q4 tiers are planned as converted copies of the image
-transformer at SceneWorks/minimax-h3-image-mlx and are not published yet. Once
-published, those converted files are modified files within the meaning of
+re-hosted. The Q8 and Q4 tiers are converted copies of the image transformer
+published at SceneWorks/minimax-h3-image-mlx. Those converted files are
+modified files within the meaning of
 Section III.2, which requires them to carry a prominent notice stating that
 they were modified; that notice belongs on the re-hosted repository, and
 nothing in this repository verifies that it is present there.

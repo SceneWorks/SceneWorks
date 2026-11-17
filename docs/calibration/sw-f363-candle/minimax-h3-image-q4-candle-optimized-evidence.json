@@ -1,0 +1,253 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/minimax-h3-image-mlx",
+        "resolvedRevision": "6f62669b919bccdbf51b08c696fbb84542000a87",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+      "capturedAt": "2026-11-17T14:45:48Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:minimax-h3-image-anchor",
+        "blockers": [
+          "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3602907136
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3429892096
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 2532311040
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3602907136
+          },
+          {
+            "name": "loadWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 161
+          },
+          {
+            "name": "conditioningWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 43912
+          },
+          {
+            "name": "denoiseWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 19746
+          },
+          {
+            "name": "decodeWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 5549
+          },
+          {
+            "name": "renderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 69209
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 1024
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 1024
+          }
+        ]
+      },
+      "evidenceScope": "candidate",
+      "fixture": "minimax-h3-image-candle-q4-1024-seed7100-step6-optimized",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-906fac2ff8f32598d837",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/minimax-h3-image-mlx@6f62669b919bccdbf51b08c696fbb84542000a87:q4+MiniMaxAI/MiniMax-H3-Image@492fd8c4eca666f1085f57e30738c1e0d86b3439",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-d3ecf8ea9c9c51bf979c",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 3602907136,
+          "allocatorBytes": 3602907136,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 2532311040,
+          "allocatorBytes": 2532311040,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 3429892096,
+          "allocatorBytes": 3429892096,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 3602907136,
+          "allocatorBytes": 3602907136,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "168d4b1cc7f4c496dd15284fd73698abc1d8ede8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f094be7b4a639551271c7a6c61b5682edd0d4324313bc3f166e9374652b514f4",
+          "revision": "4e80fe01138a5e94acba550c9a7d2655eccbc090"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded MiniMax-H3-Image admission check rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded MiniMax-H3-Image admission check rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the minimax_h3_image staged text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 8388608,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 256,
+          "stageResidency": true,
+          "transformerWindowComponent": "both",
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              8388608
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              64
+            ]
+          },
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              256
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 8388608,
+              "decodeOverlap": 64,
+              "decodeTileEdge": 256,
+              "stageResidency": true,
+              "transformerWindowComponent": "both",
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "anchorRegime": "optimized",
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "minimax_h3_image",
+        "overlay": "none",
+        "provider": "minimax_h3_image",
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}
