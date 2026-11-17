@@ -672,21 +672,22 @@ pub(super) async fn generate_candle_pulid_stream(
                 })?,
                 None => model,
             };
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Build the per-job identity-likeness scorer ONCE here (on the blocking thread where the
             // `!Send` face stack is allowed), embedding the source identity face a single time and
             // reusing it across every output (sc-4411 caching AC). `None` ⇒ non-fatal staging /
             // construction failure ⇒ scores omitted; the generation still renders.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
             Ok((model, reference, plans, scorer, memory_context, requests))
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             drive_gen_items_scored(
                 tx.clone(),
                 work,
@@ -751,17 +752,21 @@ pub(super) async fn generate_candle_pulid_stream(
                     // Score this finished image against the cached source embedding (sc-4411). The Image
                     // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
                     // records an honest detected:false N/A, `None` scorer ⇒ field omitted.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out.width,
-                                height: out.height,
-                                pixels: out.pixels.clone(),
-                            },
-                            Some(likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out.width,
+                                    height: out.height,
+                                    pixels: out.pixels.clone(),
+                                },
+                                Some(likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((
                         seed,
                         out.width,

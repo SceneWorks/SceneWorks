@@ -1692,6 +1692,9 @@ pub(super) async fn generate_instantid_stream(
             } else {
                 None
             };
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Identity-likeness scorer (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
             // With-Character): for EVERY InstantID character_image job — single identity (the plain
             // With-Character generation, sc-4411), an angle set, OR a pose set — embed the source
@@ -1706,15 +1709,13 @@ pub(super) async fn generate_instantid_stream(
             #[cfg(native_lane)]
             let scorer: Option<crate::face_likeness::FaceLikenessScorer> = {
                 let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
-                crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)
+                crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)?
             };
             #[cfg(not(native_lane))]
             let scorer: Option<()> = None;
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
@@ -2000,17 +2001,21 @@ pub(super) async fn generate_instantid_stream(
                     // scorer (a failed construction) ⇒ no block ⇒ the field is omitted. The Image build +
                     // pixel clone is paid ONLY when a scorer exists.
                     #[cfg(native_lane)]
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out.width,
-                                height: out.height,
-                                pixels: out.pixels.clone(),
-                            },
-                            Some(face_likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out.width,
+                                    height: out.height,
+                                    pixels: out.pixels.clone(),
+                                },
+                                Some(face_likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     #[cfg(not(native_lane))]
                     let face_likeness: Option<JsonObject> = {
                         let _ = (&scorer, &face_likeness_source_ref);
