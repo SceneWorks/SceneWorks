@@ -111,6 +111,23 @@ pub(crate) fn note_loaded_peak(gpu_id: &str, peak_gb: f64) {
     }
 }
 
+/// The reclaimable credit (GB) for a resident provider's retained warm set
+/// ([`gen_core::Generator::retained_weight_bytes`]) against the capped budget
+/// [`live_capped_budget`] reads. Releasing the set raises the device's free reading by at most the
+/// set itself, and the cap shows `free = min(raw_free, cap)`, so the credit is exactly how far the
+/// shown free can still rise: `min(free + retained, total) − free`. A small-card cap that already
+/// shows a full card credits nothing (Codex, #3439); uncapped, the credit never exceeds the used
+/// bytes. No device reading credits nothing.
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn retained_credit_gb(budget: Option<VramBudget>, retained_gb: f64) -> f64 {
+    budget.map_or(0.0, |budget| {
+        ((budget.free_gb + retained_gb.max(0.0)).min(budget.total_gb) - budget.free_gb).max(0.0)
+    })
+}
+
 /// The reclaimable in-process VRAM pool (GB) for `gpu_id` — the [`note_loaded_peak`] high-water, or
 /// `0.0` when nothing has loaded on this card yet (so [`with_reclaimable`] is a no-op on a cold start).
 pub(crate) fn reclaimable_pool_gb(gpu_id: &str) -> f64 {
