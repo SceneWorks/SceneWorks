@@ -1472,6 +1472,48 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-optimized-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-optimized-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-lora-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-lora-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-optimized-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-optimized-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-optimized-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-optimized-evidence.json"
+        ),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),

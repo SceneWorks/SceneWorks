@@ -6714,6 +6714,141 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
+        "sha256": "e4af93ee06cb0fc6bc1eb7f3abfc81379dda54ae6c8630a915e2d6c9591c1b4b",
+        "recordId": "imc-98a5935a8cf92c69fd05",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 67080552448,
+        "denoise": 43591401472,
+        "decode": 2599419904
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 67080552448,
+        "denoise": 43591401472,
+        "decode": 2599419904
+      },
+      "overallAllocatorEnvelopeBytes": 67080552448
+    },
+    {
+      "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
+        "sha256": "c33fb8db33f41a9f46066725834fd36685b3d94ff58152cc0b9c175df429e574",
+        "recordId": "imc-dbc52c47956bb3134827",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40109080576,
+        "denoise": 21184380928,
+        "decode": 2630877184
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40109080576,
+        "denoise": 21184380928,
+        "decode": 2630877184
+      },
+      "overallAllocatorEnvelopeBytes": 40109080576
+    },
+    {
+      "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-evidence.json",
+        "sha256": "2e796db883ccf617971afeba7c074bd0f10d0194b5a2f7f37d4feac018f74803",
+        "recordId": "imc-67e75c771b4bdd82aeb6",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 74735157248,
+        "denoise": 31415336960,
+        "decode": 2594177024
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 74735157248,
+        "denoise": 31415336960,
+        "decode": 2594177024
+      },
+      "overallAllocatorEnvelopeBytes": 74735157248
+    },
+    {
       "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -12944,39 +13079,6 @@
       "evidence": null
     },
     {
-      "id": "analytic:minimax_h3_image:candle:bf16",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "candle",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:minimax_h3_image:candle:q4",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:minimax_h3_image:candle:q8",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "candle",
-      "tier": "q8",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
       "id": "analytic:minimax_h3_image:mlx:bf16",
       "modelId": "minimax_h3_image",
       "modelFamily": "minimax-h3-image",
@@ -14484,6 +14586,192 @@
         "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-mlx-dense-v1",
         "loaderClosureDigest": "43de50db8e96e563c52fc639e4d9fa20775d9fe597bc40f0ee774fbfac9242fc"
       }
+    }
+  ],
+  "regimeAnchors": [
+    {
+      "id": "regime:minimax_h3_image:candle:bf16:base:base:optimized:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-222d3f0e9b45c3fb5c60",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "optimized",
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-optimized-evidence.json",
+        "sha256": "353fe0f434c15fcc0f015660eafe427214f26420489b27be8ab32355b5cc5ce5",
+        "recordId": "imc-222d3f0e9b45c3fb5c60",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3830448128,
+        "denoise": 3895459840,
+        "decode": 2454716416
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3830448128,
+        "denoise": 3895459840,
+        "decode": 2454716416
+      },
+      "overallAllocatorEnvelopeBytes": 3895459840
+    },
+    {
+      "id": "regime:minimax_h3_image:candle:q4:base:base:lora:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-f01770f2b7b1a5015c5d",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "lora",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-lora-evidence.json",
+        "sha256": "8919db4348a899d91c87019ef2997f480c817eee859cd9ebf56081eae7e32dc7",
+        "recordId": "imc-f01770f2b7b1a5015c5d",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40106983424,
+        "denoise": 21081620480,
+        "decode": 2494562304
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40106983424,
+        "denoise": 21081620480,
+        "decode": 2494562304
+      },
+      "overallAllocatorEnvelopeBytes": 40106983424
+    },
+    {
+      "id": "regime:minimax_h3_image:candle:q4:base:base:optimized:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-906fac2ff8f32598d837",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "optimized",
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-optimized-evidence.json",
+        "sha256": "8ef6a8604ecd11dcd6cb11b5675431edd900deca195609ec8f68802c600081c0",
+        "recordId": "imc-906fac2ff8f32598d837",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3602907136,
+        "denoise": 3429892096,
+        "decode": 2532311040
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3602907136,
+        "denoise": 3429892096,
+        "decode": 2532311040
+      },
+      "overallAllocatorEnvelopeBytes": 3602907136
+    },
+    {
+      "id": "regime:minimax_h3_image:candle:q8:base:base:optimized:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-65c3533ea0a242e86e04",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "optimized",
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "deferred_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": true,
+        "staged": true,
+        "attentionChunked": true
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-optimized-evidence.json",
+        "sha256": "24c037b1a2e88f0c0c0d32bf8a4a82a328bc90d50bb9d1bdf7d11275cc0e2422",
+        "recordId": "imc-65c3533ea0a242e86e04",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 4038066176,
+        "denoise": 3937402880,
+        "decode": 2597322752
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 4038066176,
+        "denoise": 3937402880,
+        "decode": 2597322752
+      },
+      "overallAllocatorEnvelopeBytes": 4038066176
     }
   ]
 }
