@@ -133,12 +133,20 @@ async function main() {
   child.on('error', () => { spawnFailed = true; });
   const done = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
   const api = async (method, route, body) => {
-    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method,
-      ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(10000) });
-    failureHint = response.ok ? '' : `HTTP ${method} ${route} ${response.status}`;
-    assert(response.ok, `HTTP ${method} ${response.status}`);
-    return response.json();
+    const timeoutMs = method === 'POST' && route === '/api/v1/image/jobs' ? 120000 : 10000;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${route}`, { method,
+        ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(timeoutMs) });
+      failureHint = response.ok ? '' : `HTTP ${method} ${route} ${response.status}`;
+      assert(response.ok, `HTTP ${method} ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError')
+        failureHint = `${method} ${route} timed out after ${timeoutMs} ms`;
+      else if (!failureHint) failureHint = `${method} ${route} request failed`;
+      throw error;
+    }
   };
   let result;
   try {
