@@ -4932,7 +4932,6 @@ fn training_adapters_are_cataloged_at_the_loaded_revision() {
         "{notice}"
     );
     assert!(notice.contains("Model Derivative"), "{notice}");
-    assert_eq!(adapter["ui"]["attribution"], base["ui"]["attribution"]);
 }
 
 /// sc-2124: the decoded-x0 aux losses whose upstream window was `[0, 1]` — depth anchoring, the

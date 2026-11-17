@@ -48469,7 +48469,6 @@
       "requiresLicenseAcknowledgment": true,
       "type": "utility",
       "ui": {
-        "attribution": "Powered by MiniMax-H3-Image",
         "description": "Fizgig de-distill training adapter for MiniMax-H3-Image (rank 16). Applied to MiniMax-H3-Image only while training a LoRA so it learns your subject instead of un-distilling the 6-step base into blurry, ghosted samples; removed for previews and generation - not a generation model. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "label": "MiniMax-H3-Image Training Adapter",
         "recommendedFor": []
