@@ -23,14 +23,60 @@ const GIB: u64 = 1024 * 1024 * 1024;
 
 #[test]
 fn candle_post_load_snapshot_preserves_committed_pressure_under_a_cap() {
-    let budget = candle_budget_from_total_free(24 * GIB, 10 * GIB, Some(16 * GIB))
+    let budget = candle_budget_from_total_free(24 * GIB, 10 * GIB, Some(16 * GIB), None, 0)
         .expect("valid CUDA snapshot");
     assert_eq!(budget.total_bytes, 16 * GIB);
     assert_eq!(budget.committed_bytes, 14 * GIB);
     assert_eq!(budget.reclaimable_bytes, 0);
     assert_eq!(budget.reserved_headroom_bytes, 2 * GIB);
-    assert!(candle_budget_from_total_free(24 * GIB, 25 * GIB, None).is_none());
+    assert!(candle_budget_from_total_free(24 * GIB, 25 * GIB, None, None, 0).is_none());
 }
+
+/// A provider's warm set (MiniMax-H3 on CUDA) is credited as reclaimable, never beyond what the
+/// snapshot shows committed, and a provider that retains nothing changes nothing.
+#[test]
+fn a_providers_retained_warm_set_is_credited_as_reclaimable() {
+    let budget = |retained| {
+        candle_budget_from_total_free(96 * GIB, 30 * GIB, None, retained, 0)
+            .expect("valid CUDA snapshot")
+    };
+    assert_eq!(budget(None).reclaimable_bytes, 0);
+    let warm = budget(Some(60 * GIB));
+    assert_eq!(warm.reclaimable_bytes, 60 * GIB);
+    assert_eq!(warm.committed_bytes, 66 * GIB, "the snapshot is unchanged");
+    // 30 GiB free plus the 60 GiB warm set, less the 2 GiB reserve.
+    assert_eq!(warm.effective_bytes(), 88 * GIB);
+    assert_eq!(
+        budget(Some(100 * GIB)).reclaimable_bytes,
+        66 * GIB,
+        "never more than is committed"
+    );
+}
+
+/// Under the small-card emulation cap the retained bytes are part of the RAW committed reading, so
+/// the bytes the cap already clipped off committed are not credited again (Codex, #3439).
+#[test]
+fn the_retained_credit_is_reduced_by_what_the_cap_clipped() {
+    // 32 GiB cap, 50 GiB committed (46 of 96 free), 20 GiB retained: 50 − 20 = 30 committed on a
+    // 32 GiB card is 2 GiB free, which the 2 GiB reserve consumes.
+    let capped =
+        candle_budget_from_total_free(96 * GIB, 46 * GIB, Some(32 * GIB), Some(20 * GIB), 0)
+            .expect("valid CUDA snapshot");
+    assert_eq!(capped.committed_bytes, 32 * GIB);
+    assert_eq!(capped.reclaimable_bytes, 2 * GIB);
+    assert_eq!(capped.effective_bytes(), 0);
+    // A warm set smaller than the clipped bytes earns nothing.
+    let clipped =
+        candle_budget_from_total_free(96 * GIB, 46 * GIB, Some(32 * GIB), Some(10 * GIB), 0)
+            .expect("valid CUDA snapshot");
+    assert_eq!(clipped.reclaimable_bytes, 0);
+    // Bytes the provider's cold load already attributes are not credited a second time.
+    let attributed =
+        candle_budget_from_total_free(96 * GIB, 30 * GIB, None, Some(60 * GIB), 10 * GIB)
+            .expect("valid CUDA snapshot");
+    assert_eq!(attributed.reclaimable_bytes, 56 * GIB);
+}
+
 const FITTED_CURVE_CLOSURE: &str =
     "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3";
 

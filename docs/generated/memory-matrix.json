@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2c29f60b57f4e8b5f4af7b68d88888987416849c4023e8f34efa965d172ba229",
+    "sceneWorksRevision": "source-tree:3267c1cf68f97f32c2cd343bd38f554d672eb8044b14cb47b2245658e3ae9920",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -41,7 +41,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "58a7f3129ff5e3f5d3a5da4d3521e6cbe1a13621b58d85e357b02dd62ed2ce35"
+        "sha256": "c1fb8123b036236ea88f3cbfe78f50862438365ebf4d249d991c204df543918c"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -69,7 +69,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "0e377df54a3c9ca25d324aa9cbb97cb84b99ab7033c6e6ebdfd02c72679a527a"
+        "sha256": "46dab09ed77ef7fec0b7973df12064fc628672aa5b50841df7bf74086539f19a"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -89,7 +89,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "fc190fb2d97ad0a604e8e06aad6274258055eb0d56cd0a6a1891418d40087825"
+        "sha256": "50bd48f9d77ccc751f54cb232a7663c095c460fbb642d67b860eb28054590247"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -97,11 +97,11 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "2091a4d0fbd196ce115239d66d068c52ca29e9f3d5e67c49cc6f2b80a5d6f712"
+        "sha256": "7685182fce5ad80866360f11105b51e48cb303302a0e8151889b98a89004111d"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "9fa5381943895924e2ef5d8bb966deb1c6dc7509fef289f9ad2e645864b2215a"
+        "sha256": "2a56ee8e32a1eedd792b91c256971c36d9efe8ead4420ec84b4c55fddda1c1bc"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -193,7 +193,7 @@
     "anchors": 265,
     "analyticOnlyCells": 124,
     "anchoredCells": 4036,
-    "staleAnchors": 262,
+    "staleAnchors": 265,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -7934,7 +7934,7 @@
         "fps": null
       },
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 8
     },
@@ -7952,7 +7952,7 @@
         "fps": null
       },
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 8
     },
@@ -7970,7 +7970,7 @@
         "fps": null
       },
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-q8-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 8
     },
@@ -147594,7 +147594,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147648,7 +147648,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147700,7 +147700,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147754,7 +147754,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147806,7 +147806,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147860,7 +147860,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147912,7 +147912,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147966,7 +147966,7 @@
         "id": "minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
         "tier": "bf16",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:bf16:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-98a5935a8cf92c69fd05",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148018,7 +148018,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148072,7 +148072,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148124,7 +148124,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148178,7 +148178,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148230,7 +148230,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148284,7 +148284,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148336,7 +148336,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148390,7 +148390,7 @@
         "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
         "tier": "q4",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148442,7 +148442,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148496,7 +148496,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148548,7 +148548,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148602,7 +148602,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148654,7 +148654,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148708,7 +148708,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148760,7 +148760,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148814,7 +148814,7 @@
         "id": "minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
         "tier": "q8",
         "source": "config/memory-anchors.json#minimax_h3_image:candle:q8:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-67e75c771b4bdd82aeb6",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
