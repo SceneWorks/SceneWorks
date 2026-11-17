@@ -16,12 +16,10 @@
     }
   },
   "enginesThatAlwaysStage": {
-    "$comment": "SW-F363. Providers whose generator stages EVERY request (text encoder, then DiT, then VAE, each released before the next maps) whatever rung is selected, so their least-optimized achievable anchor is the STAGED composition and a `:resident` regime row would claim a render that cannot happen. Read by scripts/memory-calibration-harness.mjs (validatePlan: such a provider's rows engage staged_residency and plan no `:resident` row) and by crates/sceneworks-worker/src/inference_runtime.rs (the staged override is legitimate for these; on MLX each listed provider's registered descriptor must carry `unconditionally_engages_staged_residency`). Evidence at the pin: mlx-gen-minimax-h3 h3_image/model.rs sets `unconditionally_engages_staged_residency: true`; candle-gen-minimax-h3 image_memory_strategy.rs and image_model.rs state the generator always stages (its descriptor carries no such flag, so the Candle half is this declaration's word alone).",
+    "$comment": "SW-F363. Providers whose generator stages EVERY request (text encoder, then DiT, then VAE, each released before the next maps) whatever rung is selected, so their least-optimized achievable anchor is the STAGED composition and a `:resident` regime row would claim a render that cannot happen. Read by scripts/memory-calibration-harness.mjs (validatePlan: such a provider's rows engage staged_residency and plan no `:resident` row) and by crates/sceneworks-worker/src/inference_runtime.rs (the staged override is legitimate for these; on MLX each listed provider's registered descriptor must carry `unconditionally_engages_staged_residency`). Evidence at the pin: mlx-gen-minimax-h3 h3_image/model.rs sets `unconditionally_engages_staged_residency: true`. The Candle lane lists nothing: candle-gen-minimax-h3 image_model.rs keeps the text encoder, DiT and VAE decoder warm on a resident request whenever its warm estimate fits the device, so a resident render can happen there.",
     "mlx": [
       "minimax_h3_image"
     ],
-    "candle": [
-      "minimax_h3_image"
-    ]
+    "candle": []
   }
 }

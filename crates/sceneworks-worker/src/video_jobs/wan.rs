@@ -3100,6 +3100,7 @@ pub(super) async fn generate_video_using(
                         cache_state,
                         load_policy,
                         provider_resident_bytes,
+                        generator.retained_weight_bytes(),
                     )?
                 } else {
                     None
