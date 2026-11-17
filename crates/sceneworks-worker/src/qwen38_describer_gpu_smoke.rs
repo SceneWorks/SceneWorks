@@ -426,7 +426,7 @@ async fn qwen38_decode_paths_on_cuda() {
             report.map(|r| r.accepted_tokens),
             report.map(|r| r.target_forwards),
             report.and_then(|r| r.speculative_demoted_at),
-            report.and_then(|r| r.speculative_monitor.clone()),
+            report.and_then(|r| r.speculative_monitor),
             report.map(|r| r.fallbacks.clone()),
         );
     }
