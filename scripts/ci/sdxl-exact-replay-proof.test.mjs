@@ -31,7 +31,11 @@ function fixture() {
   const execution = { state: 'resolved', identity: { version: 1, provider_id: 'sdxl', backend: 'candle', runtime_id: 'candle-execution-v1', output_units: 1,
     sampling: resolved(['ddim']), schedule: resolved(schedule), estimator: resolved('eps'),
     geometry: resolved([{ width: 1024, height: 1024, channels: 3, format: 'rgb8' }]),
-    quality_policy: resolved({ compute: [{ device: 'Cuda(0)', dtype: 'F16' }], operations: [] }), output_policy: resolved(['rgb8']),
+    quality_policy: resolved({ compute: [{ device: 'Cuda(0)', dtype: 'F16' }], operations: {
+      'sdxl/clip_l/representation': [{ value: 'packed_or_imported', repetitions: 1 }],
+      'sdxl/clip_bigg/representation': [{ value: 'packed_or_imported', repetitions: 1 }],
+      'sdxl/unet/representation': [{ value: 'packed', repetitions: 1 }],
+    } }), output_policy: resolved(['rgb8']),
     randomness: { kind: 'draws', scheme: 'candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32',
       draws: [{ output_index: 0, purpose: 'sdxl/pipeline', seed: 16402, noise_sha256: null }] },
     deterministic_replay: { kind: 'non_deterministic', reason: 'not qualified' } } };
@@ -54,6 +58,7 @@ function pair() {
 }
 test('completed facts and distinct fresh outputs qualify; retries cannot reuse attempt identity', () => {
   const { first, second } = pair(); compareFresh(first, second);
+  assert.deepEqual(first.representations, ['packed_or_imported', 'packed_or_imported', 'packed']);
   assert.throws(() => compareFresh(first, { ...second, attemptId: first.attemptId }), /reused completed attempt/);
   for (const key of ['pngSha256', 'executionSha256', 'payloadSha256', 'acceptedBindingSha256', 'sourceIdentitySha256', 'scheduleSha256', 'qualitySha256'])
     assert.throws(() => compareFresh(first, { ...second, [key]: hash('different') }), new RegExp(key));
@@ -78,6 +83,8 @@ test('completed witness rejects cancellation, fallback, missing facts and spoofe
     (x) => { x.receipt.execution.identity.randomness.draws[0].purpose = 'other'; },
     (x) => { x.receipt.execution.identity.geometry.state = 'unavailable'; },
     (x) => { x.receipt.execution.identity.quality_policy.value.compute = [{ device: 'Cpu' }]; },
+    (x) => { delete x.receipt.execution.identity.quality_policy.value.operations['sdxl/clip_l/representation']; },
+    (x) => { x.receipt.execution.identity.quality_policy.value.operations['sdxl/unet/representation'][0].value = 'dense'; },
   ];
   for (const mutate of mutations) { const { input } = fixture(); mutate(input); assert.throws(() => completedWitness(input)); }
 });

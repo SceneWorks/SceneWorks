@@ -154,6 +154,10 @@ export function completedWitness({ job, receipt, route, png, workerId, device, p
   for (const key of ['estimator', 'geometry', 'quality_policy', 'output_policy']) fact(identity[key]);
   same(fact(identity.geometry), [{ width: 1024, height: 1024, channels: 3, format: 'rgb8' }], 'output geometry changed');
   assert(fact(identity.quality_policy).compute?.some((entry) => /^Cuda/.test(entry.device)), 'no executed CUDA compute');
+  const operations = fact(identity.quality_policy).operations;
+  const representations = ['sdxl/clip_l/representation', 'sdxl/clip_bigg/representation', 'sdxl/unet/representation']
+    .map((key) => operations?.[key]?.length === 1 ? operations[key][0]?.value : undefined);
+  same(representations, ['packed_or_imported', 'packed_or_imported', 'packed'], 'q4 representation changed');
   assert.equal(identity.randomness?.kind, 'draws', 'draw identity missing');
   assert.equal(identity.randomness.scheme, 'candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32', 'RNG scheme changed');
   const draws = identity.randomness.draws;
@@ -165,7 +169,7 @@ export function completedWitness({ job, receipt, route, png, workerId, device, p
     executionWithoutSupportSha256: digest({ ...identity, deterministic_replay: undefined }),
     support: { kind: identity.deterministic_replay?.kind, ...(identity.deterministic_replay?.scope ? { scope: identity.deterministic_replay.scope } : {}) }, pngSha256, payloadSha256,
     acceptedBindingSha256: receipt.acceptedBindingSha256, sourceIdentitySha256: digest(sourceIdentity(route)),
-    scheduleSha256, qualitySha256: digest(identity.quality_policy), providerId: identity.provider_id, runtimeId: identity.runtime_id };
+    scheduleSha256, qualitySha256: digest(identity.quality_policy), representations, providerId: identity.provider_id, runtimeId: identity.runtime_id };
 }
 export function verifyQueuedPayload(payload) {
   for (const [key, value] of Object.entries(REQUEST)) {
