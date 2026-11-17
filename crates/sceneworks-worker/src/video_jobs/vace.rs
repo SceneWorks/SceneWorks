@@ -208,9 +208,11 @@ pub(super) fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<Pa
         true,
     )
     .map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "replace_person: failed to assemble the Wan-VACE snapshot: {error}"
-        ))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!(
+                "replace_person: failed to assemble the Wan-VACE snapshot: {error}"
+            ))
+        })
     })?;
     Ok(out_dir)
 }
@@ -280,9 +282,11 @@ fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> 
         &out_dir, &high, &low, &base_wan, true,
     )
     .map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "wan_2_2_vace_fun_14b: failed to assemble the VACE-Fun snapshot: {error}"
-        ))
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!(
+                "wan_2_2_vace_fun_14b: failed to assemble the VACE-Fun snapshot: {error}"
+            ))
+        })
     })?;
     Ok(out_dir)
 }

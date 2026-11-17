@@ -1369,9 +1369,10 @@ fn joycaption_thread(
                 }
                 Err(error) => {
                     // A model that cannot load fails the whole job; the thread ends with it.
-                    let _ = call.reply.send(Err(WorkerError::Engine(format!(
-                        "JoyCaption {backend} load failed: {error}"
-                    ))));
+                    let _ = call.reply.send(Err(crate::generation_error(
+                        &format!("JoyCaption {backend} load failed"),
+                        error,
+                    )));
                     return;
                 }
             }
@@ -2211,6 +2212,9 @@ async fn describe_with_retries(
             StreamSupervisor::new(cancel, generation, progress_report_interval(settings), None)
                 .wait(api, settings, &job.id)
                 .await?;
+        if let Some(fatal) = crate::process_fault(&reply) {
+            return Err(fatal);
+        }
         if was_canceled {
             return Ok(None);
         }

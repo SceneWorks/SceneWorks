@@ -212,6 +212,12 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
+    /// The exact owner-local plan compiled before the generator was loaded. Only base FLUX.1
+    /// reaches this seam during ENG-1a; other routes retain their existing generator call.
+    pub(crate) render_plan: Option<&'a gen_core::RenderPlan>,
+    /// The pre-load plan of the Hires.fix refinement pass, compiled together with `render_plan` as
+    /// one multi-pass plan whose second pass consumes the first pass's stretched output.
+    pub(crate) hires_render_plan: Option<&'a gen_core::RenderPlan>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -272,6 +278,11 @@ fn generate_one_on_surface(
         cancel,
         on_progress,
     )?;
+    exactly_one_image(images)
+}
+
+/// The one image of a single-image render; a missing or extra image is an engine error.
+fn exactly_one_image(images: Vec<(u32, u32, Vec<u8>)>) -> WorkerResult<(u32, u32, Vec<u8>)> {
     match images.len() {
         1 => Ok(images.into_iter().next().expect("one image checked")),
         count => Err(WorkerError::Engine(format!(
@@ -311,6 +322,137 @@ pub(super) fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
+    let request = build_render_request(
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+    )?;
+    render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        surface,
+        on_progress,
+    )
+}
+
+/// Run one already-built generic-lane request on `surface` and return every image it produced.
+fn render_request_on_surface(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    surface: &LaneRgbaSurface<'_>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
+    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
+    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
+    // has its warnings collected for the image's provenance.
+    let report = if let Some(references) = surface.flux3_references {
+        flux3_references::render_reference_request(
+            generator,
+            &mut request,
+            references,
+            memory_strategy_context,
+            on_progress,
+        )
+    } else {
+        match surface.render_plan {
+            Some(plan) => crate::memory_strategy::generate_with_scope_execution_report_planned(
+                generator,
+                &mut request,
+                plan,
+                memory_strategy_context,
+                on_progress,
+            ),
+            None => crate::memory_strategy::generate_with_scope_execution_report(
+                generator,
+                &mut request,
+                memory_strategy_context,
+                on_progress,
+            ),
+        }
+    }
+    .map_err(|error| generation_error("generation failed", error))?;
+    if let Some(sink) = surface.execution_report {
+        *sink.borrow_mut() = Some(WorkerExecutionReport::Provider(report.execution));
+    }
+    let report = report.generation;
+    if let Some(sink) = surface.warnings {
+        sink.borrow_mut().extend(report.warnings);
+    }
+    if let Some(sink) = surface.prefix_kv_cache {
+        *sink.borrow_mut() = report.prefix_kv_cache;
+    }
+    let output = report
+        .output
+        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
+    match output {
+        GenerationOutput::Images(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
+        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
+        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
+        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
+        GenerationOutput::ImagesRgba(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
+        _ => Err(WorkerError::Engine(
+            "generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
+/// Build the exact request sent by the generic image lane. The pre-load FLUX.1 compiler and the
+/// post-load render both call this function, so a plan cannot accidentally describe different
+/// prompt, geometry, count, schedule or conditioning inputs from execution.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_render_request(
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+) -> WorkerResult<GenerationRequest> {
     let conditioning = if surface.flux3_references.is_some() {
         if reference.is_some() || !multi_references.is_empty() || edit_mask.is_some() {
             return Err(WorkerError::InvalidPayload(
@@ -367,53 +509,243 @@ pub(super) fn render_on_surface(
     if let Some(layout) = surface.flux3_layout {
         layout.apply(&mut request);
     }
-    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
-    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
-    // has its warnings collected for the image's provenance.
-    let report = if let Some(references) = surface.flux3_references {
-        flux3_references::render_reference_request(
-            generator,
-            &mut request,
-            references,
-            memory_strategy_context,
-            on_progress,
-        )
-    } else {
-        crate::memory_strategy::generate_with_scope_execution_report(
-            generator,
-            &mut request,
-            memory_strategy_context,
-            on_progress,
-        )
+    Ok(request)
+}
+
+/// The FLUX.1 provider ids whose every request — base text-to-image, XLabs IP-Adapter, ControlNet
+/// and PuLID — renders from a render plan compiled before load (SW-6933 / SW-6936).
+pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
+    "flux1_schnell",
+    "flux1_dev",
+    "flux1_dev_control",
+    "pulid_flux",
+];
+
+pub(super) use crate::generation_error;
+
+/// Map a provider's pre-load plan refusal onto the worker's error classes: an invalid request is a
+/// payload error the user can act on, cancellation stays cancellation, and a poisoned process keeps its
+/// typed recovery class.
+pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::ProcessPoisoned(_) => {
+            crate::classify_engine_error("render-plan compilation failed", error)
+        }
+        gen_core::Error::Canceled => WorkerError::Canceled(format!(
+            "{route}: generation canceled while compiling its render plan"
+        )),
+        other => crate::provider_error(other, |other| {
+            WorkerError::InvalidPayload(format!(
+                "{route}: cannot compile render plan before load: {other}"
+            ))
+        }),
     }
-    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
-    if let Some(sink) = surface.execution_report {
-        *sink.borrow_mut() = Some(WorkerExecutionReport::Provider(report.execution));
+}
+
+/// Resolve a provider's owner-local plan before `start_cached_gen_stream` can load weights.
+/// The registry returns `None` for routes that have not migrated yet; an invalid request is a
+/// pre-load error rather than a fallback to the legacy call.
+pub(super) fn compile_render_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<Option<gen_core::RenderPlan>> {
+    let plan = registry
+        .compile_render_plan(engine_id, spec, request)
+        .map_err(|error| preload_plan_error(engine_id, error))?;
+    if plan.is_none() && FLUX1_PRELOAD_PLANNED_ENGINES.contains(&engine_id) {
+        return Err(WorkerError::Engine(format!(
+            "{engine_id}: route has no registered pre-load render planner"
+        )));
     }
-    let report = report.generation;
-    if let Some(sink) = surface.warnings {
-        sink.borrow_mut().extend(report.warnings);
+    Ok(plan)
+}
+
+/// [`compile_render_plan`] for a route that only renders from a pre-load plan (the MLX FLUX.1
+/// ControlNet and PuLID lanes).
+#[cfg(target_os = "macos")]
+pub(super) fn compile_required_render_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<gen_core::RenderPlan> {
+    compile_render_plan(registry, engine_id, spec, request)?.ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "{engine_id}: route has no registered pre-load render planner"
+        ))
+    })
+}
+
+/// The Hires.fix refinement request: the target size, the refinement steps and CFG, and the first
+/// pass's stretched output as `reference` (`None` while planning, where the multi-pass plan supplies
+/// the produced reference). The refinement always decodes through the native VAE, so PiD is off
+/// whatever the first pass used. Execution and the pre-load planner both build it here, so the
+/// plan is compiled from the request that runs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_hires_refinement_request(
+    prompt: &str,
+    seed: i64,
+    hires: &HiresFixPlan,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+) -> WorkerResult<GenerationRequest> {
+    build_render_request(
+        prompt,
+        hires.width,
+        hires.height,
+        seed,
+        hires.steps,
+        hires.guidance,
+        negative_prompt,
+        reference,
+        &[],
+        None,
+        hires.true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        false,
+        text_style_gain,
+        memory,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+    )
+}
+
+/// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
+/// refinement pass compiled together with it.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(super) struct PreparedRender {
+    pub(super) pass: Option<gen_core::RenderPlan>,
+    pub(super) hires: Option<gen_core::RenderPlan>,
+}
+
+/// Compile a Hires.fix render — the first pass, then a refinement pass whose reference is the first
+/// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
+/// before load. `refine` carries no reference of its own; the plan binds the produced one by size
+/// and strength, because its pixels exist only after the first pass.
+#[cfg(target_os = "macos")]
+pub(super) fn compile_hires_render_plans(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    first: &GenerationRequest,
+    refine: &GenerationRequest,
+    hires: &HiresFixPlan,
+) -> WorkerResult<(gen_core::RenderPlan, gen_core::RenderPlan)> {
+    let passes = [
+        gen_core::PlannedPassRequest {
+            request: first,
+            produced_reference: None,
+        },
+        gen_core::PlannedPassRequest {
+            request: refine,
+            produced_reference: Some(gen_core::ProducedReference {
+                from_pass: 0,
+                width: hires.width,
+                height: hires.height,
+                strength: Some(hires.provider_reference_strength),
+            }),
+        },
+    ];
+    let plan = registry
+        .compile_multi_pass_render_plan(engine_id, spec, &passes)
+        .map_err(|error| preload_plan_error(engine_id, error))?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })?;
+    match plan.passes() {
+        [first, refine] => Ok((first.clone(), refine.clone())),
+        passes => Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
+            passes.len()
+        ))),
     }
-    if let Some(sink) = surface.prefix_kv_cache {
-        *sink.borrow_mut() = report.prefix_kv_cache;
+}
+
+/// Render one image of a bespoke MLX FLUX.1 lane (ControlNet, PuLID) from its pre-load plan inside
+/// the admitted request scope, returning that image with the provider's same-attempt execution
+/// identity. A missing or extra image is an engine error, so an identity never attaches to the
+/// wrong output.
+#[cfg(target_os = "macos")]
+pub(super) fn generate_planned_single_image(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    context: Option<&gen_core::MemoryRunContext>,
+    lane: &str,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(Image, ExecutionIdentity)> {
+    let completed = crate::memory_strategy::generate_with_scope_execution_report_planned(
+        generator,
+        request,
+        plan,
+        context,
+        on_progress,
+    )
+    .map_err(|error| generation_error(&format!("{lane} generation failed"), error))?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+            Ok((images.remove(0), completed.execution))
+        }
+        _ => Err(WorkerError::Engine(format!(
+            "{lane} did not complete exactly one RGB image"
+        ))),
     }
-    let output = report
-        .output
-        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
-    match output {
-        GenerationOutput::Images(images) => Ok(images
-            .into_iter()
-            .map(|image| (image.width, image.height, image.pixels))
-            .collect()),
-        // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
-        // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
-        // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
-        GenerationOutput::ImagesRgba(images) => Ok(images
-            .into_iter()
-            .map(|image| (image.width, image.height, image.pixels))
-            .collect()),
-        _ => Err(WorkerError::Engine(
-            "generator returned non-image output".to_owned(),
+}
+
+/// Publish one output's completed execution report as its `workerExecutionReport` image fact, the
+/// receipt slot `consume_gen_events` merges into that image. `false` means the consumer is gone.
+#[cfg(target_os = "macos")]
+pub(super) fn send_execution_report(
+    tx: &tokio::sync::mpsc::Sender<super::stream::GenEvent>,
+    index: usize,
+    execution: ExecutionIdentity,
+) -> WorkerResult<bool> {
+    let mut facts = crate::JsonObject::new();
+    WorkerExecutionReport::Provider(execution).insert_image_facts(&mut facts)?;
+    Ok(tx
+        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts })
+        .is_ok())
+}
+
+/// The refinement pass's reference must be exactly the image its plan declared it consumes.
+pub(super) fn check_produced_reference(
+    plan: &gen_core::RenderPlan,
+    reference: &Image,
+) -> WorkerResult<()> {
+    match plan.produced_reference() {
+        Some(produced)
+            if (produced.width, produced.height) == (reference.width, reference.height) =>
+        {
+            Ok(())
+        }
+        Some(produced) => Err(WorkerError::InvalidPayload(format!(
+            "Hires.fix refinement plan expects a {}x{} first-pass image, got {}x{}",
+            produced.width, produced.height, reference.width, reference.height
+        ))),
+        None => Err(WorkerError::InvalidPayload(
+            "Hires.fix refinement plan does not consume the first pass's output".to_owned(),
         )),
     }
 }
@@ -765,6 +1097,8 @@ pub(super) fn generate_one_with_hires_on_surface(
         execution_report: Some(&base_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
+        render_plan: surface.render_plan,
+        hires_render_plan: None,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -810,6 +1144,9 @@ pub(super) fn generate_one_with_hires_on_surface(
         hires.height,
         "stretch",
     )?;
+    if let Some(plan) = surface.hires_render_plan {
+        check_produced_reference(plan, &high_res_reference)?;
+    }
     let reference = (high_res_reference, hires.provider_reference_strength);
     let mut second_progress = |progress| match progress {
         Progress::Step { current, .. } => on_progress(Progress::Step {
@@ -838,35 +1175,35 @@ pub(super) fn generate_one_with_hires_on_surface(
         execution_report: Some(&refine_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
+        render_plan: surface.hires_render_plan,
+        hires_render_plan: None,
     };
-    let final_image = generate_one_on_surface(
-        generator,
+    let request = build_hires_refinement_request(
         prompt,
-        hires.width,
-        hires.height,
         seed,
-        hires.steps,
-        hires.guidance,
+        &hires,
         negative_prompt,
         Some(&reference),
-        &[],
-        None,
-        hires.true_cfg,
         sampler,
         scheduler,
         scheduler_shift,
         guidance_method,
-        false,
         text_style_gain,
         memory,
-        memory_strategy_context,
         enhance,
         prompt_enhancement,
         preview,
         &refine_surface,
         cancel,
+    )?;
+    let images = render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        &refine_surface,
         &mut second_progress,
     )?;
+    let final_image = exactly_one_image(images)?;
     let refine_execution = refine_execution_report.take().ok_or_else(|| {
         WorkerError::Engine("hires-fix refine pass returned no completed execution report".into())
     })?;
@@ -888,6 +1225,448 @@ pub(super) fn step_fraction(index: usize, current: u32, total: u32, count: u32) 
     };
     (0.1 + per * (index as f64 + within)).min(0.95)
 }
+
+#[cfg(test)]
+mod process_fault_tests {
+    use super::*;
+
+    struct FaultGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        poisoned: bool,
+    }
+
+    impl FaultGenerator {
+        fn new(poisoned: bool) -> Self {
+            Self {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "render_fault_mock",
+                    family: "test",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: Default::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                poisoned,
+            }
+        }
+    }
+
+    impl Generator for FaultGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            panic!("planned render must not fall back to legacy generation")
+        }
+
+        fn generate_planned(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _plan: &gen_core::RenderPlan,
+            _scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            if self.poisoned {
+                Err(gen_core::Error::ProcessPoisoned(
+                    "first provider device fault".into(),
+                ))
+            } else {
+                Err(gen_core::Error::Unsupported("ordinary refusal".into()))
+            }
+        }
+    }
+
+    #[test]
+    fn planned_render_preserves_typed_provider_poison_and_ordinary_error_class() {
+        let request = gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let poison = FaultGenerator::new(true);
+        let plan = gen_core::RenderPlan::base_image(
+            poison.descriptor(),
+            &request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan");
+        let surface = LaneRgbaSurface {
+            render_plan: Some(&plan),
+            ..Default::default()
+        };
+        let render = |generator: &dyn Generator| {
+            render_on_surface(
+                generator,
+                "a fox",
+                64,
+                64,
+                7,
+                1,
+                None,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
+                gen_core::PreviewSink::default(),
+                &surface,
+                &CancelFlag::new(),
+                &mut |_| {},
+            )
+        };
+        let fatal = render(&poison).expect_err("provider fault must fail render");
+        assert!(
+            matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "first provider device fault")
+        );
+        let ordinary = render(&FaultGenerator::new(false)).expect_err("ordinary refusal");
+        assert!(
+            matches!(ordinary, WorkerError::Engine(ref detail) if detail == "generation failed: unsupported: ordinary refusal")
+        );
+    }
+
+    /// A planned provider whose only render entry is the planned execution-report entry; it returns
+    /// `.1` images.
+    struct PlannedReporter(gen_core::ModelDescriptor, usize);
+
+    impl Generator for PlannedReporter {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.0
+        }
+
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            panic!("planned render must not fall back to legacy generation")
+        }
+
+        fn generate_with_execution_report(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+            panic!("planned render must not take the unplanned report entry")
+        }
+
+        fn generate_planned_with_execution_report(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _plan: &gen_core::RenderPlan,
+            _scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+            gen_core::generator::CompletedGeneration::new(
+                gen_core::GenerationReport::from_output(GenerationOutput::Images(
+                    (0..self.1)
+                        .map(|_| Image {
+                            width: request.width,
+                            height: request.height,
+                            pixels: vec![0; (request.width * request.height * 3) as usize],
+                        })
+                        .collect(),
+                )),
+                ExecutionIdentity::Unavailable {
+                    reason: ExecutionUnavailable {
+                        code: "planned-attempt".into(),
+                        detail: "fixture planned attempt".into(),
+                        missing_facts: vec!["fixture replay".into()],
+                    },
+                },
+                &self.0,
+            )
+        }
+    }
+
+    #[test]
+    fn planned_render_publishes_the_planned_attempts_execution_report() {
+        let generator = PlannedReporter(FaultGenerator::new(false).descriptor, 1);
+        let request = gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let plan = gen_core::RenderPlan::base_image(
+            generator.descriptor(),
+            &request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan");
+        let sink = std::cell::RefCell::new(None);
+        let surface = LaneRgbaSurface {
+            render_plan: Some(&plan),
+            execution_report: Some(&sink),
+            ..Default::default()
+        };
+        let images = render_on_surface(
+            &generator,
+            "a fox",
+            64,
+            64,
+            7,
+            1,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &surface,
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .expect("planned render");
+        assert_eq!(images.len(), 1);
+        let report = serde_json::to_value(sink.take().expect("planned execution report")).unwrap();
+        assert_eq!(report["reason"]["code"], "planned-attempt");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_plan(
+        generator: &dyn Generator,
+        request: &GenerationRequest,
+    ) -> gen_core::RenderPlan {
+        gen_core::RenderPlan::base_image(
+            generator.descriptor(),
+            request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan")
+    }
+
+    /// The MLX FLUX.1 ControlNet and PuLID lanes render through the planned report entry and
+    /// publish its identity as that output's `workerExecutionReport` image fact.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_publish_the_planned_attempts_report_as_an_image_fact() {
+        let generator = PlannedReporter(FaultGenerator::new(false).descriptor, 1);
+        let request = || gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let plan = fixture_plan(&generator, &request());
+
+        // ControlNet: the lane's own render function.
+        let (image, execution) = super::super::flux1_control::flux1_control_generate_one(
+            &generator,
+            request(),
+            &plan,
+            None,
+            &mut |_| {},
+        )
+        .expect("planned control render");
+        assert_eq!((image.width, image.height), (64, 64));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        assert!(send_execution_report(&tx, 3, execution).unwrap());
+
+        // PuLID: the shared planned single-image render it calls.
+        let (_, execution) = generate_planned_single_image(
+            &generator,
+            &mut request(),
+            &plan,
+            None,
+            "PuLID-FLUX",
+            &mut |_| {},
+        )
+        .expect("planned PuLID render");
+        assert!(send_execution_report(&tx, 4, execution).unwrap());
+
+        for expected in [3, 4] {
+            match rx.try_recv().expect("image fact") {
+                super::super::stream::GenEvent::ImageFacts { index, facts } => {
+                    assert_eq!(index, expected);
+                    assert_eq!(
+                        facts["workerExecutionReport"]["reason"]["code"],
+                        "planned-attempt"
+                    );
+                }
+                _ => panic!("expected an ImageFacts event"),
+            }
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_refuse_a_missing_or_extra_image() {
+        for count in [0, 2] {
+            let generator = PlannedReporter(FaultGenerator::new(false).descriptor, count);
+            let mut request = gen_core::GenerationRequest {
+                prompt: "a fox".into(),
+                width: 64,
+                height: 64,
+                count: 1,
+                seed: Some(7),
+                steps: Some(1),
+                ..Default::default()
+            };
+            let plan = fixture_plan(&generator, &request);
+            assert!(generate_planned_single_image(
+                &generator,
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .is_err());
+        }
+    }
+
+    /// Codex P1 on PR #3434: the bespoke MLX FLUX.1 ControlNet / PuLID planned render must keep a
+    /// provider's `ProcessPoisoned` class and mark owner cleanup unsafe, exactly as the generic
+    /// planned path does, instead of erasing it into an engine error.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_preserve_typed_provider_poison_and_mark_cleanup_unsafe() {
+        std::thread::spawn(|| {
+            let mut request = gen_core::GenerationRequest {
+                prompt: "a fox".into(),
+                width: 64,
+                height: 64,
+                count: 1,
+                seed: Some(7),
+                steps: Some(1),
+                ..Default::default()
+            };
+            let poison = FaultGenerator::new(true);
+            let plan = fixture_plan(&poison, &request);
+            let ordinary = generate_planned_single_image(
+                &FaultGenerator::new(false),
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .expect_err("ordinary refusal");
+            assert!(
+                matches!(ordinary, WorkerError::Engine(ref detail) if detail == "PuLID-FLUX generation failed: unsupported: ordinary refusal"),
+                "{ordinary:?}"
+            );
+            assert!(!crate::error::owner_process_poisoned());
+            let fatal = generate_planned_single_image(
+                &poison,
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .expect_err("provider fault must fail render");
+            assert!(
+                matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "first provider device fault"),
+                "{fatal:?}"
+            );
+            assert!(crate::error::owner_process_poisoned());
+        })
+        .join()
+        .expect("fault thread");
+    }
+
+    /// The shared mapping every Candle planned lane (strict control, IP-Adapter, PuLID) uses keeps
+    /// the fatal class and marks owner cleanup unsafe; ordinary failures stay engine errors.
+    #[test]
+    fn generation_error_preserves_process_poison_for_every_planned_lane() {
+        std::thread::spawn(|| {
+            let ordinary = generation_error(
+                "FLUX IP-Adapter generation failed",
+                gen_core::Error::Unsupported("ordinary refusal".into()),
+            );
+            assert!(
+                matches!(ordinary, WorkerError::Engine(ref detail) if detail == "FLUX IP-Adapter generation failed: unsupported: ordinary refusal"),
+                "{ordinary:?}"
+            );
+            assert!(!crate::error::owner_process_poisoned());
+            let fatal = generation_error(
+                "FLUX IP-Adapter generation failed",
+                gen_core::Error::ProcessPoisoned("device lost".into()),
+            );
+            assert!(matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "device lost"));
+            assert!(crate::error::owner_process_poisoned());
+        })
+        .join()
+        .expect("fault thread");
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/flux1_conditional_route_tests.rs"]
+pub(super) mod flux1_conditional_route_tests;
 
 #[cfg(test)]
 mod hires_report_tests {

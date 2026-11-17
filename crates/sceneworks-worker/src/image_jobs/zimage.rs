@@ -273,7 +273,7 @@ pub(super) fn zimage_control_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("control generation failed: {error}")))?;
+        .map_err(|error| crate::generation_error("control generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
@@ -542,7 +542,7 @@ pub(super) fn zimage_base_control_generate_one(
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| {
-            WorkerError::Engine(format!("base Z-Image control generation failed: {error}"))
+            crate::generation_error("base Z-Image control generation failed", error)
         })?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {

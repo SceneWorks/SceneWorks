@@ -18,9 +18,11 @@ pub(crate) fn resolved_video_numeric_tier(
     #[cfg(target_os = "macos")]
     if let Some(tier) =
         runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "{engine_id} admission cannot resolve the provider-owned numeric tier: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "{engine_id} admission cannot resolve the provider-owned numeric tier: {error}"
+                ))
+            })
         })?
     {
         return Ok(tier);

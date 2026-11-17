@@ -541,7 +541,7 @@ fn map_sensenova_engine_error(
 ) -> WorkerError {
     match error {
         runtime_macos::media::Error::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
-        other => WorkerError::Engine(format!("{context}: {other}")),
+        other => crate::generation_error(context, other),
     }
 }
 
@@ -556,7 +556,7 @@ fn map_sensenova_engine_error(
         runtime_cuda::media::CandleError::Canceled => {
             WorkerError::Canceled(cancel_message.to_owned())
         }
-        other => WorkerError::Engine(format!("{context}: {other}")),
+        other => crate::generation_error(context, other),
     }
 }
 
@@ -768,8 +768,8 @@ fn vqa_generate(
     // The provider-owned typed runtime, NOT a second bespoke `T2iModel` assembled here: it keeps the
     // registry loader's artifact pin, quantization, provider contract, and cache identity, and it is
     // what owns the request scope `run_vqa` opens below.
-    let runtime = load_runtime(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    let runtime =
+        load_runtime(&spec).map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
@@ -845,7 +845,7 @@ fn vqa_generate(
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+        .map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
@@ -1262,8 +1262,8 @@ fn interleave_generate(
     })?;
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let runtime = load_runtime(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    let runtime =
+        load_runtime(&spec).map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
@@ -1346,7 +1346,9 @@ fn interleave_generate(
     let mut decoded = Vec::with_capacity(out.images.len());
     for image in &out.images {
         decoded.push(decoded_to_image(image).map_err(|error| {
-            WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+            })
         })?);
     }
     Ok((out.text, decoded, execution))
@@ -1372,7 +1374,7 @@ fn interleave_generate(
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+        .map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
@@ -1674,15 +1676,26 @@ fn vqa_result_json(
 /// the torch adapter's `_load_model(distill_lora=None)`, keeping the VQA decode bit-identical.
 #[cfg(all(target_os = "macos", test))]
 fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextTokenizer)> {
-    let cfg = NeoChatConfig::from_dir(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}")))?;
-    let weights = load_raw(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}")))?;
-    let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
-        WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
+    let cfg = NeoChatConfig::from_dir(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}"))
+        })
     })?;
-    let tokenizer = load_tokenizer(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}")))?;
+    let weights = load_raw(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}"))
+        })
+    })?;
+    let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
+        })
+    })?;
+    let tokenizer = load_tokenizer(weights_dir).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}"))
+        })
+    })?;
     Ok((model, tokenizer))
 }
 
@@ -1702,7 +1715,11 @@ fn image_to_chw01(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult
         out_h as usize,
         out_w as usize,
     )
-    .map_err(|error| WorkerError::InvalidPayload(format!("image resize: {error}")))?;
+    .map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(format!("image resize: {error}"))
+        })
+    })?;
     let hwc = Array::from_slice(&hwc, &[out_h, out_w, 3]);
     let chw = hwc
         .transpose_axes(&[2, 0, 1])

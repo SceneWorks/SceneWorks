@@ -1770,8 +1770,13 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
     let committed_bytes = mlx_rs::memory::get_active_memory() as u64;
     let reclaimable_bytes = mlx_rs::memory::get_cache_memory() as u64;
     let (total_bytes, reserved_headroom_bytes) = if engine_id.starts_with("mage_flow") {
-        let safe_gb = runtime_macos::providers::mage::memory::production_safe_budget_gb()
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        let safe_gb = runtime_macos::providers::mage::memory::production_safe_budget_gb().map_err(
+            |error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(error.to_string())
+                })
+            },
+        )?;
         (decimal_gb_to_bytes(safe_gb), 0)
     } else {
         let total_gib = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb())

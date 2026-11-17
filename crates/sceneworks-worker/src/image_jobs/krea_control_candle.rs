@@ -693,7 +693,7 @@ impl CandleStrictControl for KreaStrictControl {
         let paths = self.provider_paths();
         runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
             .map_err(|error| {
-                WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
+                crate::generation_error("Krea 2 strict-pose control load failed", error)
             })
     }
 
@@ -701,6 +701,8 @@ impl CandleStrictControl for KreaStrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
@@ -710,7 +712,7 @@ impl CandleStrictControl for KreaStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
+                super::render::generation_error("Krea 2 strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }

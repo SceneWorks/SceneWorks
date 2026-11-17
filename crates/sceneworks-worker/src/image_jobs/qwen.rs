@@ -239,9 +239,7 @@ pub(super) fn qwen_control_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| {
-            WorkerError::Engine(format!("Qwen strict-pose generation failed: {error}"))
-        })?;
+        .map_err(|error| crate::generation_error("Qwen strict-pose generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
@@ -756,7 +754,7 @@ pub(super) fn qwen_edit_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("edit generation failed: {error}")))?;
+        .map_err(|error| crate::generation_error("edit generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {

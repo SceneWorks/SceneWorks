@@ -179,7 +179,7 @@ pub(super) fn krea_edit_generate_one(
         Some(&memory_evaluation.context),
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
+    .map_err(|error| crate::generation_error("Krea edit generation failed", error))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {

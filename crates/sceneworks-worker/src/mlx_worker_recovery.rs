@@ -1,9 +1,10 @@
-//! Process recovery for the MiniMax-H3 MLX I2V Metal-watchdog failure (sc-21027).
+//! Process recovery for typed native owner faults and MiniMax-H3 MLX I2V Metal watchdog failures.
 //!
-//! The inference provider labels its two FL2VA-only force boundaries with a stable
+//! Typed native owner faults cover MLX and Candle. The H3 inference provider labels its two
+//! FL2VA-only force boundaries with a stable
 //! `MiniMax-H3 MLX I2V` marker. That lets this worker quarantine only the process instance whose
-//! Metal command queue failed, without changing T2V, another model family, Candle, or an ordinary
-//! MLX allocation failure. A poisoned process must not submit again: the worker loop consumes one
+//! Metal command queue failed, without changing T2V, another model family, or an ordinary
+//! allocation failure. A poisoned process must not submit again: the worker loop consumes one
 //! recycle request before its next claim and exits cleanly for the existing auto-worker supervisor
 //! to replace it.
 //!
@@ -42,10 +43,12 @@ fn classify(diagnostic: &str) -> Option<MetalSignal> {
 
 #[derive(Default)]
 struct Inner {
+    process_fault: Option<String>,
     first_timeout: Option<String>,
     first_secondary: Option<String>,
     quarantined: bool,
     terminal_failure_persisted: bool,
+    terminal_persistence_active: bool,
     recycle_started: bool,
 }
 
@@ -59,10 +62,12 @@ impl MlxWorkerRecovery {
     pub(crate) const fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
+                process_fault: None,
                 first_timeout: None,
                 first_secondary: None,
                 quarantined: false,
                 terminal_failure_persisted: false,
+                terminal_persistence_active: false,
                 recycle_started: false,
             }),
         }
@@ -89,6 +94,24 @@ impl MlxWorkerRecovery {
         Some(job_failure(&inner))
     }
 
+    /// Typed owner-executor failure, already distinguished from request/provider errors at the
+    /// cache boundary. Keep the first error verbatim for terminal accounting and forbid reuse.
+    pub(crate) fn observe_process_fault(&self, detail: &str) -> String {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.process_fault.get_or_insert_with(|| detail.to_owned());
+        inner.quarantined = true;
+        job_failure(&inner)
+    }
+
+    #[cfg(any(native_lane, not(test)))]
+    pub(crate) fn process_fault_detail(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .process_fault
+            .clone()
+    }
+
     /// Whether this process may enter the next claim. Once false it never becomes true again; only
     /// constructing a replacement process (and therefore a fresh state instance) restores it.
     pub(crate) fn can_claim(&self) -> bool {
@@ -109,6 +132,32 @@ impl MlxWorkerRecovery {
         }
     }
 
+    /// Arm recycling for a quarantine no job will ever persist. An owner can latch its fault after
+    /// the job that started it has already ended: a progress/heartbeat POST failure aborts the async
+    /// cache waiter after the cancel grace while the owner thread keeps running, and its later
+    /// `ProcessPoisoned` reaches no consumer. That job already went through its own terminal
+    /// handling, so nothing else will call [`Self::note_terminal_failure_persisted`]. Returns
+    /// `true` when it armed recycling; `false` when not quarantined, already armed, or while a
+    /// job's terminal write is still being retried (that write owns arming).
+    pub(crate) fn adopt_unowned_quarantine(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if !inner.quarantined
+            || inner.terminal_failure_persisted
+            || inner.terminal_persistence_active
+        {
+            return false;
+        }
+        inner.terminal_failure_persisted = true;
+        true
+    }
+
+    fn set_terminal_persistence_active(&self, active: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .terminal_persistence_active = active;
+    }
+
     /// Current quarantine text even before recycling is armed. The loop uses this only as a
     /// no-claim backstop when shutdown interrupted the terminal-write retry.
     pub(crate) fn quarantine_reason(&self) -> Option<String> {
@@ -126,6 +175,7 @@ impl MlxWorkerRecovery {
         inner.recycle_started = true;
         Some(RecycleRequest {
             reason: status_reason(&inner),
+            process_fault: inner.process_fault.clone(),
             first_timeout: inner.first_timeout.clone(),
             saw_submissions_ignored: inner.first_secondary.is_some(),
         })
@@ -133,6 +183,9 @@ impl MlxWorkerRecovery {
 }
 
 fn job_failure(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return detail.clone();
+    }
     match (&inner.first_timeout, &inner.first_secondary) {
         (Some(timeout), Some(_)) => format!(
             "{timeout} This first Metal watchdog timeout poisoned the MLX worker process. A later \
@@ -155,6 +208,9 @@ fn job_failure(inner: &Inner) -> String {
 }
 
 fn status_reason(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return format!("The MLX owner executor is quarantined and will recycle before another claim. Original failure: {detail}");
+    }
     match &inner.first_timeout {
         Some(timeout) => format!(
             "The MLX process is quarantined after the first MiniMax-H3 I2V Metal watchdog timeout \
@@ -169,6 +225,7 @@ fn status_reason(inner: &Inner) -> String {
 
 pub(crate) struct RecycleRequest {
     pub(crate) reason: String,
+    pub(crate) process_fault: Option<String>,
     pub(crate) first_timeout: Option<String>,
     pub(crate) saw_submissions_ignored: bool,
 }
@@ -196,6 +253,16 @@ where
     P: FnMut() -> Fut,
     Fut: Future<Output = TerminalPersistenceAttempt>,
 {
+    // While this job's terminal write is being retried it alone may arm recycling; the worker
+    // loop's unowned-quarantine adoption must not race it.
+    struct Active<'a>(&'a MlxWorkerRecovery);
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            self.0.set_terminal_persistence_active(false);
+        }
+    }
+    state.set_terminal_persistence_active(true);
+    let _active = Active(state);
     loop {
         match attempt().await {
             TerminalPersistenceAttempt::Persisted => {
@@ -332,6 +399,56 @@ mod tests {
         assert!(state.begin_recycle().is_none(), "recycle remains one-shot");
     }
 
+    /// Codex P2 on PR #3434: a progress-POST failure aborts the cache waiter after the cancel
+    /// grace; the owner thread later latches `ProcessPoisoned` with no consumer left to persist it.
+    /// The worker loop's adoption must arm the one recycle instead of looping quarantined forever,
+    /// but never while a job's own terminal write is still retrying.
+    #[tokio::test]
+    async fn a_fault_latched_after_its_job_ended_is_adopted_and_recycles() {
+        let state = MlxWorkerRecovery::new();
+        assert!(
+            !state.adopt_unowned_quarantine(),
+            "nothing to adopt before a fault"
+        );
+
+        // The aborted job already ran its own terminal handling; now the owner reports.
+        state.observe_process_fault("late owner device fault");
+        assert!(!state.can_claim());
+        assert!(
+            state.begin_recycle().is_none(),
+            "no consumer persisted anything"
+        );
+        assert!(
+            state.adopt_unowned_quarantine(),
+            "the idle loop adopts the quarantine"
+        );
+        let recycle = state
+            .begin_recycle()
+            .expect("adoption arms the one recycle");
+        assert_eq!(
+            recycle.process_fault.as_deref(),
+            Some("late owner device fault")
+        );
+        assert!(!state.adopt_unowned_quarantine(), "adoption is one-shot");
+
+        // While a job's terminal write retries, that write alone owns arming.
+        let racing = MlxWorkerRecovery::new();
+        racing.observe_process_fault("fault with a live consumer");
+        let persisted = persist_terminal_failure_with(&racing, || {
+            assert!(
+                !racing.adopt_unowned_quarantine(),
+                "the loop must not arm recycling under an in-flight terminal write"
+            );
+            std::future::ready(TerminalPersistenceAttempt::Stop)
+        })
+        .await;
+        assert!(!persisted);
+        assert!(
+            racing.begin_recycle().is_none(),
+            "an interrupted write leaves recycling unarmed"
+        );
+    }
+
     #[test]
     fn quarantine_refuses_the_old_process_and_replacement_runs_the_known_good_job() {
         fn run_known_good_small_job(
@@ -389,6 +506,41 @@ mod tests {
             assert_eq!(state.observe(diagnostic), None, "{diagnostic}");
         }
         assert!(state.can_claim());
+        assert!(state.begin_recycle().is_none());
+    }
+
+    #[tokio::test]
+    async fn typed_candle_fault_keeps_first_error_and_recycles_only_after_terminal_write() {
+        use std::cell::Cell;
+
+        let state = MlxWorkerRecovery::new();
+        assert_eq!(
+            state.observe_process_fault("Candle device lost"),
+            "Candle device lost"
+        );
+        assert_eq!(
+            state.observe_process_fault("later fallout"),
+            "Candle device lost"
+        );
+        assert!(!state.can_claim());
+        assert!(state.begin_recycle().is_none());
+        let attempts = Cell::new(0);
+        assert!(
+            persist_terminal_failure_with(&state, || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    assert!(state.begin_recycle().is_none());
+                    std::future::ready(TerminalPersistenceAttempt::Retry)
+                } else {
+                    assert!(!state.can_claim());
+                    std::future::ready(TerminalPersistenceAttempt::Persisted)
+                }
+            })
+            .await
+        );
+        let recycle = state.begin_recycle().expect("one replacement");
+        assert_eq!(recycle.process_fault.as_deref(), Some("Candle device lost"));
+        assert!(recycle.reason.contains("Candle device lost"));
         assert!(state.begin_recycle().is_none());
     }
 }

@@ -220,7 +220,9 @@ use super::stream::drive_gen_items_scored_reported;
 #[cfg(not(target_os = "macos"))]
 use super::stream::drive_native_prompt_batch;
 #[cfg(not(target_os = "macos"))]
-use super::stream::start_cached_gen_stream_with_request_state_using;
+use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
+#[cfg(not(target_os = "macos"))]
+use super::stream::PreparedRenderPlans;
 #[cfg(not(target_os = "macos"))]
 use super::streaming_result;
 #[cfg(not(target_os = "macos"))]
@@ -2312,18 +2314,99 @@ async fn generate_candle_registry_stream_using(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
+    // Compile the pure base request plan in the same owner command as the cached load and run.
+    // Count retains the exact existing `(seed, prompt)` relation and one plan per image.
+    let base_flux = request.mode == "text_to_image"
+        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && edit_reference.is_none()
+        && img2img_reference.is_none()
+        && edit_refs.is_empty()
+        && edit_mask.is_none()
+        && flux3_references.is_none()
+        && spec.ip_adapter.is_none();
+    let prepare_render_plans: PreparedRenderPlans = if base_flux {
+        if hires_fix.is_some() {
+            return Err(WorkerError::InvalidPayload(
+                "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),
+            ));
+        }
+        let planning_spec = spec.clone();
+        let planning_work = work.clone();
+        let planning_negative = negative_prompt.clone();
+        let planning_sampler = sampler.clone();
+        let planning_scheduler = scheduler.clone();
+        let planning_guidance_method = guidance_method.clone();
+        let planning_enhance = enhance.clone();
+        let planning_batch = native_batch.clone();
+        Box::new(move |planning_cancel| {
+            let planning_surface = LaneRgbaSurface {
+                output_channels: rgba_output_channels,
+                controls: lane_controls,
+                prompt_batch: planning_batch.as_ref(),
+                ..Default::default()
+            };
+            let planning_work = if planning_batch.is_some() {
+                vec![(planning_work[0].0, "")]
+            } else {
+                planning_work
+                    .iter()
+                    .map(|(seed, prompt)| (*seed, prompt.as_str()))
+                    .collect()
+            };
+            planning_work
+                .into_iter()
+                .map(|(seed, item_prompt)| {
+                    let candidate = super::render::build_render_request(
+                        item_prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        planning_negative.clone(),
+                        None,
+                        &[],
+                        None,
+                        true_cfg,
+                        planning_sampler.as_deref(),
+                        planning_scheduler.as_deref(),
+                        scheduler_shift,
+                        planning_guidance_method.as_deref(),
+                        use_pid,
+                        text_style_gain,
+                        None,
+                        &planning_enhance,
+                        gen_core::PromptEnhancementSink::default(),
+                        gen_core::PreviewSink::default(),
+                        &planning_surface,
+                        planning_cancel,
+                    )?;
+                    super::render::compile_render_plan(
+                        crate::inference_runtime::media(),
+                        engine_id,
+                        &planning_spec,
+                        &candidate,
+                    )
+                })
+                .collect::<WorkerResult<Vec<_>>>()
+        })
+    } else {
+        Box::new(|_| Ok(Vec::new()))
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_prepared(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
+        prepare_render_plans,
         load_generator,
         move |generator,
               cache_state,
               loaded_policy,
               warm_policy,
               external_committed_bytes,
+              render_plans,
               tx,
               cancel| {
             if is_ideogram || is_sana || is_sd35 || receipt_selector_authoritative {
@@ -2585,6 +2668,8 @@ async fn generate_candle_registry_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 prompt_batch: Some(batch),
+                                render_plan: render_plans.first().and_then(Option::as_ref),
+                                hires_render_plan: None,
                             },
                             &cancel,
                             on_progress,
@@ -2609,7 +2694,7 @@ async fn generate_candle_registry_stream_using(
             drive_gen_items_scored_reported(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
@@ -2667,6 +2752,8 @@ async fn generate_candle_registry_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 prompt_batch: None,
+                                render_plan: render_plans.get(index).and_then(Option::as_ref),
+                                hires_render_plan: None,
                             },
                             &cancel,
                             on_progress,

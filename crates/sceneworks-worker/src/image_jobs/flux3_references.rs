@@ -210,7 +210,11 @@ pub(crate) fn resolve_owned_layout(
     let Some(document) = &authored.layout else {
         return Ok(None);
     };
-    let invalid = |error: gen_core::Error| WorkerError::InvalidPayload(error.to_string());
+    let invalid = |error: gen_core::Error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(error.to_string())
+        })
+    };
     let layout = gen_core_flux3::layouts::Layout::from_json(document.clone()).map_err(invalid)?;
     let bindings = references
         .map(|refs| {
@@ -344,11 +348,16 @@ pub(crate) fn resolve_owned_references(
         width: authored.width,
         height: authored.height,
     };
-    let plan = gen_core_flux3::references::plan(&dimensions, output_size)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    let resources = plan
-        .memory_resources()
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let plan = gen_core_flux3::references::plan(&dimensions, output_size).map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(error.to_string())
+        })
+    })?;
+    let resources = plan.memory_resources().map_err(|error| {
+        crate::provider_error(error, |error| {
+            WorkerError::InvalidPayload(error.to_string())
+        })
+    })?;
     Ok(Some(ResolvedReferences {
         conditioning,
         bindings,

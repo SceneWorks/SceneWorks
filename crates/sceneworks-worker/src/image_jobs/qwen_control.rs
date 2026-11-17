@@ -455,7 +455,7 @@ impl CandleStrictControl for QwenStrictControl {
             adapters: self.adapters.clone(),
         };
         QwenFunControl::load_with_spec(&paths, &self.load_spec).map_err(|error| {
-            WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
+            crate::generation_error("Qwen 2512-Fun strict-control load failed", error)
         })
     }
 
@@ -463,6 +463,8 @@ impl CandleStrictControl for QwenStrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
@@ -472,9 +474,10 @@ impl CandleStrictControl for QwenStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!(
-                    "Qwen 2512-Fun strict-control generation failed: {error}"
-                ))
+                super::render::generation_error(
+                    "Qwen 2512-Fun strict-control generation failed",
+                    error,
+                )
             })?;
         completed_control_image(completed)
     }

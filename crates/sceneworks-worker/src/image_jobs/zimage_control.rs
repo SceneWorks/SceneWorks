@@ -500,7 +500,7 @@ impl CandleStrictControl for ZImageStrictControl {
                 }
             })
             .map_err(|error| {
-                WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
+                crate::generation_error("Z-Image strict-pose control load failed", error)
             })
     }
 
@@ -508,6 +508,8 @@ impl CandleStrictControl for ZImageStrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
@@ -542,7 +544,7 @@ impl CandleStrictControl for ZImageStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
+                super::render::generation_error("Z-Image strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }

@@ -130,9 +130,9 @@ pub(super) fn attach_prompt_upsampler(
                 "Install or reinstall FLUX 3 Prompt Upsampler ({UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}) in Models: its exact receipt, complete inventory and contained files must verify before enabling Enhance prompt; or turn enhancement off"
             )))?
     };
-    UpsamplePackage::check(&dir).map_err(|error| WorkerError::InvalidPayload(format!(
+    UpsamplePackage::check(&dir).map_err(|error| crate::provider_error(error, |error| WorkerError::InvalidPayload(format!(
         "FLUX 3 prompt_upsampler is incomplete or incompatible: {error}; reinstall FLUX 3 Prompt Upsampler or turn enhancement off"
-    )))?;
+    ))))?;
     Ok(spec.with_component(UPSAMPLER_COMPONENT, WeightsSource::Dir(dir)))
 }
 
@@ -775,9 +775,11 @@ mod tests {
         plan: &gen_core_flux3::pup::UpsamplePlan,
         raw: &str,
     ) -> WorkerResult<Value> {
-        let outcome = plan
-            .finish(raw)
-            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        let outcome = plan.finish(raw).map_err(|error| {
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(error.to_string())
+            })
+        })?;
         prompt_enhancement_fact(outcome.report, &plan.original_prompt)
     }
 

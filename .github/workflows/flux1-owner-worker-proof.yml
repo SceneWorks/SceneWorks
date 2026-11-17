@@ -1,0 +1,76 @@
+# Manual AC3 proof called by the existing Memory catalog campaign dispatcher only.
+name: FLUX.1 native owner worker proof
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact clean SceneWorks commit containing the paired inference pin
+        required: true
+        type: string
+      inference_sha:
+        description: Exact pinned inference commit, checked against Cargo manifests and lock
+        required: true
+        type: string
+      runner_target:
+        description: "Physical Mac target: primary or secondary"
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native-worker-entry:
+    runs-on: ${{ inputs.runner_target == 'secondary' && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') }}
+    timeout-minutes: 360
+    concurrency:
+      group: flux1-owner-worker-proof-${{ inputs.runner_target }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLUX1_OWNER_SOURCE_SHA: ${{ inputs.source_sha }}
+      FLUX1_OWNER_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      FLUX1_OWNER_RUNNER_TARGET: ${{ inputs.runner_target }}
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Set attempt-owned output directory
+        run: echo "FLUX1_OWNER_OUTPUT=$RUNNER_TEMP/flux1-owner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - name: Refuse wrong source, pin, runner or inaccessible pinned q4 source
+        run: node scripts/flux1-owner-worker-proof.mjs --preflight-only
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Run ordinary FLUX.1 dev and Schnell API jobs on owned native worker
+        run: |
+          source scripts/ci/metal_execution_entry.sh
+          metal_execution_entry 18000 node scripts/flux1-owner-worker-proof.mjs
+      - name: Independently verify retained receipt and image hashes
+        run: node scripts/flux1-owner-worker-proof.mjs --verify-artifact
+      - name: Retain redacted receipt and generated PNGs only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flux1-owner-worker-proof-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.FLUX1_OWNER_OUTPUT }}/evidence/
+          if-no-files-found: error
+          retention-days: 30

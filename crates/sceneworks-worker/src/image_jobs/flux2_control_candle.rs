@@ -448,14 +448,12 @@ impl CandleStrictControl for Flux2StrictControl {
             ),
         };
         let model = loaded.map_err(|error| {
-            WorkerError::Engine(format!(
-                "FLUX.2-dev strict-pose control load failed: {error}"
-            ))
+            crate::generation_error("FLUX.2-dev strict-pose control load failed", error)
         })?;
         // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
         match &self.pid {
             Some(pid) => model.with_pid(pid).map_err(|error| {
-                WorkerError::Engine(format!("FLUX.2 control PiD decoder load failed: {error}"))
+                crate::generation_error("FLUX.2 control PiD decoder load failed", error)
             }),
             None => Ok(model),
         }
@@ -465,6 +463,8 @@ impl CandleStrictControl for Flux2StrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
@@ -496,7 +496,7 @@ impl CandleStrictControl for Flux2StrictControl {
             None => model.generate_with_execution_report(&req, control, on_progress),
         };
         let completed = generated.map_err(|error| {
-            WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
+            super::render::generation_error("FLUX.2-dev strict-pose generation failed", error)
         })?;
         completed_control_image(completed)
     }

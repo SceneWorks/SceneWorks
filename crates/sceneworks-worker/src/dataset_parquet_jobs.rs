@@ -134,6 +134,9 @@ pub(crate) async fn run_dataset_parquet_import_job(
         StreamSupervisor::new(cancel, scan_task, progress_report_interval(settings), None)
             .wait(api, settings, &job.id)
             .await?;
+    if let Some(fatal) = result.as_ref().ok().and_then(crate::process_fault) {
+        return Err(fatal);
+    }
     if canceled {
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));

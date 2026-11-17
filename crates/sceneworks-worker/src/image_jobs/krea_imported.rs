@@ -1276,7 +1276,7 @@ pub(super) async fn generate_krea_imported_control_stream(
         pins: adapter_pins,
     } = resolve_prepared_adapters(request, settings)?;
     let control_pin = gen_core::PinnedWeightsFile::pin(&control_weights)
-        .map_err(|error| WorkerError::Engine(format!("Krea pose overlay pin failed: {error}")))?;
+        .map_err(|error| crate::generation_error("Krea pose overlay pin failed", error))?;
 
     // Conditioning-overlay admission (sc-16069) — the dense Krea trunk, the pose-control branch, and
     // every job adapter are held co-resident by this bespoke assembly.
@@ -1373,13 +1373,16 @@ pub(super) async fn generate_krea_imported_control_stream(
             };
             runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
                 |error| {
-                    WorkerError::Engine(format!(
-                        "Krea 2 imported checkpoint pose-control load failed: {error}"
-                    ))
+                    crate::generation_error(
+                        "Krea 2 imported checkpoint pose-control load failed",
+                        error,
+                    )
                 },
             )
         },
         move |model, tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
@@ -1424,9 +1427,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                 let completed = model
                     .generate_with_execution_report(&control_request, &control, on_progress)
                     .map_err(|error| {
-                        WorkerError::Engine(format!(
-                            "Krea imported pose generation failed: {error}"
-                        ))
+                        crate::generation_error("Krea imported pose generation failed", error)
                     })?;
                 let image = match completed.generation.output {
                     Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
@@ -1843,9 +1844,7 @@ fn krea_imported_generate_pass(
         on_progress,
     )
     .map_err(|error| {
-        WorkerError::Engine(format!(
-            "Krea 2 imported checkpoint generation failed: {error}"
-        ))
+        crate::generation_error("Krea 2 imported checkpoint generation failed", error)
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -1901,9 +1900,7 @@ fn krea_imported_generate_multiphase(
         on_progress,
     )
     .map_err(|error| {
-        WorkerError::Engine(format!(
-            "Krea 2 imported multi-phase generation failed: {error}"
-        ))
+        crate::generation_error("Krea 2 imported multi-phase generation failed", error)
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -2148,6 +2145,8 @@ where
             };
             let (out_width, out_height, pixels) = match generated {
                 Ok(image) => image,
+                // A poisoned process keeps its fatal class even when cancellation raced it.
+                Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
                 Err(_) if cancel.is_cancelled() => return Ok(None),
                 Err(error) => return Err(error),
             };
@@ -2439,6 +2438,8 @@ pub(super) async fn generate_krea_imported_stream(
                     };
                     let (out_width, out_height, pixels) = match generated {
                         Ok(image) => image,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => return Err(error),
                     };

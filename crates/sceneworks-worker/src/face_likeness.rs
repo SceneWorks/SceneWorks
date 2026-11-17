@@ -44,8 +44,10 @@ use sceneworks_core::contracts::JsonObject;
 
 // `WorkerResult` / `WorkerError` are re-exported from the crate root (`error::*`); the backend legs
 // surface model failures through them, the same as every other worker face path.
+#[cfg(any(target_os = "macos", all(native_lane, test)))]
+use crate::WorkerError;
 #[cfg(native_lane)]
-use crate::{WorkerError, WorkerResult};
+use crate::WorkerResult;
 
 /// The recognition method surfaced on every result. Stable string the asset sidecar (sc-4408) and the
 /// UI bands (sc-4414) key off — the same antelopev2 ArcFace stack on both platforms.
@@ -345,14 +347,14 @@ impl FaceBackend {
                 let (h, w) = (image.height as usize, image.width as usize);
                 let dets = analysis
                     .detect(&image.pixels, h, w)
-                    .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?;
+                    .map_err(|error| crate::generation_error("face detect", error))?;
                 // `detect` returns largest-first; embed just `[0]` (one recognition forward).
                 let Some(det) = dets.first() else {
                     return Ok(None);
                 };
                 let face = analysis
                     .embed(&image.pixels, h, w, det)
-                    .map_err(|error| WorkerError::Engine(format!("face embed: {error}")))?;
+                    .map_err(|error| crate::generation_error("face embed", error))?;
                 Ok(Some((face.det_score, face.embedding)))
             }
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -362,7 +364,7 @@ impl FaceBackend {
                 // clean N/A funnel both other worker face paths rely on.)
                 let faces = analysis
                     .analyze(image)
-                    .map_err(|error| WorkerError::Engine(format!("face analyze: {error}")))?;
+                    .map_err(|error| crate::generation_error("face analyze", error))?;
                 Ok(faces.into_iter().next().map(|f| (f.det_score, f.embedding)))
             }
             #[cfg(test)]
@@ -382,7 +384,7 @@ impl FaceBackend {
 /// call [`score`](Self::score) for each generated image. The source is never re-embedded.
 #[cfg(native_lane)]
 pub(crate) struct FaceLikenessScorer {
-    backend: FaceBackend,
+    backend: Option<FaceBackend>,
     /// The cached, L2-normalized source embedding. `None` ⇒ no detectable source face: every `score`
     /// call short-circuits to an N/A result (`NoSourceFace`) — the whole job is N/A, but never an error.
     source_normalized: Option<Vec<f32>>,
@@ -390,6 +392,18 @@ pub(crate) struct FaceLikenessScorer {
     /// embedded exactly once across N `score` calls — the explicit caching acceptance criterion.
     #[cfg(test)]
     source_embed_count: usize,
+}
+
+#[cfg(native_lane)]
+impl Drop for FaceLikenessScorer {
+    fn drop(&mut self) {
+        if !crate::owner_device_cleanup_allowed() {
+            // MLX and Candle face weights may free device allocations in Drop. The owner
+            // retires this process after a typed fatal fault, so leave those allocations
+            // to process teardown instead of contacting the failed device.
+            std::mem::forget(self.backend.take());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -407,7 +421,7 @@ impl FaceLikenessScorer {
         )
         .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
         let analysis = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
-            .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Mlx(analysis), source)
     }
 }
@@ -417,7 +431,7 @@ impl FaceLikenessScorer {
     /// Load the candle SCRFD + ArcFace stack from `weights_dir` and embed the source face once.
     pub(crate) fn load_candle(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
         let analysis = runtime_cuda::providers::face::load(weights_dir)
-            .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Candle(Box::new(analysis)), source)
     }
 }
@@ -435,7 +449,7 @@ impl FaceLikenessScorer {
         #[cfg(not(test))]
         let _ = source_embed_count;
         Ok(Self {
-            backend,
+            backend: Some(backend),
             source_normalized,
             #[cfg(test)]
             source_embed_count,
@@ -451,7 +465,11 @@ impl FaceLikenessScorer {
         let Some(source_normalized) = self.source_normalized.as_deref() else {
             return Ok(LikenessResult::na(NoScoreReason::NoSourceFace));
         };
-        let largest = self.backend.largest_face(generated)?;
+        let largest = self
+            .backend
+            .as_ref()
+            .expect("live face backend")
+            .largest_face(generated)?;
         let generated = largest
             .as_ref()
             .map(|(det_score, raw)| (*det_score, raw.as_slice()));
@@ -815,6 +833,31 @@ mod tests {
     mod angle_set_wiring {
         use super::*;
         use std::sync::atomic::Ordering;
+
+        #[test]
+        fn typed_process_fault_leaves_face_backend_for_process_teardown() {
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+            drop(scorer);
+            assert_eq!(std::sync::Arc::strong_count(&calls), 1);
+
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _scorer = scorer;
+                panic!("owner panic");
+            }));
+            assert!(panic_result.is_err());
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let fatal = crate::classify_engine_error(
+                "generation failed",
+                gen_core::Error::ProcessPoisoned("device lost".into()),
+            );
+            assert!(matches!(fatal, WorkerError::ProcessPoisoned(_)));
+            drop(scorer);
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+        }
 
         /// A synthetic image whose first pixel byte selects the stub detection (see `StubFaceBackend`):
         /// `0` ⇒ no face; `>=77` ⇒ a reliable face; `1..=76` ⇒ a low-confidence face.

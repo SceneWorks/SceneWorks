@@ -427,11 +427,19 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                     let completed =
                         match model.generate_with_execution_report(&request, &mut *on_progress) {
                             Ok(completed) => completed,
+                            // A poisoned process keeps its fatal class even when cancellation raced it.
+                            Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                                return Err(super::render::generation_error(
+                                    "ComfyUI Z-Image generation failed",
+                                    error,
+                                ));
+                            }
                             Err(_) if cancel.is_cancelled() => return Ok(None),
                             Err(error) => {
-                                return Err(WorkerError::Engine(format!(
-                                    "ComfyUI Z-Image generation failed: {error}"
-                                )));
+                                return Err(crate::generation_error(
+                                    "ComfyUI Z-Image generation failed",
+                                    error,
+                                ));
                             }
                         };
                     match completed.generation.output {

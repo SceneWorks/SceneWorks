@@ -568,7 +568,9 @@ fn run_rank_process_with(
         );
     });
     let outcome = (|| {
-        let mut trainer = load_trainer(engine_id, &spec_load)?;
+        let trainer = load_trainer(engine_id, &spec_load)?;
+        // A typed fault classified mid-run must not let this destructor touch the device.
+        let mut trainer = crate::DeviceOwned::new(trainer);
         trainer.validate(&request)?;
         trainer.train(&request, &mut |progress| {
             load_bridge.regular(|| {

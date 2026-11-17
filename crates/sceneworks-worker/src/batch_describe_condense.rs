@@ -485,6 +485,9 @@ pub(crate) async fn condense_fields(
             StreamSupervisor::new(cancel, generation, progress_report_interval(settings), None)
                 .wait(api, settings, &job.id)
                 .await?;
+        if let Some(fatal) = crate::process_fault(&reply) {
+            return Err(fatal);
+        }
         if was_canceled {
             return Ok(None);
         }

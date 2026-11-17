@@ -921,9 +921,11 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     attached_provider_spec
         .prepare_file_sources()
         .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "Qwen Edit could not retain the exact adapter file receipts: {error}"
-            ))
+            crate::provider_error(error, |error| {
+                WorkerError::InvalidPayload(format!(
+                    "Qwen Edit could not retain the exact adapter file receipts: {error}"
+                ))
+            })
         })?;
     let prepared_provider_spec = attached_provider_spec.into_load_spec();
 
@@ -1181,10 +1183,12 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 &provider_load_spec,
                 &memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("Qwen edit load failed", error))?;
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
@@ -1238,11 +1242,19 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                     );
                     let completed = match result {
                         Ok(completed) => completed,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            return Err(super::render::generation_error(
+                                "Qwen edit generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "Qwen edit generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "Qwen edit generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

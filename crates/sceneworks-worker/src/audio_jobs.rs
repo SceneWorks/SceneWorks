@@ -1728,6 +1728,8 @@ async fn run_audio_synthesis_with_completed(
             }
             let generator = load_generator(&model_id, &spec)
                 .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
+            // A typed fault classified mid-run must not let this destructor touch the device.
+            let generator = crate::DeviceOwned::new(generator);
             // Engine progress and streamed chunks fold into one latest update (sc-19384). Publishing
             // never blocks and never fails — synthesis must not depend on the progress sink.
             let fold = std::cell::RefCell::new(SynthesisProgress::new());
@@ -2224,6 +2226,8 @@ async fn run_native_voice_clone_synthesis_using_completed(
             let generator = load_generator(&model_id, &spec).map_err(|error| {
                 crate::classify_engine_error("clone-TTS model load failed", error)
             })?;
+            // A typed fault classified mid-run must not let this destructor touch the device.
+            let generator = crate::DeviceOwned::new(generator);
             let req = GenerationRequest {
                 prompt: script,
                 seed,
@@ -5176,6 +5180,8 @@ mod tests {
         .expect(
             "load the real moss_tts_realtime generator from the cached snapshot + staged codec",
         );
+        // A typed fault classified mid-run must not let this destructor touch the device.
+        let generator = crate::DeviceOwned::new(generator);
         assert!(
             generator.descriptor().capabilities.supports_streaming,
             "moss_tts_realtime must advertise supports_streaming"
@@ -5345,6 +5351,8 @@ mod tests {
                 .with_component("codec", WeightsSource::File(PathBuf::from(&codec_file))),
         )
         .expect("load the real moss_ttsd_v05 generator from the cached snapshot + staged codec");
+        // A typed fault classified mid-run must not let this destructor touch the device.
+        let generator = crate::DeviceOwned::new(generator);
         assert!(
             generator.descriptor().capabilities.supports_multi_speaker,
             "moss_ttsd_v05 must advertise supports_multi_speaker"

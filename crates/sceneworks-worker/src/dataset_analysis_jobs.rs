@@ -105,7 +105,7 @@ pub(crate) async fn run_dataset_analysis_job(
                 CLIP_EMBEDDER_ID,
                 &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
             )
-            .map_err(|error| WorkerError::Engine(format!("CLIP embedder load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("CLIP embedder load failed", error))?;
             let needs_text = blocking_items
                 .iter()
                 .any(|item| !item.caption_text.trim().is_empty());
@@ -116,7 +116,7 @@ pub(crate) async fn run_dataset_analysis_job(
                         &LoadSpec::new(WeightsSource::Dir(weights_dir)),
                     )
                     .map_err(|error| {
-                        WorkerError::Engine(format!("CLIP text embedder load failed: {error}"))
+                        crate::generation_error("CLIP text embedder load failed", error)
                     })?,
                 )
             } else {
@@ -134,7 +134,7 @@ pub(crate) async fn run_dataset_analysis_job(
                 let image = load_analysis_image(&item.image_path)?;
                 let embedding = embedder
                     .embed(&image)
-                    .map_err(|error| WorkerError::Engine(format!("CLIP embed failed: {error}")))?;
+                    .map_err(|error| crate::generation_error("CLIP embed failed", error))?;
                 let (caption_hash, text_embedding) =
                     if let Some(text_embedder) = text_embedder.as_ref() {
                         if item.caption_text.trim().is_empty() {
@@ -150,7 +150,7 @@ pub(crate) async fn run_dataset_analysis_job(
                                 );
                             let text_embedding =
                                 text_embedder.embed_text(alignment_text).map_err(|error| {
-                                    WorkerError::Engine(format!("CLIP text embed failed: {error}"))
+                                    crate::generation_error("CLIP text embed failed", error)
                                 })?;
                             (Some(item.caption_hash), Some(text_embedding))
                         }

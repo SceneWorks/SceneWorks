@@ -387,15 +387,15 @@ impl CandleStrictControl for KolorsStrictControl {
             self.pid.as_ref(),
             self.memory_context.clone(),
         )
-        .map_err(|error| {
-            WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))
-        })
+        .map_err(|error| crate::generation_error("Kolors strict-pose control load failed", error))
     }
 
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         // `KolorsControlRequest` has no `preview` field yet — candle Kolors is not preview-wired
@@ -428,7 +428,7 @@ impl CandleStrictControl for KolorsStrictControl {
                 on_progress,
             )
             .map_err(|error| {
-                WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
+                super::render::generation_error("Kolors strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }
@@ -523,9 +523,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         &contract_paths,
         pid_weights.as_ref(),
     )
-    .map_err(|error| {
-        WorkerError::Engine(format!("Kolors control memory contract failed: {error}"))
-    })?;
+    .map_err(|error| crate::generation_error("Kolors control memory contract failed", error))?;
     let overlay_receipt = crate::candle_memory_strategy::kolors_overlay_receipt_identity(
         KOLORS_CONTROL_ENGINE,
         &contract,

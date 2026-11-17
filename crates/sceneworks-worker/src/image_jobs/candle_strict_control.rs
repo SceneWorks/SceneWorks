@@ -4,7 +4,7 @@ use super::conditioning::stage_likeness;
 use super::events::consume_gen_events;
 use super::resolve_seed;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_gen_stream;
+use super::stream::start_gen_stream_with_cancel;
 use super::stream::GenEvent;
 use super::strict_control::ensure_depth_estimator_dir;
 use super::strict_control::preprocess_control_entry;
@@ -124,15 +124,43 @@ pub(super) trait CandleStrictControl: Send + 'static {
     /// and fails on exactly that, on every platform, because both candle CI lanes are dispatch-only. An
     /// impl whose upstream request has no `preview` field yet binds `_preview`; its file is still swept,
     /// so adding the field upstream without wiring it here is caught the same way.
+    ///
+    /// `plan` is the render plan [`compile_one_before_load`](Self::compile_one_before_load) compiled for
+    /// this exact `control` before the model loaded: `Some` for every pose of a lane whose
+    /// [`requires_preload_plan`](Self::requires_preload_plan) is true, `None` for every other lane.
+    #[allow(clippy::too_many_arguments)]
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
+        plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<(Image, ExecutionIdentity)>;
+
+    /// Whether this lane compiles a source-bound render plan for every preprocessed control map before
+    /// [`load`](Self::load) opens any weights (SW-6936). The driver then preprocesses the whole pose set
+    /// up front, so a request the provider would refuse fails before the load instead of after it.
+    fn requires_preload_plan(&self) -> bool {
+        false
+    }
+
+    /// Compile one pose's render plan without weights. Called only when
+    /// [`requires_preload_plan`](Self::requires_preload_plan) is true; a lane that opts in must
+    /// override it.
+    fn compile_one_before_load(
+        &self,
+        _control: &Image,
+        _seed: u64,
+        _cancel: &CancelFlag,
+    ) -> WorkerResult<gen_core::RenderPlan> {
+        Err(WorkerError::Engine(format!(
+            "{} declares a pre-load render plan but has no planner",
+            self.engine_label()
+        )))
+    }
 }
 
 /// Extract exactly one RGB image from a completed bespoke provider call. A missing or extra image
@@ -159,6 +187,7 @@ fn generate_control_item<P: CandleStrictControl>(
     provider: &P,
     model: &P::Model,
     control: &Image,
+    plan: Option<&gen_core::RenderPlan>,
     seed: u64,
     cancel: &CancelFlag,
     preview: &gen_core::PreviewSink,
@@ -167,9 +196,11 @@ fn generate_control_item<P: CandleStrictControl>(
     if cancel.is_cancelled() {
         return Ok(None);
     }
-    match provider.generate_one(model, control, seed, cancel, preview, on_progress) {
+    match provider.generate_one(model, control, plan, seed, cancel, preview, on_progress) {
         Ok(_) if cancel.is_cancelled() => Ok(None),
         Ok(completed) => Ok(Some(completed)),
+        // A poisoned process keeps its fatal class even when cancellation raced it.
+        Err(error @ WorkerError::ProcessPoisoned(_)) => Err(error),
         Err(_) if cancel.is_cancelled() => Ok(None),
         Err(error) => Err(error),
     }
@@ -300,11 +331,49 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     let engine_label = provider.engine_label();
     let stream_tag = provider.stream_tag();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_gen_stream_with_cancel(
         job.id.clone(),
         stream_tag,
         0,
-        move || {
+        move |planning_cancel| {
+            // A planned lane preprocesses every control map and compiles its source-bound plan before
+            // `load` opens any weights, so a request the provider refuses fails here, pre-load.
+            let planned = if provider.requires_preload_plan() {
+                let planned = poses
+                    .iter()
+                    .map(|pose| {
+                        if planning_cancel.is_cancelled() {
+                            return Err(WorkerError::Canceled(
+                                "strict-control generation canceled while planning".into(),
+                            ));
+                        }
+                        let control = preprocess_control_entry(
+                            &control_kind,
+                            user_control.as_ref(),
+                            Some(pose),
+                            control_source.as_ref(),
+                            width,
+                            height,
+                            stickwidth,
+                            depth_weights_dir.as_deref(),
+                        )?;
+                        let plan = provider.compile_one_before_load(
+                            &control,
+                            seed as u64,
+                            planning_cancel,
+                        )?;
+                        Ok((control, plan))
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?;
+                if planning_cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(
+                        "strict-control generation canceled before load".into(),
+                    ));
+                }
+                Some(planned)
+            } else {
+                None
+            };
             let model = provider.load()?;
             // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
             let scorer = match (&face_stack_dir, &likeness_source) {
@@ -313,9 +382,33 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 }
                 _ => None,
             };
-            Ok((provider, model, poses, scorer))
+            Ok((
+                provider,
+                model,
+                poses,
+                planned,
+                scorer,
+                user_control,
+                control_source,
+                depth_weights_dir,
+                control_kind,
+            ))
         },
-        move |(provider, model, poses, scorer), tx, cancel| {
+        move |(
+            provider,
+            model,
+            poses,
+            planned,
+            scorer,
+            user_control,
+            control_source,
+            depth_weights_dir,
+            control_kind,
+        ),
+              tx,
+              cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
@@ -325,17 +418,32 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                     return Ok(None);
                 }
                 // Pose = the same `draw_wholebody` skeleton (byte-preserved); canny/depth derive from the
-                // threaded source. A user-supplied control map short-circuits for any kind.
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
+                // threaded source. A user-supplied control map short-circuits for any kind. A planned
+                // lane reuses the exact map its plan was compiled from.
+                let unplanned_control;
+                let (control, render_plan) = match planned.as_ref() {
+                    Some(planned) => {
+                        let (control, plan) = planned.get(index).ok_or_else(|| {
+                            WorkerError::Engine(format!(
+                                "{engine_label}: no pre-load render plan for pose {index}"
+                            ))
+                        })?;
+                        (control, Some(plan))
+                    }
+                    None => {
+                        unplanned_control = preprocess_control_entry(
+                            &control_kind,
+                            user_control,
+                            Some(&pose),
+                            control_source,
+                            width,
+                            height,
+                            stickwidth,
+                            depth_weights_dir,
+                        )?;
+                        (&unplanned_control, None)
+                    }
+                };
                 // The job's live per-image preview sink, handed straight to the provider's bespoke request
                 // (epic 16948, sc-16962). `drive_gen_items_scored` built it with `preview_sink_for`, so a
                 // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
@@ -344,7 +452,8 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 let Some((out, execution)) = generate_control_item(
                     &provider,
                     &model,
-                    &control,
+                    control,
+                    render_plan,
                     seed as u64,
                     &cancel,
                     &preview,
@@ -445,6 +554,7 @@ mod report_tests {
             &self,
             _model: &Self::Model,
             _control: &Image,
+            _plan: Option<&gen_core::RenderPlan>,
             seed: u64,
             cancel: &CancelFlag,
             preview: &gen_core::PreviewSink,
@@ -457,6 +567,15 @@ mod report_tests {
             if seed == 3 {
                 cancel.cancel();
             }
+            if seed == 5 {
+                // A device fault that races a user cancel.
+                cancel.cancel();
+                return Err(WorkerError::ProcessPoisoned("device lost".into()));
+            }
+            if seed == 6 {
+                cancel.cancel();
+                return Err(WorkerError::Engine("canceled mid-denoise".into()));
+            }
             Ok((
                 Image {
                     width: seed as u32,
@@ -466,6 +585,44 @@ mod report_tests {
                 unavailable(&format!("attempt-{seed}")),
             ))
         }
+    }
+
+    /// Codex P1 on PR #3434: the CUDA FLUX.1 strict-control route has no cache boundary to latch
+    /// quarantine, so a `ProcessPoisoned` that races a cancel must still fail the item with its
+    /// fatal class rather than read as a clean cancel. An ordinary error under cancel stays a cancel.
+    #[test]
+    fn strict_control_keeps_process_poison_when_cancel_raced_it() {
+        let control = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 3],
+        };
+        let preview = gen_core::PreviewSink::default();
+        let poisoned = generate_control_item(
+            &Fixture,
+            &(),
+            &control,
+            None,
+            5,
+            &CancelFlag::default(),
+            &preview,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(poisoned, Err(WorkerError::ProcessPoisoned(ref detail)) if detail == "device lost"),
+            "{poisoned:?}"
+        );
+        let canceled = generate_control_item(
+            &Fixture,
+            &(),
+            &control,
+            None,
+            6,
+            &CancelFlag::default(),
+            &preview,
+            &mut |_| {},
+        );
+        assert!(matches!(canceled, Ok(None)), "{canceled:?}");
     }
 
     #[test]
@@ -484,6 +641,7 @@ mod report_tests {
             &provider,
             &(),
             &control,
+            None,
             1,
             &first_cancel,
             &preview,
@@ -499,6 +657,7 @@ mod report_tests {
             &provider,
             &(),
             &control,
+            None,
             2,
             &failed_cancel,
             &preview,
@@ -510,6 +669,7 @@ mod report_tests {
             &provider,
             &(),
             &control,
+            None,
             3,
             &canceled,
             &preview,
@@ -523,6 +683,7 @@ mod report_tests {
             &provider,
             &(),
             &control,
+            None,
             4,
             &retry_cancel,
             &preview,

@@ -517,7 +517,7 @@ pub(super) fn krea_control_generate_one(
         memory_evaluation.map(|evaluation| &evaluation.context),
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("Krea control generation failed: {error}")))?;
+    .map_err(|error| crate::generation_error("Krea control generation failed", error))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {

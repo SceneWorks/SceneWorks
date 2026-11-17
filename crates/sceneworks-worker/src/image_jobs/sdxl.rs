@@ -198,9 +198,7 @@ fn sdxl_advanced_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| {
-            WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
-        })?;
+        .map_err(|error| crate::generation_error("sdxl advanced generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images
@@ -407,7 +405,7 @@ pub(super) async fn generate_sdxl_advanced_stream(
                 )?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
-                    WorkerError::Engine(format!("outpaint mask union failed: {error}"))
+                    crate::generation_error("outpaint mask union failed", error)
                 })?;
             }
             let strength = super::sampling::resolved_f32_clamped(

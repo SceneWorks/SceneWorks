@@ -38,9 +38,11 @@ impl PreparedAdapterSelection {
     pub fn ensure_unchanged(&self) -> WorkerResult<()> {
         for pin in &self.pins {
             pin.ensure_unchanged().map_err(|error| {
-                crate::WorkerError::InvalidPayload(format!(
-                    "Prepared adapter source changed: {error}"
-                ))
+                crate::provider_error(error, |error| {
+                    crate::WorkerError::InvalidPayload(format!(
+                        "Prepared adapter source changed: {error}"
+                    ))
+                })
             })?;
         }
         Ok(())
@@ -262,7 +264,11 @@ pub fn moss_generation_acceptance_device(settings: &Settings) -> WorkerResult<se
     };
     moss_acceptance_device(bytes, fraction)
         .map(|(metadata, _device)| metadata)
-        .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))
+        .map_err(|error| {
+            crate::provider_error(error, |error| {
+                crate::WorkerError::InvalidPayload(error.to_string())
+            })
+        })
 }
 
 #[cfg(target_os = "macos")]
