@@ -14600,6 +14600,52 @@
         "decode": 2454716416
       },
       "overallAllocatorEnvelopeBytes": 3895459840
+    },
+    {
+      "id": "regime:minimax_h3_image:candle:q4:base:base:lora:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-f01770f2b7b1a5015c5d",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "regime": "lora",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-lora-evidence.json",
+        "sha256": "8919db4348a899d91c87019ef2997f480c817eee859cd9ebf56081eae7e32dc7",
+        "recordId": "imc-f01770f2b7b1a5015c5d",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40106983424,
+        "denoise": 21081620480,
+        "decode": 2494562304
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40106983424,
+        "denoise": 21081620480,
+        "decode": 2494562304
+      },
+      "overallAllocatorEnvelopeBytes": 40106983424
     }
   ]
 }
