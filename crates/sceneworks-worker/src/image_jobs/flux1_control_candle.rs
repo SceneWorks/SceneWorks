@@ -436,7 +436,7 @@ impl CandleStrictControl for Flux1StrictControl {
             }
         };
         loaded.map_err(|error| {
-            WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))
+            crate::generation_error("FLUX.1-dev strict-control load failed", error)
         })
     }
 

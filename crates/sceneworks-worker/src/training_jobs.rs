@@ -1685,10 +1685,10 @@ fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerErro
         gen_core::Error::Backend(_)
         | gen_core::Error::MissingTensor(_)
         | gen_core::Error::Io(_) => {
-            WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+            crate::generation_error(&format!("{engine_id} trainer load failed"), error)
         }
         gen_core::Error::ProcessPoisoned(detail) => WorkerError::ProcessPoisoned(detail),
-        gen_core::Error::Canceled => WorkerError::Engine(format!("training failed: {error}")),
+        gen_core::Error::Canceled => crate::generation_error("training failed", error),
     }
 }
 
@@ -3554,7 +3554,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
             let spec = load_inputs.load_spec(engine_id, &request.config.train_dtype);
             let operation = (|| {
                 let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
-                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                    crate::generation_error(&format!("{engine_id} trainer load failed"), error)
                 })?;
                 trainer
                     .validate(&request)
@@ -3577,7 +3577,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
                         gen_core::Error::ProcessPoisoned(detail) => {
                             WorkerError::ProcessPoisoned(detail)
                         }
-                        other => WorkerError::Engine(format!("training failed: {other}")),
+                        other => crate::generation_error("training failed", other),
                     })
             })();
             // The operation closure owns and drops the trainer on success, validation failure,

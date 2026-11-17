@@ -1361,9 +1361,8 @@ fn generate_refined(
         |output| output.kv_cache.as_ref(),
     );
     record.emit(job_id);
-    let output = generation.map_err(|error| {
-        WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-    })?;
+    let output = generation
+        .map_err(|error| crate::generation_error("prompt-refine generation failed", error))?;
     Ok((output, record.block().clone()))
 }
 

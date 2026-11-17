@@ -151,7 +151,7 @@ where
     // generic `CacheThread::with_model` before this runs (see `REFINE_EVICT_BEFORE_LOAD`).
     let load = move || {
         crate::inference_runtime::load_for_model_with(&spec, &reqs)
-            .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))
+            .map_err(|error| crate::generation_error(&load_error_context, error))
     };
     // Adapt the user's `&dyn TextLlm` run closure to the generic cache's resident `Box<dyn TextLlm>`.
     // The `&Box<_>` param is inherent to the seam (the cache stores the boxed trait object), so

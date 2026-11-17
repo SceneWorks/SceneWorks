@@ -259,14 +259,14 @@ pub(crate) fn propagate_track_blocking(
             let weights = crate::image_jobs::read_weights(&weights_path)
                 .map_err(|e| WorkerError::Engine(format!("sam2 weights load: {e}")))?;
             Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
-                .map_err(|e| WorkerError::Engine(format!("sam2 predictor build: {e}")))
+                .map_err(|e| crate::generation_error("sam2 predictor build", e))
         },
     )?;
 
     let mut run = |seeds: &[(usize, BoxNorm)]| -> WorkerResult<Vec<Vec<u8>>> {
         let mut state = predictor
             .init_state_from_frames(&frame_refs, height, width)
-            .map_err(|e| WorkerError::Engine(format!("sam2 init_state: {e}")))?;
+            .map_err(|e| crate::generation_error("sam2 init_state", e))?;
         for &(idx, box_norm) in seeds {
             predictor
                 .add_new_box(
@@ -274,7 +274,7 @@ pub(crate) fn propagate_track_blocking(
                     idx as i32,
                     box_norm_to_pixels(box_norm, width, height),
                 )
-                .map_err(|e| WorkerError::Engine(format!("sam2 add_box: {e}")))?;
+                .map_err(|e| crate::generation_error("sam2 add_box", e))?;
         }
         // gen-core d8038beb (sc-7176 pin sync): `propagate` takes `cancel` + per-frame `progress`
         // (the video per-step cancel contract). Thread the caller's flag/callback so a user cancel
@@ -291,14 +291,14 @@ pub(crate) fn propagate_track_blocking(
                 runtime_macos::media::Error::Canceled => {
                     WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
                 }
-                e => WorkerError::Engine(format!("sam2 propagate: {e}")),
+                e => crate::generation_error("sam2 propagate", e),
             })?;
         // `propagate` yields the prompt frame onward in order; build a dense per-clip-frame vec.
         let mut out = vec![Vec::new(); clip_frame_paths.len()];
         for (frame_idx, low) in &masks {
             let mask = predictor
                 .mask_to_video_res(&state, low)
-                .map_err(|e| WorkerError::Engine(format!("sam2 mask resize: {e}")))?;
+                .map_err(|e| crate::generation_error("sam2 mask resize", e))?;
             // Bounds-check the predictor's returned frame index rather than trusting it:
             // a negative i32 would wrap via `as usize` and an out-of-range index would
             // panic on `out[..]`, unwinding the blocking task (media_jobs would absorb it

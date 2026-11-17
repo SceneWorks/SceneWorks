@@ -253,7 +253,7 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
         };
         let completed = self
             .generate_with_execution_report(&request, &tile, &tile, &mut |_| {})
-            .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))?;
+            .map_err(|error| crate::generation_error("detail tile failed", error))?;
         match completed.generation.output {
             Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                 Ok((images.remove(0).pixels, completed.execution))
@@ -306,7 +306,7 @@ fn detail_refine_tile_generator(
     };
     let completed = generator
         .generate_with_execution_report(&request, &mut noop)
-        .map_err(|error| WorkerError::Engine(format!("detail tile failed: {error}")))?;
+        .map_err(|error| crate::generation_error("detail tile failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
             Ok((images.remove(0).pixels, completed.execution))
@@ -833,7 +833,7 @@ pub(crate) async fn run_image_detail_job(
                 &candle_provider_spec,
                 candle_memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("SDXL detail load failed", error))?;
             let preview_tx = tx.clone();
             let preview = gen_core::PreviewSink::new(move |frame| {
                 let _ = preview_tx.try_send(DetailEvent::Preview(frame));

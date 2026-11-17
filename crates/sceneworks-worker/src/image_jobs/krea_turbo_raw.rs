@@ -219,9 +219,7 @@ fn krea_turbo_on_raw_generate_one(
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
-        .map_err(|error| {
-            WorkerError::Engine(format!("Krea turbo-on-Raw generation failed: {error}"))
-        })?;
+        .map_err(|error| crate::generation_error("Krea turbo-on-Raw generation failed", error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {

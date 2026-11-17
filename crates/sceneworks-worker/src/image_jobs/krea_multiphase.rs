@@ -489,7 +489,7 @@ pub(super) fn krea_multiphase_generate_one(
         memory_strategy_context,
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("Krea multi-phase generation failed: {error}")))?;
+    .map_err(|error| crate::generation_error("Krea multi-phase generation failed", error))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images.pop().ok_or_else(|| {

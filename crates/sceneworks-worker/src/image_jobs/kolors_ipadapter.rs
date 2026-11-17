@@ -350,9 +350,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
     let tier = candle_resolved_tier_key(request, &kolors_base, false);
     let contract =
         runtime_cuda::providers::kolors::memory_strategy::provider_contract_for_ip(&contract_paths)
-            .map_err(|error| {
-                WorkerError::Engine(format!("Kolors IP memory contract failed: {error}"))
-            })?;
+            .map_err(|error| crate::generation_error("Kolors IP memory contract failed", error))?;
     let overlay_receipt = crate::candle_memory_strategy::kolors_overlay_receipt_identity(
         KOLORS_IPADAPTER_ENGINE,
         &contract,
@@ -487,9 +485,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                 adapters,
             };
             let model = IpAdapterKolors::load_with_memory_context(&paths, load_memory_context)
-                .map_err(|error| {
-                    WorkerError::Engine(format!("Kolors IP-Adapter load failed: {error}"))
-                })?;
+                .map_err(|error| crate::generation_error("Kolors IP-Adapter load failed", error))?;
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
@@ -542,9 +538,10 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "Kolors IP-Adapter generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "Kolors IP-Adapter generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

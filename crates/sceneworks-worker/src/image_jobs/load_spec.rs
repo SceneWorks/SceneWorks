@@ -1034,7 +1034,7 @@ pub(super) fn load_control_engine(
     spec: &LoadSpec,
 ) -> WorkerResult<Box<dyn Generator>> {
     crate::inference_runtime::load(engine_id, spec)
-        .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
+        .map_err(|error| crate::generation_error(&format!("{engine_id} load failed"), error))
 }
 
 #[cfg(native_lane)]

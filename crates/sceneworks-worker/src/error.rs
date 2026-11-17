@@ -167,6 +167,40 @@ pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> Wo
     }
 }
 
+/// Map a provider failure on a device path onto the worker's error classes. `E` is any provider
+/// error that bridges into [`gen_core::Error`] (`gen_core::Error` itself, `mlx_gen::Error`,
+/// `CandleError`, …); each bridge carries `ProcessPoisoned` across 1:1. A poisoned process keeps its
+/// typed recovery class through [`classify_engine_error`], which also marks owner cleanup unsafe on
+/// this thread. Every other failure is an engine error under `context` whose text is the provider
+/// error's own `Display`, byte-identical to the `format!("{context}: {error}")` seams this replaces.
+pub(crate) fn generation_error<E>(context: &str, error: E) -> WorkerError
+where
+    E: Into<gen_core::Error> + std::fmt::Display,
+{
+    provider_error(error, |detail| {
+        WorkerError::Engine(format!("{context}: {detail}"))
+    })
+}
+
+/// [`generation_error`] for a lane whose ordinary failure has its own shape: `ordinary` receives the
+/// provider error's `Display` text and builds the error exactly as the lane always has. Only a
+/// typed `ProcessPoisoned` bypasses it.
+pub(crate) fn provider_error<E>(
+    error: E,
+    ordinary: impl FnOnce(String) -> WorkerError,
+) -> WorkerError
+where
+    E: Into<gen_core::Error> + std::fmt::Display,
+{
+    let detail = error.to_string();
+    match error.into() {
+        poisoned @ gen_core::Error::ProcessPoisoned(_) => {
+            classify_engine_error("provider failure", poisoned)
+        }
+        _ => ordinary(detail),
+    }
+}
+
 /// Prepend the actionable host-side remedy to a terminal job-failure detail when it describes a
 /// driver-class CUDA failure, leaving everything else untouched (sc-16247).
 ///

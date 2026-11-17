@@ -618,7 +618,7 @@ fn run_vision_generation(
     .emit(job_id);
     generation
         .map(|output| output.text)
-        .map_err(|error| WorkerError::Engine(format!("catalog vision inference failed: {error}")))
+        .map_err(|error| crate::generation_error("catalog vision inference failed", error))
 }
 
 #[cfg(native_lane)]
@@ -874,7 +874,7 @@ fn run_embedding_pass_blocking(
         CLIP_EMBEDDER_ID,
         &LoadSpec::new(WeightsSource::Dir(weights_dir)),
     )
-    .map_err(|error| WorkerError::Engine(format!("CLIP embedder load failed: {error}")))?;
+    .map_err(|error| crate::generation_error("CLIP embedder load failed", error))?;
     let descriptor = embedder.descriptor().clone();
     if descriptor.space != CLIP_SPACE {
         return Err(WorkerError::Engine(format!(

@@ -44,8 +44,10 @@ use sceneworks_core::contracts::JsonObject;
 
 // `WorkerResult` / `WorkerError` are re-exported from the crate root (`error::*`); the backend legs
 // surface model failures through them, the same as every other worker face path.
+#[cfg(any(target_os = "macos", all(native_lane, test)))]
+use crate::WorkerError;
 #[cfg(native_lane)]
-use crate::{WorkerError, WorkerResult};
+use crate::WorkerResult;
 
 /// The recognition method surfaced on every result. Stable string the asset sidecar (sc-4408) and the
 /// UI bands (sc-4414) key off — the same antelopev2 ArcFace stack on both platforms.
@@ -345,14 +347,14 @@ impl FaceBackend {
                 let (h, w) = (image.height as usize, image.width as usize);
                 let dets = analysis
                     .detect(&image.pixels, h, w)
-                    .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?;
+                    .map_err(|error| crate::generation_error("face detect", error))?;
                 // `detect` returns largest-first; embed just `[0]` (one recognition forward).
                 let Some(det) = dets.first() else {
                     return Ok(None);
                 };
                 let face = analysis
                     .embed(&image.pixels, h, w, det)
-                    .map_err(|error| WorkerError::Engine(format!("face embed: {error}")))?;
+                    .map_err(|error| crate::generation_error("face embed", error))?;
                 Ok(Some((face.det_score, face.embedding)))
             }
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -362,7 +364,7 @@ impl FaceBackend {
                 // clean N/A funnel both other worker face paths rely on.)
                 let faces = analysis
                     .analyze(image)
-                    .map_err(|error| WorkerError::Engine(format!("face analyze: {error}")))?;
+                    .map_err(|error| crate::generation_error("face analyze", error))?;
                 Ok(faces.into_iter().next().map(|f| (f.det_score, f.embedding)))
             }
             #[cfg(test)]
@@ -419,7 +421,7 @@ impl FaceLikenessScorer {
         )
         .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
         let analysis = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
-            .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Mlx(analysis), source)
     }
 }
@@ -429,7 +431,7 @@ impl FaceLikenessScorer {
     /// Load the candle SCRFD + ArcFace stack from `weights_dir` and embed the source face once.
     pub(crate) fn load_candle(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
         let analysis = runtime_cuda::providers::face::load(weights_dir)
-            .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+            .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Candle(Box::new(analysis)), source)
     }
 }

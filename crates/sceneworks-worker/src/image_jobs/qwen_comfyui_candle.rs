@@ -489,9 +489,10 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
                             }
                             Err(_) if cancel.is_cancelled() => return Ok(None),
                             Err(error) => {
-                                return Err(WorkerError::Engine(format!(
-                                    "ComfyUI Qwen-Image generation failed: {error}"
-                                )));
+                                return Err(crate::generation_error(
+                                    "ComfyUI Qwen-Image generation failed",
+                                    error,
+                                ));
                             }
                         };
                     match completed.generation.output {

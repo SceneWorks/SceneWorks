@@ -95,7 +95,7 @@ fn with_sam3_weights<R>(
         |_| true,
         || {
             Weights::from_file(model_path, device)
-                .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))
+                .map_err(|e| crate::generation_error("sam3 weights load", e))
         },
     )?;
     f(weights)
@@ -118,17 +118,17 @@ impl PersonConceptSession {
         cancel: Option<&CancelFlag>,
     ) -> WorkerResult<Self> {
         let mut model = Sam3VideoModel::from_weights(weights)
-            .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 model build", e))?;
         if let Some(quant) = quant_level() {
             model
                 .quantize(quant)
-                .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
+                .map_err(|e| crate::generation_error("sam3 quantize", e))?;
         }
         let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenizer load", e))?;
         let (input_ids, text_mask) = tokenizer
             .encode(CONCEPT_PROMPT, device)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenize", e))?;
         check_segment_canceled(cancel)?;
         Ok(Self {
             model,
@@ -157,7 +157,7 @@ impl PersonConceptSession {
                 runtime_cuda::media::CandleError::Canceled => {
                     WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
                 }
-                e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+                e => crate::generation_error("sam3 propagate", e),
             })
     }
 }
@@ -198,7 +198,7 @@ where
 {
     let cancel = cancel.as_ref();
     check_segment_canceled(cancel)?;
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let device = default_device().map_err(|e| crate::generation_error("sam3 device", e))?;
     with_sam3_weights(&model_path, &device, |weights| {
         segment_images_in_one_session(
             count,
@@ -264,16 +264,16 @@ pub(crate) fn segment_box_blocking(
             "smart-select source image has zero dimension".to_owned(),
         ));
     }
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let device = default_device().map_err(|e| crate::generation_error("sam3 device", e))?;
     let weights = Weights::from_file(&model_path, &device)
-        .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        .map_err(|e| crate::generation_error("sam3 weights load", e))?;
     let segmenter = Sam3ImageSegmenter::from_weights(&weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+        .map_err(|e| crate::generation_error("sam3 image model build", e))?;
     let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+        .map_err(|e| crate::generation_error("sam3 tokenizer load", e))?;
     let (input_ids, text_mask) = tokenizer
         .encode(concept, &device)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+        .map_err(|e| crate::generation_error("sam3 tokenize", e))?;
     let pixels = input_tensor(&image, &device)?;
     let cxcywh = normalize_box_cxcywh(box_xyxy, width, height);
     let boxes = Tensor::from_vec(cxcywh.to_vec(), (1, 1, 4), &device)
@@ -289,7 +289,7 @@ pub(crate) fn segment_box_blocking(
             threshold,
             mask_threshold,
         )
-        .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))?;
+        .map_err(|e| crate::generation_error("sam3 segment_with_boxes", e))?;
     let nx1 = (box_xyxy[0].min(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
     let ny1 = (box_xyxy[1].min(box_xyxy[3]) / height as f32).clamp(0.0, 1.0);
     let nx2 = (box_xyxy[0].max(box_xyxy[2]) / width as f32).clamp(0.0, 1.0);
@@ -373,7 +373,7 @@ pub(crate) fn segment_track_blocking(
         ));
     }
 
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let device = default_device().map_err(|e| crate::generation_error("sam3 device", e))?;
 
     // Decode every clip frame to RGB8 (shared rendered size) and build the SAM3 input tensors.
     let mut frames: Vec<Tensor> = Vec::with_capacity(clip_frame_paths.len());
@@ -462,7 +462,7 @@ pub(crate) fn segment_all_persons_in_memory(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let device = default_device().map_err(|e| crate::generation_error("sam3 device", e))?;
     let tensors: Vec<Tensor> = views
         .iter()
         .map(|view| input_tensor(view, &device))

@@ -468,7 +468,7 @@ async fn run_seedvr2_upscale(
                 .generate_with_execution_report(&request, &mut |_progress| {})
                 .map_err(|error| match error {
                     gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
-                    other => WorkerError::Engine(format!("SeedVR2 upscale failed: {other}")),
+                    other => crate::generation_error("SeedVR2 upscale failed", other),
                 })?;
             let image = match completed.generation.output {
                 Some(GenerationOutput::Images(mut images)) if images.len() == 1 => images.remove(0),

@@ -500,7 +500,7 @@ impl CandleStrictControl for ZImageStrictControl {
                 }
             })
             .map_err(|error| {
-                WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
+                crate::generation_error("Z-Image strict-pose control load failed", error)
             })
     }
 

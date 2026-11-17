@@ -328,7 +328,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                 )?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
-                    WorkerError::Engine(format!("SDXL outpaint mask union failed: {error}"))
+                    crate::generation_error("SDXL outpaint mask union failed", error)
                 })?;
             }
             (canvas, Some(mask), "outpaint")
@@ -418,12 +418,12 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                 adapters,
             };
             let model = SdxlEdit::load_admitted(&paths, &provider_spec, memory_context)
-                .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
+                .map_err(|error| crate::generation_error("SDXL edit load failed", error))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
             // snapshots are cached, so a native-VAE edit is a no-op here.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("SDXL edit PiD decoder load failed: {error}"))
+                    crate::generation_error("SDXL edit PiD decoder load failed", error)
                 })?,
                 None => model,
             };
@@ -474,9 +474,10 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "SDXL edit generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "SDXL edit generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

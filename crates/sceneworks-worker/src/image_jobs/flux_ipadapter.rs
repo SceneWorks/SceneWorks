@@ -581,9 +581,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                     IpAdapterFlux::load_with_memory_spec(&paths, generation_memory, &strategy_spec)
                 }
             };
-            let model = loaded.map_err(|error| {
-                WorkerError::Engine(format!("FLUX IP-Adapter load failed: {error}"))
-            })?;
+            let model = loaded
+                .map_err(|error| crate::generation_error("FLUX IP-Adapter load failed", error))?;
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.

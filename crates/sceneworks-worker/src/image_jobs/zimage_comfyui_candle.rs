@@ -436,9 +436,10 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                             }
                             Err(_) if cancel.is_cancelled() => return Ok(None),
                             Err(error) => {
-                                return Err(WorkerError::Engine(format!(
-                                    "ComfyUI Z-Image generation failed: {error}"
-                                )));
+                                return Err(crate::generation_error(
+                                    "ComfyUI Z-Image generation failed",
+                                    error,
+                                ));
                             }
                         };
                     match completed.generation.output {

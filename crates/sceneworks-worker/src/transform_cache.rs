@@ -214,7 +214,7 @@ where
             gen_core::Error::Unsupported(_) => {
                 WorkerError::InvalidPayload(format!("{load_error_context}: {error}"))
             }
-            other => WorkerError::Engine(format!("{load_error_context}: {other}")),
+            other => crate::generation_error(&load_error_context, other),
         })
     };
     #[allow(clippy::borrowed_box)]

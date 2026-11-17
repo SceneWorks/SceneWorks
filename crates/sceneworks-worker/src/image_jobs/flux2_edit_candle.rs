@@ -527,11 +527,11 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                     ),
                 }
             }
-            .map_err(|error| WorkerError::Engine(format!("FLUX.2 edit load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("FLUX.2 edit load failed", error))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("FLUX.2 edit PiD decoder load failed: {error}"))
+                    crate::generation_error("FLUX.2 edit PiD decoder load failed", error)
                 })?,
                 None => model,
             };
@@ -593,9 +593,10 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "FLUX.2 edit generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "FLUX.2 edit generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

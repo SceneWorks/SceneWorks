@@ -93,7 +93,7 @@ impl CatalogFaceDetector {
             )
             .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
             let analysis = FaceAnalysis::load(&scrfd, &arcface)
-                .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+                .map_err(|error| crate::generation_error("face stack load", error))?;
             Ok(Self {
                 backend: CatalogFaceBackend::Mlx(analysis),
             })
@@ -101,7 +101,7 @@ impl CatalogFaceDetector {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             let analysis = runtime_cuda::providers::face::load(weights_dir)
-                .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+                .map_err(|error| crate::generation_error("face stack load", error))?;
             Ok(Self {
                 backend: CatalogFaceBackend::Candle(Box::new(analysis)),
             })
@@ -119,7 +119,7 @@ impl CatalogFaceDetector {
                 let (height, width) = (image.height as usize, image.width as usize);
                 analysis
                     .detect(&image.pixels, height, width)
-                    .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?
+                    .map_err(|error| crate::generation_error("face detect", error))?
                     .into_iter()
                     .map(|face| CatalogFaceDetection {
                         bbox: face.bbox,
@@ -131,7 +131,7 @@ impl CatalogFaceDetector {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             CatalogFaceBackend::Candle(analysis) => analysis
                 .detect(&image)
-                .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?
+                .map_err(|error| crate::generation_error("face detect", error))?
                 .into_iter()
                 .map(|face| CatalogFaceDetection {
                     bbox: face.bbox,
@@ -183,14 +183,14 @@ fn largest_face_mlx(
     let (h, w) = (image.height as usize, image.width as usize);
     let dets = analysis
         .detect(&image.pixels, h, w)
-        .map_err(|error| WorkerError::Engine(format!("face detect: {error}")))?;
+        .map_err(|error| crate::generation_error("face detect", error))?;
     // `detect` returns largest-first; embed just `[0]`.
     let Some(det) = dets.first() else {
         return Ok(None);
     };
     let face = analysis
         .embed(&image.pixels, h, w, det)
-        .map_err(|error| WorkerError::Engine(format!("face embed: {error}")))?;
+        .map_err(|error| crate::generation_error("face embed", error))?;
     Ok(Some((face.bbox, face.embedding)))
 }
 
@@ -204,7 +204,7 @@ fn largest_face_candle(
 ) -> WorkerResult<Option<([f32; 4], Vec<f32>)>> {
     let faces = analysis
         .analyze(image)
-        .map_err(|error| WorkerError::Engine(format!("face analyze: {error}")))?;
+        .map_err(|error| crate::generation_error("face analyze", error))?;
     Ok(faces.into_iter().next().map(|f| (f.bbox, f.embedding)))
 }
 
@@ -225,7 +225,7 @@ fn analyze_faces(
     )
     .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
     let analysis = FaceAnalysis::load(&scrfd, &arcface)
-        .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+        .map_err(|error| crate::generation_error("face stack load", error))?;
     embed_largest_faces(
         &items,
         |image| largest_face_mlx(&analysis, image),
@@ -244,7 +244,7 @@ fn analyze_faces(
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
     let analysis = runtime_cuda::providers::face::load(&weights_dir)
-        .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
+        .map_err(|error| crate::generation_error("face stack load", error))?;
     embed_largest_faces(
         &items,
         |image| largest_face_candle(&analysis, image),

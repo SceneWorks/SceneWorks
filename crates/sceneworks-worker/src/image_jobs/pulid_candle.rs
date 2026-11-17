@@ -125,9 +125,7 @@ fn pulid_memory_ladder_eligible(request: &ImageRequest, use_pid: bool) -> bool {
 fn pulid_memory_tier_key(paths: &PulidFluxPaths) -> WorkerResult<&'static str> {
     let tier = runtime_cuda::providers::pulid::memory_strategy::resolved_numeric_tier(paths)
         .map_err(|error| {
-            WorkerError::Engine(format!(
-                "PuLID-FLUX numeric tier resolution failed: {error}"
-            ))
+            crate::generation_error("PuLID-FLUX numeric tier resolution failed", error)
         })?;
     match (tier.precision, tier.quant) {
         (gen_core::Precision::Bf16, Some(gen_core::Quant::Q4)) => Ok("q4"),
@@ -515,9 +513,7 @@ pub(super) async fn generate_candle_pulid_stream(
     let tier = pulid_memory_tier_key(&contract_paths)?;
     let pulid_contract =
         runtime_cuda::providers::pulid::memory_strategy::provider_contract(&contract_paths)
-            .map_err(|error| {
-                WorkerError::Engine(format!("PuLID-FLUX memory contract failed: {error}"))
-            })?;
+            .map_err(|error| crate::generation_error("PuLID-FLUX memory contract failed", error))?;
     let runtime_overlay_bytes = pulid_contract.asset_facts.overlay_bytes;
     let mut strategy_spec =
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
@@ -668,11 +664,11 @@ pub(super) async fn generate_candle_pulid_stream(
                     &strategy_spec,
                 ),
             }
-            .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("PuLID-FLUX load failed", error))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("PuLID-FLUX PiD decoder load failed: {error}"))
+                    crate::generation_error("PuLID-FLUX PiD decoder load failed", error)
                 })?,
                 None => model,
             };

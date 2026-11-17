@@ -223,7 +223,7 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
     // gen-core d8038beb (sc-7176 pin sync): `detector_blob` is now fallible (returns a `Result`).
     let (blob, det_scale) =
         detector_blob(&image.pixels, image.height as usize, image.width as usize)
-            .map_err(|error| WorkerError::Engine(format!("SCRFD blob: {error}")))?;
+            .map_err(|error| crate::generation_error("SCRFD blob", error))?;
     let dets = SCRFD.with(|cell| -> WorkerResult<_> {
         let cached = crate::cache_thread::get_or_load_local(
             cell,
@@ -247,14 +247,14 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
                     },
                 )?;
                 let scrfd = Scrfd::from_weights(weights)
-                    .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
+                    .map_err(|error| crate::generation_error("SCRFD load", error))?;
                 Ok((scrfd_path.to_path_buf(), scrfd))
             },
         )?;
         let (_, scrfd) = &*cached;
         scrfd
             .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
-            .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
+            .map_err(|error| crate::generation_error("SCRFD detect", error))
     })?;
 
     Ok(extraction_from_detections(
@@ -282,7 +282,7 @@ fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<Kps
             |(dir, _)| dir.as_path() == face_dir,
             || {
                 let analysis = runtime_cuda::providers::face::load(face_dir).map_err(|error| {
-                    WorkerError::Engine(format!("face stack {face_dir:?}: {error}"))
+                    crate::generation_error(&format!("face stack {face_dir:?}"), error)
                 })?;
                 Ok((face_dir.to_path_buf(), analysis))
             },
@@ -290,7 +290,7 @@ fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<Kps
         let (_, analysis) = &*cached;
         analysis
             .detect(image)
-            .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
+            .map_err(|error| crate::generation_error("SCRFD detect", error))
     })?;
 
     Ok(extraction_from_detections(

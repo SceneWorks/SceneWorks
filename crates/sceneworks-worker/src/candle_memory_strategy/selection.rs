@@ -709,7 +709,7 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
             let Some(contract) = crate::inference_runtime::media()
                 .memory_strategy_contract(engine_id, spec)
                 .map_err(|error| {
-                    WorkerError::Engine(format!("{engine_id} memory contract failed: {error}"))
+                    crate::generation_error(&format!("{engine_id} memory contract failed"), error)
                 })?
             else {
                 return Ok(None);

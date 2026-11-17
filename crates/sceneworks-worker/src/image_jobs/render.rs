@@ -521,17 +521,7 @@ pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
     "pulid_flux",
 ];
 
-/// Map a provider's generation failure onto the worker's error classes. A poisoned process keeps its
-/// typed recovery class through [`crate::classify_engine_error`], which also marks owner cleanup
-/// unsafe on this thread; every other failure is an engine error under `context`. Every planned
-/// render path (generic, bespoke MLX FLUX.1, Candle control / IP-Adapter / PuLID) maps through
-/// here so none erases the fatal class before the cache boundary.
-pub(super) fn generation_error(context: &str, error: gen_core::Error) -> WorkerError {
-    match error {
-        gen_core::Error::ProcessPoisoned(_) => crate::classify_engine_error(context, error),
-        other => WorkerError::Engine(format!("{context}: {other}")),
-    }
-}
+pub(super) use crate::generation_error;
 
 /// Map a provider's pre-load plan refusal onto the worker's error classes: an invalid request is a
 /// payload error the user can act on, cancellation stays cancellation, and a poisoned process keeps its

@@ -5337,7 +5337,9 @@ mod tests {
                 let mut steps: Vec<gen_core::Progress> = Vec::new();
                 let output = generator
                     .generate(&req, &mut |progress| steps.push(progress))
-                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                    .map_err(|error| {
+                        crate::provider_error(error, |error| WorkerError::Engine(error.to_string()))
+                    })?;
                 let image = match output {
                     gen_core::GenerationOutput::Images(mut images) => images.remove(0),
                     other => {
@@ -5410,7 +5412,9 @@ mod tests {
                     .map(|_| ())
                     .map_err(|error| match error {
                         gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
-                        other => WorkerError::Engine(other.to_string()),
+                        other => crate::provider_error(other, |other| {
+                            WorkerError::Engine(other.to_string())
+                        }),
                     })
             },
         )

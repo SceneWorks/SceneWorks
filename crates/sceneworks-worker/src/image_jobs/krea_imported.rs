@@ -1276,7 +1276,7 @@ pub(super) async fn generate_krea_imported_control_stream(
         pins: adapter_pins,
     } = resolve_prepared_adapters(request, settings)?;
     let control_pin = gen_core::PinnedWeightsFile::pin(&control_weights)
-        .map_err(|error| WorkerError::Engine(format!("Krea pose overlay pin failed: {error}")))?;
+        .map_err(|error| crate::generation_error("Krea pose overlay pin failed", error))?;
 
     // Conditioning-overlay admission (sc-16069) — the dense Krea trunk, the pose-control branch, and
     // every job adapter are held co-resident by this bespoke assembly.
@@ -1373,9 +1373,10 @@ pub(super) async fn generate_krea_imported_control_stream(
             };
             runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
                 |error| {
-                    WorkerError::Engine(format!(
-                        "Krea 2 imported checkpoint pose-control load failed: {error}"
-                    ))
+                    crate::generation_error(
+                        "Krea 2 imported checkpoint pose-control load failed",
+                        error,
+                    )
                 },
             )
         },
@@ -1424,9 +1425,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                 let completed = model
                     .generate_with_execution_report(&control_request, &control, on_progress)
                     .map_err(|error| {
-                        WorkerError::Engine(format!(
-                            "Krea imported pose generation failed: {error}"
-                        ))
+                        crate::generation_error("Krea imported pose generation failed", error)
                     })?;
                 let image = match completed.generation.output {
                     Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
@@ -1843,9 +1842,7 @@ fn krea_imported_generate_pass(
         on_progress,
     )
     .map_err(|error| {
-        WorkerError::Engine(format!(
-            "Krea 2 imported checkpoint generation failed: {error}"
-        ))
+        crate::generation_error("Krea 2 imported checkpoint generation failed", error)
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -1901,9 +1898,7 @@ fn krea_imported_generate_multiphase(
         on_progress,
     )
     .map_err(|error| {
-        WorkerError::Engine(format!(
-            "Krea 2 imported multi-phase generation failed: {error}"
-        ))
+        crate::generation_error("Krea 2 imported multi-phase generation failed", error)
     })?;
     match output {
         GenerationOutput::Images(mut images) => {

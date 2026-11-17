@@ -662,9 +662,10 @@ pub(super) async fn generate_mage_finetuned_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "Fine-tuned Mage-Flow generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "Fine-tuned Mage-Flow generation failed",
+                                error,
+                            ));
                         }
                     };
                     match output {

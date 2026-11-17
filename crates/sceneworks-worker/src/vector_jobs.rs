@@ -801,7 +801,7 @@ fn classify_starvector_error(error: gen_core::core_llm::Error) -> WorkerError {
     if matches!(error, gen_core::core_llm::Error::Canceled) {
         WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
     } else {
-        WorkerError::Engine(format!("native StarVector generation failed: {error}"))
+        crate::generation_error("native StarVector generation failed", error)
     }
 }
 

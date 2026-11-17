@@ -1181,7 +1181,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 &provider_load_spec,
                 &memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("Qwen edit load failed", error))?;
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
@@ -1247,9 +1247,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "Qwen edit generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "Qwen edit generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

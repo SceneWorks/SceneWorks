@@ -240,7 +240,7 @@ fn bernini_image_generate_one_with_memory(
         memory_strategy_context,
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("Bernini image generation failed: {error}")))?;
+    .map_err(|error| crate::generation_error("Bernini image generation failed", error))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images

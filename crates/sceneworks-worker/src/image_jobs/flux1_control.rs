@@ -358,7 +358,7 @@ pub(super) fn flux1_control_render_for_test(
     if baseline {
         let output = generator
             .generate(&request, &mut |_| {})
-            .map_err(|error| WorkerError::Engine(format!("baseline render failed: {error}")))?;
+            .map_err(|error| crate::generation_error("baseline render failed", error))?;
         return match output {
             GenerationOutput::Images(mut images) => {
                 let image = images

@@ -1583,20 +1583,20 @@ pub(super) async fn generate_instantid_stream(
                 load_memory_identity,
                 load_memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("InstantID load failed", error))?;
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = InstantId::load_with_memory_context(
                 &paths,
                 load_memory_identity,
                 load_memory_context,
             )
-            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            .map_err(|error| crate::generation_error("InstantID load failed", error))?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
             // before with_face (the engine's documented order). `with_openpose` is backend-neutral
             // (both engines take `&WeightsSource` and consume+return `self`).
             let model = match &openpose {
                 Some(source) => model.with_openpose(source).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID OpenPose load failed: {error}"))
+                    crate::generation_error("InstantID OpenPose load failed", error)
                 })?,
                 None => model,
             };
@@ -1604,9 +1604,9 @@ pub(super) async fn generate_instantid_stream(
             // `quantize` method (the candle lane already forced `quant_bits` out, above).
             #[cfg(target_os = "macos")]
             let model = match quant_bits {
-                Some(bits) => model.quantize(bits).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID quantize failed: {error}"))
-                })?,
+                Some(bits) => model
+                    .quantize(bits)
+                    .map_err(|error| crate::generation_error("InstantID quantize failed", error))?,
                 None => model,
             };
             // Attach the SCRFD + ArcFace face stack. The MLX engine loads the two weight files
@@ -1623,18 +1623,18 @@ pub(super) async fn generate_instantid_stream(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))
                 })?;
-                model.with_face(&scrfd, &arcface).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID face stack: {error}"))
-                })?
+                model
+                    .with_face(&scrfd, &arcface)
+                    .map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
                 let _ = &arcface_path;
-                model.with_face(face_dir).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID face stack: {error}"))
-                })?
+                model
+                    .with_face(face_dir)
+                    .map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371 mlx / sc-8373 candle):
             // the `sdxl` student InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some`
@@ -1650,7 +1650,7 @@ pub(super) async fn generate_instantid_stream(
             #[cfg(native_lane)]
             let mut model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
+                    crate::generation_error("InstantID PiD decoder load failed", error)
                 })?,
                 None => model,
             };
@@ -1918,9 +1918,7 @@ pub(super) async fn generate_instantid_stream(
                     scope
                         .finish(gen_core::MemoryRunOutcome::Complete)
                         .map_err(|error| {
-                            WorkerError::Engine(format!(
-                                "InstantID memory scope cleanup failed: {error}"
-                            ))
+                            crate::generation_error("InstantID memory scope cleanup failed", error)
                         })?;
                     drop(scope);
                     let execution = if execution_stages.is_empty() {

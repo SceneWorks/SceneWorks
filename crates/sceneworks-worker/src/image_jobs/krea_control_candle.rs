@@ -693,7 +693,7 @@ impl CandleStrictControl for KreaStrictControl {
         let paths = self.provider_paths();
         runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
             .map_err(|error| {
-                WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
+                crate::generation_error("Krea 2 strict-pose control load failed", error)
             })
     }
 

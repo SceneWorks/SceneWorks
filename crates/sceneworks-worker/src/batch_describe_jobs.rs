@@ -1369,9 +1369,10 @@ fn joycaption_thread(
                 }
                 Err(error) => {
                     // A model that cannot load fails the whole job; the thread ends with it.
-                    let _ = call.reply.send(Err(WorkerError::Engine(format!(
-                        "JoyCaption {backend} load failed: {error}"
-                    ))));
+                    let _ = call.reply.send(Err(crate::generation_error(
+                        &format!("JoyCaption {backend} load failed"),
+                        error,
+                    )));
                     return;
                 }
             }

@@ -455,7 +455,7 @@ impl CandleStrictControl for QwenStrictControl {
             adapters: self.adapters.clone(),
         };
         QwenFunControl::load_with_spec(&paths, &self.load_spec).map_err(|error| {
-            WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
+            crate::generation_error("Qwen 2512-Fun strict-control load failed", error)
         })
     }
 

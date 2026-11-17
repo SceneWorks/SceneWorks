@@ -127,17 +127,17 @@ impl PersonConceptSession {
         cancel: Option<&CancelFlag>,
     ) -> WorkerResult<Self> {
         let mut model = Sam3VideoModel::from_weights(weights)
-            .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 model build", e))?;
         if let Some(bits) = quant_bits() {
             model
                 .quantize(bits)
-                .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+                .map_err(|e| crate::generation_error(&format!("sam3 quantize q{bits}"), e))?;
         }
         let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenizer load", e))?;
         let (input_ids, text_mask) = tokenizer
             .encode(CONCEPT_PROMPT)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenize", e))?;
         check_segment_canceled(cancel)?;
         Ok(Self {
             model,
@@ -166,7 +166,7 @@ impl PersonConceptSession {
                 runtime_macos::media::Error::Canceled => {
                     WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
                 }
-                e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+                e => crate::generation_error("sam3 propagate", e),
             })
     }
 }
@@ -403,11 +403,11 @@ fn run_on_sam3_thread<T: Send + 'static>(
 fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3ImageSegmenter> {
     with_sam3_weights(model_path, |weights| {
         let mut model = Sam3ImageSegmenter::from_weights(weights)
-            .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 image model build", e))?;
         if let Some(bits) = quant {
             model
                 .quantize(bits)
-                .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+                .map_err(|e| crate::generation_error(&format!("sam3 quantize q{bits}"), e))?;
         }
         Ok(model)
     })
@@ -418,11 +418,11 @@ fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sa
 fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3Tracker> {
     with_sam3_weights(model_path, |weights| {
         let mut tracker = Sam3Tracker::from_weights(weights)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tracker build", e))?;
         if let Some(bits) = quant {
-            tracker
-                .quantize(bits)
-                .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
+            tracker.quantize(bits).map_err(|e| {
+                crate::generation_error(&format!("sam3 tracker quantize q{bits}"), e)
+            })?;
         }
         Ok(tracker)
     })
@@ -645,10 +645,10 @@ fn segment_box_on_thread(
         )?;
         let (_, model) = &*cached;
         let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenizer load", e))?;
         let (input_ids, text_mask) = tokenizer
             .encode(concept)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+            .map_err(|e| crate::generation_error("sam3 tokenize", e))?;
         model
             .segment_with_boxes(
                 &pixels,
@@ -660,7 +660,7 @@ fn segment_box_on_thread(
                 threshold,
                 mask_threshold,
             )
-            .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))
+            .map_err(|e| crate::generation_error("sam3 segment_with_boxes", e))
     })?;
 
     // Pick the instance whose MASK has the most foreground inside the prompt box. SAM3 PVS returns
@@ -777,7 +777,7 @@ fn segment_points_on_thread(
         let (_, tracker) = &*cached;
         tracker
             .segment_points(&pixels, &coords, &labels)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))
+            .map_err(|e| crate::generation_error("sam3 tracker segment_points", e))
     })?;
 
     // Low-res mask logits `[mg, mg]` → binarize `> 0` + resize to source dims (inverts the squash).

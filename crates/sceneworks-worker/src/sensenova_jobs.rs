@@ -541,7 +541,7 @@ fn map_sensenova_engine_error(
 ) -> WorkerError {
     match error {
         runtime_macos::media::Error::Canceled => WorkerError::Canceled(cancel_message.to_owned()),
-        other => WorkerError::Engine(format!("{context}: {other}")),
+        other => crate::generation_error(context, other),
     }
 }
 
@@ -556,7 +556,7 @@ fn map_sensenova_engine_error(
         runtime_cuda::media::CandleError::Canceled => {
             WorkerError::Canceled(cancel_message.to_owned())
         }
-        other => WorkerError::Engine(format!("{context}: {other}")),
+        other => crate::generation_error(context, other),
     }
 }
 
@@ -768,8 +768,8 @@ fn vqa_generate(
     // The provider-owned typed runtime, NOT a second bespoke `T2iModel` assembled here: it keeps the
     // registry loader's artifact pin, quantization, provider contract, and cache identity, and it is
     // what owns the request scope `run_vqa` opens below.
-    let runtime = load_runtime(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    let runtime =
+        load_runtime(&spec).map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
@@ -845,7 +845,7 @@ fn vqa_generate(
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+        .map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     on_loaded()?;
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
@@ -1262,8 +1262,8 @@ fn interleave_generate(
     })?;
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let runtime = load_runtime(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    let runtime =
+        load_runtime(&spec).map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
@@ -1372,7 +1372,7 @@ fn interleave_generate(
     let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
-        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+        .map_err(|error| crate::generation_error("SenseNova-U1 load", error))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`

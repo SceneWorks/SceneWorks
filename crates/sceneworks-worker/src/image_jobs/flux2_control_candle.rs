@@ -448,14 +448,12 @@ impl CandleStrictControl for Flux2StrictControl {
             ),
         };
         let model = loaded.map_err(|error| {
-            WorkerError::Engine(format!(
-                "FLUX.2-dev strict-pose control load failed: {error}"
-            ))
+            crate::generation_error("FLUX.2-dev strict-pose control load failed", error)
         })?;
         // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
         match &self.pid {
             Some(pid) => model.with_pid(pid).map_err(|error| {
-                WorkerError::Engine(format!("FLUX.2 control PiD decoder load failed: {error}"))
+                crate::generation_error("FLUX.2 control PiD decoder load failed", error)
             }),
             None => Ok(model),
         }

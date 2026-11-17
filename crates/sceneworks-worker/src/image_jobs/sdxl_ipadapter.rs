@@ -480,14 +480,12 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 adapters,
             };
             let model = IpAdapterSdxl::load_admitted(&paths, &provider_spec, memory_context)
-                .map_err(|error| {
-                    WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
-                })?;
+                .map_err(|error| crate::generation_error("SDXL IP-Adapter load failed", error))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
             // snapshots are cached, so a native-VAE generation is a no-op here.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
-                    WorkerError::Engine(format!("SDXL IP-Adapter PiD decoder load failed: {error}"))
+                    crate::generation_error("SDXL IP-Adapter PiD decoder load failed", error)
                 })?,
                 None => model,
             };
@@ -544,9 +542,10 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                         }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "SDXL IP-Adapter generation failed: {error}"
-                            )));
+                            return Err(crate::generation_error(
+                                "SDXL IP-Adapter generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

@@ -151,11 +151,13 @@ pub(super) async fn finalize_refine_job(
             &reply.aspect,
         )
         .map_err(|error| {
-            WorkerError::Engine(format!(
-                "The MiniMax-H3-Image prompt expander returned output this build cannot read: \
+            crate::provider_error(error, |error| {
+                WorkerError::Engine(format!(
+                    "The MiniMax-H3-Image prompt expander returned output this build cannot read: \
                  {error}. The reply began: {}",
-                crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
-            ))
+                    crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
+                ))
+            })
         })?;
         rewrite_suggestion = Some(
             crate::minimax_h3_image_prompt_expand::suggestion_result_block(
