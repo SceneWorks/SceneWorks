@@ -1,6 +1,5 @@
 use super::adapters::resolve_adapters;
 use super::artifact_resolution::krea_model_subdir;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_text_style_gain;
@@ -11,7 +10,7 @@ use super::load_spec::attach_selected_decoder;
 use super::metrics::lora_label;
 use super::quantization::resolve_quant;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_cached_gen_stream;
 use super::strict_control::build_control_conditioning;
@@ -28,13 +27,13 @@ use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
 use super::Progress;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
@@ -220,10 +219,15 @@ pub(super) fn resolve_krea_control_base(
         }
     }
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Krea control modelPath").map(Some);
@@ -270,15 +274,30 @@ pub(super) fn resolve_krea_control_base(
 /// `advanced.poses`, not edit mode, whose dense base resolves locally. The MLX mirror of
 /// `krea_control_candle_available`; the overlay weights are NOT part of the gate (resolved on first use).
 pub(super) fn krea_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn krea_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn krea_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
 pub(super) fn krea_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
+    resolved_option_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
 }
 
 /// The (repo, filename) of the hosted MLX overlay — `advanced.controlWeights.{repo,filename}` overrides
@@ -288,15 +307,15 @@ pub(super) fn krea_control_steps(request: &ImageRequest) -> u32 {
 pub(super) fn krea_control_overlay_repo_file(
     request: &ImageRequest,
 ) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", KREA_CONTROL_OVERLAY_REPO);
     let file = safe_weight_filename(
@@ -311,12 +330,8 @@ pub(super) fn krea_control_overlay_repo_file(
 /// routes hand this exact entry to `pin_app_managed_model_file`; canonicalizing first would erase the
 /// symlink/path-component identity the prepared token must retain (sc-18306).
 pub(super) fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathBuf> {
-    request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("path"))
-        .and_then(crate::payload::trimmed_value_str)
+    super::strict_control::resolved_control_weights(request)
+        .and_then(|fields| fields.path.valid_trimmed())
         .map(PathBuf::from)
 }
 
@@ -355,8 +370,8 @@ pub(super) async fn ensure_krea_control_weights(
     request: &ImageRequest,
 ) -> WorkerResult<(PathBuf, bool)> {
     let env_override = std::env::var(KREA_CONTROL_WEIGHTS_ENV).ok();
-    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override(
-        &request.advanced,
+    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override_typed(
+        &request.portable_aux,
         env_override.as_deref(),
     )? {
         return Ok((path, false));
@@ -407,7 +422,7 @@ fn krea_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -527,10 +542,14 @@ pub(super) async fn generate_krea_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
-    project_path: &Path,
-    backend: &str,
+    execution: &super::conditioning::ResolvedImageExecution,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let weights_dir = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
@@ -547,8 +566,8 @@ pub(super) async fn generate_krea_control_stream(
     let adapters = resolve_adapters(request, settings)?;
 
     let steps = krea_control_steps(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KREA_CONTROL_DEFAULT_SCALE,
         0.0..=KREA_CONTROL_SCALE_CAP,
@@ -566,7 +585,7 @@ pub(super) async fn generate_krea_control_stream(
     let user_control = resolve_user_control_map(request, settings, project_path)?;
     let control_source = resolve_control_source(request, settings, project_path)?;
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = krea_control_raw_settings(request, &repo, steps, control_scale, count);
     // Strict pose shares one seed across the set so noise-derived attributes (hair, wardrobe, lighting)
@@ -582,6 +601,7 @@ pub(super) async fn generate_krea_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )

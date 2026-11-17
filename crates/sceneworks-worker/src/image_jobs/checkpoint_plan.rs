@@ -11,6 +11,7 @@ use super::resolve_seed;
 #[cfg(not(target_os = "macos"))]
 use super::routing::imported_base_snapshot_companions;
 use super::routing::imported_generate_request_has_unsupported_shape;
+use super::routing::imported_generate_request_has_unsupported_shape_resolved;
 use super::sdxl_imported::resolve_sdxl_imported_component_dir_cache_only;
 use super::sdxl_imported::resolve_sdxl_ldm_tokenizer_root_cache_only;
 use super::stream::drive_gen_items;
@@ -477,7 +478,10 @@ fn checkpoint_plan_request_shape_refusal(
     }
     // Material strict-control intent that did NOT resolve to the Pose operation (a pose set inside
     // edit mode, or a control payload the pose-mode reader rejects) has no lane anywhere.
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+    if (request.advanced_text("controlImage").is_some()
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty()))
         && operation != gen_core::ImportedModelOperation::Pose
     {
         return refuse("cannot combine strict control intent with this operation");
@@ -499,9 +503,9 @@ fn checkpoint_plan_request_shape_refusal(
             }
         }
         gen_core::ImportedModelOperation::Pose => {
-            if !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(
-                &request.advanced,
-            ) {
+            if !request.advanced_text("controlMode").is_none_or(|mode| {
+                mode.trim().is_empty() || mode.trim().eq_ignore_ascii_case("pose")
+            }) {
                 return refuse("does not support the requested pose control mode");
             }
             if !caps
@@ -661,6 +665,14 @@ pub(crate) fn request_is_checkpoint_plan_backed(request: &ImageRequest) -> bool 
         && checkpoint_plan_serves_request_shape(request)
 }
 
+pub(crate) fn request_is_checkpoint_plan_backed_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    checkpoint_plan_checkpoint_id(&execution.model_manifest_entry).is_some()
+        && checkpoint_plan_binds_request_operation(execution)
+        && checkpoint_plan_serves_request_shape_resolved(execution)
+}
+
 /// The request shapes the route's own generation body implements today.
 ///
 /// Distinct from [`checkpoint_plan_binds_request_operation`], which asks the REGISTRY whether a
@@ -677,6 +689,15 @@ fn checkpoint_plan_serves_request_shape(request: &ImageRequest) -> bool {
         && request.loras.is_empty()
         && request.reference_asset_id.is_none()
         && !request.hires_fix.enabled
+}
+
+fn checkpoint_plan_serves_request_shape_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    !imported_generate_request_has_unsupported_shape_resolved(execution)
+        && execution.loras.is_empty()
+        && execution.reference_asset_id.is_none()
+        && !execution.hires_fix.enabled
 }
 
 /// How this route answers "I cannot serve this request": decline so the entry's own bespoke family
@@ -1300,14 +1321,38 @@ pub(super) fn checkpoint_plan_candle_companion_dirs(
 /// retained refusal happens only when the entry is not plan-backed; a plan-backed entry that cannot
 /// be served either refuses here or retains its refusal for the router's fall-through, never a
 /// silent fall-through to the stub.
+#[cfg(test)]
 pub(super) fn prepare_checkpoint_plan_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<CheckpointPlanSelection> {
+    prepare_checkpoint_plan_sources_with_shape(
+        request,
+        settings,
+        checkpoint_plan_serves_request_shape(request),
+    )
+}
+
+pub(super) fn prepare_checkpoint_plan_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<CheckpointPlanSelection> {
+    prepare_checkpoint_plan_sources_with_shape(
+        execution,
+        settings,
+        checkpoint_plan_serves_request_shape_resolved(execution),
+    )
+}
+
+fn prepare_checkpoint_plan_sources_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    serves_shape: bool,
+) -> WorkerResult<CheckpointPlanSelection> {
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
         return Ok(CheckpointPlanSelection::default());
     };
-    if !checkpoint_plan_serves_request_shape(request) {
+    if !serves_shape {
         return checkpoint_plan_unservable_shape(
             request,
             format!(
@@ -1839,7 +1884,7 @@ fn checkpoint_plan_bespoke_primary(
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's
 /// `[key]`. `None` means "the provider's own default", which the registry descriptor owns.
-fn checkpoint_plan_u32_override(request: &ImageRequest, key: &str) -> Option<u32> {
+fn resolved_checkpoint_plan_u32(request: &ImageRequest, key: &'static str) -> Option<u32> {
     let parse = |value: &Value| {
         value
             .as_u64()
@@ -1847,13 +1892,12 @@ fn checkpoint_plan_u32_override(request: &ImageRequest, key: &str) -> Option<u32
             .and_then(|value| u32::try_from(value).ok())
     };
     request
-        .advanced
-        .get(key)
-        .and_then(parse)
+        .advanced_i64(key)
+        .and_then(|value| u32::try_from(value).ok())
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
 }
 
-fn checkpoint_plan_f32_override(request: &ImageRequest, key: &str) -> Option<f32> {
+fn resolved_checkpoint_plan_f32(request: &ImageRequest, key: &'static str) -> Option<f32> {
     let parse = |value: &Value| {
         value
             .as_f64()
@@ -1861,9 +1905,8 @@ fn checkpoint_plan_f32_override(request: &ImageRequest, key: &str) -> Option<f32
             .map(|value| value as f32)
     };
     request
-        .advanced
-        .get(key)
-        .and_then(parse)
+        .advanced_f64(key)
+        .map(|value| value as f32)
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
 }
 
@@ -1899,7 +1942,7 @@ fn checkpoint_plan_raw_settings(
     guidance: Option<f32>,
     quant_bits: Option<i64>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     // This route consumes pinned source layers directly, not a cache derivative. Never echo an
     // advanced-setting claim as conversion history.
     raw.remove("checkpointDerivative");
@@ -2006,8 +2049,8 @@ pub(super) fn checkpoint_plan_generation_request(request: &ImageRequest) -> Gene
     GenerationRequest {
         width: request.width,
         height: request.height,
-        steps: checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100)),
-        guidance: checkpoint_plan_f32_override(request, "guidanceScale"),
+        steps: resolved_checkpoint_plan_u32(request, "steps").map(|steps| steps.clamp(1, 100)),
+        guidance: resolved_checkpoint_plan_f32(request, "guidanceScale"),
         ..super::sampling::explicit_sampling_request(request)
     }
 }

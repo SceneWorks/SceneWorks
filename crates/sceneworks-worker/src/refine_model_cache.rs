@@ -161,9 +161,114 @@ where
     cache_thread::run_cached(refine_worker(), key, load, run, REFINE_SEAM_MESSAGES).await
 }
 
+/// Drop the resident refine model now and release its backend allocation (SW-7102). Returns
+/// whether a model was resident.
+///
+/// The idle window keeps a refine model resident for minutes after its job; MiniMax-H3-Image's
+/// 27B prompt expander and the image model it serves do not fit together on most hosts, so the
+/// image route stages the expander out before it loads. A no-op when the cache thread never
+/// started.
+pub(crate) async fn evict_resident_refiner() -> WorkerResult<bool> {
+    match REFINE_WORKER.get() {
+        Some(worker) => evict_resident_refiner_on(worker).await,
+        None => Ok(false),
+    }
+}
+
+async fn evict_resident_refiner_on(worker: &mpsc::Sender<RefineJob>) -> WorkerResult<bool> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let job: RefineJob = Box::new(move |cache| {
+        let evicted = cache.evict().is_some();
+        if evicted {
+            cache_thread::release_backend_cache_after_evict();
+        }
+        let _ = reply_tx.send(evicted);
+    });
+    worker
+        .send(job)
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_stopped.to_owned()))?;
+    reply_rx
+        .await
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_dropped.to_owned()))
+}
+
+/// Ask the cache thread what a load of `spec`/`reqs` would find, evicting nothing:
+/// [`CacheAccess::Warm`] when that exact model is already resident (the job reuses it and needs no
+/// new memory), else [`CacheAccess::Cold`] with the weights source of a different resident
+/// refiner, which the load's own evict-before-load drops first. A memory check credits what that
+/// drop frees; a job it refuses leaves the resident refiner in place.
+#[cfg(native_lane)]
+pub(crate) async fn refiner_admission_access(
+    spec: &LoadSpec,
+    reqs: &ModelRequirements,
+) -> WorkerResult<(cache_thread::CacheAccess, Option<PathBuf>)> {
+    let key = RefineModelCacheKey::new(spec, reqs);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let job: RefineJob = Box::new(move |cache| {
+        let (access, resident) = cache.access_for(&key);
+        let _ = reply_tx.send((access, resident.map(|resident| resident.source.clone())));
+    });
+    refine_worker()
+        .send(job)
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_stopped.to_owned()))?;
+    reply_rx
+        .await
+        .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_dropped.to_owned()))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Make a stub model resident in the PROCESS-WIDE refine cache, the one the image route
+    /// stages out (SW-7102). Returns once the cache thread has installed it.
+    pub(crate) async fn seed_global_resident_stub() {
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        refine_worker()
+            .send(Box::new(move |cache: &mut RefineModelCache| {
+                seed_stub_entry(cache);
+                seed_tx.send(()).expect("ack cache seed");
+            }))
+            .expect("seed the global refine cache");
+        seed_rx.await.expect("global cache seed ack");
+    }
+
+    /// Whether the process-wide refine cache holds a resident model.
+    pub(crate) async fn global_refiner_is_resident() -> bool {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        refine_worker()
+            .send(Box::new(move |cache: &mut RefineModelCache| {
+                reply_tx.send(!cache.is_empty()).expect("send cache state");
+            }))
+            .expect("query the global refine cache");
+        reply_rx.await.expect("global cache state")
+    }
+
+    /// SW-7102: the explicit eviction drops the resident model on the cache's own thread and says
+    /// so; a second call finds nothing resident.
+    #[tokio::test]
+    async fn an_explicit_eviction_drops_the_resident_refiner() {
+        let (tx, rx) = mpsc::channel::<RefineJob>();
+        let worker = thread::spawn(move || run_refine_cache_worker(rx, None));
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        tx.send(Box::new(move |cache: &mut RefineModelCache| {
+            seed_stub_entry(cache);
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx.await.expect("cache seed ack");
+
+        assert!(evict_resident_refiner_on(&tx).await.unwrap());
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(Box::new(move |cache: &mut RefineModelCache| {
+            reply_tx.send(cache.is_empty()).expect("send cache state");
+        }))
+        .expect("check cache state");
+        assert!(reply_rx.await.unwrap(), "the resident model is gone");
+        assert!(!evict_resident_refiner_on(&tx).await.unwrap());
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
 
     fn spec(source: &str) -> LoadSpec {
         LoadSpec {

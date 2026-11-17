@@ -88,7 +88,7 @@ pub(super) fn resolve_svd_model_dir(settings: &Settings) -> WorkerResult<PathBuf
 /// target.get(manifest_key, default), min, max)` (advanced overrides the manifest, which overrides
 /// the builtin default; the resolved value is clamped).
 #[cfg(native_lane)]
-pub(super) fn svd_i32(
+pub(super) fn resolved_svd_i32(
     request: &VideoRequest,
     adv_key: &str,
     manifest_key: &str,
@@ -96,11 +96,24 @@ pub(super) fn svd_i32(
     min: i32,
     max: i32,
 ) -> i32 {
-    request
-        .advanced
-        .get(adv_key)
-        .or_else(|| request.model_manifest_entry.get(manifest_key))
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+    let selected = match adv_key {
+        "numFrames" => request.options().num_frames.as_ref().map(|v| v.value),
+        "decodeChunkSize" => request
+            .options()
+            .decode_chunk_size
+            .as_ref()
+            .map(|v| v.value),
+        "motionBucketId" => request.options().motion_bucket_id.as_ref().map(|v| v.value),
+        "conditioningFps" => request.options().conditioning_fps.as_ref().map(|v| v.value),
+        _ => None,
+    };
+    selected
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get(manifest_key)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        })
         .map(|v| v as i32)
         .unwrap_or(default)
         .clamp(min, max)
@@ -109,17 +122,27 @@ pub(super) fn svd_i32(
 /// Read an SVD float knob: `advanced[adv_key]` → `modelManifestEntry[manifest_key]` → `default`
 /// (no clamp). Mirrors the torch `float(advanced.get(adv_key, target.get(manifest_key, default)))`.
 #[cfg(native_lane)]
-pub(super) fn svd_f32(
+pub(super) fn resolved_svd_f32(
     request: &VideoRequest,
     adv_key: &str,
     manifest_key: &str,
     default: f32,
 ) -> f32 {
-    request
-        .advanced
-        .get(adv_key)
-        .or_else(|| request.model_manifest_entry.get(manifest_key))
-        .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+    let selected = match adv_key {
+        "noiseAugStrength" => request
+            .options()
+            .noise_aug_strength
+            .as_ref()
+            .map(|v| v.value),
+        _ => None,
+    };
+    selected
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get(manifest_key)
+                .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+        })
         .map(|v| v as f32)
         .unwrap_or(default)
 }
@@ -147,10 +170,10 @@ pub(super) fn svd_steps(request: &VideoRequest) -> u32 {
         .map(|v| v as i32)
         .unwrap_or(builtin);
     request
-        .advanced
-        .get("steps")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .map(|v| v as i32)
+        .options()
+        .steps
+        .as_ref()
+        .map(|v| v.value as i32)
         .unwrap_or(manifest_default)
         .clamp(1, 80) as u32
 }
@@ -190,11 +213,18 @@ pub(super) fn svd_raw_settings(request: &VideoRequest) -> Value {
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
     raw.insert(
         "numFrames".to_owned(),
-        json!(svd_i32(request, "numFrames", "numFrames", 25, 1, 25)),
+        json!(resolved_svd_i32(
+            request,
+            "numFrames",
+            "numFrames",
+            25,
+            1,
+            25
+        )),
     );
     raw.insert(
         "motionBucketId".to_owned(),
-        json!(svd_i32(
+        json!(resolved_svd_i32(
             request,
             "motionBucketId",
             "motionBucketId",
@@ -205,13 +235,20 @@ pub(super) fn svd_raw_settings(request: &VideoRequest) -> Value {
     );
     raw.insert(
         "conditioningFps".to_owned(),
-        json!(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30)),
+        json!(resolved_svd_i32(
+            request,
+            "conditioningFps",
+            "condFps",
+            7,
+            1,
+            30
+        )),
     );
     // The output/playback cadence (decoupled from conditioningFps; sc-3764).
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert(
         "noiseAugStrength".to_owned(),
-        json!(svd_f32(
+        json!(resolved_svd_f32(
             request,
             "noiseAugStrength",
             "noiseAugStrength",
@@ -220,7 +257,7 @@ pub(super) fn svd_raw_settings(request: &VideoRequest) -> Value {
     );
     raw.insert(
         "decodeChunkSize".to_owned(),
-        json!(svd_i32(
+        json!(resolved_svd_i32(
             request,
             "decodeChunkSize",
             "decodeChunkSize",
@@ -260,27 +297,48 @@ pub(super) async fn generate_svd(
         negative_prompt: None,
         width: request.width,
         height: request.height,
-        frames: svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
+        frames: resolved_svd_i32(request, "numFrames", "numFrames", 25, 1, 25) as u32,
         // Output/playback cadence = the user's `fps` (mirrors the torch `export_to_video(fps=request.fps)`);
         // the motion cadence rides `conditioning_fps` below (sc-3764).
         fps: request.fps,
         steps: Some(svd_steps(request)),
         guidance: None,
         seed: resolve_video_seed(request) as u64,
-        motion_bucket_id: Some(
-            svd_i32(request, "motionBucketId", "motionBucketId", 127, 1, 255) as f32,
-        ),
-        noise_aug_strength: Some(svd_f32(
+        motion_bucket_id: Some(resolved_svd_i32(
+            request,
+            "motionBucketId",
+            "motionBucketId",
+            127,
+            1,
+            255,
+        ) as f32),
+        noise_aug_strength: Some(resolved_svd_f32(
             request,
             "noiseAugStrength",
             "noiseAugStrength",
             0.02,
         )),
-        decode_chunk_size: Some(
-            svd_i32(request, "decodeChunkSize", "decodeChunkSize", 8, 1, 64) as u32,
+        decode_chunk_size: Some(resolved_svd_i32(
+            request,
+            "decodeChunkSize",
+            "decodeChunkSize",
+            8,
+            1,
+            64,
+        ) as u32),
+        conditioning_fps: Some(
+            resolved_svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32,
         ),
-        conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }

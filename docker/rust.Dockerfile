@@ -12,7 +12,7 @@
 
 # Immutable CUDA worker base for the RunPod target. Its source inputs are
 # checked by scripts/check-runpod-prebuilt-inputs.mjs before publication.
-ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:36e0a3fc5bf6a25eb4eaead33e3d07cfb3c10c1db969ecf5955be9737d664d44
+ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:cab97ba4931374744f48ee41f6d1c9614b8310915bbcf1bb49c903775f408ee4
 
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
@@ -50,6 +50,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
+COPY crates/sceneworks-options/Cargo.toml ./crates/sceneworks-options/Cargo.toml
+COPY crates/sceneworks-options-wasm/Cargo.toml ./crates/sceneworks-options-wasm/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY crates/sceneworks-memory-adapter/Cargo.toml ./crates/sceneworks-memory-adapter/Cargo.toml
@@ -63,6 +65,8 @@ RUN mkdir -p \
       apps/rust-api/src \
       apps/rust-worker/src \
       crates/sceneworks-core/src \
+      crates/sceneworks-options/src \
+      crates/sceneworks-options-wasm/src \
       crates/sceneworks-worker/src \
       crates/sceneworks-image-quality/src \
       crates/sceneworks-memory-adapter/src/bin \
@@ -70,7 +74,7 @@ RUN mkdir -p \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
+    && touch crates/sceneworks-options/src/lib.rs crates/sceneworks-options-wasm/src/lib.rs crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
       crates/sceneworks-memory-adapter/src/lib.rs \
       crates/sceneworks-memory-adapter/src/bin/candle.rs \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs
@@ -215,7 +219,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # — the Windows host build uses schannel instead, so this only surfaces here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config libssl-dev procps \
+        ca-certificates curl git build-essential pkg-config libssl-dev procps python3 \
     && rm -rf /var/lib/apt/lists/*
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
@@ -244,6 +248,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
+COPY crates/sceneworks-options/Cargo.toml ./crates/sceneworks-options/Cargo.toml
+COPY crates/sceneworks-options-wasm/Cargo.toml ./crates/sceneworks-options-wasm/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY crates/sceneworks-memory-adapter/Cargo.toml ./crates/sceneworks-memory-adapter/Cargo.toml
@@ -253,12 +259,12 @@ COPY apps/rust-worker/Cargo.toml ./apps/rust-worker/Cargo.toml
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 RUN mkdir -p \
       apps/desktop/src apps/rust-api/src apps/rust-worker/src \
-      crates/sceneworks-core/src crates/sceneworks-worker/src crates/sceneworks-image-quality/src \
+      crates/sceneworks-core/src crates/sceneworks-options/src crates/sceneworks-options-wasm/src crates/sceneworks-worker/src crates/sceneworks-image-quality/src \
       crates/sceneworks-memory-adapter/src/bin crates/sceneworks-mcp/src \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
+    && touch crates/sceneworks-options/src/lib.rs crates/sceneworks-options-wasm/src/lib.rs crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
       crates/sceneworks-memory-adapter/src/lib.rs \
       crates/sceneworks-memory-adapter/src/bin/candle.rs \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs
@@ -267,6 +273,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo fetch --locked
 
 COPY crates ./crates
+COPY scripts/fetch-flash-prebuilt.py ./scripts/fetch-flash-prebuilt.py
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
@@ -291,7 +298,8 @@ COPY docs/calibration/sc-24217/ ./docs/calibration/sc-24217/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
-# nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
+# nvcc compiles the other candle providers' CUDA kernels here (compiling needs no GPU);
+# FlashAttention links the verified Linux archive when the exact source/toolchain matches.
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in
 # libmoe.a need explicit cubins. Inspect the exact executable copied to /out
 # (rather than a Cargo build-directory candidate) so a stale cache entry cannot
@@ -301,6 +309,7 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 # apps/desktop/scripts/build-sidecar.mjs).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/root/.cache/sceneworks/flash-attn \
     --mount=type=cache,target=/app/target \
     set -eu; \
     (while sleep 120; do \
@@ -309,6 +318,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     done) & monitor=$!; \
     trap 'kill "$monitor" 2>/dev/null || true' EXIT; \
     cargo fetch --locked \
+    && flash_dir="$(python3 scripts/fetch-flash-prebuilt.py)" \
+    && if [ -n "$flash_dir" ]; then export CANDLE_FLASH_ATTN_PREBUILT_DIR="$flash_dir"; fi \
     && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \

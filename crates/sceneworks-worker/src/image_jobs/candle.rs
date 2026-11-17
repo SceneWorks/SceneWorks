@@ -29,6 +29,8 @@ use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_mage_edit_model;
 #[cfg(not(target_os = "macos"))]
+use super::conditioning::is_minimax_h3_image_edit;
+#[cfg(not(target_os = "macos"))]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_sensenova_candle_model;
@@ -46,6 +48,8 @@ use super::conditioning::resolve_ideogram_edit;
 use super::conditioning::resolve_img2img_init_generic;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_mage_edit;
+#[cfg(not(target_os = "macos"))]
+use super::conditioning::resolve_minimax_h3_image_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_qwen_image_2_1_edit_images;
 #[cfg(not(target_os = "macos"))]
@@ -198,9 +202,9 @@ use super::sampling::mlx_raw_settings_for_bundle;
 #[cfg(not(target_os = "macos"))]
 use super::sampling::normalize_sampling_knob;
 #[cfg(not(target_os = "macos"))]
-use super::sampling::read_advanced_guidance_method;
+use super::sampling::read_resolved_image_guidance_method;
 #[cfg(not(target_os = "macos"))]
-use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::read_resolved_image_sampling_knobs;
 #[cfg(not(target_os = "macos"))]
 use super::sampling::recover_ideogram_placeholder;
 #[cfg(not(target_os = "macos"))]
@@ -427,6 +431,10 @@ pub(super) fn resolve_candle_lane_inputs(
         let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
         edit_ref_alpha = alpha;
         images
+    } else if is_minimax_h3_image_edit(request) {
+        // MiniMax-H3-Image edit (SW-7101) — the SAME resolver as the MLX lane: one engine id, the
+        // same `Reference` + `MultiReference` conditioning on both backends.
+        resolve_minimax_h3_image_edit(request, settings, project_path)?
     } else if is_sensenova_candle_model(&request.model)
         && matches!(request.mode.as_str(), "edit_image" | "character_image")
     {
@@ -689,11 +697,7 @@ async fn generate_candle_registry_stream_using(
     // the runtime knob under different names (SDXL `set_flash_attn`, Z-Image `set_accel_attn`); the
     // diffusion-transformer families (flux/flux2/qwen) bake it via the build feature with no runtime
     // toggle. No effect unless the crate was built with its flash/accel feature.
-    let flash_attn = request
-        .advanced
-        .get("flashAttn")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let flash_attn = request.advanced_bool("flashAttn").unwrap_or(true);
     match request.model.as_str() {
         // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
         // So do the Illustrious-XL finetunes (epic 10609).
@@ -750,7 +754,12 @@ async fn generate_candle_registry_stream_using(
     // request, plus each ordered reference's alpha plane (`edit_ref_alpha`). Default — RGB, no
     // alpha — for every model but Qwen-Image 2.1.
     let rgba_output_channels = crate::qwen_alpha::request_output_channels(
-        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?,
+        crate::qwen_alpha::resolve_output_channels_typed(
+            &request.model,
+            request
+                .advanced_bool("transparentBackground")
+                .unwrap_or(false),
+        )?,
     );
     if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
         true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
@@ -785,7 +794,7 @@ async fn generate_candle_registry_stream_using(
     // P4, so most families advertise only their family default today) is dropped back to the engine default
     // + a `sampling_knob_unsupported` event, never a hard-fail. The curated knobs light up per-family with
     // zero worker change as the candle engines are adopted.
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = if request.model == "realvisxl_lightning" {
         Some("lightning".to_owned())
     } else {
@@ -810,7 +819,7 @@ async fn generate_candle_registry_stream_using(
     );
     // Guidance method (epic 7434 P5, sc-7448), N3-guarded against the candle descriptor's advertised set.
     let guidance_method = normalize_sampling_knob(
-        read_advanced_guidance_method(&request.advanced),
+        read_resolved_image_guidance_method(request),
         &caps.supported_guidance_methods,
         "guidanceMethod",
         &request.model,
@@ -820,7 +829,7 @@ async fn generate_candle_registry_stream_using(
     // sc-18474: FLUX.2-dev prompt enhancement is native on Candle too. The request-local report
     // sink below is the proof seam: an enabled request cannot silently run the raw prompt without a
     // typed, honestly persisted fallback. The stale passthrough-only behavior is no longer allowed.
-    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
+    let enhance = PromptEnhance::from_resolved(request)?;
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
@@ -1024,7 +1033,7 @@ async fn generate_candle_registry_stream_using(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = candle_tier_pick_is_exact(&request.model, &request.advanced);
+    let explicit_pick = candle_resolved_tier_pick_is_exact(request);
     // FLUX 3's package is request-named and is gated as named: rejected before load if it does
     // not fit, never downtiered to a package the request did not choose.
     if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {
@@ -1329,6 +1338,7 @@ async fn generate_candle_registry_stream_using(
         quant_bits,
         guidance.or(true_cfg),
     );
+    lane_controls::record_effective_h3_image_sampler(&mut raw_settings, &lane_controls);
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:
@@ -2297,6 +2307,7 @@ async fn generate_candle_registry_stream_using(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "registered Candle character_image face-stack staging failed; likeness scores omitted",
     )
@@ -2622,6 +2633,7 @@ async fn generate_candle_registry_stream_using(
                     |preview, on_progress| {
                         let warnings = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                        let execution_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -2654,6 +2666,7 @@ async fn generate_candle_registry_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: Some(batch),
                                 render_plan: render_plans.first().and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2661,7 +2674,7 @@ async fn generate_candle_registry_stream_using(
                             &cancel,
                             on_progress,
                         )?;
-                        let facts = lane_controls::image_facts(
+                        let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
@@ -2669,8 +2682,12 @@ async fn generate_candle_registry_stream_using(
                                 prefix_kv_cache_plan,
                                 prefix_kv_cache_report.take().as_ref(),
                             ),
-                        );
-                        Ok((images, facts))
+                        )
+                        .unwrap_or_default();
+                        if let Some(report) = execution_report.take() {
+                            report.insert_image_facts(&mut facts)?;
+                        }
+                        Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
             }
@@ -2682,6 +2699,7 @@ async fn generate_candle_registry_stream_using(
                     let warnings = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                    let execution_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -2732,6 +2750,7 @@ async fn generate_candle_registry_stream_using(
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                execution_report: Some(&execution_report),
                                 prompt_batch: None,
                                 render_plan: render_plans.get(index).and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2778,6 +2797,9 @@ async fn generate_candle_registry_stream_using(
                         ),
                     )
                     .unwrap_or_default();
+                    if let Some(report) = execution_report.take() {
+                        report.insert_image_facts(&mut facts)?;
+                    }
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(
                             flux3_references::FACT_KEY.to_owned(),
@@ -2820,7 +2842,22 @@ async fn generate_candle_registry_stream_using(
 /// whose verified binding froze a tier. The latter is served in place from the hub snapshot, so a
 /// downtier would load a sibling tier the guard never verified; such a job is gated as bound
 /// (fits, or is refused before load).
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolved_tier_pick_is_exact(request: &ImageRequest) -> bool {
+    (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        && request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .mlx_quantize
+            .is_some())
+        || request
+            .advanced_bool("mlxQuantizeExplicit")
+            .unwrap_or(false)
+        || request.portable_aux.bound_tier().is_some()
+}
+
+#[cfg(test)]
 pub(crate) fn candle_tier_pick_is_exact(model: &str, advanced: &crate::JsonObject) -> bool {
     (matches!(model, "flux_schnell" | "flux_dev") && advanced.contains_key("mlxQuantize"))
         || advanced

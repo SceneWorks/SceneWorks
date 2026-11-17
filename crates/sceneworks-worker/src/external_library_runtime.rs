@@ -25,9 +25,9 @@ use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant, resident_base_component_downloads,
-    selected_portable_model_artifact_closure, selected_portable_requirements_for_model,
-    selected_resident_base_closure_for_row,
+    is_co_requisite_download, requested_runtime_variant_typed, resident_base_component_downloads,
+    selected_portable_model_artifact_closure_resolved,
+    selected_portable_requirements_for_model_resolved, selected_resident_base_closure_for_row,
 };
 #[cfg(test)]
 use sceneworks_core::model_artifacts::artifact_selection::{
@@ -54,9 +54,11 @@ use sceneworks_core::model_artifacts::ModelArtifactResolver;
 use sceneworks_core::model_artifacts::{
     ArtifactContractError, ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
 };
+use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
 use sceneworks_core::portable_sources::{
-    portable_aux_source_shape, required_portable_aux_source_ids, PortableAuxSourceShape,
+    portable_aux_source_shape, required_portable_aux_source_ids_resolved, PortableAuxSourceShape,
 };
+use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
 use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -65,11 +67,68 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tracing::Level;
 
+/// Authored syntax is retained only for omission-sensitive source and path checks. The effective
+/// facts come from the shared resolver before any source closure is selected.
+#[derive(Clone, Debug)]
+struct SourceOptionFacts {
+    authored: RouteOptionFacts,
+    effective: RouteOptionFacts,
+}
+
+impl SourceOptionFacts {
+    fn resolve(job_type: &JobType, payload: &JsonObject) -> WorkerResult<Self> {
+        let authored = RouteOptionFacts::from_payload_syntax(payload);
+        let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) else {
+            // Source-only utility operations have no generation option contract.
+            return Ok(Self {
+                effective: authored.clone(),
+                authored,
+            });
+        };
+        let facts = sceneworks_core::request_validation::facts_for_job(job_type, payload);
+        // Persisted training plans contain API-derived checkpoint paths. Validate their
+        // client controls without treating those trusted paths as new client input.
+        let validation_payload =
+            if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+                sceneworks_core::request_validation::trusted_training_plan_validation_view(payload)
+            } else {
+                payload.clone()
+            };
+        let effective =
+            sceneworks_core::request_validation::resolve_request(kind, &validation_payload, &facts)
+                .map_err(|error| invalid_binding(error.to_string()))?;
+        Ok(Self {
+            authored,
+            effective: RouteOptionFacts::from_payload_syntax(effective.as_payload()),
+        })
+    }
+
+    #[cfg(test)]
+    fn syntax(payload: &JsonObject) -> Self {
+        let authored = RouteOptionFacts::from_payload_syntax(payload);
+        Self {
+            effective: authored.clone(),
+            authored,
+        }
+    }
+
+    fn artifact_selection(
+        &self,
+        model_id: Option<&str>,
+    ) -> WorkerResult<sceneworks_core::model_artifacts::artifact_selection::PortableArtifactOptions>
+    {
+        self.effective
+            .artifact_selection(&self.authored, model_id)
+            .map_err(invalid_binding)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct RuntimeSourceGuard {
     /// Worker-only request copy. Every user-supplied binding hint is removed before dispatch;
     /// a verified route may replace it with its frozen tier and later with pinned local paths.
     dispatch_payload: JsonObject,
+    portable_aux: PortableAuxBindings,
     portable_scope: Option<ActiveLocalArtifacts>,
     _portable_snapshot: Option<PortableAttemptSnapshot>,
     plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
@@ -119,7 +178,19 @@ impl RuntimeSourceGuard {
         settings: &Settings,
         binding: Option<&PortableRouteBinding>,
     ) -> WorkerResult<Self> {
-        Self::begin_with_binding_cancelable(job_type, payload, settings, binding, None)
+        // Source tests often construct only the model carrier. Supply the unrelated
+        // required job envelope before exercising the production validation path.
+        let mut fixture = payload.clone();
+        if matches!(
+            job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::VideoGenerate
+        ) {
+            fixture.entry("projectId").or_insert_with(|| json!("p"));
+            fixture
+                .entry("prompt")
+                .or_insert_with(|| json!("source selection fixture"));
+        }
+        Self::begin_with_binding_cancelable(job_type, &fixture, settings, binding, None)
     }
 
     pub(crate) fn begin_with_binding_cancelable(
@@ -154,10 +225,18 @@ impl RuntimeSourceGuard {
             ]
             .iter()
             .all(|key| payload.get(*key).and_then(serde_json::Value::as_bool) == Some(false));
+        // SW-7163: a measure-only describe job counts with the target's installed tokenizer and
+        // never loads a describer (the API's identical exemption sends no model carriers).
+        let model_free_measure_only = matches!(job_type, JobType::DatasetBatchDescribe)
+            && payload
+                .get("measureOnly")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
         if explicit_download
             || model_free_dry_run
             || model_free_trigger_only_caption
             || model_free_catalog_analysis
+            || model_free_measure_only
         {
             if binding.is_some() {
                 return Err(WorkerError::InvalidPayload(
@@ -166,6 +245,8 @@ impl RuntimeSourceGuard {
             }
             return Ok(Self::none(payload));
         }
+
+        let source_options = SourceOptionFacts::resolve(job_type, payload)?;
 
         let mut planning_payload = payload.clone();
         let mut verified_converted_slots = std::collections::BTreeSet::new();
@@ -329,6 +410,7 @@ impl RuntimeSourceGuard {
                 slot,
                 entry,
                 binding.and_then(|route| route.models.iter().find(|model| &model.slot == slot)),
+                &source_options,
             )?;
             let has_hf_downloads = entry
                 .get("downloads")
@@ -372,12 +454,15 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let selected = selected_portable_requirements_for_model(
+            let artifact_options = source_options
+                .artifact_selection(entry.get("id").and_then(serde_json::Value::as_str))?;
+            let selected = selected_portable_requirements_for_model_resolved(
                 entry,
                 crate::portable_runtime_backend(settings),
                 std::env::consts::OS,
                 requested_variant.as_deref(),
                 payload,
+                &artifact_options,
                 &settings.data_dir,
             )
             .map_err(invalid_binding)?;
@@ -540,8 +625,8 @@ impl RuntimeSourceGuard {
                 job_type,
                 payload,
                 settings,
-                &plans,
-                &converted_co_requirements,
+                (&plans, &converted_co_requirements),
+                &source_options,
                 cancellation,
             )?;
             let prepared = prepare_portable_snapshot(
@@ -550,6 +635,7 @@ impl RuntimeSourceGuard {
                 payload,
                 settings,
                 &mut dispatch_payload,
+                &source_options,
                 cancellation,
             )?;
             if let Some(prepared) = prepared {
@@ -570,7 +656,12 @@ impl RuntimeSourceGuard {
                 portable_snapshot = Some(prepared.snapshot);
                 plan_layers = prepared.plan_layers;
             }
-            rebind_revision_primary_paths(binding, settings, &mut dispatch_payload)?;
+            rebind_revision_primary_paths(
+                binding,
+                settings,
+                &mut dispatch_payload,
+                &source_options,
+            )?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
             verified_revision_sources = revision_primary_handoffs(binding, &dispatch_payload)?;
             dispatch_payload
@@ -620,8 +711,11 @@ impl RuntimeSourceGuard {
                     );
             }
         }
+        let portable_aux = PortableAuxBindings::from_trusted_dispatch(&dispatch_payload)
+            .map_err(invalid_binding)?;
         Ok(Self {
             dispatch_payload,
+            portable_aux,
             portable_scope,
             _portable_snapshot: portable_snapshot,
             plan_layers,
@@ -654,6 +748,7 @@ impl RuntimeSourceGuard {
         }
         Self {
             dispatch_payload,
+            portable_aux: PortableAuxBindings::default(),
             portable_scope: None,
             _portable_snapshot: None,
             plan_layers: None,
@@ -668,6 +763,10 @@ impl RuntimeSourceGuard {
 
     pub(crate) fn dispatch_payload(&self) -> &JsonObject {
         &self.dispatch_payload
+    }
+
+    pub(crate) fn portable_aux(&self) -> &PortableAuxBindings {
+        &self.portable_aux
     }
 
     pub(crate) fn plan_layers(&self) -> Option<std::sync::Arc<VerifiedPlanLayers>> {
@@ -987,7 +1086,11 @@ fn discover_frozen_member_snapshot(
             .all(|file| selected.join(&file.relative_path).is_file());
         if selected_complete
             && (selected.starts_with(preferred.root())
-                || snapshot_matches_frozen_files(&selected, files))
+                || snapshot_matches_frozen_files(
+                    &verified_source_cache(settings),
+                    &selected,
+                    files,
+                ))
         {
             return Ok(selected);
         }
@@ -1050,16 +1153,19 @@ fn discover_frozen_selector_snapshot<'a>(
     discover_frozen_member_snapshot(settings, identity, &files)
 }
 
-fn snapshot_matches_frozen_files(snapshot: &Path, files: &[PortableArtifactFile]) -> bool {
+/// Whether every frozen file in `snapshot` holds its ledger bytes, each read at most once per host
+/// while it keeps its stamp.
+fn snapshot_matches_frozen_files(
+    cache: &VerifiedSourceCache,
+    snapshot: &Path,
+    files: &[PortableArtifactFile],
+) -> bool {
     files.iter().all(|file| {
-        let path = snapshot.join(&file.relative_path);
-        let Ok(input) = File::open(path) else {
+        let Ok(real) = std::fs::canonicalize(snapshot.join(&file.relative_path)) else {
             return false;
         };
-        let Ok((digest, size)) = sceneworks_core::hashing::sha256_reader_retry(input) else {
-            return false;
-        };
-        size == file.size_bytes && format!("sha256:{digest}") == file.sha256
+        std::fs::metadata(&real).is_ok_and(|metadata| metadata.len() == file.size_bytes)
+            && cache.verify(&real, &file.sha256, &|| Ok(())).is_ok()
     })
 }
 
@@ -1125,11 +1231,7 @@ fn in_place_revision_files(
 
 /// This host's hash-once verdict store ([`sceneworks_core::verified_source_cache`]).
 fn verified_source_cache(settings: &Settings) -> VerifiedSourceCache {
-    VerifiedSourceCache::new(
-        settings
-            .data_dir
-            .join("models/portable-attempts/.verified-sources"),
-    )
+    VerifiedSourceCache::for_data_dir(&settings.data_dir)
 }
 
 /// Run `body` with a load-progress context that reports `Verifying model files — read / total`
@@ -1227,10 +1329,10 @@ fn selected_portable_aux_ids(
     payload: &JsonObject,
     entry: &serde_json::Value,
     backend: &str,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Vec<String>> {
-    let mut ids = required_portable_aux_source_ids(job_type, payload, entry, backend)
-        .map_err(invalid_binding)?;
-    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+    let mut auxiliary = options.effective.auxiliary_selection();
+    let plan = if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
         let plan: sceneworks_core::training::TrainingPlan = serde_json::from_value(
             payload
                 .get("plan")
@@ -1238,6 +1340,23 @@ fn selected_portable_aux_ids(
                 .ok_or_else(|| invalid_binding("training plan is absent"))?,
         )
         .map_err(|error| invalid_binding(error.to_string()))?;
+        let entry_id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_binding("model entry lacks id"))?;
+        let training = sceneworks_core::resolved_options::IrisTrainingOptions::bind(
+            &sceneworks_core::resolved_options::BindingInput::new(payload, payload),
+        )
+        .map_err(|error| invalid_binding(error.to_string()))?;
+        auxiliary.training = Some(training.auxiliary_selection(&plan, entry_id));
+        Some(plan)
+    } else {
+        None
+    };
+    let mut ids =
+        required_portable_aux_source_ids_resolved(job_type, payload, entry, backend, &auxiliary)
+            .map_err(invalid_binding)?;
+    if let Some(plan) = plan {
         if entry.get("id").and_then(serde_json::Value::as_str)
             == Some(plan.target.base_model.as_str())
         {
@@ -1257,38 +1376,39 @@ fn selected_portable_aux_ids(
     Ok(ids)
 }
 
+/// The tier `slot` (holding `model_id`) was admitted with: the one selection the API's portable
+/// admission froze the binding from (`admitted_runtime_variant`: a training base's plan tier, a
+/// prompt expansion's `peTier`, else the request's explicit tier), so this guard re-derives the
+/// closure the API bound rather than a default of its own.
 fn selected_runtime_variant(
     job_type: &JobType,
     payload: &JsonObject,
+    slot: &str,
     model_id: &str,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
-    if !matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
-        return Ok(requested_runtime_variant(payload));
+    let requested = || {
+        requested_runtime_variant_typed(
+            payload.get("variant").and_then(serde_json::Value::as_str),
+            match &options.effective.quant_tier {
+                RouteField::Valid(tier) => Some(tier.as_str()),
+                _ => None,
+            },
+            match &options.effective.mlx_quantize {
+                RouteField::Valid(bits) => Some(*bits),
+                _ => None,
+            },
+        )
+    };
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+        || (*job_type == JobType::PromptRefine && slot == "modelManifestEntry")
+    {
+        return sceneworks_core::model_artifacts::artifact_selection::admitted_runtime_variant(
+            job_type, payload, slot, model_id,
+        )
+        .map_err(invalid_binding);
     }
-    let target = payload
-        .get("plan")
-        .and_then(|plan| plan.get("target"))
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| invalid_binding("training plan has no canonical target"))?;
-    let base = target
-        .get("baseModel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no base model"))?;
-    if base != model_id {
-        return Ok(requested_runtime_variant(payload));
-    }
-    let kernel = target
-        .get("kernel")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid_binding("training plan has no native kernel"))?;
-    Ok(Some(
-        if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
-            "q4"
-        } else {
-            "bf16"
-        }
-        .to_owned(),
-    ))
+    Ok(requested())
 }
 
 /// The tier this request runs. An image request that names no tier runs the worker's implicit
@@ -1303,12 +1423,13 @@ fn bound_runtime_variant(
     slot: &str,
     entry: &serde_json::Value,
     binding: Option<&PortableModelBinding>,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
     let model_id = entry
         .get("id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id)? {
+    if let Some(variant) = selected_runtime_variant(job_type, payload, slot, model_id, options)? {
         return Ok(Some(variant));
     }
     if slot != "modelManifestEntry"
@@ -1331,12 +1452,24 @@ fn bound_runtime_variant(
         .filter(|tier| matches!(tier.as_str(), "bf16" | "q8" | "q4")))
 }
 
+pub(crate) fn bound_runtime_variant_from_payload(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &serde_json::Value,
+    binding: Option<&PortableModelBinding>,
+) -> WorkerResult<Option<String>> {
+    let options = SourceOptionFacts::resolve(job_type, payload)?;
+    bound_runtime_variant(job_type, payload, slot, entry, binding, &options)
+}
+
 fn prepare_portable_snapshot(
     route: &PortableRouteBinding,
     job_type: &JobType,
     payload: &JsonObject,
     settings: &Settings,
     dispatch_payload: &mut JsonObject,
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<Option<PreparedPortableSnapshot>> {
     let model_slots = payload_model_slots(payload);
@@ -1349,7 +1482,7 @@ fn prepare_portable_snapshot(
                 .find(|(slot, _)| slot == &model.slot)
                 .map(|(_, entry)| *entry)
                 .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
-            selected_portable_aux_ids(job_type, payload, entry, &route.backend)
+            selected_portable_aux_ids(job_type, payload, entry, &route.backend, options)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
     if route.models.is_empty() {
@@ -1524,7 +1657,9 @@ fn prepare_portable_snapshot(
             } else if let Some(layer) = &plan_layer {
                 layer.source_path.clone()
             } else {
-                selected_local_artifact_path(member, model, entry, payload, settings, job_type)?
+                selected_local_artifact_path(
+                    member, model, entry, payload, settings, job_type, options,
+                )?
             };
             if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
                 || plan_layer.is_some()
@@ -1729,6 +1864,7 @@ fn prepare_portable_snapshot(
                     member,
                     &selected,
                     *is_selected_aux,
+                    options,
                 )?;
             }
         }
@@ -1738,7 +1874,7 @@ fn prepare_portable_snapshot(
     for (slot, member, selected, is_selected_aux) in &in_place {
         route_loader_locator(job_type, dispatch_payload, slot, member, selected)?;
         if *is_selected_aux {
-            rewrite_loader_locator(dispatch_payload, slot, member, selected, true)?;
+            rewrite_loader_locator(dispatch_payload, slot, member, selected, true, options)?;
         }
     }
     for (key, snapshot, files) in in_place_aux {
@@ -2193,6 +2329,7 @@ fn rewrite_loader_locator(
     member: &PortableArtifactMember,
     selected: &Path,
     is_selected_aux: bool,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<()> {
     if member.component_id.as_deref() == Some("selected_text_encoder") {
         if model_slot != "modelManifestEntry" {
@@ -2273,7 +2410,9 @@ fn rewrite_loader_locator(
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| invalid_binding("advanced options are not an object"))?;
-        if source_id == "strict_control" {
+        if source_id == "strict_control"
+            && matches!(options.effective.control_weights, RouteField::Valid(_))
+        {
             if let Some(weights) = advanced
                 .get_mut("controlWeights")
                 .and_then(serde_json::Value::as_object_mut)
@@ -2343,7 +2482,7 @@ fn rewrite_loader_locator(
             .get_mut("advanced")
             .and_then(serde_json::Value::as_object_mut)
         {
-            if advanced.contains_key("modelPath") {
+            if !matches!(options.authored.model_path, RouteField::Absent) {
                 advanced.insert(
                     "modelPath".to_owned(),
                     serde_json::Value::String(path.clone()),
@@ -2410,6 +2549,7 @@ fn rebind_revision_primary_paths(
     route: &PortableRouteBinding,
     settings: &Settings,
     dispatch: &mut JsonObject,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<()> {
     for model in &route.models {
         let primary = model
@@ -2432,7 +2572,7 @@ fn rebind_revision_primary_paths(
         } else {
             snapshot
         };
-        rewrite_loader_locator(dispatch, &model.slot, primary, &selected, false)?;
+        rewrite_loader_locator(dispatch, &model.slot, primary, &selected, false, options)?;
     }
     Ok(())
 }
@@ -2571,10 +2711,11 @@ fn verify_portable_route(
     job_type: &JobType,
     payload: &JsonObject,
     settings: &Settings,
-    plans: &[EntryPlan],
-    converted_co_requirements: &[ExternalArtifactRequirement],
+    prepared_sources: (&[EntryPlan], &[ExternalArtifactRequirement]),
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
+    let (plans, converted_co_requirements) = prepared_sources;
     route
         .validate()
         .map_err(|error| invalid_binding(error.to_string()))?;
@@ -2670,11 +2811,11 @@ fn verify_portable_route(
             job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
         ) && model.slot == "modelManifestEntry"
-            && payload
-                .get("advanced")
-                .and_then(|advanced| advanced.get("textEncoderModel"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| id != "default" && !id.is_empty());
+            && matches!(
+                options.effective.text_encoder_model,
+                RouteField::Valid(ref id)
+                    if id != "default" && !id.is_empty()
+            );
         let bound_encoder = model
             .members
             .iter()
@@ -2691,7 +2832,8 @@ fn verify_portable_route(
                 "selected text encoder closure differs from the admitted route",
             ));
         }
-        let required = selected_portable_aux_ids(job_type, payload, entry, &route.backend)?;
+        let required =
+            selected_portable_aux_ids(job_type, payload, entry, &route.backend, options)?;
         for source_id in &required {
             let admitted = model
                 .members
@@ -2722,6 +2864,7 @@ fn verify_portable_route(
             plans,
             &required,
             job_type,
+            options,
             cancellation,
         )?;
     }
@@ -2866,6 +3009,7 @@ fn verify_portable_binding(
     plans: &[EntryPlan],
     selected_aux_ids: &[String],
     job_type: &JobType,
+    options: &SourceOptionFacts,
     cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
     binding
@@ -2892,14 +3036,22 @@ fn verify_portable_binding(
                 .map(move |requirement| (requirement, plan.resident_base))
         })
         .collect();
-    let requested_variant =
-        bound_runtime_variant(job_type, payload, &binding.slot, entry, Some(binding))?;
-    let mut selected_manifest = selected_portable_model_artifact_closure(
+    let requested_variant = bound_runtime_variant(
+        job_type,
+        payload,
+        &binding.slot,
+        entry,
+        Some(binding),
+        options,
+    )?;
+    let artifact_options = options.artifact_selection(Some(binding.model_id.as_str()))?;
+    let mut selected_manifest = selected_portable_model_artifact_closure_resolved(
         entry,
         binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,
+        &artifact_options,
     )
     .map_err(invalid_binding)?;
     if entry
@@ -3000,7 +3152,7 @@ fn verify_portable_binding(
                     layer.source_path
                 } else {
                     selected_local_artifact_path(
-                        member, binding, entry, payload, settings, job_type,
+                        member, binding, entry, payload, settings, job_type, options,
                     )?
                 };
                 let is_file = selected.is_file();
@@ -3041,12 +3193,13 @@ fn verify_portable_binding(
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
         .expect("portable binding validates exactly one primary");
-    let selected = selected_portable_requirements_for_model(
+    let selected = selected_portable_requirements_for_model_resolved(
         entry,
         binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,
+        &artifact_options,
         &settings.data_dir,
     )
     .map_err(invalid_binding)?;
@@ -3112,7 +3265,9 @@ fn verify_portable_binding(
             let selected = if let Some(layer) = plan_layer {
                 layer.source_path
             } else {
-                selected_local_artifact_path(member, binding, entry, payload, settings, job_type)?
+                selected_local_artifact_path(
+                    member, binding, entry, payload, settings, job_type, options,
+                )?
             };
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
@@ -3361,6 +3516,7 @@ fn selected_local_artifact_path(
     payload: &JsonObject,
     settings: &Settings,
     job_type: &JobType,
+    options: &SourceOptionFacts,
 ) -> WorkerResult<PathBuf> {
     let model_slot = model.slot.as_str();
     if member.component_id.as_deref() == Some("selected_text_encoder") {
@@ -3372,11 +3528,11 @@ fn selected_local_artifact_path(
         let resolution = entry
             .get("resolvedTextEncoder")
             .ok_or_else(|| invalid_binding("selected text encoder has no private resolution"))?;
-        let selected_id = payload
-            .get("advanced")
-            .and_then(|advanced| advanced.get("textEncoderModel"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
+        let selected_id = match &options.effective.text_encoder_model {
+            RouteField::Valid(id) => Some(id.as_str()),
+            _ => None,
+        }
+        .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
         if resolution
             .get("selectionId")
             .and_then(serde_json::Value::as_str)
@@ -3481,12 +3637,11 @@ fn selected_local_artifact_path(
             .transpose()?
     } else if member.role == ArtifactMemberRole::Control {
         if member.component_id.as_deref() == Some("strict_control") {
-            let overlay_id = payload
-                .get("advanced")
-                .and_then(|advanced| advanced.get("controlWeights"))
-                .and_then(|weights| weights.get("overlayId"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
+            let overlay_id = match &options.effective.control_weights {
+                RouteField::Valid(weights) => weights.overlay_id.valid().map(String::as_str),
+                _ => None,
+            }
+            .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
             return crate::portable_source_claims::registered_control_overlay_path(
                 settings,
                 payload,
@@ -3543,18 +3698,21 @@ fn selected_local_artifact_path(
     } else if let Some(local) = local_catalog {
         Some(local)
     } else if member.role == ArtifactMemberRole::Primary {
-        (model_slot == "modelManifestEntry")
-            .then(|| {
-                payload
-                    .get("advanced")
-                    .and_then(|advanced| advanced.get("modelPath"))
-            })
-            .flatten()
-            .or_else(|| entry.get("modelPath"))
-            .or_else(|| entry.get("paths").and_then(|paths| paths.get("model")))
-            .or_else(|| entry.get("installedPath"))
-            .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
+        if model_slot == "modelManifestEntry"
+            && !matches!(&options.authored.model_path, RouteField::Absent)
+        {
+            match &options.authored.model_path {
+                RouteField::Valid(path) => Some(PathBuf::from(path)),
+                _ => None,
+            }
+        } else {
+            entry
+                .get("modelPath")
+                .or_else(|| entry.get("paths").and_then(|paths| paths.get("model")))
+                .or_else(|| entry.get("installedPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        }
     } else if matches!(
         member.role,
         ArtifactMemberRole::Lora | ArtifactMemberRole::Control
@@ -3915,6 +4073,7 @@ fn worker_catalog_member_path_at(
             };
             let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
             if crate::portable_source_claims::capture_registered_files_with_roots(
+                &verified_source_cache(settings),
                 &normalized,
                 &roots,
             )
@@ -4708,12 +4867,14 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
+        let options = SourceOptionFacts::syntax(&payload);
         rewrite_loader_locator(
             &mut payload,
             "modelManifestEntry",
             &member,
             &private_root,
             false,
+            &options,
         )
         .unwrap();
         let worker_file = private_root.join("model.safetensors");
@@ -4770,7 +4931,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -4826,7 +4991,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let binding = PortableRouteBinding::new(
             "mlx",
             std::env::consts::OS,
@@ -4913,7 +5082,11 @@ mod tests {
         std::fs::write(root.join("model_index.json"), b"{}").unwrap();
         std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
         crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &root,
+        )
+        .unwrap();
         let mut members = vec![PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -5086,15 +5259,20 @@ mod tests {
     }
 
     fn training_payload(base_model: &str, kernel: &str, model_path: &Path) -> JsonObject {
+        let (target_id, family, modality) = match base_model {
+            "z_image_turbo" => ("z_image_turbo_lora", "z-image", "image"),
+            "ltx_2_5" => ("ltx_2_5_video_lora", "ltx-video", "video"),
+            _ => panic!("unsupported training source fixture model: {base_model}"),
+        };
         json!({
             "modelManifestEntry":{"id":base_model,"downloads":[],"paths":{"model":model_path}},
             "plan":{
                 "schemaVersion":1,"planVersion":1,"jobId":"job",
-                "target":{"targetId":"target","kernel":kernel,"family":"training","modality":"image","outputKind":"lora","baseModel":base_model,"baseModelPath":model_path},
+                "target":{"targetId":target_id,"kernel":kernel,"family":family,"modality":modality,"outputKind":"lora","baseModel":base_model,"baseModelPath":model_path},
                 "dataset":{"datasetId":"dataset","datasetVersion":1,"rootPath":"/dataset","items":[]},
-                "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":10,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{}},
+                "config":{"rank":16,"alpha":32,"learningRate":0.0001,"steps":200,"batchSize":1,"gradientAccumulation":1,"resolution":512,"saveEvery":10,"seed":1,"optimizer":"adamw8bit","advanced":{}},
                 "output":{"loraId":"lora","outputDir":"/output","fileName":"lora.safetensors","format":"safetensors","triggerWords":[]},
-                "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":"target","baseModel":base_model,"configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
+                "provenance":{"datasetId":"dataset","datasetVersion":1,"targetId":target_id,"baseModel":base_model,"configSnapshot":{},"outputLoraId":"lora","sourceJobId":"job","createdAt":"2026-11-07T00:00:00Z"}
             }
         })
         .as_object()
@@ -5162,8 +5340,11 @@ mod tests {
         .clone();
         let slot = "modelManifestEntry";
         let source = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
-        let primary_files =
-            crate::portable_source_claims::capture_registered_files(&imported.install_dir).unwrap();
+        let primary_files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &imported.install_dir,
+        )
+        .unwrap();
         assert_eq!(
             crate::paths::normalize_app_managed_model_entry_path(
                 &settings,
@@ -5171,7 +5352,13 @@ mod tests {
                 "portable catalog source",
             )
             .ok()
-            .and_then(|path| crate::portable_source_claims::capture_registered_files(&path).ok()),
+            .and_then(
+                |path| crate::portable_source_claims::capture_registered_files(
+                    &crate::portable_source_claims::test_store(),
+                    &path
+                )
+                .ok()
+            ),
             Some(primary_files.clone()),
             "the worker catalog locator must resolve the admitted primary closure",
         );
@@ -5210,7 +5397,11 @@ mod tests {
             let revision = download["revision"].as_str().unwrap();
             let variant = download["variant"].as_str().unwrap_or("default");
             let (_, snapshot) = source.discover_snapshot(repo, Some(revision)).unwrap();
-            let all = crate::portable_source_claims::capture_registered_files(&snapshot).unwrap();
+            let all = crate::portable_source_claims::capture_registered_files(
+                &crate::portable_source_claims::test_store(),
+                &snapshot,
+            )
+            .unwrap();
             let files = all
                 .into_iter()
                 .filter(|file| {
@@ -5330,8 +5521,14 @@ mod tests {
             {"provider":"huggingface","repo":"guardfx/training-base","revision":REV_A,
              "variant":"bf16","files":["bf16/model.safetensors"]}
         ]});
-        let selected =
-            selected_runtime_variant(&JobType::LoraTrain, &payload, "z_image_turbo").unwrap();
+        let selected = selected_runtime_variant(
+            &JobType::LoraTrain,
+            &payload,
+            "modelManifestEntry",
+            "z_image_turbo",
+            &SourceOptionFacts::syntax(&payload),
+        )
+        .unwrap();
         assert_eq!(selected.as_deref(), Some("bf16"));
         let closure =
             selected_model_artifact_closure(&entry, std::env::consts::OS, selected.as_deref());
@@ -5466,6 +5663,7 @@ mod tests {
                 &payload,
                 &settings(data),
                 &mut dispatch,
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .unwrap();
@@ -5659,7 +5857,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(&right).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &right,
+        )
+        .unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
             component_id: None,
@@ -5710,7 +5912,11 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-            let files = crate::portable_source_claims::capture_registered_files(&selected).unwrap();
+            let files = crate::portable_source_claims::capture_registered_files(
+                &crate::portable_source_claims::test_store(),
+                &selected,
+            )
+            .unwrap();
             let member = PortableArtifactMember {
                 role: ArtifactMemberRole::Lora,
                 component_id: None,
@@ -5758,7 +5964,7 @@ mod tests {
         let interrupted = cache_entry.join("staging-interrupted");
         std::fs::create_dir_all(&interrupted).unwrap();
         std::fs::write(interrupted.join("partial"), b"incomplete").unwrap();
-        let payload = json!({
+        let payload = json!({"projectId":"p", "prompt":"x",
             "model":"m", "modelManifestEntry":{"id":"m", "downloads":[],
                 "paths":{"model":second}}
         })
@@ -5835,7 +6041,7 @@ mod tests {
         let mut model = local_binding("modelManifestEntry", "m", &selected, None);
         model.variant = "local".to_owned();
         let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
-        let payload = json!({"model":"m", "advanced":{"modelPath":substituted},
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "advanced":{"modelPath":substituted},
             "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":selected}}})
         .as_object()
         .unwrap()
@@ -5916,12 +6122,14 @@ mod tests {
         .unwrap()
         .clone();
         let private = Path::new("/worker/private/verified");
+        let options = SourceOptionFacts::syntax(&payload);
         rewrite_loader_locator(
             &mut payload,
             "modelManifestEntries/0",
             primary,
             private,
             false,
+            &options,
         )
         .unwrap();
         assert_eq!(payload["advanced"]["modelPath"], private.to_str().unwrap());
@@ -5950,17 +6158,17 @@ mod tests {
             "baseModelManifestEntry":{"id":"sdxl", "downloads":[], "paths":{"model":source}},
             "plan":{
                 "schemaVersion":1, "planVersion":1, "jobId":"job-1",
-                "target":{"targetId":"base_lora", "kernel":"sdxl_lora", "family":"sdxl",
+                "target":{"targetId":"sdxl_lora", "kernel":"sdxl_lora", "family":"sdxl",
                     "modality":"image", "outputKind":"lora", "baseModel":"sdxl",
                     "baseModelPath":"/other-host/models/base"},
                 "dataset":{"datasetId":"ds", "datasetVersion":1,
                     "rootPath":"/other-host/dataset", "items":[]},
-                "config":{"rank":16, "alpha":32, "learningRate":0.0001, "steps":1,
-                    "batchSize":1, "gradientAccumulation":1, "resolution":512,
+                "config":{"rank":16, "alpha":32, "learningRate":0.0001, "steps":200,
+                    "batchSize":1, "gradientAccumulation":1, "resolution":768,
                     "saveEvery":1, "seed":1, "optimizer":"adamw8bit", "advanced":{}},
                 "output":{"loraId":"lora", "outputDir":"/other-host/output",
                     "fileName":"lora.safetensors", "format":"safetensors", "triggerWords":[]},
-                "provenance":{"datasetId":"ds", "datasetVersion":1, "targetId":"base_lora",
+                "provenance":{"datasetId":"ds", "datasetVersion":1, "targetId":"sdxl_lora",
                     "baseModel":"sdxl", "configSnapshot":{}, "outputLoraId":"lora",
                     "sourceJobId":"job-1", "createdAt":"2026-11-07T00:00:00Z"}
             }
@@ -6216,7 +6424,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let payload = json!({
+        let payload = json!({"projectId":"p", "prompt":"x",
             "model":"flux_dev", "mode":"character_image", "referenceAssetId":"reference",
             "modelManifestEntry":{"id":"flux_dev", "downloads":[], "paths":{"model":model}}
         })
@@ -6403,7 +6611,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let payload = json!({"model":"m", "modelManifestEntry":{
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "modelManifestEntry":{
             "id":"m", "downloads":[], "paths":{"model":model},
             "components":[{"id":"text_encoder", "path":changed}]
         }})
@@ -6439,7 +6647,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let payload = json!({"model":"m",
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m",
             "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
             "baseModelManifestEntry":{"id":"base", "downloads":[], "paths":{"model":base}}
         })
@@ -6528,6 +6736,9 @@ mod tests {
     fn portable_binding_uses_adapter_slot_even_when_ids_repeat() {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
+        let project = sceneworks_core::project_store::ProjectStore::new(data.clone(), "worker")
+            .create_project("portable adapter slot")
+            .unwrap();
         let model = data.join("models/imports/demo/model.safetensors");
         let first = data.join("loras/first.safetensors");
         let second = data.join("loras/second.safetensors");
@@ -6575,7 +6786,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"m", "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
+        let payload = json!({"projectId":project.id, "prompt":"x", "model":"m", "modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}},
             "loras":[{"id":"same", "path":first}, {"id":"same", "path":second}]
         }).as_object().unwrap().clone();
         RuntimeSourceGuard::begin_with_binding(
@@ -6893,7 +7104,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"turbo","modelManifestEntry":{
+        let payload = json!({"projectId":"p","prompt":"source selection fixture","model":"turbo","modelManifestEntry":{
             "id":"turbo","downloads":[{"provider":"huggingface","repo":repo,
                 "revision":REV_A,"variant":"default","default":true,"files":["turbo/*"]}]
         }})
@@ -6915,8 +7126,8 @@ mod tests {
                 &JobType::ImageGenerate,
                 &payload,
                 &worker_settings,
-                &[],
-                &[],
+                (&[], &[]),
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .expect("verification must use the complete source while a partial overlay is active");
@@ -7083,7 +7294,7 @@ mod tests {
             .unwrap()],
         )
         .unwrap();
-        let payload = json!({"model":"m", "variant":"q4", "modelManifestEntry":{
+        let payload = json!({"projectId":"p", "prompt":"x", "model":"m", "variant":"q4", "modelManifestEntry":{
             "id":"m", "downloads":[{"provider":"huggingface", "repo":"guardfx/glob",
                 "revision":REV_A, "variant":"q4", "files":["q4/*"]}]
         }})
@@ -7251,7 +7462,9 @@ mod tests {
                      "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
         );
         let payload = json!({
+            "projectId": "p",
             "model": "m",
+            "prompt": "source selection fixture",
             "modelManifestEntry": {
                 "id": "m",
                 "downloads": [{ "provider": "huggingface", "repo": "guardfx/model",
@@ -7388,6 +7601,45 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_verdict_recorded_at_api_admission_is_reused_by_the_worker() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let binding = portable_installed_model_binding();
+        let source = library
+            .join("models--guardfx--model/snapshots")
+            .join(REV_A)
+            .join("model.safetensors");
+        settle_mtime(&source);
+        // The API's admission capture checks the installed file through the same host store.
+        let expected = &binding.models[0].members[0].files[0].sha256;
+        assert_eq!(
+            VerifiedSourceCache::for_data_dir(&settings.data_dir)
+                .verify(&std::fs::canonicalize(&source).unwrap(), expected, &|| Ok(
+                    ()
+                ))
+                .unwrap(),
+            SourceVerification::Hashed
+        );
+        with_library(&library, || {
+            let start = in_place_hashed_files();
+            drop(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                in_place_hashed_files(),
+                start,
+                "the worker reuses the admission verdict instead of reading the blob"
+            );
+        });
+    }
+
     fn tiered_route(repo: &str, tier: &str) -> PortableRouteBinding {
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
@@ -7500,14 +7752,19 @@ mod tests {
                         "every bits-driven tier resolver reads the bound tier"
                     );
                     #[cfg(native_lane)]
-                    assert_eq!(
-                        crate::image_jobs::standard_tier_subdir_for_test(
-                            root,
-                            &sceneworks_core::image_request::ImageRequest::from_payload(dispatch),
-                        ),
-                        root.join(bound),
-                        "the engine's implicit tier resolution lands on the bound tier"
-                    );
+                    {
+                        let mut request =
+                            sceneworks_core::image_request::ImageRequest::from_resolved(
+                                dispatch, dispatch,
+                            )
+                            .unwrap();
+                        request.portable_aux = guard.portable_aux().clone();
+                        assert_eq!(
+                            crate::image_jobs::standard_tier_subdir_for_test(root, &request),
+                            root.join(bound),
+                            "the engine's implicit tier resolution lands on the bound tier"
+                        );
+                    }
                     // The load boundary: while the guard serves this route, a loader handed a
                     // sibling tier from the same hub snapshot is refused, naming the path; the
                     // verified tier (and the snapshot root) load.
@@ -7685,6 +7942,7 @@ mod tests {
                 &payload,
                 &settings(data.clone()),
                 &mut dispatch,
+                &SourceOptionFacts::syntax(&payload),
                 None,
             )
             .expect("both members pass ledger verification in their own roots")
@@ -7939,7 +8197,11 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let files = crate::portable_source_claims::capture_registered_files(&selected).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(
+            &crate::portable_source_claims::test_store(),
+            &selected,
+        )
+        .unwrap();
         let digest = portable_closure_sha256(&files).unwrap();
         let member = PortableArtifactMember {
             role: ArtifactMemberRole::Primary,
@@ -10499,5 +10761,21 @@ mod tests {
         }
         // The exemption is keyed on the caption job type, not on the bare field.
         assert!(RuntimeSourceGuard::begin(&JobType::LoraTrain, &trigger_only, &settings).is_err());
+    }
+
+    // SW-7163: a measure-only describe job needs no describer source and refuses a binding; a
+    // condense-only one runs its describer and still needs its source.
+    #[test]
+    fn measure_only_describe_is_model_free_but_condense_only_is_not() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let measure = json!({ "measureOnly": true }).as_object().unwrap().clone();
+        RuntimeSourceGuard::begin(&JobType::DatasetBatchDescribe, &measure, &settings).unwrap();
+        let condense = json!({ "condenseOnly": true }).as_object().unwrap().clone();
+        assert!(
+            RuntimeSourceGuard::begin(&JobType::DatasetBatchDescribe, &condense, &settings)
+                .is_err()
+        );
+        assert!(RuntimeSourceGuard::begin(&JobType::PromptRefine, &measure, &settings).is_err());
     }
 }

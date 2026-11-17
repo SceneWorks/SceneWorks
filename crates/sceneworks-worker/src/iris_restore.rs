@@ -578,6 +578,7 @@ pub(crate) fn registry_transform_loader(
 pub(crate) struct RestoreOutcome {
     pub image: image::RgbImage,
     pub plan: RestorationPlan,
+    pub execution: gen_core::generator::ExecutionIdentity,
 }
 
 /// Restore `source` (already upright) through the cached `iris_3b_restore` transform loaded from
@@ -606,7 +607,7 @@ pub(crate) async fn restore_image_using(
         cancel,
     );
     let mut on_tile = on_tile;
-    let image = crate::transform_cache::with_cached_transform_using(
+    let completed = crate::transform_cache::with_cached_transform_using(
         IRIS_RESTORE_MODEL_ID,
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(export_dir)),
         "Iris restoration load",
@@ -616,7 +617,7 @@ pub(crate) async fn restore_image_using(
                 crate::classify_engine_error("Iris restoration refused the request", error)
             })?;
             transform
-                .apply(&request, &mut |progress| {
+                .apply_with_execution_report(&request, &mut |progress| {
                     if let gen_core::Progress::Step { current, total } = progress {
                         on_tile(current, total);
                     }
@@ -630,6 +631,7 @@ pub(crate) async fn restore_image_using(
         },
     )
     .await?;
+    let gen_core::CompletedTransform { image, execution } = completed;
     if (image.width, image.height) != (plan.output.width, plan.output.height) {
         return Err(WorkerError::Engine(format!(
             "Iris restoration returned {}x{} but the plan promised {}x{}",
@@ -638,7 +640,11 @@ pub(crate) async fn restore_image_using(
     }
     let image = image::RgbImage::from_raw(image.width, image.height, image.pixels)
         .ok_or_else(|| WorkerError::Engine("Iris restoration buffer size mismatch".to_owned()))?;
-    Ok(RestoreOutcome { image, plan })
+    Ok(RestoreOutcome {
+        image,
+        plan,
+        execution,
+    })
 }
 
 /// The applied-settings record a restored asset carries (`rawAdapterSettings.upscale`), which the

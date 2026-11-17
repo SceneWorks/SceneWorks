@@ -333,6 +333,17 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
         on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()>;
 
+    fn generate_svg_with_execution_report(
+        &self,
+        request: &VectorProviderRequest,
+        cancel: &gen_core::CancelFlag,
+        progress: tokio::sync::watch::Sender<u32>,
+        on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+    ) -> WorkerResult<gen_core::core_llm::ExecutionIdentity> {
+        self.generate_svg(request, cancel, progress, on_source)?;
+        Ok(gen_core::core_llm::ExecutionIdentity::provider_default())
+    }
+
     /// Native StarVector providers record their typed terminal outcome here.  The normal worker
     /// path deliberately does not depend on it; the post-pin campaign alone requests it.
     fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
@@ -471,6 +482,17 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         progress: tokio::sync::watch::Sender<u32>,
         on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()> {
+        self.generate_svg_with_execution_report(request, cancel, progress, on_source)
+            .map(|_| ())
+    }
+
+    fn generate_svg_with_execution_report(
+        &self,
+        request: &VectorProviderRequest,
+        cancel: &gen_core::CancelFlag,
+        progress: tokio::sync::watch::Sender<u32>,
+        on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+    ) -> WorkerResult<gen_core::core_llm::ExecutionIdentity> {
         let source_path = request.source_path.as_deref().ok_or_else(|| {
             WorkerError::InvalidPayload("image_to_svg source path is missing".to_owned())
         })?;
@@ -515,7 +537,7 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                             "text provider {expected_provider_id} exposes the wrong StarVector tier"
                         )));
                     }
-                    let (output, events) = decode_native_starvector(
+                    let (output, events, execution) = decode_native_starvector(
                         provider, &typed_request, &progress, backend, &kv_cache,
                     )?;
                     let terminal = TerminalProviderOutcome {
@@ -530,18 +552,18 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                         backend,
                     };
                     let source = validate_native_starvector_generation(output, events)?;
-                    Ok((source, terminal))
+                    Ok((source, terminal, execution))
                 },
             ))
         })?;
-        let (source, terminal) = generation;
+        let (source, terminal, execution) = generation;
         *self.terminal_outcome.lock().map_err(|_| {
             WorkerError::Engine("StarVector terminal outcome lock poisoned".to_owned())
         })? = Some(terminal);
         for (text, index) in source {
             on_source(&text, index)?;
         }
-        Ok(())
+        Ok(execution)
     }
 
     fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
@@ -562,7 +584,11 @@ fn decode_native_starvector(
     progress: &tokio::sync::watch::Sender<u32>,
     backend: &'static str,
     kv_cache: &Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>,
-) -> WorkerResult<(StarVectorOutput, Vec<StarVectorStreamEvent>)> {
+) -> WorkerResult<(
+    StarVectorOutput,
+    Vec<StarVectorStreamEvent>,
+    gen_core::core_llm::ExecutionIdentity,
+)> {
     // sc-24029: StarVector decodes on the same resident `TextLlm` with the same
     // per-token-growing KV cache. `Progress` is the decode's per-token event, so
     // counting its arrivals bounds the cache the same way, and this callback is used
@@ -575,7 +601,7 @@ fn decode_native_starvector(
     // terminal clear fires when this function returns.
     let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
     let mut events = Vec::new();
-    let generation = provider.generate_svg(typed_request, &mut |event| {
+    let generation = provider.generate_svg_with_execution_report(typed_request, &mut |event| {
         if let StarVectorStreamEvent::Progress { generated_tokens } = &event {
             cache_bound.note_event();
             // Only counters leave this private source boundary. A watch channel
@@ -593,13 +619,13 @@ fn decode_native_starvector(
         backend,
         typed_request.text_request.kv_compression,
         &generation,
-        |output| output.kv_cache.as_ref(),
+        |completed| completed.output.kv_cache.as_ref(),
     );
     *kv_cache.lock().map_err(|_| {
         WorkerError::Engine("StarVector KV-cache record lock poisoned".to_owned())
     })? = Some(record);
-    let output = generation.map_err(classify_starvector_error)?;
-    Ok((output, events))
+    let completed = generation.map_err(classify_starvector_error)?;
+    Ok((completed.output, events, completed.execution))
 }
 
 const fn terminal_finish_reason(reason: StarVectorFinishReason) -> &'static str {
@@ -877,6 +903,7 @@ fn manifest_declares_mode(payload: &VectorJobPayload) -> bool {
 struct CollectedSvgSource {
     source: Option<String>,
     terminal: Option<TerminalProviderOutcome>,
+    execution: Option<gen_core::core_llm::ExecutionIdentity>,
 }
 
 fn record_vector_token_progress(
@@ -997,7 +1024,7 @@ fn collect_svg_source(
         .map_err(|_| WorkerError::InvalidPayload("maxSvgBytes does not fit usize".to_owned()))?;
     let mut source = String::new();
     let mut previous_source_index = None;
-    let generated = provider.generate_svg(request, cancel, progress, &mut |fragment, index| {
+    let generated = provider.generate_svg_with_execution_report(request, cancel, progress, &mut |fragment, index| {
         if cancel.is_cancelled() {
             return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
         }
@@ -1031,7 +1058,7 @@ fn collect_svg_source(
     if let Some(record) = provider.kv_cache_record() {
         record.emit(job_id);
     }
-    generated?;
+    let execution = generated?;
     if cancel.is_cancelled() {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
@@ -1045,6 +1072,7 @@ fn collect_svg_source(
                 return Ok(CollectedSvgSource {
                     source: None,
                     terminal: Some(terminal.clone()),
+                    execution: None,
                 });
             }
             return match terminal.finish_reason {
@@ -1072,6 +1100,7 @@ fn collect_svg_source(
     Ok(CollectedSvgSource {
         source: Some(source),
         terminal,
+        execution: Some(execution),
     })
 }
 
@@ -1457,7 +1486,7 @@ pub(crate) async fn run_vector_job_with_provider(
         None
     };
 
-    let fact = build_vector_asset_fact(
+    let mut fact = build_vector_asset_fact(
         &asset_id,
         &generation_set_id,
         canonical.width,
@@ -1472,6 +1501,14 @@ pub(crate) async fn run_vector_job_with_provider(
         json!(payload.detail_budget),
         payload.workflow.clone(),
     );
+    if let Some(execution) = collected.execution {
+        fact.as_object_mut()
+            .expect("vector fact is an object")
+            .insert(
+                "workerExecutionReport".into(),
+                serde_json::to_value(execution).map_err(WorkerError::Json)?,
+            );
+    }
     let mut result = json!({
         "generationSetId": generation_set_id,
         "expectedCount": 1,

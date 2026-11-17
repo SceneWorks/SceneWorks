@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 use super::load_spec::attach_manifest_text_encoder;
 use super::load_spec::candle_certified_hf_artifact_path;
@@ -8,8 +9,8 @@ use super::pid::pid_effective_dims;
 use super::pid::pid_output_tier;
 use super::pid::resolve_pid_weights;
 use super::run_candle_strict_control;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32_with;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 #[cfg(target_os = "macos")]
@@ -23,7 +24,6 @@ use super::Progress;
 use super::ZImageControl;
 use super::ZImageControlPaths;
 use super::ZImageControlRequest;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
@@ -135,10 +135,15 @@ pub(super) fn resolve_zimage_control_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Z-Image control modelPath")
@@ -163,16 +168,31 @@ pub(super) fn resolve_zimage_control_base(
 /// (sc-8379) with a non-empty `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::zimage_control_candle_eligible` so the worker and router agree.
 pub(super) fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    zimage_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn zimage_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    zimage_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn zimage_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_zimage_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_zimage_control_base(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → model default (Turbo 8,
 /// base 50; sc-8379). The base undistilled model runs the longer schedule for its real-CFG quality.
 pub(super) fn zimage_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32_with(
+    resolved_option_or_manifest_u32_with(
         request,
         "steps",
         || {
@@ -191,7 +211,7 @@ pub(super) fn zimage_control_steps(request: &ImageRequest) -> u32 {
 /// `z_image` control path (real CFG); Turbo ignores it (guidance-distilled). Mirrors
 /// `kolors_control_guidance`.
 pub(super) fn zimage_control_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         if is_zimage_base_model(&request.model) {
@@ -213,15 +233,15 @@ pub(super) fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(
     } else {
         (ZIMAGE_CTRL_REPO, ZIMAGE_CTRL_FILE)
     };
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", default_repo);
     let file = safe_weight_filename(
@@ -246,8 +266,11 @@ async fn ensure_zimage_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -492,7 +515,7 @@ impl CandleStrictControl for ZImageStrictControl {
         // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         // `guidance` + `negative_prompt` drive the base-mode real-CFG denoise; the distilled Turbo path
         // ignores both (single cond forward), so a `None`/value is inert there. We always forward the
         // resolved base values — they only take effect when `base = true` in the loaded `ZImageControl`.
@@ -518,9 +541,12 @@ impl CandleStrictControl for ZImageStrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
-        })
+        let completed = model
+            .generate_with_execution_report(&req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
+            })?;
+        completed_control_image(completed)
     }
 }
 
@@ -532,11 +558,13 @@ impl CandleStrictControl for ZImageStrictControl {
 /// driver, which validates the requested kind against the model's `supported_kinds`, preprocesses each
 /// pose's control map, runs the per-pose loop, and scores against any identity reference. The pose path is
 /// byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_zimage_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -558,8 +586,8 @@ pub(super) async fn generate_candle_zimage_control_stream(
     let controlnet = ensure_zimage_control_weights(api, settings, job, request).await?;
 
     let steps = zimage_control_steps(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         ZIMAGE_CTRL_DEFAULT_SCALE,
         0.0..=2.0,
@@ -573,7 +601,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
     let guidance = zimage_control_guidance(request);
     let negative_prompt = request.negative_prompt.clone();
 
-    let pose_count = pose_entries(request).len();
+    let pose_count = execution.pose_source_count();
     // Per-generation PiD decode (epic 7840, sc-8044): resolve the `zimage-turbo`/`flux` PiD student + Gemma
     // when `advanced.usePid` is set and the snapshots are cached; else `None` → native Z-Image VAE.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
@@ -693,7 +721,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
     }
 
     let (sampler, scheduler, scheduler_shift) =
-        super::sampling::read_advanced_sampling_knobs(&request.advanced);
+        super::sampling::read_resolved_image_sampling_knobs(request);
     let provider = ZImageStrictControl {
         snapshot: base,
         load_spec: selected_spec,
@@ -723,6 +751,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

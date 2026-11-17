@@ -25,7 +25,7 @@
 //!   that flags the finished file and deallocates the never-written tail past its header.
 //!
 //! Both are best-effort by design: `fsutil` is the no-`unsafe` route to `FSCTL_SET_SPARSE` (the
-//! workspace forbids `unsafe`), and if it is missing or the temp volume is not NTFS the fixture is
+//! workspace denies `unsafe`), and if it is missing or the temp volume is not NTFS the fixture is
 //! still correct — it just costs its full size. A test must never fail over disk bookkeeping, so a
 //! failure prints and continues.
 //!

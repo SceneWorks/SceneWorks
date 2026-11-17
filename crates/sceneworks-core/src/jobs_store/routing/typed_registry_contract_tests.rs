@@ -1758,6 +1758,38 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
             add(format!("trainingKernels/{target}/{kind}"), BOTH);
         }
     }
+    // MiniMax-H3-Image (SW-F363): the cells the retired capability matrix published for it, all
+    // served on both native lanes, plus its two training targets
+    // (minimax_h3_image_training_targets_are_supported_on_both_backends_at_the_pin).
+    for operation in ["text_to_image", "edit_image"] {
+        add(
+            format!("models/minimax_h3_image/operationAndMode/{operation}"),
+            BOTH,
+        );
+    }
+    for shape in ["reference", "multiReference"] {
+        add(
+            format!("models/minimax_h3_image/conditioningShape/{shape}"),
+            BOTH,
+        );
+    }
+    for adapter in ["lora", "lokr"] {
+        add(
+            format!("models/minimax_h3_image/userAdapters/{adapter}"),
+            BOTH,
+        );
+    }
+    for tier in ["bf16", "q8", "q4"] {
+        add(
+            format!("models/minimax_h3_image/precisionTier/{tier}"),
+            BOTH,
+        );
+    }
+    for target in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+        for kind in ["lora", "lokr"] {
+            add(format!("trainingKernels/{target}/{kind}"), BOTH);
+        }
+    }
     // terminal_vector_install_is_projected_from_native_worker_capabilities
     add("gpuJobTypes/vector_generate/image_to_svg".into(), BOTH);
     // SW-7082/SW-7083: the dataset batch describer is served on both lanes by either describer.

@@ -6,6 +6,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
         .route(
+            "/api/v1/options/validate",
+            post(crate::options_preview::validate_options_preview),
+        )
+        .route(
             "/api/v1/credentials",
             get(list_credentials).put(set_credential),
         )

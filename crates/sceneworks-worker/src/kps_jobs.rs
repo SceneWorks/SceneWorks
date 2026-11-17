@@ -371,6 +371,7 @@ pub(crate) async fn run_kps_extract_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -392,9 +393,9 @@ pub(crate) async fn run_kps_extract_job(
     // `load` resolves both files from one dir by name); both are `PathBuf`, both flow into the matching
     // detector below.
     #[cfg(target_os = "macos")]
-    let weights = ensure_scrfd_weights(api, settings, job).await?;
+    let weights = ensure_scrfd_weights(api, settings, job, portable_aux).await?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let weights = ensure_face_stack_dir(api, settings, job).await?;
+    let weights = ensure_face_stack_dir(api, settings, job, portable_aux).await?;
 
     // The source read + full image decode is folded into the blocking task below (sc-8909 / F-107)
     // so it never stalls the async runtime thread (protecting the heartbeat).

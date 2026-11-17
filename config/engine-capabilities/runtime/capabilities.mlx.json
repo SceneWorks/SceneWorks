@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
+    "inferenceRevision": "101975c301686467f089cf8c0e3c4a9e33846b6d",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -39,6 +39,7 @@
     "mage_flow_edit_base": "mage_flow_edit_base",
     "mage_flow_edit_turbo": "mage_flow_edit_turbo",
     "mage_flow_turbo": "mage_flow_turbo",
+    "minimax_h3_image": "minimax_h3_image",
     "moss_image_base": "moss_image_base",
     "moss_image_sft": "moss_image_sft",
     "qwen_image": "qwen_image",
@@ -388,6 +389,10 @@
     "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
+    "minimax_h3_image_edit_lora": "minimax_h3_image",
+    "minimax_h3_image_lora": "minimax_h3_image",
+    "moss_image_base_lora": "moss_image_base",
+    "moss_image_sft_lora": "moss_image_sft",
     "qwen_image_2_1_edit_lora": "qwen_image_2_1",
     "qwen_image_2_1_lora": "qwen_image_2_1",
     "sd3_5_large_lora": "sd3_5_large",
@@ -396,9 +401,7 @@
     "wan_i2v_14b_lora": "wan2_2_i2v_14b",
     "wan_lora": "wan2_2_ti2v_5b",
     "wan_t2v_14b_lora": "wan2_2_t2v_14b",
-    "z_image_turbo_lora": "z_image_turbo",
-    "moss_image_base_lora": "moss_image_base",
-    "moss_image_sft_lora": "moss_image_sft"
+    "z_image_turbo_lora": "z_image_turbo"
   },
   "workerCapabilities": [
     "audio_generate",
@@ -478,6 +481,7 @@
       "mage_flow_edit_base",
       "mage_flow_edit_turbo",
       "minimax_h3",
+      "minimax_h3_image",
       "mochi_1",
       "moss_image_base",
       "moss_image_sft",
@@ -1948,6 +1952,30 @@
         "supported_guidance_methods": []
       },
       {
+        "id": "minimax_h3_image",
+        "family": "minimax_h3_image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "lcm"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
         "id": "mochi_1",
         "family": "mochi",
         "backend": "mlx",
@@ -3006,6 +3034,7 @@
       "ltx_2_3",
       "ltx_2_5",
       "mage_flow_base",
+      "minimax_h3_image",
       "moss_image_base",
       "moss_image_sft",
       "qwen_image_2_1",
@@ -3327,6 +3356,30 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "minimax_h3_image",
+        "family": "minimax_h3_image",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false,
+        "max_reference_images": 16,
+        "supports_weight_noise": true,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": true,
+        "supports_resolution_buckets": true,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

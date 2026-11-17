@@ -24,11 +24,11 @@ use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
-    ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
-    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
-    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
+    ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest, GenerationMetrics,
+    GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject,
+    PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary, RetryJobRequest,
+    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    WorkerTerminationRequest,
 };
 #[cfg(test)]
 use sceneworks_core::hf_home::huggingface_hub_cache_dir;
@@ -71,9 +71,8 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder,
-    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, ReferenceSetVerdict,
+    default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
+    resolve_duration, resolve_fps,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -96,6 +95,7 @@ use uuid::Uuid;
 mod auth;
 mod file_serving;
 mod job_redaction;
+mod options_preview;
 mod portable_routes;
 mod project_files;
 mod router;
@@ -200,7 +200,7 @@ mod ideogram;
 mod jobs;
 use jobs::{
     append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
-    create_job, duplicate_job, get_job, get_job_metrics,
+    create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job, get_job_metrics,
     invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
     prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
@@ -484,28 +484,71 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
 // `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
 // the number and drifting.
-pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
+
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. Image pose coordinates have a separate bounded data budget in
 // `validate_image_prompt_extras`; the remaining settings still obey this ceiling.
-const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
+#[cfg(test)]
+const MAX_ADVANCED_JSON_BYTES: usize =
+    sceneworks_core::request_validation::shape::MAX_ADVANCED_JSON_BYTES;
 
 struct ApiJson<T>(T);
 
 #[axum::async_trait]
 impl<S, T> FromRequest<S> for ApiJson<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
     S: Send + Sync,
 {
     type Rejection = Response;
 
     async fn from_request(request: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(request, state).await {
-            Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_rejection_response(rejection)),
+        let Json(mut value) = Json::<Value>::from_request(request, state)
+            .await
+            .map_err(json_rejection_response)?;
+        let generation_kind = generation_wire_kind::<T>();
+        if value.is_object() {
+            let carrier = if std::any::TypeId::of::<T>()
+                == std::any::TypeId::of::<JobCreateRequest>()
+            {
+                let kind = value
+                    .get("type")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<JobType>(value).ok())
+                    .and_then(|job_type| {
+                        sceneworks_core::request_validation::kind_for_job(&job_type)
+                    });
+                sceneworks_core::options::upgrade::job_carrier(kind.unwrap_or(""))
+            } else {
+                sceneworks_core::options::upgrade::request_carrier(generation_kind.unwrap_or(""))
+            };
+            value =
+                sceneworks_core::options::upgrade::upgrade(&value, carrier).map_err(|error| {
+                    ApiError::typed(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        error.to_string(),
+                        error.code,
+                        json!({ "field": error.field }),
+                    )
+                    .into_response()
+                })?;
         }
+        if let Some(kind) = generation_kind {
+            let payload = value.as_object().ok_or_else(|| {
+                ApiError::bad_request("Generation request must be an object").into_response()
+            })?;
+            sceneworks_core::request_validation::validate_shape(kind, payload)
+                .map_err(|error| ApiError::from(error).into_response())?;
+            // The canonical upgrader has checked this envelope field. Strict DTOs only own options.
+            value
+                .as_object_mut()
+                .expect("request object")
+                .remove("optionsSchemaVersion");
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|error| json_decode_error_response(error.to_string()))
     }
 }
 
@@ -1598,6 +1641,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         service: "sceneworks-api",
         runtime: "rust".to_owned(),
         version: state.settings.app_version.clone(),
+        options_validator_schema_version:
+            sceneworks_core::options::request_validation::VALIDATOR_SCHEMA_VERSION,
         auth_required: token_configured,
         // When a token is configured the endpoint is public but the deployment expects
         // auth, so don't leak absolute host paths to unauthenticated LAN callers.
@@ -2542,3 +2587,38 @@ use test_hooks::{
     TEST_MAX_LORA_UPLOAD_BYTES, TEST_MAX_MODEL_UPLOAD_BYTES, TEST_MAX_WORKFLOW_INSPECT_BYTES,
     TEST_TRASH_OUTCOMES,
 };
+
+#[cfg(test)]
+mod option_upgrade_boundary_tests {
+    use super::*;
+    #[tokio::test]
+    async fn http_raw_upgrade_refuses_alias_conflicts_and_future_versions_before_dto_defaults() {
+        for (body, code) in [
+            (
+                json!({"optionsSchemaVersion":9}),
+                "UnsupportedSchemaVersion",
+            ),
+            (
+                json!({"advanced":{"schedulerShift":3,"timestepShift":4}}),
+                "ConflictingAliases",
+            ),
+        ] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = match ApiJson::<Value>::from_request(request, &()).await {
+                Ok(_) => panic!("future/conflicting input was accepted"),
+                Err(response) => response,
+            };
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+                .await
+                .unwrap();
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["code"], code);
+            assert!(error["context"]["field"].is_string());
+        }
+    }
+}

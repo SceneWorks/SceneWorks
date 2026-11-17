@@ -118,20 +118,35 @@ fn require_acceptance_loopback(settings: &Settings) -> WorkerResult<()> {
 /// Full production utility dispatcher, including source guard, import/image
 /// routing, terminal reconciliation and metrics. Unit return is NOT success:
 /// callers must read and validate the actual API terminal job snapshot.
-pub async fn run_acceptance_utility_job(settings: &Settings, job: JobSnapshot) {
+pub async fn run_acceptance_utility_job(
+    settings: &Settings,
+    job: JobSnapshot,
+    execution_claim_capability: Option<String>,
+) {
     let api = ApiClient::new(settings);
     // Keep the production dispatcher out of the enclosing acceptance future
     // layouts. Directly await the same job; no task, controller or teardown is
     // detached, and the production worker's dispatch/stack contract is unchanged.
-    Box::pin(crate::run_utility_job(
-        &api,
-        settings,
-        api.http_client(),
-        job,
-        None,
-        gen_core::CancelFlag::new(),
-    ))
+    crate::progress::with_execution_claim_capability(
+        execution_claim_capability,
+        Box::pin(crate::run_utility_job(
+            &api,
+            settings,
+            api.http_client(),
+            job,
+            None,
+            gen_core::CancelFlag::new(),
+        )),
+    )
     .await;
+}
+
+/// Match the production worker's private terminal-claim scope in direct acceptance runs.
+pub async fn with_acceptance_execution_claim<F: std::future::Future>(
+    capability: Option<String>,
+    future: F,
+) -> F::Output {
+    crate::progress::with_execution_claim_capability(capability, future).await
 }
 
 /// Measure the actual unpolled dispatcher and acceptance-wrapper future layouts.
@@ -151,7 +166,7 @@ pub fn acceptance_utility_future_sizes() -> (usize, usize) {
         },
     );
     let wrapper = size(|(settings, job): (&'static Settings, JobSnapshot)| {
-        run_acceptance_utility_job(settings, job)
+        run_acceptance_utility_job(settings, job, None)
     });
     (dispatcher, wrapper)
 }

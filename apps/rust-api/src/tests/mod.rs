@@ -29,6 +29,7 @@ mod jobs;
 mod load_progress_acceptance;
 mod mcp;
 mod media;
+mod minimax_h3_image_jobs;
 mod model_cache;
 mod model_library;
 mod moss_image;
@@ -74,3 +75,5 @@ mod yue2_transcriptions;
 
 #[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
 mod moss_training_acceleration;
+
+mod shared_validation;

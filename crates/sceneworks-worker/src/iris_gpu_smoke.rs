@@ -190,7 +190,7 @@ async fn iris_worker_gpu_smoke() {
 
     let api = ApiClient::new(&settings);
     let started = std::time::Instant::now();
-    crate::image_jobs::run_image_generate_job(&api, &settings, &job)
+    crate::image_jobs::run_image_generate_job(&api, &settings, &job, &Default::default())
         .await
         .expect("the Iris-3B CUDA worker job completes");
     let elapsed = started.elapsed();
@@ -281,7 +281,7 @@ async fn iris_worker_gpu_smoke() {
 /// One `nvidia-smi` reading of `memory.used` (MiB) on physical GPU `index`, or `None` when the
 /// query fails.
 #[cfg(not(target_os = "macos"))]
-fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
+pub(crate) fn nvidia_memory_used_mib(index: &str) -> Option<u64> {
     let output = std::process::Command::new("nvidia-smi")
         .args([
             "--query-gpu=memory.used",
@@ -403,7 +403,8 @@ async fn iris_staged_vram_measurement() {
     };
     let api = ApiClient::new(&settings);
     let started = std::time::Instant::now();
-    let outcome = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+    let outcome =
+        crate::image_jobs::run_image_generate_job(&api, &settings, &job, &Default::default()).await;
     let elapsed = started.elapsed();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let peak_mib = sampler.join().expect("sampler thread joins");
@@ -500,7 +501,7 @@ async fn iris_worker_gpu_smoke_native_prompt_batch() {
     let job: JobSnapshot = serde_json::from_value(snapshot).expect("smoke job deserializes");
     let api = ApiClient::new(&settings);
     let started = std::time::Instant::now();
-    crate::image_jobs::run_image_generate_job(&api, &settings, &job)
+    crate::image_jobs::run_image_generate_job(&api, &settings, &job, &Default::default())
         .await
         .expect("the Iris-3B native batch job completes");
     let elapsed = started.elapsed();

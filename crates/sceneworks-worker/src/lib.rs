@@ -114,6 +114,70 @@ pub fn flux3_receipted_snapshot(
         })
 }
 
+/// Why a MiniMax-H3-Image LoRA/LoKr training run (SW-7103) cannot start on this host's installs, or
+/// `None` when it can: the plan's `advanced.baseTier` (absent / `auto` = densest installed) must name
+/// an installed DiT tier, with the image VAE + tokenizer and MiniMax-H3's text encoder at that tier.
+/// The SAME resolution the worker hands the trainer, so the API's real-run gate cannot admit a run
+/// the worker would refuse at load. Backend-neutral (no weights are read).
+pub fn minimax_h3_image_training_install_refusal(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    minimax_h3_image_training_base(data_dir, config).err()
+}
+
+/// The tier directory a MiniMax-H3-Image render of the job `payload` loads on this host — the
+/// render loader's own resolution (an explicit `advanced.mlxQuantize` honoured by name, else the
+/// densest installed tier). Lets the API's tests prove its admitted tier is the one loaded.
+pub fn minimax_h3_image_render_tier_dir(
+    data_dir: &Path,
+    payload: &JsonObject,
+) -> Result<Option<PathBuf>, String> {
+    image_jobs::minimax_h3_image::render_tier_dir(payload, data_dir)
+        .map_err(|error| error.to_string())
+}
+
+/// The MiniMax-H3-Image tier an unselected render loads on this host (the densest installed tier,
+/// by the render loader's own installed-ness rule), or `None` when no tier is installed. The API
+/// freezes it into the request so the binding and the loader agree.
+pub fn minimax_h3_image_installed_render_tier(
+    data_dir: &Path,
+    entry: &Value,
+) -> Option<&'static str> {
+    image_jobs::minimax_h3_image::installed_render_tier(entry.as_object()?, data_dir)
+}
+
+/// The tier the worker's portable guard verifies model carrier `slot` against before any loader
+/// runs: the job's admitted selection, else (for an unselected image request of a standard-tier
+/// model) the tier the binding froze. The guard rebuilds the artifact closure from this tier and
+/// refuses a binding that names another, so the API's tests use it to prove that what admission
+/// froze is what the worker accepts.
+pub fn portable_guard_runtime_variant(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &Value,
+    binding: Option<&sceneworks_core::model_artifacts::portable_binding::PortableModelBinding>,
+) -> Result<Option<String>, String> {
+    external_library_runtime::bound_runtime_variant_from_payload(
+        job_type, payload, slot, entry, binding,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// The DiT tier a MiniMax-H3-Image LoRA/LoKr run trains over on this host's installs, and that
+/// tier's directory: the plan's `advanced.baseTier` (absent / `auto` = densest installed) resolved
+/// exactly as the trainer resolves it, or the refusal [`minimax_h3_image_training_install_refusal`]
+/// reports. The API freezes both into the plan so its portable source binding names the tier the
+/// trainer loads rather than the bf16 snapshot.
+pub fn minimax_h3_image_training_base(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<(&'static str, PathBuf), String> {
+    let tier = sceneworks_core::training::minimax_h3_image_base_tier(&config.advanced)?;
+    image_jobs::minimax_h3_image::training_base(data_dir, tier).map_err(|error| error.to_string())
+}
+
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.
 /// This is filesystem/index integrity, not whole-repository download completion or a weights
 /// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact
@@ -257,6 +321,7 @@ pub(crate) use sceneworks_core::admission_geometry;
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
 #[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 mod advanced;
 mod api_client;
 #[cfg(native_lane)]
@@ -476,7 +541,7 @@ use image_jobs::*;
 /// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
 /// This is independent of effective-caption Unicode-character admission after enhancement.
 pub fn prompt_enhancement_max_tokens(model_id: &str) -> u64 {
-    u64::from(gen_core::generator::max_enhance_tokens_for_model(model_id))
+    sceneworks_core::request_validation::prompt_enhancement::max_tokens(model_id)
 }
 mod vector_jobs;
 #[doc(hidden)]
@@ -542,7 +607,9 @@ pub mod voice_register;
 mod person_replace;
 #[cfg(all(feature = "test-support", native_lane))]
 pub mod test_support;
+mod training_continuation;
 mod training_jobs;
+pub use training_continuation::fork_completed_training_checkpoint;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
@@ -581,7 +648,7 @@ use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 // SW-7082 — the dataset prompt-batch describe job: a vision-language describer over a training
-// dataset's images, six description fields + pixel size per image, for Training Studio's prompt batch.
+// dataset's images, seven description fields + pixel size per image, for Training Studio's prompt batch.
 mod batch_describe_jobs;
 use batch_describe_jobs::run_dataset_batch_describe_job;
 // Qwen-Image 2.1 (sc-24113, epic 24107). Two small, pure adapters kept OUT of the 4k-line
@@ -599,6 +666,11 @@ mod qwen_alpha;
 // a no-backend build keeps the module for its pure-function tests.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod qwen_prompt_rewrite;
+// MiniMax-H3-Image's prompt expander (SW-7102): where its tier weights and its upstream `prompt/`
+// files are on disk, and the job-result shape. The request and reply contract are the engine's
+// (`core_llm::minimax_h3_image_pe`); `prompt_refine_jobs` drives it on the same TextLlm lane.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+mod minimax_h3_image_prompt_expand;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
@@ -657,6 +729,12 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+
+// Real-weight CUDA validation of the Qwen3.8 27B describer (SW-7120). Test-only + candle-only and
+// ignored, like the other worker GPU smokes; only the dispatch-only
+// `qwen38-describer-validation.yml` workflow runs it.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod qwen38_describer_gpu_smoke;
 // Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
 // descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
 // NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the
@@ -1789,6 +1867,8 @@ enum JobOutcome {
 struct ClaimedJob {
     job: JobSnapshot,
     portable_model_binding: Option<PortableRouteBinding>,
+    execution_claim_capability: Option<String>,
+    exact_replay_expected: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>,
 }
 
 /// Runtime backend advertised to the private portable-source claim. The worker repeats this
@@ -1829,15 +1909,46 @@ async fn run_job_with_shutdown(
     http_client: &reqwest::Client,
     claimed: ClaimedJob,
 ) -> JobOutcome {
+    let capability = claimed.execution_claim_capability.clone();
+    with_execution_claim_capability(
+        capability,
+        run_job_with_shutdown_scoped(api, settings, http_client, claimed),
+    )
+    .await
+}
+
+async fn run_job_with_shutdown_scoped(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    claimed: ClaimedJob,
+) -> JobOutcome {
     let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = run_utility_job(
-        api,
-        settings,
-        http_client,
-        claimed.job,
-        claimed.portable_model_binding,
-        shutdown.clone(),
+    let project_id = claimed
+        .job
+        .project_id
+        .as_deref()
+        .or_else(|| claimed.job.payload.get("projectId").and_then(Value::as_str));
+    let project_root = project_id.and_then(|project_id| {
+        ProjectStore::new(settings.data_dir.clone(), "worker")
+            .get_project(project_id)
+            .ok()
+            .map(|project| PathBuf::from(project.path))
+    });
+    let job_future = with_execution_project_root(
+        project_root,
+        with_exact_replay_expected(
+            claimed.exact_replay_expected,
+            run_utility_job(
+                api,
+                settings,
+                http_client,
+                claimed.job,
+                claimed.portable_model_binding,
+                shutdown.clone(),
+            ),
+        ),
     );
     tokio::pin!(job_future);
 
@@ -1978,6 +2089,8 @@ async fn poll_once(
     Ok(Some(ClaimedJob {
         job,
         portable_model_binding: claim.portable_model_binding,
+        execution_claim_capability: claim.execution_claim_capability,
+        exact_replay_expected: claim.exact_replay_expected,
     }))
 }
 

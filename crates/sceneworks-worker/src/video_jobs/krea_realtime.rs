@@ -688,7 +688,12 @@ pub(super) async fn resolve_krea_realtime_conditioning(
         )
         .await?;
         // v2v HONORS strength (`videoConditioningStrength`, default 1.0 — the Wan/LTX v2v convention).
-        let strength = advanced::f32(&request.advanced, "videoConditioningStrength", 1.0);
+        let strength = request
+            .options()
+            .video_conditioning_strength
+            .as_ref()
+            .map(|v| v.value as f32)
+            .unwrap_or(1.0);
         return Ok(krea_realtime_conditioning(None, Some(frames), strength));
     }
     // i2v: a reference still (the I2V conditioning source, like SVD's `sourceAssetId`).
@@ -813,7 +818,7 @@ pub(super) async fn generate_krea_realtime_using(
         height: request.height,
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
-        steps: super::wan::advanced_opt_u32(request, "steps"),
+        steps: super::wan::resolved_video_u32(request, "steps"),
         seed: resolve_video_seed(request) as u64,
         // No `video_mode`: the engine routes purely on the supplied conditioning, not a task string.
         // User LoRAs ride here → `video_load_spec` → `LoadSpec::adapters` (sc-15017).
@@ -825,7 +830,7 @@ pub(super) async fn generate_krea_realtime_using(
         settings,
         job,
         backend,
-        &request.advanced,
+        (request.options(), &request.portable_aux),
         input,
         load_generator,
     )

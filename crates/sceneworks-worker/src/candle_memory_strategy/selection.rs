@@ -947,6 +947,7 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
             exceeded_bounds: Vec::new(),
             // The endpoint pair is a measured capacity capture, not an owned-process accounting
             // observation; the ladder store carries no operating envelopes.
+            regime_anchors: Vec::new(),
             observed_operating_envelopes: Vec::new(),
         });
     let endpoint_anchors = endpoint_anchor_store

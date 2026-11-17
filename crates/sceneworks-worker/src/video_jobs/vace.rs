@@ -737,7 +737,12 @@ async fn generate_wan_vace_engine(
     let reference_count = references.len();
     let frame_total = frames.len();
 
-    let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
+    let masking_strength = request
+        .options()
+        .masking_strength
+        .as_ref()
+        .map(|v| v.value as f32)
+        .unwrap_or(1.0);
     let conditioning = build_vace_conditioning(
         frames,
         masks,
@@ -747,8 +752,8 @@ async fn generate_wan_vace_engine(
     )?;
 
     let negative_prompt = non_empty_negative_prompt(request);
-    let steps = super::wan::advanced_opt_u32(request, "steps");
-    let guidance = super::wan::advanced_opt_f32(request, "guidanceScale");
+    let steps = super::wan::resolved_video_u32(request, "steps");
+    let guidance = super::wan::resolved_video_f32(request, "guidanceScale");
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -766,10 +771,26 @@ async fn generate_wan_vace_engine(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        control_scale: Some(
+            request
+                .options()
+                .conditioning_scale
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
+        ),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -826,14 +847,10 @@ pub(super) fn extend_anchor_frames(request: &VideoRequest, frame_count: usize) -
     let max_per_side = (max_total / per_side).max(1);
     let default = (frame_count / 3 / per_side).max(1);
     let requested = request
-        .advanced
-        .get("motionAnchorFrames")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as usize)
+        .options()
+        .motion_anchor_frames
+        .as_ref()
+        .and_then(|value| usize::try_from(value.value).ok())
         .unwrap_or(default);
     requested.clamp(1, max_per_side)
 }
@@ -1105,8 +1122,8 @@ pub(super) async fn generate_wan_vace_extend_bridge(
         right_anchor,
     )?;
     let negative_prompt = non_empty_negative_prompt(request);
-    let steps = super::wan::advanced_opt_u32(request, "steps");
-    let guidance = super::wan::advanced_opt_f32(request, "guidanceScale");
+    let steps = super::wan::resolved_video_u32(request, "steps");
+    let guidance = super::wan::resolved_video_f32(request, "guidanceScale");
     let engine_id = "wan_vace";
     let input = VideoGenInput {
         sampler: None,
@@ -1125,10 +1142,26 @@ pub(super) async fn generate_wan_vace_extend_bridge(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
-        control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
+        control_scale: Some(
+            request
+                .options()
+                .conditioning_scale
+                .as_ref()
+                .map(|v| v.value as f32)
+                .unwrap_or(1.0),
+        ),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, &request.advanced, input).await
+    generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await
 }
 
 #[cfg(all(test, target_os = "macos"))]

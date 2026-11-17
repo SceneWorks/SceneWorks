@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
@@ -9,6 +10,7 @@ import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from ".
 import { errorMessage } from "../errorMessage.js";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { TrainingRunHistory } from "./training/TrainingRunHistory.jsx";
 import { JOY_CAPTION_MODEL_ID, POSE_DETECT_MODEL_ID, terminalStatuses } from "../constants.js";
 import { missingRequiredModels } from "../modelEligibility.js";
 import {
@@ -76,6 +78,7 @@ import {
 } from "../training/trainedLoraOffer.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import {
   irisCaptionFieldOptions,
@@ -273,23 +276,12 @@ export function trainingSampleGroups(job, projectId) {
 }
 
 // A live Iris run's holdout validation (sc-25689), re-read while it trains.
-function LiveIrisMetrics({ job, token }) {
-  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live: true })} />;
+function LiveIrisMetrics({ job, token, live = true }) {
+  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
-  if (!jobs.length) {
-    return null;
-  }
+function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
   return (
-    <section className="training-live-panel" aria-label="Active training progress">
-      <div className="training-live-title">
-        <div>
-          <p className="eyebrow">Runs</p>
-          <h3>Training in progress</h3>
-        </div>
-        <span>{jobs.length} active</span>
-      </div>
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
           const sampleGroups = trainingSampleGroups(job, projectId);
@@ -304,13 +296,26 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
                 thumbnailGroups={sampleGroups}
                 expectedThumbnailCount={4}
                 onCancel={onCancel}
+                onContinueTraining={onContinueTraining}
                 onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
               />
-              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} /> : null}
+              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} live={!completed} /> : null}
             </React.Fragment>
           );
         })}
       </div>
+  );
+}
+
+function TrainingLiveProgress(props) {
+  if (!props.jobs.length) return null;
+  return (
+    <section className="training-live-panel" aria-label="Active training progress">
+      <div className="training-live-title">
+        <div><p className="eyebrow">Runs</p><h3>Training in progress</h3></div>
+        <span>{props.jobs.length} active</span>
+      </div>
+      <TrainingRunCards {...props} />
     </section>
   );
 }
@@ -351,6 +356,7 @@ export function TrainingDataSetsLibrary() {
 
 export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
+  const [trainingAction, setTrainingAction] = useState("new");
   const {
     activeProject,
     token,
@@ -682,6 +688,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // (more than just lora). LoKr targets gain the picker + the LoKr factor field.
   const networkTypeOptions = rangeOptions(selectedTarget?.limits, "networkTypes");
   const showNetworkType = networkTypeOptions.length > 1;
+  // SW-7103: the base tier picker, only on targets that advertise `limits.baseTiers`.
+  const baseTierOptions = rangeOptions(selectedTarget?.limits, "baseTiers");
   const isLokrNetwork = asText(configDraft.networkType).trim() === "lokr";
   // sc-14056 — the full base fine-tune. Not an adapter: it trains every base weight. Gradient
   // (activation) checkpointing has no full-tune implementation yet (sc-14989) and the engine hard-
@@ -720,6 +728,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       jobs
         .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && !terminalStatuses.has(job.status))
         .slice(0, 3),
+    [activeProject?.id, jobs],
+  );
+  const completedTrainingRefreshKey = useMemo(
+    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed").map((job) => `${job.id}:${job.updatedAt}`).join("|"),
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
@@ -801,6 +813,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
+  // Build the same body used by Start training while the user edits. Dataset readiness,
+  // installation and licence checks remain live server-owned gates.
+  let trainingRequest = null;
+  if (selectedTarget && activeDataset) {
+    try {
+      const snapshot = trainingConfigSnapshot({
+        activeDataset, configDraft, selectedPreset, selectedTarget, dryRun: false,
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      });
+      trainingRequest = {
+        targetId: snapshot.targetId, datasetId: snapshot.datasetId,
+        datasetVersion: snapshot.datasetVersion, presetId: snapshot.presetId,
+        presetVersion: snapshot.presetVersion, outputName: snapshot.outputName,
+        dryRun: false, config: snapshot.config,
+        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
+      };
+    } catch { /* The existing draft validation and server retain the gate. */ }
+  }
+  const trainingFeedback = usePortableFeedback("training", trainingRequest, selectedTarget, Boolean(trainingRequest));
+  const trainingRefusal = trainingFeedback?.state === "invalid" ? trainingFeedback.refusal : null;
 
   // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
   // field names, the active lane for the declared memory floor, and the data-walk preflight.
@@ -2207,7 +2239,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configValidity.ready || submittingJob) {
+    if (!configValidity.ready || portableFeedbackBlocks(trainingFeedback) || submittingJob) {
       return;
     }
     setSubmittingJob(true);
@@ -2225,19 +2257,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         dryRun,
         trainingLane: trainingLaneFromCapabilities(macCapabilities),
       });
-      const job = await createTrainingJob({
-        targetId: snapshot.targetId,
-        datasetId: snapshot.datasetId,
-        datasetVersion: snapshot.datasetVersion,
-        presetId: snapshot.presetId,
-        presetVersion: snapshot.presetVersion,
-        outputName: snapshot.outputName,
-        dryRun,
-        config: snapshot.config,
-        // Only reachable once the licence notice was accepted (configValidity holds Start until
-        // then); the API refuses an unacknowledged real run against a licence-bound base.
-        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
-      });
+      const job = await createTrainingJob(trainingRequest);
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
     } catch (err) {
@@ -2343,17 +2363,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }), [activeProject, subjectMasks, sessionHandlers]);
 
   return (
-    <ModelAvailabilityGate
-      ready={trainingReady}
-      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
-      title="Training needs a trainable base model"
-      description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
-      offers={trainingOffers}
-      downloadJobs={trainingDownloadJobs}
-      onDownload={installTrainingBase}
-      onOpenModels={() => setActiveView("Models")}
-      onOpenQueue={() => setActiveView("Queue")}
-    >
     <section className="page-frame training-studio">
       <div className="training-studio-shell">
         {/* Both modes are named by the topbar and lead straight into their work-panel
@@ -2376,6 +2385,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
           </div>
         ) : (
           <>
+            {!datasetLibraryMode ? (
+              <div className="training-run-actions" role="group" aria-label="Training action">
+                <button className={trainingAction === "new" ? "primary-action" : "secondary-action"}
+                  type="button" aria-pressed={trainingAction === "new"}
+                  onClick={() => {
+                    setTrainingAction("new");
+                    setConfigDraft((current) => ({ ...current, resumeFromJobId: "", loadFromJobId: "" }));
+                  }}>New training</button>
+                <button className={trainingAction === "continue" ? "primary-action" : "secondary-action"}
+                  type="button" aria-pressed={trainingAction === "continue"}
+                  onClick={() => setTrainingAction("continue")}>Continue training</button>
+              </div>
+            ) : null}
+            <ModelAvailabilityGate
+              ready={trainingReady || (!datasetLibraryMode && trainingAction === "continue")}
+              initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
+              title="Training needs a trainable base model"
+              description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
+              offers={trainingOffers}
+              downloadJobs={trainingDownloadJobs}
+              onDownload={installTrainingBase}
+              onOpenModels={() => setActiveView("Models")}
+              onOpenQueue={() => setActiveView("Queue")}
+            >
             {datasetLibraryMode ? (
               <DatasetEditorPanel
                 datasetSession={datasetSession}
@@ -2385,6 +2418,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={config}
                 maskSession={maskSession}
               />
+            ) : trainingAction === "continue" ? (
+              <TrainingRunHistory key={activeProject.id} projectId={activeProject.id} token={token}
+                refreshKey={completedTrainingRefreshKey}
+                renderRuns={(savedJobs) => (
+                  <TrainingRunCards jobs={savedJobs} projectId={activeProject.id} token={token} completed
+                    onPreview={setPreviewAsset}
+                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined} />
+                )} />
             ) : (
               <>
                 {trainedLoraOffer ? (
@@ -2412,6 +2453,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onOpenQueue={() => setActiveView("Queue")}
                   onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   configValidity={configValidity}
+                  trainingRefusal={trainingRefusal}
+                  trainingFeedback={trainingFeedback}
                   trainingTargetsError={trainingTargetsError}
                   trainingPresetsError={trainingPresetsError}
                   configError={configError}
@@ -2437,6 +2480,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setShowAdvancedConfig={setShowAdvancedConfig}
                   showNetworkType={showNetworkType}
                   networkTypeOptions={networkTypeOptions}
+                  baseTierOptions={baseTierOptions}
                   macLokrOnWanBlocked={macLokrOnWanBlocked}
                   isLokrNetwork={isLokrNetwork}
                   isFullFinetune={isFullFinetune}
@@ -2463,10 +2507,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 />
               </>
             )}
+            </ModelAvailabilityGate>
           </>
         )}
       </div>
     </section>
-    </ModelAvailabilityGate>
   );
 }

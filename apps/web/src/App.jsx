@@ -1,3 +1,4 @@
+import { isSettingsRefusal, SettingsRefusal } from "./components/SettingsRefusal.jsx";
 import { useAppDomainValue } from "./context/useAppDomainValue.js";
 import { KEEP_ALIVE_VIEWS, navSections, viewTitles, KeepAlivePane, ProjectSwitcher, FirstRunProjectGate } from "./components/shell/ShellChrome.jsx";
 import { useThemeAccent } from "./hooks/useThemeAccent.js";
@@ -17,6 +18,7 @@ import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError } from "./api.js";
 import { recordStartupMark } from "./startupTiming.js";
+import { setServerValidatorVersion } from "./portableValidationState.js";
 
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
@@ -60,6 +62,7 @@ import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
+import { UpgradeError } from "./requestUpgrade.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -368,6 +371,7 @@ export function App() {
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  const [studioSettingsRefusal, setStudioSettingsRefusal] = useState(null);
   // Domain loaders and mutations own separate notice slots. A successful Models
   // request must never erase a Training or Characters failure (sc-14783).
   const setDomainError = useCallback(
@@ -1160,7 +1164,14 @@ export function App() {
           setActiveView(persistedView);
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (!cancelled) {
+          if (isSettingsRefusal(error)) setStudioSettingsRefusal(error);
+          else if (error instanceof UpgradeError) {
+            setError(`Saved studio settings could not be restored: ${error.message}`);
+          }
+        }
+      })
       .finally(() => {
         if (!cancelled) {
           // Only now may the disclosure fire: before this, `seen` is whatever localStorage said,
@@ -1175,7 +1186,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [setAccent, setTheme, settlePendingWorkflowGeneration]);
+  }, [setAccent, setTheme, setError, settlePendingWorkflowGeneration]);
 
   const refreshHealth = useCallback(() => {
     healthRequestRef.current?.abort();
@@ -1184,6 +1195,7 @@ export function App() {
     return systemApi.health("", { signal: controller.signal })
       .then((nextHealth) => {
         if (healthRequestRef.current === controller) {
+          setServerValidatorVersion(nextHealth.optionsValidatorSchemaVersion);
           setHealth(nextHealth);
         }
       })
@@ -1663,6 +1675,8 @@ export function App() {
       projects={projects}
     />
   );
+
+  if (studioSettingsRefusal) return <SettingsRefusal error={studioSettingsRefusal} />;
 
   if (showSimpleShell) {
     return (

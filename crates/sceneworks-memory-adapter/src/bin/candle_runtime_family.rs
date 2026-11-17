@@ -764,11 +764,38 @@ pub(super) fn planned_selection_with_tier(
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
             transformer_window_size,
-            transformer_window_component: transformer_window_size
-                .map(|_| TransformerComponent::Dit),
+            transformer_window_component: planned_transformer_window_component(
+                request,
+                transformer_window_size,
+            )?,
         },
         tier,
     })
+}
+
+/// The window component a rung-4 tuple names: `DiT` when it names none (every Candle row planned
+/// before SW-F363 states only `transformerWindowSize`, and keeps its meaning), else the declared
+/// `"dit"` or `"both"`. `minimax_h3_image` publishes `transformer_window_components: [Both]` — its
+/// one-block window covers the text encoder too — so its rung-4 rows must be able to say so; the
+/// contract's own `validate_selection` still refuses a component the provider does not declare.
+fn planned_transformer_window_component(
+    request: &Value,
+    transformer_window_size: Option<u32>,
+) -> Result<Option<TransformerComponent>, String> {
+    let declared = protocol::strategy_parameters(request)?.get("transformerWindowComponent");
+    match (declared, transformer_window_size) {
+        (None, size) => Ok(size.map(|_| TransformerComponent::Dit)),
+        (Some(value), None) => Err(format!(
+            "planned.strategy.parameters.transformerWindowComponent requires transformerWindowSize, got {value}"
+        )),
+        (Some(value), Some(_)) => match value.as_str() {
+            Some("dit") => Ok(Some(TransformerComponent::Dit)),
+            Some("both") => Ok(Some(TransformerComponent::Both)),
+            _ => Err(format!(
+                "planned.strategy.parameters.transformerWindowComponent must be \"dit\" or \"both\", got {value}"
+            )),
+        },
+    }
 }
 
 /// Admit one planned context through the provider EXACTLY as the worker does

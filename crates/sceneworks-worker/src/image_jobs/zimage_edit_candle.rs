@@ -31,10 +31,15 @@ pub(super) fn resolve_zimage_edit_candle_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Z-Image edit modelPath").map(Some);

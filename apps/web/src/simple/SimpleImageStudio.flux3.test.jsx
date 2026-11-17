@@ -45,6 +45,7 @@ it("submits the sole installed FP8R package from Simple without a picker or stic
   });
   expect(container.querySelector(".quant-tier-picker")).toBeNull();
   const generate = [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Generate"));
+  await vi.waitFor(() => expect(generate?.disabled).toBe(false));
   expect(generate?.disabled).toBe(false);
   await act(async () => generate.click());
   expect(createImageJob).toHaveBeenCalledTimes(1);

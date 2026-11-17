@@ -12,6 +12,7 @@ import { recordStartupMark } from "../startupTiming.js";
 export function LibraryScreen() {
   const {
     activeProject,
+    requestedGpu,
     assets,
     assetsReady = false,
     assetsLoading = false,
@@ -276,6 +277,8 @@ export function LibraryScreen() {
             vqaEnabled={vqaEnabled}
             vqaEntries={vqaEntries}
             vqaPending={vqaPending}
+            vqaProject={activeProject}
+            vqaRequestedGpu={requestedGpu}
             audioModels={audioModels}
             createVqaJob={createVqaJob}
             onEstimateDepth={

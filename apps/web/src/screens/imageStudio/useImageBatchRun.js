@@ -5,6 +5,7 @@ import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
 import { promptBatchSize } from "./samplingControls.js";
 import { batchPromptBudgetMessage, batchPromptBudgetOverages } from "../../imageStudioValidation.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
+import { validatePortableRequest } from "../../portableValidation.js";
 
 // Extracted from ImageStudio along its existing concern boundary.
 export function useImageBatchRun({
@@ -28,6 +29,7 @@ export function useImageBatchRun({
   batchJobCount,
   BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
+  token = "",
   buildBatchJobRequest,
   onMagicExpand,
   createImageJob
@@ -224,6 +226,19 @@ export function useImageBatchRun({
           }
         }
         if (stopped()) break;
+        // Structured captions exist only after refinement. Validate the exact resolved
+        // request here, including a cold browser module, before admitting this batch item.
+        const portable = await validatePortableRequest({
+          kind: "image", payload: { ...request, projectId: owner.projectId }, token, signal: owner.controller.signal,
+        });
+        if (stopped()) break;
+        if (portable.state !== "valid") {
+          const error = new Error(portable.state === "invalid"
+            ? portable.refusal.detail
+            : "The server must check these options. Reconnect to continue.");
+          error.portableStop = true;
+          throw error;
+        }
         const result = createImageJob.withResult
           ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
           : { job: await createImageJob(request) };
@@ -265,7 +280,7 @@ export function useImageBatchRun({
         const current = batchRunRef.current;
         if (!current) break;
         replaceBatchRun(recordBatchEnqueueFailure(current, n, error?.message || (typeof error === "string" ? error : "Could not enqueue image job.")));
-        if (stopped()) break;
+        if (stopped() || error?.portableStop) break;
       }
     }
     const current = batchRunRef.current;

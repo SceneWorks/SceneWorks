@@ -325,7 +325,7 @@ async fn imported_nvfp4_worker_gpu_smoke() {
             "modelManifestEntry": imported
         }),
     );
-    crate::image_jobs::run_image_generate_job(&api, &settings, &image_job)
+    crate::image_jobs::run_image_generate_job(&api, &settings, &image_job, &Default::default())
         .await
         .expect("linked NVFP4 worker generation completes");
 

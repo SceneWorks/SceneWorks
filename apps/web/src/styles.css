@@ -5713,6 +5713,18 @@ input.dataset-name-input.boxed:focus {
    from the config above (sc-10492). Both buttons share the control baseline —
    `.primary-action`'s 44px default would otherwise stand taller than the 36px
    `.secondary-action` beside it. */
+.training-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.training-run-actions .primary-action,
+.training-run-actions .secondary-action {
+  min-height: var(--control-h);
+}
+
 .training-config-actions {
   display: flex;
   justify-content: flex-end;
@@ -15661,6 +15673,26 @@ input.dataset-name-input.boxed:focus {
 @keyframes worker-progress-card-indeterminate {
   from { transform: translateX(-100%); }
   to { transform: translateX(350%); }
+}
+
+.training-continue-form {
+  display: grid;
+  gap: 8px;
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.training-continue-form label {
+  display: grid;
+  gap: 4px;
+  max-width: 240px;
+}
+
+.training-continue-form p,
+.worker-progress-card__continuation {
+  margin: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
 }
 
 .worker-progress-card__actions {

@@ -1592,9 +1592,10 @@ async fn a_generic_audio_job_for_a_symbolic_song_model_is_refused() {
     .clone();
     // Mutation that reds this: dropping `refuse_symbolic_song_without_block` from the generic arm
     // (the job then reaches the project lookup and fails there instead, with another error).
-    let error = crate::audio_jobs::run_audio_generate_job(&api, &settings, &job)
-        .await
-        .expect_err("refused");
+    let error =
+        crate::audio_jobs::run_audio_generate_job(&api, &settings, &job, &Default::default())
+            .await
+            .expect_err("refused");
     assert!(
         error.to_string().contains("symbolic-plan song model"),
         "{error}"

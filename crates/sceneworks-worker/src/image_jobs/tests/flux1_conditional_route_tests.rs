@@ -91,7 +91,9 @@ pub(in crate::image_jobs) fn assert_conditional_base_resolution(
             .unwrap_or_default();
         merged.extend(advanced.as_object().cloned().unwrap_or_default());
         object.insert("advanced".to_owned(), Value::Object(merged));
-        ImageRequest::from_payload(object)
+        // Bind the advanced map as the worker does before resolving weights, so the tier the
+        // resolver reads is the request's resolved `mlxQuantize`.
+        ImageRequest::from_resolved(object, object).expect("fixture options bind")
     };
     let external = fixture.external.display().to_string();
 

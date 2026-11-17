@@ -151,6 +151,8 @@ describe("ModelAttribution (sc-17161)", () => {
       .filter((model) => model.ui?.attribution)
       .map((model) => model.id)
       .sort();
-    expect(declaring).toEqual(["minimax_h3", "minimax_h3_ref"]);
+    // SW-7100: MiniMax-H3-Image owes its own §IV.2 string, "MiniMax-H3-Image".
+    // SW-7102: the prompt expander is under the same agreement and owes the same string.
+    expect(declaring).toEqual(["minimax_h3", "minimax_h3_image", "minimax_h3_image_pe", "minimax_h3_ref"]);
   });
 });

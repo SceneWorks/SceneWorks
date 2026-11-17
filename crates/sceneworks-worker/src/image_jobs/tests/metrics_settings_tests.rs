@@ -8,7 +8,8 @@ use super::image_settings_metrics;
 use serde_json::json;
 
 fn request(value: serde_json::Value) -> ImageRequest {
-    ImageRequest::from_payload(value.as_object().unwrap())
+    let authored = value.as_object().unwrap();
+    ImageRequest::from_resolved(authored, authored).unwrap()
 }
 
 #[cfg(native_lane)]

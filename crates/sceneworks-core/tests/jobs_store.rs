@@ -435,6 +435,59 @@ fn store_helper_removes_its_directory_after_closing_the_connection() {
 }
 
 #[test]
+fn completed_lora_history_survives_queue_clearing_and_retention() {
+    let db = temp_db("saved-lora-history");
+    let store = JobsStore::new(db.path());
+    store.initialize().unwrap();
+    let connection = Connection::open(db.path()).unwrap();
+    for (id, output_kind, dry_run) in [
+        ("saved", "lora", false),
+        ("saved-uncleared", "lora", false),
+        ("dry-run", "lora", true),
+        ("other-output", "base_checkpoint", false),
+    ] {
+        let payload = serde_json::json!({
+            "dryRun": dry_run, "plan": {"target": {"outputKind": output_kind}}
+        });
+        connection.execute(
+            "insert into jobs (
+                id,type,status,project_id,payload_json,result_json,requested_gpu,progress,stage,message,
+                attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values (?1,'lora_train','completed','project',?2,'{}','auto',1,'completed','',1,0,
+                       '2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            params![id, payload.to_string()],
+        ).unwrap();
+    }
+    store.clear_job("saved").unwrap();
+    assert_eq!(
+        store
+            .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+            .unwrap(),
+        2
+    );
+    assert!(store
+        .list_jobs(Some("project"), None, 100)
+        .unwrap()
+        .is_empty());
+    let history = store.list_completed_lora_runs("project", 0, 1).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, "saved-uncleared");
+    assert_eq!(
+        store.list_completed_lora_runs("project", 1, 1).unwrap()[0].id,
+        "saved"
+    );
+    assert!(store
+        .list_completed_lora_runs("project", 2, 1)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .list_completed_lora_runs("other-project", 0, 100)
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.get_job("saved").unwrap().payload["dryRun"], false);
+}
+
+#[test]
 fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
     let db = temp_db("retention");
     let path = db.path();

@@ -515,7 +515,16 @@ pub(super) async fn generate_scail2(
         adapters,
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((decoded, lightning))
 }
 
@@ -684,6 +693,15 @@ pub(super) async fn generate_scail2_replace(
         adapters,
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    let decoded = generate_video(
+        api,
+        settings,
+        job,
+        backend,
+        request.options(),
+        &request.portable_aux,
+        input,
+    )
+    .await?;
     Ok((decoded, status, lightning))
 }

@@ -58,22 +58,12 @@ pub(super) fn image_settings_metrics(
         } else {
             (quant_label, quant_bits)
         };
-    let adv = &request.advanced;
-    let string_or = |key: &str, default: &str| -> Option<String> {
-        Some(
-            adv.get(key)
-                .and_then(Value::as_str)
-                .unwrap_or(default)
-                .to_owned(),
-        )
+    let string_or = |key: &'static str, default: &str| -> Option<String> {
+        Some(request.advanced_text(key).unwrap_or(default).to_owned())
     };
-    let number_field = |key: &str| -> Option<serde_json::Number> {
-        adv.get(key)
-            .and_then(|value| {
-                value
-                    .as_f64()
-                    .or_else(|| value.as_str()?.trim().parse().ok())
-            })
+    let number_field = |key: &'static str| -> Option<serde_json::Number> {
+        request
+            .advanced_f64(key)
             .and_then(serde_json::Number::from_f64)
     };
     let loras: Vec<String> = request.loras.iter().filter_map(lora_label).collect();
@@ -104,11 +94,8 @@ pub(super) fn image_settings_metrics(
             .and_then(serde_json::Number::from_f64),
         true_cfg_scale: number_field("trueCfgScale"),
         guidance_method: string_or("guidanceMethod", "cfg"),
-        use_pid: Some(adv.get("usePid").and_then(Value::as_bool).unwrap_or(false)),
-        pid_target: adv
-            .get("pidTarget")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        use_pid: Some(request.advanced_bool("usePid").unwrap_or(false)),
+        pid_target: request.advanced_text("pidTarget").map(str::to_owned),
         width: Some(request.width),
         height: Some(request.height),
         seed: request.seed.or_else(|| request.seeds.first().copied()),
@@ -155,12 +142,7 @@ pub(super) fn effective_quant_label_gated(
     nvfp4_host: bool,
     tier_dir: Option<&Path>,
 ) -> (Option<String>, Option<i64>) {
-    if request
-        .advanced
-        .get("convRot")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if request.advanced_bool("convRot").unwrap_or(false) {
         return (Some("int8-convrot".to_owned()), None);
     }
     #[cfg(target_os = "macos")]

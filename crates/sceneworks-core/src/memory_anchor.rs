@@ -62,7 +62,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant};
+use crate::memory_calibration::{AnchorRegime, Ltx25Decoder, Ltx25TransformerVariant};
 
 #[path = "sdxl_cuda_memory_endpoints.rs"]
 pub mod sdxl_cuda_memory_endpoints;
@@ -1999,6 +1999,15 @@ pub struct MemoryAnchorStore {
     /// migration still parses.
     #[serde(default)]
     pub exceeded_bounds: Vec<ExceededBound>,
+    /// The cell's REGIME anchors (SW-F363): its resident, fully optimized and LoRA renders, each
+    /// planned as `<cell>:<regime>` in `config/memory-calibration-plan.json` — the two-anchor
+    /// memory-evidence rule's lowest- and highest-memory fits plus one overlay witness. Recorded and
+    /// validated exactly as an anchor is, but never consulted by a lookup: the derivation reads
+    /// [`Self::anchors`] alone, so a regime row cannot shadow the cell's derivation anchor. One row
+    /// per (model, tier, backend lane, transformer variant, decoder, regime). Absent when empty, so
+    /// a store written before it existed parses and round-trips byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regime_anchors: Vec<MemoryAnchor>,
     /// Sampled accounting observations, NEVER input to the legacy residency/allocator laws.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_operating_envelopes: Vec<ObservedOperatingEnvelope>,
@@ -2293,6 +2302,13 @@ pub struct ExceededBound {
     pub tier: String,
     pub transformer_variant: Option<Ltx25TransformerVariant>,
     pub decoder: Option<Ltx25Decoder>,
+    /// SW-F363: the regime row whose capture the guard stopped, `None` for a cell's base row.
+    /// A regime stop bounds THAT composition (a resident or LoRA render outweighs the cell's own),
+    /// so [`MemoryAnchorStore::binding_exceeded_bound`] never consults it; it is carried so the
+    /// probe tooling stops re-booking the regime row. Bound to the source entry's
+    /// `target.anchorRegime` in both directions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime: Option<AnchorRegime>,
     pub mode: String,
     pub overlay: Option<String>,
     pub reference_count: u32,
@@ -2631,6 +2647,12 @@ pub struct MemoryAnchor {
     /// not a wildcard — because a record that never named a variant cannot certify one.
     pub transformer_variant: Option<Ltx25TransformerVariant>,
     pub decoder: Option<Ltx25Decoder>,
+    /// SW-F363: which regime anchor of its cell this row is. `None` on every
+    /// [`MemoryAnchorStore::anchors`] row (the cell's derivation anchor) and `Some` on every
+    /// [`MemoryAnchorStore::regime_anchors`] row; bound to the source record's
+    /// `target.anchorRegime` in both directions by [`validate_anchor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime: Option<AnchorRegime>,
     pub mode: String,
     /// The anchor was measured overlay-free; a future overlay anchor is a new row, never a reuse.
     pub overlay: Option<String>,
@@ -2777,6 +2799,48 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
                 anchor.id
             ));
         }
+        if anchor.regime.is_some() {
+            return Err(format!(
+                "memory anchor {} names a regime; regime anchors belong in regimeAnchors, never \
+                 among the cell's derivation anchors",
+                anchor.id
+            ));
+        }
+        validate_anchor(anchor)?;
+    }
+    let mut regime_identities = BTreeMap::new();
+    for anchor in &store.regime_anchors {
+        let Some(regime) = anchor.regime else {
+            return Err(format!(
+                "regime anchor {} names no regime; a cell's derivation anchor belongs in anchors",
+                anchor.id
+            ));
+        };
+        let identity = (
+            anchor.model_id.clone(),
+            anchor.tier.clone(),
+            anchor.backend,
+            variant_key_opt(anchor.transformer_variant),
+            decoder_key_opt(anchor.decoder),
+            regime,
+        );
+        if let Some(previous) = regime_identities.insert(identity, &anchor.id) {
+            return Err(format!(
+                "duplicate regime anchor for ({}, {}, {}, {}, {}, {}): {} and {} — exactly one \
+                 anchor per regime of a (model, tier, backend lane, transformer variant, decoder)",
+                anchor.model_id,
+                anchor.tier,
+                anchor.backend.as_key(),
+                variant_key_opt(anchor.transformer_variant),
+                decoder_key_opt(anchor.decoder),
+                regime.as_key(),
+                previous,
+                anchor.id
+            ));
+        }
+    }
+    // Identity first, over the whole array, so a duplicate is named as one whatever its records say.
+    for anchor in &store.regime_anchors {
         validate_anchor(anchor)?;
     }
     validate_analytic_only(&store)?;
@@ -3166,6 +3230,7 @@ fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
             || str_at(entry, "calibrationFingerprint").as_deref()
                 != Some(bound.source.calibration_fingerprint.as_str())
             || entry_overlay != bound.overlay
+            || str_at(target, "anchorRegime").as_deref() != bound.regime.map(AnchorRegime::as_key)
             || u64_at(entry, "referenceCount") != Some(u64::from(bound.reference_count))
         {
             return Err(format!(
@@ -3384,6 +3449,9 @@ fn validate_anchor_with_sources(
             != decoder_key_opt(anchor.decoder)
         || str_at(record, "calibrationFingerprint").as_deref()
             != Some(anchor.source.calibration_fingerprint.as_str())
+        // SW-F363: both directions, like the pipeline axes — a regime capture cannot anchor a
+        // cell's derivation row, and a base capture cannot be filed as a regime.
+        || str_at(target, "anchorRegime").as_deref() != anchor.regime.map(AnchorRegime::as_key)
     {
         return Err(format!(
             "memory anchor {} identity disagrees with its source record {}",
@@ -3805,7 +3873,9 @@ impl MemoryAnchorStore {
         self.exceeded_bounds
             .iter()
             .filter(|bound| {
-                bound.model_id == query.model_id
+                // A regime row's stop bounds that regime's composition, not the cell's.
+                bound.regime.is_none()
+                    && bound.model_id == query.model_id
                     && query
                         .model_family
                         .is_none_or(|family| bound.model_family == family)

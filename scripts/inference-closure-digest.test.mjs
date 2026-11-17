@@ -567,11 +567,37 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam2::PROVIDER_ID,";
   assert.doesNotThrow(() => assertFor("fam2_img"));
   assert.throws(() => assertFor("fam_img"), /never names it/);
+  // SW-7158: the native family can re-export one serde-only policy owner.
+  sources["crates/contracts/gen-core-checkpoint/src/fam2.rs"] =
+    "pub use gen_core_fam2_policy::PROVIDER_ID;\n";
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "fam2_img";\n';
+  assert.doesNotThrow(() => assertFor("fam2_img"));
+  assert.throws(() => assertFor("fam_img"), /never names it/);
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "wrong_img";\n';
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
+  delete sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"];
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
+  sources["crates/contracts/gen-core-fam2-policy/src/lib.rs"] =
+    'pub const PROVIDER_ID: &str = "fam2_img";\n';
+  sources["crates/contracts/gen-core-checkpoint/src/fam2.rs"] =
+    "use gen_core_fam2_policy::PROVIDER_ID;\n";
+  assert.throws(() => assertFor("fam2_img"), /never names it/);
   // A sibling reference to a family the sibling crate does not declare still refuses.
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam::PROVIDER_ID,";
   assert.throws(() => assertFor("fam_img"), /never names it/);
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core::absent::PROVIDER_ID,";
   assert.throws(() => assertFor("fam_img"), /never names it/);
+  // SW-F363: one hop of `pub use gen_core_<crate>::PROVIDER_ID;` (inference 4effdfb5 moved the
+  // Supra2 literal into gen-core-supra2-policy) is followed to that crate's lib.rs — and only to a
+  // declaration of exactly this provider id there.
+  sources["crates/m/src/lib.rs"] = "provider_id: gen_core_checkpoint::fam3::PROVIDER_ID,";
+  sources["crates/contracts/gen-core-checkpoint/src/fam3.rs"] = "pub use gen_core_fam3_policy::PROVIDER_ID;\n";
+  assert.throws(() => assertFor("fam3_img"), /never names it/, "no policy crate yet");
+  sources["crates/contracts/gen-core-fam3-policy/src/lib.rs"] = 'pub const PROVIDER_ID: &str = "fam3_img";\n';
+  assert.doesNotThrow(() => assertFor("fam3_img"));
+  assert.throws(() => assertFor("other_img"), /never names it/);
 });
 
 test("two providers in the SAME crate get distinct digests", () => {

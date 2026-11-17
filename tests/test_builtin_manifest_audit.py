@@ -31,6 +31,7 @@ embedded manifest, in ``crates/sceneworks-worker/src/engines.rs`` (the tests
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -901,70 +902,47 @@ def test_manifest_model_path_is_only_an_optional_override():
     and continue to repo resolution (or decline an imported-only lane) when it
     is absent.
     """
+    # The typed accessors split request/manifest reads across lines. Scan the whole file:
+    # image_jobs.rs also has production functions after its first inline test module.
     expected_readers = {
-        # sc-16426: gallery attribution reads the imported checkpoint only after the worker has
-        # selected an imported Krea/SDXL route, and declines attribution when every path source is
-        # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
         "image_jobs/artifact_resolution.rs",
-        "image_jobs/flux2_control_candle.rs",
-        "image_jobs/kolors_control.rs",
-        "image_jobs/krea_control.rs",
-        "image_jobs/qwen_control.rs",
-        "image_jobs/zimage_control.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
-        "image_jobs/instantid.rs",
-        "image_jobs/kolors_ipadapter.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/krea_control.rs",
         "image_jobs/krea_control_candle.rs",
         "image_jobs/krea_imported.rs",
-        # sc-15036: the fine-tuned Mage-Flow base lane. Audited — `modelPath` is an optional
-        # FIRST preference here, falling through to the catalog entry's `paths.model` (which is
-        # what registration actually stamps) and then declining the lane entirely with `Ok(None)`
-        # when neither is present, so a normal install never reaches it.
         "image_jobs/mage_finetuned.rs",
-        "image_jobs/pulid.rs",
-        "image_jobs/pulid_candle.rs",
+        "image_jobs/qwen_control.rs",
         "image_jobs/qwen_edit_candle.rs",
         "image_jobs/sdxl_edit_candle.rs",
         "image_jobs/sdxl_imported.rs",
         "image_jobs/sdxl_ipadapter.rs",
+        "image_jobs/zimage_control.rs",
         "image_jobs/zimage_edit_candle.rs",
     }
     actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = _before_test_module(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
         for match in re.finditer(
-            r'request\.model_manifest_entry\.get\("modelPath"\)',
+            r'request\s*\.\s*model_manifest_entry\s*\.\s*get\("modelPath"\)',
             source,
         ):
             relative_path = path.relative_to(WORKER_SOURCE_PATH).as_posix()
+            # This one assertion inspects the absence of a manifest override; it is not a reader.
+            if relative_path == "image_jobs/qwen_edit_candle.rs" and source[
+                match.end() :
+            ].startswith(".is_none()"):
+                continue
             actual_readers.append(relative_path)
-            prefix = source[max(0, match.start() - 500) : match.start()]
-            statement_start = source.rfind(
-                "let raw_path = request", max(0, match.start() - 500), match.start()
-            )
-            statement_end = source.find(";", match.end())
-            statement = (
-                source[statement_start : statement_end + 1]
-                if statement_start >= 0 and statement_end >= 0
-                else ""
-            )
-            compact_statement = re.sub(r"\s+", "", statement)
-            # sc-16426's attribution-only reader uses idiomatic `?`, which Clippy requires. Keep
-            # that exception exact: any new source, precedence change, panic/error conversion, or
-            # fallback change must fail this inventory audit and be reviewed explicitly.
-            question_mark_optional = relative_path == "image_jobs.rs" and compact_statement == (
-                'letraw_path=request.advanced.get("modelPath")'
-                '.or_else(||request.model_manifest_entry.get("modelPath"))'
-                '.or_else(||{request.model_manifest_entry.get("paths")'
-                '.and_then(|paths|paths.get("model"))})'
-                ".and_then(Value::as_str)?;"
-            )
+            prefix = re.sub(r"\s+", " ", source[max(0, match.start() - 280) : match.start()])
             assert (
-                "if let Some(path) = request" in prefix
-                or "let Some(raw_path) = request" in prefix
-                or question_mark_optional
+                ("if let Some(path) = request" in prefix
+                 or "let Some(raw_path) = request" in prefix
+                 or relative_path == "image_jobs.rs" and "let raw_path = request" in prefix)
+                and '.advanced_text("modelPath")' in prefix
+                and ".or_else(|| {" in prefix
             ), (
                 f"{relative_path}: modelPath is no longer read through an "
                 "optional branch"
@@ -3610,6 +3588,9 @@ IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
         "flux_schnell",
         "ideogram_4_turbo",
         "flux3_klein",  # flow map: no CFG at all (sc-26234)
+        # SW-7100: PDD-distilled six-step sampler; `gen_core::h3_image` refuses guidance != 1.0
+        # and any negative prompt.
+        "minimax_h3_image",
     }
 )
 
@@ -4152,6 +4133,275 @@ def test_minimax_h3_declares_the_section_iv_2_ui_attribution():
         attribution = entry["ui"]["attribution"]
         assert "MiniMax H3" in attribution, model_id
         assert attribution == "Powered by MiniMax H3", model_id
+
+
+# ---------------------------------------------------------------------------------------------
+# SW-7100 — MiniMax-H3-Image (feature SW-F363).
+# ---------------------------------------------------------------------------------------------
+
+
+def _models_by_id() -> dict:
+    return {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+
+
+def _text_encoder_rows(entry: dict) -> list:
+    return [
+        download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is True and download.get("componentId") == "text_encoder"
+    ]
+
+
+def test_minimax_h3_image_text_encoder_rows_are_minimax_h3s():
+    """E22: H3-Image reads H3's text encoder, so its text-encoder rows are H3's rows verbatim —
+    same repos, revisions, files (the macOS bf16 shard-13 omission included) and platforms. A
+    cache holding H3's tier therefore downloads no text-encoder byte for H3-Image."""
+    models = _models_by_id()
+    image_rows = _text_encoder_rows(models["minimax_h3_image"])
+    h3_rows = _text_encoder_rows(models["minimax_h3"])
+    assert len(image_rows) == 4
+    assert image_rows == h3_rows
+    shard_13 = "text_encoder/model-00013-of-00014.safetensors"
+    macos_bf16 = [
+        row for row in image_rows if row["variant"] == "bf16" and row["platforms"] == ["macos"]
+    ]
+    assert len(macos_bf16) == 1 and shard_13 not in macos_bf16[0]["files"]
+
+
+def test_minimax_h3_image_downloads_only_the_diffusers_components():
+    """E22: the tiers fetch `transformer_diffusers/` + the heads file; the root fetches
+    `vae_diffusers/`, `tokenizer/` and `processor/`. Never the native `transformer/` / `vae/` copies
+    or the H3-Image repository's own `text_encoder/`."""
+    entry = _models_by_id()["minimax_h3_image"]
+    assert entry["family"] == "minimax-h3-image"
+    image_repo_files = [
+        pattern
+        for download in entry["downloads"]
+        if download["repo"] in ("MiniMaxAI/MiniMax-H3-Image", "SceneWorks/minimax-h3-image-mlx")
+        for pattern in download["files"]
+    ]
+    for pattern in image_repo_files:
+        top = pattern.split("/")[1] if pattern.startswith(("q4/", "q8/")) else pattern.split("/")[0]
+        assert top in {
+            "transformer_diffusers",
+            "pdd_fused_heads.safetensors",
+            "vae_diffusers",
+            "tokenizer",
+            "processor",
+        }, pattern
+    primaries = {
+        download["variant"]: download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is not True
+    }
+    assert sorted(primaries) == ["bf16", "q4", "q8"]
+    assert primaries["bf16"]["default"] is True
+    assert primaries["bf16"].get("pendingArtifact") is None
+    for tier in ("q8", "q4"):
+        assert primaries[tier].get("pendingArtifact") is None
+        assert primaries[tier]["revision"] == "6f62669b919bccdbf51b08c696fbb84542000a87"
+        # The output heads are inside the quantized shards; only bf16 fetches the heads file.
+        assert primaries[tier]["files"] == [f"{tier}/transformer_diffusers/*"]
+
+
+def test_minimax_h3_image_size_envelope_is_its_own():
+    """E25: the published 16 MP presets up to a 6272 px edge, the 2048x2048 default, fixed six
+    steps — declared on this entry alone; no other image model declares an edge above 4096."""
+    models = _models_by_id()
+    entry = models["minimax_h3_image"]
+    limits = entry["limits"]
+    assert limits["maxDimension"] == 6272
+    assert entry["defaults"]["resolution"] == "2048x2048"
+    for preset in ("4096x4096", "4736x3552", "5024x3360", "5472x3072", "6272x2688"):
+        assert preset in limits["resolutions"], preset
+    assert "requiresDimensionsMultipleOf" not in limits
+    assert limits["hardMinSteps"] == limits["hardMaxSteps"] == entry["defaults"]["steps"] == 6
+    above = [
+        model_id
+        for model_id, model in models.items()
+        if model.get("type") == "image"
+        and model_id != "minimax_h3_image"
+        and (model.get("limits") or {}).get("maxDimension", 0) > 4096
+    ]
+    assert not above, above
+
+
+def test_minimax_h3_image_license_notice_names_its_own_terms():
+    """E23 / S2: the H3-Image agreement's own terms — including §IV.1's 1 million USD / Hosted
+    Service trigger, which is NOT H3's 20 million — and none of the H3-only authorization copy."""
+    entry = _models_by_id()["minimax_h3_image"]
+    assert entry["requiresLicenseAcknowledgment"] is True
+    assert entry["licenseUrl"].startswith("https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/")
+    notice = entry["licenseNotice"]
+    assert "MiniMax-H3-Image Community License Agreement" in notice
+    assert "NON-TRANSFERABLE" in notice
+    for territory in (
+        "European Union",
+        "United Kingdom",
+        "Republic of Korea",
+        "United States of America",
+    ):
+        assert territory in notice, territory
+    assert "machine-generated" in notice
+    assert "1 million US dollars" in notice
+    assert "Hosted Service" in notice
+    assert "https://platform.minimax.io/license" in notice
+    assert "20 million" not in notice
+    assert "(5) NO IMPROVING OTHER AI MODELS (§V.3)" in notice
+    assert "authorizes SceneWorks" not in notice
+    assert entry["ui"]["attribution"] == "Powered by MiniMax-H3-Image"
+
+
+def test_minimax_h3_image_shipped_license_is_the_upstream_text():
+    """S3: the verbatim agreement and the §III.4 NOTICE ship under About → Licenses."""
+    folder = ROOT / "apps" / "desktop" / "licenses" / "minimax-h3-image"
+    license_text = (folder / "MiniMax-H3-Image-Community-License.txt").read_bytes()
+    assert (
+        hashlib.sha256(license_text).hexdigest()
+        == "edfab8ece9d0ccd39106c4fe44105ce599b27ca7dd22601b736a8e9219cb4d26"
+    )
+    notice = (folder / "NOTICE.txt").read_text(encoding="utf-8")
+    assert notice.startswith(
+        "MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License Agreement,"
+    )
+    for fragment in (
+        "Applicable Territory (Sections I and V.4)",
+        "Acceptable Use Policy (Section V.1 and Exhibit A)",
+        "Additional Commercial Terms (Section IV.1)",
+        "1 million US dollars",
+        "No improving other AI models (Section V.3)",
+    ):
+        assert fragment in notice, fragment
+
+
+# ---------------------------------------------------------------------------------------------
+# SW-7102 — MiniMax-H3-Image-PE, the prompt expander (feature SW-F363).
+# ---------------------------------------------------------------------------------------------
+
+_PE_REPO = "MiniMaxAI/MiniMax-H3-Image-PE"
+_PE_REVISION = "35603d4b63949afa12cb098227fffefedf081afa"
+_PE_PROMPT_FILES = [
+    "prompt/manifest.json",
+    "prompt/t2i/system_prompt.txt",
+    "prompt/t2i/task_prompt.txt",
+    "prompt/t2i/request_params.json",
+    "prompt/edit/task_prompt.txt",
+]
+
+
+def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
+    """E17: its own entry — the published NVFP4 tier (Blackwell CUDA, so Windows/Linux only), the
+    bf16 conversion pending publication (null SHA + `pendingArtifact`), the published macOS q8/q4, and a `prompt`
+    co-requisite that fetches the five prompt files from the UPSTREAM snapshot for every tier."""
+    entry = _models_by_id()["minimax_h3_image_pe"]
+    assert entry["type"] == "utility"
+    assert entry["adapter"] == "prompt-refine"
+    assert entry["family"] == "minimax-h3-image-pe"
+    assert entry["autoDownload"] is False
+    primaries = {
+        download["variant"]: download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is not True
+    }
+    assert sorted(primaries) == ["bf16", "nvfp4", "q4", "q8"]
+    nvfp4 = primaries["nvfp4"]
+    assert (nvfp4["repo"], nvfp4["revision"]) == (_PE_REPO, _PE_REVISION)
+    assert nvfp4["default"] is True and nvfp4.get("pendingArtifact") is None
+    assert nvfp4["platforms"] == ["windows", "linux"]
+    assert not any(pattern.startswith("prompt") for pattern in nvfp4["files"])
+    assert primaries["bf16"]["pendingArtifact"] is True
+    assert primaries["bf16"]["revision"] == "0" * 40
+    assert primaries["bf16"]["files"] == ["bf16/*"]
+    for tier in ("q8", "q4"):
+        rows = [
+            download
+            for download in entry["downloads"]
+            if download.get("variant") == tier and download.get("coRequisite") is not True
+        ]
+        by_platforms = {tuple(row["platforms"]): row for row in rows}
+        assert len(rows) == len(by_platforms) == 2, tier
+        for platforms, directory in ((("macos",), tier), (("windows", "linux"), f"candle-{tier}")):
+            row = by_platforms[platforms]
+            assert row.get("pendingArtifact") is None, (tier, platforms)
+            assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", (tier, platforms)
+            assert row["files"] == [f"{directory}/*"], (tier, platforms)
+    prompt_rows = [
+        download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is True and download.get("componentId") == "prompt"
+    ]
+    assert len(prompt_rows) == 1
+    prompt_row = prompt_rows[0]
+    assert (prompt_row["repo"], prompt_row["revision"]) == (_PE_REPO, _PE_REVISION)
+    assert prompt_row["files"] == _PE_PROMPT_FILES
+    assert set(entry["candle"]["minMemoryGbByTier"]) == {"bf16", "q8", "q4", "nvfp4"}
+    assert set(entry["mlx"]["minMemoryGbByTier"]) == {"bf16", "q8", "q4"}
+    assert entry["candle"]["measured"] is False
+
+
+def test_minimax_h3_image_pe_license_notice_names_its_own_terms():
+    """E23 / S2: the expander is under the MiniMax-H3-Image agreement and its gate names the same
+    terms — §IV.1's 1 million USD / Hosted Service trigger, the territory, Exhibit A item 12, §IV.2
+    and §V.3 — and says the prompts are read, never copied."""
+    entry = _models_by_id()["minimax_h3_image_pe"]
+    assert entry["requiresLicenseAcknowledgment"] is True
+    assert entry["licenseUrl"].startswith("https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/")
+    notice = entry["licenseNotice"]
+    assert "MiniMax-H3-Image Community License Agreement" in notice
+    assert "NON-TRANSFERABLE" in notice
+    for territory in (
+        "European Union",
+        "United Kingdom",
+        "Republic of Korea",
+        "United States of America",
+    ):
+        assert territory in notice, territory
+    assert "machine-generated" in notice
+    assert "1 million US dollars" in notice
+    assert "Hosted Service" in notice
+    assert "https://platform.minimax.io/license" in notice
+    assert "20 million" not in notice
+    assert "(5) NO IMPROVING OTHER AI MODELS (§V.3)" in notice
+    assert "never copies them" in notice
+    assert entry["ui"]["attribution"] == "Powered by MiniMax-H3-Image"
+
+
+def test_minimax_h3_image_pe_has_its_own_license_entry_and_notice():
+    """S3: its own About → Licenses entry and §III.4 NOTICE, pointing at the verbatim agreement
+    shipped with MiniMax-H3-Image (the expander's repository has no LICENSE file of its own)."""
+    licenses = json.loads(
+        (ROOT / "apps" / "desktop" / "licenses" / "manifest.json").read_text(encoding="utf-8")
+    )
+    components = licenses["components"] if isinstance(licenses, dict) else licenses
+    entries = [component for component in components if component.get("id") == "minimax-h3-image-pe"]
+    assert len(entries) == 1
+    assert entries[0]["models"] == ["minimax_h3_image_pe"]
+    keys = [document["key"] for document in entries[0]["documents"]]
+    assert keys == ["minimax-h3-image-pe-notice", "minimax-h3-image-community-license"]
+    notice = (
+        ROOT / "apps" / "desktop" / "licenses" / "minimax-h3-image-pe" / "NOTICE.txt"
+    ).read_text(encoding="utf-8")
+    assert notice.startswith(
+        "MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License Agreement,"
+    )
+    assert "MiniMax-H3-Image-PE" in notice
+
+
+def test_minimax_h3_image_pe_prompt_text_is_not_in_the_repository():
+    """E16: no MiniMax prompt file is vendored anywhere in the repository, fixtures included —
+    nothing named like one of the expander's prompt files lives outside dependency trees."""
+    import os
+
+    names = {path.split("/")[-1] for path in _PE_PROMPT_FILES} - {"manifest.json"}
+    skip = {"node_modules", "target", ".git", "dist", ".venv"}
+    offenders = []
+    for directory, subdirectories, files in os.walk(ROOT):
+        subdirectories[:] = [name for name in subdirectories if name not in skip]
+        parts = Path(directory).parts
+        for name in files:
+            if name in names and "prompt" in parts:
+                offenders.append(str((Path(directory) / name).relative_to(ROOT)))
+    assert not offenders, offenders
 
 
 def test_schema_accepts_license_acknowledgment_without_gated():

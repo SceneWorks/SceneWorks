@@ -1,6 +1,8 @@
+import { jobFailureMessage } from "../generationRefusal.js";
 import { formatMiB } from "../formatting.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import ExactReplayAction from "../components/ExactReplayAction.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -97,7 +99,7 @@ function activeDependencyFor(job, jobs) {
 
 function jobWaitingMessage(job, workers, jobs) {
   if (job.status !== "queued") {
-    return job.error ?? job.message;
+    return jobFailureMessage(job);
   }
   const dependency = activeDependencyFor(job, jobs);
   if (dependency) {
@@ -445,6 +447,7 @@ export function QueueScreen() {
                   onClear={clearJob ? (j) => clearJob(j) : undefined}
                   onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
                   onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
+                  onContinueTraining={(j, additionalSteps) => jobAction(j, "continue-training", { body: { additionalSteps } })}
                   onDuplicate={(j, computePolicy) => jobAction(j, "duplicate", {
                     body: computePolicy ? {
                       payloadChanges: { yue2: { ...j.payload.yue2, computePolicy, precision: undefined } },
@@ -452,6 +455,7 @@ export function QueueScreen() {
                   })}
                   hideOpenQueue
                 />
+                <ExactReplayAction job={enrichedJob} onExactReplay={(j) => jobAction(j, "exact-replay")} />
               </div>
             );
           })

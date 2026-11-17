@@ -14,19 +14,19 @@ use super::pid::resolve_pid_weights;
 use super::resolve_seed;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream_with_cancel;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::PulidFlux;
 use super::PulidFluxPaths;
 use super::PulidFluxRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
@@ -151,13 +151,7 @@ fn resolve_pulid_candle_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "PuLID-FLUX modelPath").map(Some);
     }
     let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
@@ -179,13 +173,13 @@ pub(super) fn pulid_candle_available(request: &ImageRequest, settings: &Settings
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", PULID_CANDLE_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", PULID_CANDLE_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG the distilled single forward consumes).
 fn pulid_candle_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         PULID_CANDLE_DEFAULT_GUIDANCE,
@@ -196,8 +190,8 @@ fn pulid_candle_guidance(request: &ImageRequest) -> f32 {
 /// The PuLID identity-strength knob → the provider's `id_weight` (0.0 = the no-id ablation = plain
 /// FLUX). Torch/MLX clamp band 0.0–3.0 (the upstream gradio slider), default 1.0.
 fn pulid_candle_id_weight(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(
-        &request.advanced,
+    super::sampling::resolved_f32_clamped(
+        request,
         "idWeight",
         PULID_CANDLE_DEFAULT_ID_WEIGHT,
         0.0..=3.0,
@@ -308,7 +302,7 @@ fn pulid_candle_raw_settings(
     guidance: f32,
     id_weight: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("pulidFlux".to_owned(), Value::Bool(true));
@@ -421,15 +415,14 @@ pub(super) async fn generate_candle_pulid_stream(
         project_path,
     )?;
     let mut _portable_face_lease = None;
-    let (adapter, eva, face_dir) =
-        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-            let (adapter, eva, face_dir, lease) =
-                crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
-            _portable_face_lease = Some(lease);
-            (adapter, eva, face_dir)
-        } else {
-            ensure_pulid_candle_weights(api, settings, job).await?
-        };
+    let (adapter, eva, face_dir) = if request.portable_aux.has_paths() {
+        let (adapter, eva, face_dir, lease) =
+            crate::portable_aux_sources::bound_pulid_weights_typed(&request.portable_aux)?;
+        _portable_face_lease = Some(lease);
+        (adapter, eva, face_dir)
+    } else {
+        ensure_pulid_candle_weights(api, settings, job).await?
+    };
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle PuLID-FLUX lane
     // serves the single-identity `character_image` path (one identity image per seed) and has no
@@ -448,6 +441,7 @@ pub(super) async fn generate_candle_pulid_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "PuLID-FLUX face-stack staging failed; likeness scores omitted",
     )
@@ -463,7 +457,7 @@ pub(super) async fn generate_candle_pulid_stream(
     // time-shift `mu`). Read + N3-normalize against the shared curated menu. N1: unset ⇒ `None` ⇒ the
     // native euler-over-native-schedule default runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -696,7 +690,7 @@ pub(super) async fn generate_candle_pulid_stream(
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 work,
                 move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
@@ -709,19 +703,22 @@ pub(super) async fn generate_candle_pulid_stream(
                         ))
                     })?;
                     let generated = match memory_context.as_ref() {
-                        Some(context) => model.generate_with_memory_context_planned(
+                        Some(context) => model.generate_with_memory_context_with_execution_report(
                             context,
                             &req,
                             &reference,
                             render_plan,
                             &mut *on_progress,
                         ),
-                        None => {
-                            model.generate_planned(&req, &reference, render_plan, &mut *on_progress)
-                        }
+                        None => model.generate_with_execution_report(
+                            &req,
+                            &reference,
+                            render_plan,
+                            &mut *on_progress,
+                        ),
                     };
-                    let out = match generated {
-                        Ok(out) => out,
+                    let completed = match generated {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -729,6 +726,22 @@ pub(super) async fn generate_candle_pulid_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "PuLID-FLUX returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). The Image
                     // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
                     // records an honest detected:false N/A, `None` scorer ⇒ field omitted.

@@ -224,6 +224,22 @@ where
         self.entry.as_ref().map(|entry| &entry.model)
     }
 
+    /// What a load of `key` would find, without evicting anything: [`CacheAccess::Warm`] when `key`
+    /// is resident (the load reuses it), else [`CacheAccess::Cold`] with the different resident
+    /// entry's key, which the load's own miss drops before allocating. A memory check decides on
+    /// that first, so a load it refuses leaves the resident model in place.
+    #[cfg_attr(
+        not(all(not(target_os = "macos"), feature = "backend-candle")),
+        allow(dead_code)
+    )]
+    pub(crate) fn access_for(&self, key: &K) -> (CacheAccess, Option<&K>) {
+        match &self.entry {
+            Some(entry) if entry.key == *key => (CacheAccess::Warm, None),
+            Some(entry) => (CacheAccess::Cold, Some(&entry.key)),
+            None => (CacheAccess::Cold, None),
+        }
+    }
+
     /// Load (on a miss) or reuse (on a hit) the model for `key`, then run `run` against it.
     ///
     /// A miss clears the resident entry, optionally frees the backend cache first (see

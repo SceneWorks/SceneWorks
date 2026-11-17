@@ -1,5 +1,5 @@
 use super::*;
-use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
+use crate::dto::VectorSampling;
 
 pub(super) async fn create_generation_job_with_binding(
     state: AppState,
@@ -47,6 +47,11 @@ pub(super) async fn create_generation_job_with_binding(
         .get("modelManifestEntry")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
+    if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job_type) {
+        let facts = sceneworks_core::request_validation::facts_for_job(&job_type, &payload);
+        sceneworks_core::request_validation::validate(kind, &payload, &facts)
+            .map_err(ApiError::from)?;
+    }
     validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
     // Freeze the admitted selection for retry/duplicate too, including requests that were not
     // themselves replays. A later same-id catalog rebind must not change their weights.
@@ -165,30 +170,27 @@ pub(crate) fn validate_selected_decoder_for_manifest(
     job_payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
-    let Some(raw) = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("decoder"))
-    else {
-        return Ok(());
-    };
-    let decoder_id = match raw {
-        Value::Null => return Ok(()),
-        Value::String(value) if value.trim().is_empty() || value == "native" => return Ok(()),
-        Value::String(value) => value.as_str(),
-        _ => {
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let decoder_id = match &route_options.decoder {
+        sceneworks_core::resolved_options::RouteField::Absent
+        | sceneworks_core::resolved_options::RouteField::Null => return Ok(()),
+        sceneworks_core::resolved_options::RouteField::Valid(value)
+            if value.trim().is_empty() || value == "native" =>
+        {
+            return Ok(());
+        }
+        sceneworks_core::resolved_options::RouteField::Valid(value) => value.as_str(),
+        sceneworks_core::resolved_options::RouteField::Invalid => {
             return Err(ApiError::bad_request(
                 "advanced.decoder must be a decoder id string (or 'native')",
             ))
         }
     };
-    if job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("usePid"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
+    if matches!(
+        route_options.use_pid,
+        sceneworks_core::resolved_options::RouteField::Valid(true)
+    ) {
         return Err(ApiError::bad_request(
             "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder",
         ));
@@ -241,21 +243,8 @@ pub(crate) async fn create_image_job(
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
-    if let Some(advanced) = job_payload.remove("mossImageAdvanced") {
-        let map = job_payload
-            .entry("advanced".to_owned())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
-        if map
-            .insert(sceneworks_core::moss_image_advanced::KEY.into(), advanced)
-            .is_some()
-        {
-            return Err(ApiError::bad_request(
-                "supply mossImageAdvanced once, not at both request boundaries",
-            ));
-        }
-    }
+    sceneworks_core::moss_image_advanced::normalize_carrier(&mut job_payload)
+        .map_err(ApiError::bad_request)?;
     job_payload.remove("requestedGpu");
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
@@ -345,6 +334,7 @@ pub(crate) async fn create_image_job(
     if let Some(entry) = model_manifest_entry.as_object() {
         sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
             .map_err(ApiError::bad_request)?;
+        crate::models::ensure_run_license_acknowledged(&state, entry).await?;
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
         // Preserve omitted sides through storage/retry. The worker derives their actual canvas
@@ -391,11 +381,19 @@ pub(crate) async fn create_image_job(
         // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
         // a POST for a model that should refuse it returned 201 and failed later (or rendered
         // without the pass). Judged against the FINAL payload (post-preset, with the resolved
-        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
-        // and the worker parse the request exactly the same way. Read after the width/height/count
-        // defaults because the 4096-target check needs the resolved geometry.
+        // dimensions above) and the server-owned manifest entry. Bind the same effective typed
+        // options the worker consumes after shared validation; the authored payload stays intact
+        // for persistence. Read after the width/height/count defaults because the 4096-target
+        // check needs the resolved geometry.
         {
-            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let resolved =
+                sceneworks_core::request_validation::resolve_request("image", &job_payload, entry)
+                    .map_err(ApiError::from)?;
+            let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                &job_payload,
+                resolved.as_payload(),
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
             let family = entry
                 .get("family")
                 .and_then(Value::as_str)
@@ -654,85 +652,9 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-const MIN_VECTOR_SVG_BYTES: u32 = 1_024;
-const MAX_VECTOR_SVG_BYTES: u32 = 256 * 1_024;
 fn validate_vector_request(payload: &VectorRequest) -> Result<(), ApiError> {
-    if payload.project_id.trim().is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    validate_model_id(&payload.model)?;
-    let prompt = payload.prompt.trim();
-    if prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must not exceed {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    match payload.mode {
-        VectorMode::ImageToSvg => {
-            if payload
-                .source_asset_id
-                .as_deref()
-                .is_none_or(|id| id.trim().is_empty())
-            {
-                return Err(ApiError::bad_request(
-                    "sourceAssetId is required for image_to_svg",
-                ));
-            }
-        }
-        VectorMode::TextToSvg => {
-            if prompt.is_empty() {
-                return Err(ApiError::bad_request("prompt is required for text_to_svg"));
-            }
-            if payload.source_asset_id.is_some() {
-                return Err(ApiError::bad_request(
-                    "sourceAssetId is not accepted for text_to_svg",
-                ));
-            }
-        }
-    }
-    let sampling = &payload.sampling;
-    if !sampling.temperature.is_finite() || !(0.0..=2.0).contains(&sampling.temperature) {
-        return Err(ApiError::bad_request(
-            "sampling.temperature must be between 0 and 2",
-        ));
-    }
-    if !sampling.top_p.is_finite() || !(0.0 < sampling.top_p && sampling.top_p <= 1.0) {
-        return Err(ApiError::bad_request(
-            "sampling.topP must be greater than 0 and at most 1",
-        ));
-    }
-    if sampling.top_k > 1_000 {
-        return Err(ApiError::bad_request("sampling.topK must be at most 1000"));
-    }
-    if !sampling.repetition_penalty.is_finite()
-        || !(0.1..=2.0).contains(&sampling.repetition_penalty)
-    {
-        return Err(ApiError::bad_request(
-            "sampling.repetitionPenalty must be between 0.1 and 2",
-        ));
-    }
-    if sampling.repetition_context > 32_768 {
-        return Err(ApiError::bad_request(
-            "sampling.repetitionContext must be at most 32768",
-        ));
-    }
-    let budget = &payload.detail_budget;
-    if !(16..=32_768).contains(&budget.max_new_tokens) {
-        return Err(ApiError::bad_request(
-            "detailBudget.maxNewTokens must be between 16 and 32768",
-        ));
-    }
-    if !(MIN_VECTOR_SVG_BYTES..=MAX_VECTOR_SVG_BYTES).contains(&budget.max_svg_bytes) {
-        return Err(ApiError::bad_request(format!(
-            "detailBudget.maxSvgBytes must be between {MIN_VECTOR_SVG_BYTES} and {MAX_VECTOR_SVG_BYTES}"
-        )));
-    }
-    if !(1_000..=MAX_VECTOR_WALL_TIME_MS).contains(&budget.max_wall_time_ms) {
-        return Err(ApiError::bad_request(format!(
-            "detailBudget.maxWallTimeMs must be between 1000 and {MAX_VECTOR_WALL_TIME_MS}"
-        )));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_request(payload)
+        .map_err(ApiError::from)
 }
 
 fn validate_vector_model_manifest(
@@ -740,36 +662,10 @@ fn validate_vector_model_manifest(
     mode: VectorMode,
     manifest: &Value,
 ) -> Result<(), ApiError> {
-    if manifest.get("type").and_then(Value::as_str) != Some("vector") {
-        return Err(ApiError::bad_request(format!(
-            "Model {model_id} is not a vector model (type: \"vector\" required)"
-        )));
-    }
-    let adapter = manifest
-        .get("adapter")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|adapter| !adapter.is_empty())
-        .ok_or_else(|| {
-            ApiError::bad_request(format!(
-                "Model {model_id} has no declared vector provider adapter"
-            ))
-        })?;
-    let supported = manifest
-        .get("capabilities")
-        .and_then(Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|capability| capability.as_str() == Some(mode.as_str()))
-        });
-    if !supported {
-        return Err(ApiError::bad_request(format!(
-            "Model {model_id} provider {adapter} does not declare the {} capability; the request was not queued",
-            mode.as_str()
-        )));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_model_manifest(
+        model_id, mode, manifest,
+    )
+    .map_err(ApiError::from)
 }
 
 fn validate_vector_model_availability(
@@ -834,42 +730,8 @@ fn validate_vector_provider_request(
     payload: &VectorRequest,
     model: &Value,
 ) -> Result<(), ApiError> {
-    let vector = model.get("vector").and_then(Value::as_object);
-    if payload.mode == VectorMode::ImageToSvg
-        && !payload.prompt.trim().is_empty()
-        && vector
-            .and_then(|value| value.get("acceptsTextGuidance"))
-            .and_then(Value::as_bool)
-            == Some(false)
-    {
-        return Err(ApiError::bad_request(format!(
-            "Model {} does not accept text guidance for image_to_svg",
-            payload.model
-        )));
-    }
-    for (field, requested) in [
-        (
-            "maxNewTokens",
-            u64::from(payload.detail_budget.max_new_tokens),
-        ),
-        (
-            "maxSvgBytes",
-            u64::from(payload.detail_budget.max_svg_bytes),
-        ),
-        ("maxWallTimeMs", payload.detail_budget.max_wall_time_ms),
-    ] {
-        if let Some(limit) = vector
-            .and_then(|value| value.get(field))
-            .and_then(Value::as_u64)
-        {
-            if requested > limit {
-                return Err(ApiError::bad_request(format!(
-                    "detailBudget.{field} exceeds the selected provider limit of {limit}"
-                )));
-            }
-        }
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vector_provider_request(payload, model)
+        .map_err(ApiError::from)
 }
 
 async fn validate_vector_source_asset(
@@ -1464,6 +1326,14 @@ async fn create_vector_prompt_workflow_internal(
             .await?
             .unwrap_or_else(|| json!({}))
     };
+    sceneworks_core::request_validation::validate(
+        "vectorPrompt",
+        &to_json_object(&payload)?,
+        json!({"raster":raster_model,"vector":vector_model})
+            .as_object()
+            .unwrap(),
+    )
+    .map_err(ApiError::from)?;
     let raster_revision = if replay_source.is_some() {
         authoritative_workflow_revision(&raster_model)?
     } else {
@@ -2146,10 +2016,18 @@ pub(crate) fn validate_imported_submission(
     {
         return Ok(());
     }
-    let has_material_control = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let has_material_control =
+        sceneworks_core::jobs_store::imported_control_intent_is_material_with_facts(&route_options);
+    let poses_present = matches!(
+        route_options.poses,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
+    let phases_present = matches!(
+        route_options.phases,
+        sceneworks_core::resolved_options::RouteField::Valid(count) if count > 0
+    );
     let backend = enqueue_backend(state);
     let candle_required = backend == "candle";
     let family = entry
@@ -2163,30 +2041,11 @@ pub(crate) fn validate_imported_submission(
     ) {
         return Ok(());
     }
-    let feature = if has_material_control
-        && !payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("poses"))
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty())
-    {
+    let feature = if has_material_control && !poses_present {
         "control image/mode without a supported Pose request"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if poses_present {
         "strict-pose control"
-    } else if payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("phases"))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
-    {
+    } else if phases_present {
         "multi-phase denoise"
     } else if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         "image edit"
@@ -2235,25 +2094,7 @@ pub(crate) async fn create_vqa_job(
 }
 
 pub(crate) fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    if payload.source_asset_id.trim().is_empty() {
-        return Err(ApiError::bad_request("sourceAssetId is required"));
-    }
-    let question = payload.question.trim();
-    if question.is_empty() || question.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "question must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    validate_prompt_extras("", &payload.advanced)?;
-    if !(16..=2048).contains(&payload.max_new_tokens) {
-        return Err(ApiError::bad_request(
-            "maxNewTokens must be between 16 and 2048",
-        ));
-    }
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_vqa_job(payload).map_err(ApiError::from)
 }
 
 pub(crate) async fn create_interleave_job(
@@ -2279,31 +2120,8 @@ pub(crate) async fn create_interleave_job(
 }
 
 pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    if payload.prompt.trim().is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    validate_prompt_extras("", &payload.advanced)?;
-    // Upstream interleave_gen caps the run at 10 generated images.
-    if !(1..=10).contains(&payload.max_images) {
-        return Err(ApiError::bad_request("maxImages must be between 1 and 10"));
-    }
-    if payload
-        .source_asset_ids
-        .iter()
-        .any(|id| id.trim().is_empty())
-    {
-        return Err(ApiError::bad_request(
-            "sourceAssetIds must not contain blank ids",
-        ));
-    }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
-    Ok(())
+    sceneworks_core::request_validation::shape::validate_interleave_job(payload)
+        .map_err(ApiError::from)
 }
 
 /// Request-scoped, lazily-memoized snapshot of the model and LoRA catalogs (sc-8819,
@@ -2400,12 +2218,16 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
     // MOSS's model-specific controls survive headless preset expansion. Presence wins, including
     // explicit OFF; never inherit an enabled preset over a caller's deliberate ordinary request.
     if let Some(moss) = preset.get("defaults").and_then(|d| d.get("mossImage")) {
+        let authored =
+            sceneworks_core::resolved_options::AppearanceAuthoredInputs::from_payload_syntax(
+                job_payload,
+            );
         let advanced = job_payload
             .entry("advanced".to_owned())
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
-        if !advanced.contains_key("mossImage") {
+        if !authored.moss_image_present {
             advanced.insert("mossImage".to_owned(), moss.clone());
             if moss
                 .get("acceleration")
@@ -2421,6 +2243,22 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
                         .or_insert_with(|| steps.clone());
                 }
             }
+        }
+    }
+    // SW-7106: a preset's MiniMax-H3-Image sampler survives headless expansion onto the preset's
+    // own model. A caller's explicit block wins, and another model never inherits it.
+    if let Some(sampler) = preset.get("defaults").and_then(|d| d.get("h3ImageSampler")) {
+        let same_model = preset.get("model").and_then(Value::as_str)
+            == job_payload.get("model").and_then(Value::as_str);
+        if same_model {
+            let advanced = job_payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+            advanced
+                .entry(sceneworks_core::image_sampling_controls::H3_IMAGE_SAMPLER_KEY.to_owned())
+                .or_insert_with(|| sampler.clone());
         }
     }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT
@@ -2633,104 +2471,12 @@ fn normalize_ltx25_generation_controls(
     job_payload: &mut JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<bool, ApiError> {
-    const KEYS: [&str; 6] = [
-        "vaeDecoder",
-        "autoDuration",
-        "autoDurationMinSeconds",
-        "autoDurationMaxSeconds",
-        "temporalUpsampleRounds",
-        // `transformerVariant` is read only by `ltx25_transformer_variant`, on the 2.5 arm. It
-        // belongs in this list for the same reason `vaeDecoder` does: on any other family it is a
-        // control the UI shows and nothing reads.
-        "transformerVariant",
-    ];
-    /// The legacy LTX guider knobs. LTX-2.5 has no reader for any of them — distilled guidance is
-    /// baked in and the dev checkpoint uses its fixed native video/audio guider parameters — so
-    /// they are inert in exactly the way `guidanceScale` is, and get the same refusal rather than
-    /// being accepted and silently dropped.
-    const DEAD_GUIDANCE_KEYS: [&str; 4] = [
-        "guidanceScale",
-        "videoCfgGuidanceScale",
-        "videoStgGuidanceScale",
-        "videoRescaleScale",
-    ];
-    let advanced = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let carries_ltx25_control = KEYS.iter().any(|key| advanced.contains_key(*key));
-    if model_id != "ltx_2_5" {
-        if carries_ltx25_control {
-            return Err(ApiError::bad_request(format!(
-                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
-            )));
-        }
-        return Ok(false);
-    }
-
-    if let Some(key) = DEAD_GUIDANCE_KEYS
-        .iter()
-        .find(|key| advanced.contains_key(**key))
-    {
-        return Err(ApiError::bad_request(format!(
-            "LTX-2.5 does not accept advanced.{key}; distilled guidance is baked in and \
-             the dev checkpoint uses its fixed native video/audio guider parameters"
-        )));
-    }
-
-    requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
-    requested_temporal_upsample_rounds(&advanced).map_err(ApiError::bad_request)?;
-
-    let explicit_duration = job_payload
-        .get("duration")
-        .and_then(Value::as_f64)
-        .is_some();
-    let auto_enabled = match advanced.get("autoDuration") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "advanced.autoDuration must be a boolean when present",
-            ))
-        }
-    };
-    if explicit_duration && auto_enabled {
-        if let Some(advanced) = job_payload
-            .get_mut("advanced")
-            .and_then(Value::as_object_mut)
-        {
-            for key in [
-                "autoDuration",
-                "autoDurationMinSeconds",
-                "autoDurationMaxSeconds",
-            ] {
-                advanced.remove(key);
-            }
-        }
-        return Ok(false);
-    }
-
-    let Some(range) = requested_auto_duration(&advanced).map_err(ApiError::bad_request)? else {
-        return Ok(false);
-    };
-    if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
-        return Err(ApiError::bad_request(
-            "advanced auto-duration min/max seconds must stay between 1 and 30",
-        ));
-    }
-    let entry = model_manifest_entry
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    if let Some(message) = duration_limit_error(model_id, range.min_seconds, &entry)
-        .or_else(|| duration_limit_error(model_id, range.max_seconds, &entry))
-    {
-        return Err(ApiError::bad_request(format!(
-            "Auto-duration range is outside the model's supported duration window. {message}"
-        )));
-    }
-    Ok(true)
+    sceneworks_core::video_request::normalize_ltx25_generation_controls(
+        model_id,
+        job_payload,
+        model_manifest_entry,
+    )
+    .map_err(ApiError::from)
 }
 
 #[cfg(test)]
@@ -2920,13 +2666,17 @@ pub(crate) async fn create_video_job(
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
     ensure_expected_imported_model_reference(&state, &job_payload, &model_manifest_entry)?;
-    let auto_duration_active =
-        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
     // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
     // direct API client must not be able to send additional references to an older engine that
     // cannot consume them. The catalog flag is absent today and will be set only with the paired
     // descriptor/pin evidence.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::request_validation::validate("video", &job_payload, entry)
+            .map_err(ApiError::from)?;
+    }
+    let auto_duration_active =
+        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
     validate_selected_decoder_for_manifest(
         enqueue_backend(&state),
@@ -2976,9 +2726,8 @@ pub(crate) async fn create_video_job(
             }
         }
     }
-    sceneworks_core::video_request::VideoRequest::from_payload(&job_payload)
-        .h3_veda_settings()
-        .map_err(ApiError::bad_request)?;
+    // The portable validator above checks Veda using the selected H3 recipe. The worker
+    // resolves the same bound wire against its final step schedule before model load.
     // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
     // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
     // three gates around it bound how long the clip is and how much conditioning media it carries,
@@ -3270,6 +3019,10 @@ pub(crate) async fn create_audio_job(
     // Segmented-song / ICL / tier fields vs the model's declared capabilities (sc-19384): an ICL
     // mode on a non-`_icl` checkpoint (or a missing one on an `_icl` checkpoint) is a validation
     // error here, not a failed job.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::request_validation::validate("audio", &job_payload, entry)
+            .map_err(ApiError::from)?;
+    }
     crate::validate_audio_job_for_model(&payload, &model_manifest_entry)?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     // Voice Clone (sc-13411 C4): the two-call chain runs a SECOND model — the base TTS (Kokoro) whose

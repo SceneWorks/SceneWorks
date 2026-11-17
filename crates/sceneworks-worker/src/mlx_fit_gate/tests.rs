@@ -2395,8 +2395,11 @@ fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions()
         )
         .unwrap();
     let payload = serde_json::json!({"projectId":project.id,"model":"flux3_klein","mode":"edit_image","sourceAssetId":asset["id"],"width":1024,"height":1024,"count":1});
-    let authored =
-        sceneworks_core::image_request::ImageRequest::from_payload(payload.as_object().unwrap());
+    let authored = sceneworks_core::image_request::ImageRequest::from_resolved(
+        payload.as_object().unwrap(),
+        payload.as_object().unwrap(),
+    )
+    .unwrap();
     let references = crate::image_jobs::flux3_references::resolve_owned_references(
         &authored,
         data.path(),
@@ -13218,6 +13221,25 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
             .folded_adapter_bytes,
         250
     );
+    // SW-7101: MiniMax-H3-Image installs every LoRA as a forward-time residual, dense or packed,
+    // so the gate prices the adapter bytes on top of the weights.
+    for spec in [
+        additive.clone(),
+        additive.clone().with_quant(gen_core::Quant::Q8),
+    ] {
+        assert_eq!(spec_component_bytes("minimax_h3_image", &spec).0, 1_250);
+        assert_eq!(
+            MlxRequestPlan::for_spec_and_manifest(
+                "minimax_h3_image",
+                "minimax_h3_image",
+                &spec,
+                None,
+                None
+            )
+            .folded_adapter_bytes,
+            250
+        );
+    }
 
     let dense_wan = LoadSpec::new(WeightsSource::Dir(weights.clone()))
         .with_quant(gen_core::Quant::Q4)
@@ -13799,6 +13821,9 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
         "flux3_klein",
         "flux3_klein_base",
+        // MiniMax-H3-Image (SW-7100): text encoder, then DiT, then VAE, never co-resident
+        // (the descriptor sets unconditionally_engages_staged_residency).
+        "minimax_h3_image",
         "z_image",
         "z_image_control",
         "z_image_turbo",

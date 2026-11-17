@@ -1,4 +1,5 @@
 use super::adapters::resolve_adapters;
+use super::candle_strict_control::completed_control_image;
 use super::conditioning::pose_entries;
 #[cfg(target_os = "macos")]
 use super::kolors::kolors_control_raw_settings;
@@ -11,9 +12,9 @@ use super::pid::resolve_pid_weights;
 use super::run_candle_strict_control;
 use super::sampling::curated_image_menu;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::strict_control::trusted_control_weight_revision;
 use super::CancelFlag;
@@ -25,7 +26,6 @@ use super::KolorsControl;
 use super::KolorsControlPaths;
 use super::KolorsControlRequest;
 use super::Progress;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::resolve_app_managed_model_dir;
@@ -101,13 +101,7 @@ fn resolve_kolors_control_base(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
-        .map(str::to_owned)
-    {
+    if let Some(path) = super::artifact_resolution::model_path_override(request) {
         return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath")
             .map(Some);
     }
@@ -123,20 +117,35 @@ fn resolve_kolors_control_base(
 /// `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::kolors_control_candle_eligible` so the worker and router agree.
 pub(super) fn kolors_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    kolors_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn kolors_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    kolors_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn kolors_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_kolors_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_kolors_control_base(request, settings), Ok(Some(_)))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
 fn kolors_control_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KOLORS_CONTROL_DEFAULT_STEPS, 1..=80)
+    resolved_option_or_manifest_u32(request, "steps", KOLORS_CONTROL_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn kolors_control_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32(
+    resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         KOLORS_CONTROL_DEFAULT_GUIDANCE,
@@ -148,15 +157,15 @@ fn kolors_control_guidance(request: &ImageRequest) -> f32 {
 /// else the Kolors-ControlNet-Pose default (parity with the MLX `resolve_control_weights_for`).
 /// The payload filename must be a plain component (sc-8821 / F-019).
 pub(super) fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
+    let cw = super::strict_control::resolved_control_weights(request);
     let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
+        cw.and_then(|fields| match key {
+            "repo" => fields.repo.valid_trimmed(),
+            "filename" => fields.filename.valid_trimmed(),
+            _ => None,
+        })
+        .unwrap_or(default)
+        .to_owned()
     };
     let repo = pick("repo", KOLORS_CONTROL_REPO);
     let file = safe_weight_filename(
@@ -179,8 +188,11 @@ async fn ensure_kolors_control_weights(
     let (repo, file) = kolors_control_repo_file(request)?;
     let revision =
         trusted_control_weight_revision(request, KOLORS_CONTROL_ENGINE_ID, &repo, &file)?;
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("missing bound Kolors ControlNet source".to_owned())
             });
@@ -223,7 +235,7 @@ fn kolors_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -393,7 +405,7 @@ impl CandleStrictControl for KolorsStrictControl {
         // sweeps this file, so the guard fails the moment the field appears without being fed.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<Image> {
+    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = KolorsControlRequest {
             prompt: self.prompt.clone(),
             negative: self.negative.clone(),
@@ -410,11 +422,17 @@ impl CandleStrictControl for KolorsStrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model
-            .generate_with_memory_context(&self.memory_context, &req, control, on_progress)
+        let completed = model
+            .generate_with_memory_context_with_execution_report(
+                &self.memory_context,
+                &req,
+                control,
+                on_progress,
+            )
             .map_err(|error| {
                 WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
-            })
+            })?;
+        completed_control_image(completed)
     }
 }
 
@@ -424,11 +442,13 @@ impl CandleStrictControl for KolorsStrictControl {
 /// `supported_kinds`, per-pose preprocessing, identity-likeness scoring, streaming). A `controlMode =
 /// canny | depth` request is REJECTED by the driver (Kolors is pose-only) instead of silently rendering a
 /// pose skeleton (sc-8823). The pose path is byte-preserved.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_kolors_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -441,8 +461,8 @@ pub(super) async fn generate_candle_kolors_control_stream(
 
     let steps = kolors_control_steps(request);
     let guidance = kolors_control_guidance(request);
-    let control_scale = advanced::f32_clamped(
-        &request.advanced,
+    let control_scale = super::sampling::resolved_f32_clamped(
+        request,
         "controlScale",
         KOLORS_CONTROL_DEFAULT_SCALE,
         0.0..=2.0,
@@ -452,7 +472,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     // against the shared curated menu (an unknown name drops to the engine default + emits an event).
     // N1: unset ⇒ `None` ⇒ the native leading-Euler default loop runs byte-exact.
     let (curated_samplers, curated_schedulers) = curated_image_menu();
-    let (sampler, scheduler, _shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, _shift) = read_resolved_image_sampling_knobs(request);
     let sampler = normalize_sampling_knob(
         sampler,
         &curated_samplers,
@@ -655,6 +675,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

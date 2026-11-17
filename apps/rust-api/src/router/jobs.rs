@@ -31,6 +31,11 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/jobs/:job_id/clear", post(clear_job))
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))
         .route("/api/v1/jobs/:job_id/duplicate", post(duplicate_job))
+        .route("/api/v1/jobs/:job_id/exact-replay", post(exact_replay_job))
+        .route(
+            "/api/v1/jobs/:job_id/execution-receipt",
+            get(get_execution_receipt),
+        )
         .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))
         // Per-run generation metrics (epic 10402): worker POSTs on completion;
         // GET returns a single job's block; the aggregate feed powers the

@@ -12,12 +12,21 @@ async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
+const nativeCratePaths = [
+  "crates/sceneworks-core/**",
+  "crates/sceneworks-image-quality/**",
+  "crates/sceneworks-mcp/**",
+  "crates/sceneworks-options/**",
+  "crates/sceneworks-memory-adapter/**",
+  "crates/sceneworks-worker/**",
+];
+
 test("parses the real macos-mlx anchor, comments and all", async () => {
   const paths = parseWorkflowPaths(await source(".github/workflows/macos-mlx.yml"), "mlx_paths");
   // The anchor is heavily interleaved with multi-paragraph rationale comments; every one of them
   // must be skipped rather than ending the block early.
   for (const watched of [
-    "crates/**",
+    ...nativeCratePaths,
     "apps/rust-worker/**",
     "apps/rust-api/**",
     "config/manifests/**",
@@ -40,7 +49,10 @@ test("parses the real windows-candle anchor", async () => {
     await source(".github/workflows/windows-candle.yml"),
     "candle_paths",
   );
-  assert.ok(paths.includes("crates/**"));
+  for (const watched of nativeCratePaths) {
+    assert.ok(paths.includes(watched), `candle_paths should carry ${watched}`);
+  }
+  assert.ok(!paths.includes("crates/**"));
   assert.ok(paths.includes("config/engine-capabilities/capabilities.candle.json"));
   // sc-17703 deliberately keeps apps/rust-worker/** OFF this lane; the parse must reflect the file,
   // not the sibling lane's list.
@@ -83,7 +95,7 @@ test("glob semantics match GitHub filter patterns", () => {
   assert.ok(!matchesGlob("config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/capabilities.candle.json"));
 });
 
-test("a docs-only merge group skips the lane; a crates-only one runs it", async () => {
+test("a docs-only merge group skips the lane; a watched crate runs it", async () => {
   const paths = parseWorkflowPaths(await source(".github/workflows/macos-mlx.yml"), "mlx_paths");
 
   const docs = relevanceDecision(paths, ["README.md", "docs/rust-mlx-build.md", "apps/web/src/App.jsx"]);
@@ -92,7 +104,7 @@ test("a docs-only merge group skips the lane; a crates-only one runs it", async 
   // The exact file today's semantic conflict landed in (e71b932f).
   const rust = relevanceDecision(paths, ["crates/sceneworks-core/tests/jobs_store.rs"]);
   assert.equal(rust.run, true);
-  assert.match(rust.reason, /crates\/\*\*/);
+  assert.match(rust.reason, /crates\/sceneworks-core\/\*\*/);
 });
 
 test("an undeterminable diff runs the lane rather than skipping it", () => {

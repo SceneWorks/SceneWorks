@@ -43,6 +43,15 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+// The portable Rust result supplies geometry refusals; this screen test checks the inline
+// message and Generate gate for the exact size that Simple sends.
+vi.mock("../hooks/usePortableFeedback.js", () => ({
+  usePortableFeedback: vi.fn((kind, payload, modelEntry) =>
+    kind === "image" && modelEntry?.id?.startsWith("qwen_image_2_1") && payload?.width === 2050
+      ? { state: "invalid", refusal: { code: "invalid_generation_option", field: "width", detail: "Width and height must be a multiple of 32." } }
+      : { state: "valid" }),
+}));
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
 const manifestModels = (() => {
@@ -227,6 +236,12 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     await act(async () => setInput(fieldById("su-image-width"), "2048"));
     expect(container.querySelector(".su-error")).toBeNull();
     expect(container.querySelector(".su-generate").disabled).toBe(false);
+
+    for (const width of ["0", "-32"]) {
+      await act(async () => setInput(fieldById("su-image-width"), width));
+      expect(container.querySelector(".su-error")?.textContent).toContain("between 32 and 2752");
+      expect(container.querySelector(".su-generate").disabled).toBe(true);
+    }
   });
 
   it("reads the variation ladder from the model instead of the hardcoded [1,2,4,6]", async () => {

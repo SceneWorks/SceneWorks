@@ -17,6 +17,17 @@ pub fn native_route_claims_request(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> Result<bool, String> {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    native_route_claims_request_resolved(backend, job_type, payload, &options)
+}
+
+/// Admission-time claim using the option facts already bound from the validated effective request.
+pub fn native_route_claims_request_resolved(
+    backend: &str,
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+    route_options: &crate::resolved_options::RouteOptionFacts,
+) -> Result<bool, String> {
     // Conversion is dispatched by the CPU utility worker, which may invoke a native
     // MLX or Candle converter on its host. GPU workers do not advertise this utility
     // capability even when their native engine can perform the conversion.
@@ -64,11 +75,14 @@ pub fn native_route_claims_request(
     };
     // Candle claims unsupported pose shapes only to reject them with a typed error.
     // That is not a render route and must not authorize a portable source closure.
-    if backend == "candle"
-        && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit)
-        && !super::gaps::job_is_any_candle_eligible(&probe)
-    {
-        return Ok(false);
+    if backend == "candle" && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        let route_context = super::RouteContext {
+            payload,
+            options: route_options,
+        };
+        if !super::candle::image_job_is_candle_eligible_with_context(&probe, &route_context) {
+            return Ok(false);
+        }
     }
     let required = super::super::required_capability(&probe);
     let required_capability: WorkerCapability =
@@ -85,6 +99,10 @@ pub fn native_route_claims_request(
     };
     if backend == "candle" {
         capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
+        // A Blackwell CUDA worker advertises the NVFP4 marker; no MLX worker does.
+        capabilities.push(WorkerCapability::Unknown(
+            crate::contracts::NVFP4_WORKER_CAPABILITY.to_owned(),
+        ));
     }
     let worker = WorkerSnapshot {
         id: "portable-route-worker-probe".to_owned(),
@@ -101,7 +119,11 @@ pub fn native_route_claims_request(
         last_seen_at: String::new(),
         extra: BTreeMap::new(),
     };
-    Ok(super::super::worker_supports_job(&worker, &probe))
+    Ok(super::super::worker_supports_job_with_route_options(
+        &worker,
+        &probe,
+        route_options,
+    ))
 }
 
 #[cfg(test)]

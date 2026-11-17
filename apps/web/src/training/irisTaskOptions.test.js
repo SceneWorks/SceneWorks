@@ -109,10 +109,10 @@ describe("depth snapshot", () => {
     );
   });
 
-  it("needs no trigger word and validates micro-steps against the accumulation", () => {
+  it("needs no trigger word and passes micro-steps to portable Rust", () => {
     const all = configValidation(draftFor(irisDepthTarget()), { activeDataset: DATASET, selectedTarget: irisDepthTarget() });
     expect(all.map((entry) => entry.field)).not.toContain("triggerWord");
-    expect(errors(irisDepthTarget(), { steps: "320016" }).map((e) => e.field)).toContain("steps");
+    expect(errors(irisDepthTarget(), { steps: "320016" }).map((e) => e.field)).not.toContain("steps");
   });
 });
 
@@ -144,13 +144,12 @@ describe("restoration snapshot", () => {
     expect(errors(irisRestoreTarget(), patch).map((e) => e.field)).toContain("irisTask.preview_weights");
   });
 
-  it("requires step fields to be multiples of 2 × gradient accumulation", () => {
+  it("passes restoration step alignment to portable Rust", () => {
     expect(errors(irisRestoreTarget())).toEqual([]);
     const odd = errors(irisRestoreTarget(), { steps: "10001" });
-    expect(odd.map((e) => e.field)).toEqual(["steps"]);
-    expect(odd[0].message).toMatch(/2 × the gradient accumulation \(2\)/);
-    // accumulation 2 → multiples of 4: 10002 fails, 10000 passes.
-    expect(errors(irisRestoreTarget(), { gradientAccumulation: "2", steps: "10002" }).map((e) => e.field)).toEqual(["steps"]);
+    expect(odd.map((e) => e.field)).toEqual([]);
+    expect(snapshot(irisRestoreTarget(), { steps: "10001" }).config.steps).toBe(10001);
+    expect(errors(irisRestoreTarget(), { gradientAccumulation: "2", steps: "10002" }).map((e) => e.field)).toEqual([]);
     expect(errors(irisRestoreTarget(), { gradientAccumulation: "2" })).toEqual([]);
   });
 

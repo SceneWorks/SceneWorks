@@ -9,18 +9,18 @@ use super::load_spec::candle_artifact_path_matches;
 use super::load_spec::candle_certified_artifact_path;
 use super::load_spec::candle_pinned_hf_artifact_path;
 use super::resolve_seed;
-use super::sampling::resolve_advanced_or_manifest_f32_with;
-use super::sampling::resolve_advanced_or_manifest_u32_with;
+use super::sampling::resolved_option_or_manifest_f32_with;
+use super::sampling::resolved_option_or_manifest_u32_with;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream_with_cancel;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::IpAdapterFlux;
 use super::IpAdapterFluxPaths;
 use super::IpAdapterFluxRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
@@ -124,10 +124,15 @@ fn resolve_flux_ipadapter_base(
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(crate::payload::trimmed_value_str)
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX IP-Adapter modelPath")
@@ -153,7 +158,7 @@ pub(super) fn flux_ipadapter_available(request: &ImageRequest, settings: &Settin
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → variant default.
 fn flux_ipadapter_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32_with(
+    resolved_option_or_manifest_u32_with(
         request,
         "steps",
         || flux_ipadapter_default_steps(&request.model),
@@ -163,7 +168,7 @@ fn flux_ipadapter_steps(request: &ImageRequest) -> u32 {
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → variant default, clamped.
 fn flux_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    resolve_advanced_or_manifest_f32_with(
+    resolved_option_or_manifest_f32_with(
         request,
         "guidanceScale",
         || flux_ipadapter_default_guidance(&request.model),
@@ -181,23 +186,24 @@ async fn ensure_flux_ipadapter_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-            let adapter = crate::portable_aux_sources::bound_aux_path(advanced, "flux_ip_adapter")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "portable FLUX IP-Adapter source is not bound".to_owned(),
-                    )
-                })?;
-            let encoder = crate::portable_aux_sources::bound_aux_path(advanced, "flux_ip_encoder")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "portable FLUX image encoder is not bound".to_owned(),
-                    )
-                })?;
-            return Ok((adapter, encoder));
-        }
+    if portable_aux.has_paths() {
+        let adapter = portable_aux
+            .path("flux_ip_adapter")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable FLUX IP-Adapter source is not bound".to_owned(),
+                )
+            })?;
+        let encoder = portable_aux
+            .path("flux_ip_encoder")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("portable FLUX image encoder is not bound".to_owned())
+            })?;
+        return Ok((adapter, encoder));
     }
     // Env override: a staged dir laid out like the validation harness.
     if let Ok(root) = std::env::var("SCENEWORKS_IPADAPTER_FLUX") {
@@ -271,7 +277,7 @@ fn flux_ipadapter_raw_settings(
     guidance: f32,
     ip_scale: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -378,7 +384,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         reference_id,
         project_path,
     )?;
-    let (adapter_file, encoder_dir) = ensure_flux_ipadapter_weights(api, settings, job).await?;
+    let (adapter_file, encoder_dir) =
+        ensure_flux_ipadapter_weights(api, settings, job, &request.portable_aux).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle FLUX XLabs
     // IP-Adapter lane is the With-Character route for a FLUX.1 model — score every output against the
@@ -396,6 +403,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )
@@ -406,8 +414,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
     let sampling = super::sampling::explicit_sampling_request(request);
     let steps = flux_ipadapter_steps(request);
     let guidance = flux_ipadapter_guidance(request);
-    let ip_scale = advanced::f32_clamped(
-        &request.advanced,
+    let ip_scale = super::sampling::resolved_f32_clamped(
+        request,
         "ipAdapterScale",
         FLUX_IPADAPTER_IP_SCALE,
         0.0..=1.0,
@@ -591,7 +599,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             // `IpAdapterFlux` renders through `&self` (the IP tokens live in a per-call injector, not on
             // the DiT), so — unlike the SDXL/Kolors lanes — the per-item closure needs no `mut model`.
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 work,
                 move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
@@ -603,20 +611,25 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                             "FLUX IP-Adapter: no pre-load render plan for output {index}"
                         ))
                     })?;
+                    // Both report entries render the pre-load plan and complete with observations
+                    // from this same attempt; the admitted one is the entry this lane loads for.
                     let generated = match memory_context.as_ref() {
-                        Some(context) => model.generate_with_memory_context_planned(
+                        Some(context) => model.generate_with_memory_context_with_execution_report(
                             context,
                             &req,
                             &reference,
                             render_plan,
                             &mut *on_progress,
                         ),
-                        None => {
-                            model.generate_planned(&req, &reference, render_plan, &mut *on_progress)
-                        }
+                        None => model.generate_with_execution_report(
+                            &req,
+                            &reference,
+                            render_plan,
+                            &mut *on_progress,
+                        ),
                     };
-                    let out = match generated {
-                        Ok(out) => out,
+                    let completed = match generated {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -624,6 +637,22 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "FLUX IP-Adapter returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid
                     // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {

@@ -45574,6 +45574,196 @@
       }
     ]
   },
+  "minimax_h3_image": {
+    "mlx": {
+      "minMemoryGb": 73,
+      "minMemoryGbByTier": {
+        "bf16": 73,
+        "q8": 42,
+        "q4": 25
+      }
+    },
+    "candle": {
+      "minMemoryGb": 73,
+      "minMemoryGbByTier": {
+        "bf16": 73,
+        "q8": 42,
+        "q4": 25
+      },
+      "measured": false
+    },
+    "downloads": [
+      {
+        "provider": "huggingface",
+        "repo": "MiniMaxAI/MiniMax-H3-Image",
+        "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+        "variant": "bf16",
+        "files": [
+          "transformer_diffusers/*",
+          "pdd_fused_heads.safetensors"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-mlx",
+        "revision": "6f62669b919bccdbf51b08c696fbb84542000a87",
+        "variant": "q8",
+        "files": [
+          "q8/transformer_diffusers/*"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-mlx",
+        "revision": "6f62669b919bccdbf51b08c696fbb84542000a87",
+        "variant": "q4",
+        "files": [
+          "q4/transformer_diffusers/*"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      }
+    ]
+  },
+  "minimax_h3_image_pe": {
+    "model": {
+      "minMemoryGb": 24
+    },
+    "mlx": {
+      "minMemoryGb": 61,
+      "minMemoryGbByTier": {
+        "bf16": 61,
+        "q8": 37,
+        "q4": 24
+      }
+    },
+    "candle": {
+      "minMemoryGb": 61,
+      "minMemoryGbByTier": {
+        "bf16": 61,
+        "q8": 37,
+        "q4": 24,
+        "nvfp4": 24
+      },
+      "measured": false
+    },
+    "downloads": [
+      {
+        "provider": "huggingface",
+        "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+        "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+        "variant": "nvfp4",
+        "files": [
+          "config.json",
+          "generation_config.json",
+          "hf_quant_config.json",
+          "chat_template.jinja",
+          "processor_config.json",
+          "tokenizer.json",
+          "tokenizer_config.json",
+          "model.safetensors.index.json",
+          "model-*.safetensors"
+        ],
+        "platforms": [
+          "windows",
+          "linux"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-pe",
+        "revision": "0000000000000000000000000000000000000000",
+        "variant": "bf16",
+        "files": [
+          "bf16/*"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-pe",
+        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "variant": "q8",
+        "files": [
+          "q8/*"
+        ],
+        "platforms": [
+          "macos"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-pe",
+        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "variant": "q8",
+        "files": [
+          "candle-q8/*"
+        ],
+        "platforms": [
+          "windows",
+          "linux"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-pe",
+        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "variant": "q4",
+        "files": [
+          "q4/*"
+        ],
+        "platforms": [
+          "macos"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      },
+      {
+        "provider": "huggingface",
+        "repo": "SceneWorks/minimax-h3-image-pe",
+        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "variant": "q4",
+        "files": [
+          "candle-q4/*"
+        ],
+        "platforms": [
+          "windows",
+          "linux"
+        ],
+        "footprint": {
+          "residentMemoryBytes": null,
+          "peakMemoryBytes": null
+        }
+      }
+    ]
+  },
   "iris_3b_restore": {
     "mlx": {
       "minMemoryGb": 16
@@ -45665,6 +45855,28 @@
   "vision_caption_qwen3vl_8b": {
     "model": {
       "minMemoryGb": 64
+    }
+  },
+  "vision_describe_qwen3_8_27b": {
+    "model": {
+      "minMemoryGb": 32
+    },
+    "mlx": {
+      "minMemoryGb": 65,
+      "minMemoryGbByTier": {
+        "bf16": 65,
+        "q8": 41,
+        "q4": 28
+      }
+    },
+    "candle": {
+      "minMemoryGb": 65,
+      "minMemoryGbByTier": {
+        "bf16": 65,
+        "q8": 34,
+        "q4": 22
+      },
+      "measured": false
     }
   },
   "kokoro_82m": {

@@ -127,8 +127,14 @@ jobs:
       - name: Preserve listener-owned CUDA dependency and kernel build caches
         if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}
         shell: powershell
+        env:
+          FLASH_ATTN_CACHE_ONLY: ${{ inputs.backend == 'cpu' }}
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          if ($env:FLASH_ATTN_CACHE_ONLY -eq 'true') {
+            node scripts/prepare-windows-flash-prebuilt.mjs --cache-only
+          } else {
+            node scripts/prepare-windows-flash-prebuilt.mjs
+          }
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the exact locked CUDA dependencies
         if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}

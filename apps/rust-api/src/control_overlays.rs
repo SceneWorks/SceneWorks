@@ -122,17 +122,14 @@ pub(crate) async fn resolve_control_overlay_selection(
     job_payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
     validate_raw_control_weights(job_payload)?;
-    let Some(overlay_id) = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("controlWeights"))
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("overlayId"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-    else {
+    let options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let Some(overlay_id) = (match &options.control_weights {
+        sceneworks_core::resolved_options::RouteField::Valid(weights) => {
+            weights.overlay_id.valid_trimmed().map(str::to_owned)
+        }
+        _ => None,
+    }) else {
         return Ok(());
     };
 
@@ -300,30 +297,28 @@ fn validate_raw_control_weights(job_payload: &mut JsonObject) -> Result<(), ApiE
     control_weights.remove("_catalogAuthorized");
     control_weights.remove("revision");
 
-    let overlay_id = control_weights
-        .get("overlayId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let sceneworks_core::resolved_options::RouteField::Valid(weights) = &options.control_weights
+    else {
+        return Ok(());
+    };
+
+    let overlay_id = weights.overlay_id.valid_trimmed();
     if overlay_id.is_some() {
         return Ok(());
     }
-    if control_weights.contains_key("path") {
+    if !matches!(
+        weights.path,
+        sceneworks_core::image_request::ControlWeightField::Absent
+    ) {
         return Err(ApiError::bad_request(
             "advanced.controlWeights.path requires a registered overlayId",
         ));
     }
 
-    let repo = control_weights
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let file = control_weights
-        .get("filename")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let repo = weights.repo.valid_trimmed();
+    let file = weights.filename.valid_trimmed();
     match (repo, file) {
         (None, None) => Ok(()),
         (Some(repo), Some(file))

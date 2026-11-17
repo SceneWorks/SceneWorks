@@ -88,8 +88,13 @@ pub fn installed_repa_teacher(data_dir: &Path) -> Option<PathBuf> {
     (size == pinned_teacher_integrity().0).then_some(dir)
 }
 
-/// The integrity check of a staged teacher file: the exact pinned size, then the pinned sha256.
-pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
+/// The integrity check of a staged teacher file: the exact pinned size, then the pinned sha256,
+/// read at most once per host while the file keeps its stamp (`store`, the host's shared
+/// verified-source store); any stamp change reads it again.
+pub fn verify_repa_teacher_file(
+    store: &sceneworks_core::verified_source_cache::VerifiedSourceCache,
+    path: &Path,
+) -> Result<sceneworks_core::verified_source_cache::SourceVerification, String> {
     let (pinned_size, pinned_sha256) = pinned_teacher_integrity();
     let size = std::fs::metadata(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?
@@ -102,19 +107,26 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    let mut file = std::fs::File::open(path)
+    let real = std::fs::canonicalize(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?;
-    let digest = sceneworks_core::hashing::sha256_reader(&mut file)
-        .map_err(|error| format!("reading the REPA teacher failed: {error}"))?
-        .0;
-    if digest != pinned_sha256 {
-        return Err(format!(
-            "the REPA teacher {} has sha256 {digest}, not the pinned {pinned_sha256}; reinstall \
-             it in the Model Manager",
-            path.display()
-        ));
+    match store.verify(&real, &format!("sha256:{pinned_sha256}"), &|| Ok(())) {
+        Ok(verification) => Ok(verification),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // Name the bytes that are actually there, as the refusal always has.
+            let mut file = std::fs::File::open(path).map_err(|error| {
+                format!("the REPA teacher {} is unreadable: {error}", path.display())
+            })?;
+            let digest = sceneworks_core::hashing::sha256_reader(&mut file)
+                .map_err(|error| format!("reading the REPA teacher failed: {error}"))?
+                .0;
+            Err(format!(
+                "the REPA teacher {} has sha256 {digest}, not the pinned {pinned_sha256}; \
+                 reinstall it in the Model Manager",
+                path.display()
+            ))
+        }
+        Err(error) => Err(format!("reading the REPA teacher failed: {error}")),
     }
-    Ok(())
 }
 
 /// The `repa_teacher` load component of an Iris run that trains with REPA: the verified pinned
@@ -127,9 +139,13 @@ pub(crate) fn repa_teacher_component(
     if !is_iris_training_kernel(&plan.target.kernel) {
         return Ok(None);
     }
-    let options = sceneworks_core::training::iris::iris_options(&plan.config)
-        .map_err(|error| crate::error::WorkerError::InvalidPayload(error.to_string()))?;
-    if !curricula::iris_repa_enabled(&options) {
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(crate::error::WorkerError::InvalidPayload)?;
+    if !options.iris.repa_enabled() {
         return Ok(None);
     }
     let dir = installed_repa_teacher(&settings.data_dir).ok_or_else(|| {
@@ -139,29 +155,14 @@ pub(crate) fn repa_teacher_component(
              downloaded during training."
         ))
     })?;
-    verify_repa_teacher_file(&dir.join(IRIS_REPA_TEACHER_FILE))
-        .map_err(crate::error::WorkerError::InvalidPayload)?;
+    verify_repa_teacher_file(
+        &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &settings.data_dir,
+        ),
+        &dir.join(IRIS_REPA_TEACHER_FILE),
+    )
+    .map_err(crate::error::WorkerError::InvalidPayload)?;
     Ok(Some(gen_core::WeightsSource::Dir(dir)))
-}
-
-/// The engine `train_dtype` of an Iris run: `fp16` reaches the trainer verbatim (accelerate's
-/// dynamic loss scaling, `MixedPrecision::Fp16`); every other kernel keeps the shared mapping.
-#[cfg(native_lane)]
-pub(crate) fn apply_iris_train_dtype(
-    mut config: gen_core::TrainingConfig,
-    plan: &TrainingPlan,
-) -> gen_core::TrainingConfig {
-    if is_iris_training_kernel(&plan.target.kernel)
-        && plan
-            .config
-            .advanced
-            .get("mixedPrecision")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("fp16"))
-    {
-        config.train_dtype = "fp16".to_owned();
-    }
-    config
 }
 
 /// A typed refusal of an Iris plan by the engine's own resolution.
@@ -259,14 +260,16 @@ pub fn resolve_iris_config(
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
     let mut engine =
         crate::training_jobs::map_engine_config(config).map_err(training_config_refusal)?;
-    if config
-        .advanced
-        .get("mixedPrecision")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("fp16"))
-    {
-        engine.train_dtype = "fp16".to_owned();
-    }
+    let options = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        config,
+        sceneworks_core::training::iris::IRIS_TRAINING_KERNEL,
+        "",
+    )
+    .map_err(|message| IrisPlanRefusal {
+        kind: "invalid".to_owned(),
+        message,
+    })?;
+    engine.train_dtype = options.common.train_dtype;
     let request = gen_core::TrainingRequest {
         items: Vec::new(),
         config: engine,
@@ -734,15 +737,52 @@ mod tests {
     fn the_teacher_integrity_check_reads_size_then_sha256() {
         let _real_pin = test_teacher_integrity(None);
         let dir = tempfile::tempdir().unwrap();
+        let store = sceneworks_core::verified_source_cache::VerifiedSourceCache::new(
+            dir.path().join("verified"),
+        );
         let file = dir.path().join(IRIS_REPA_TEACHER_FILE);
         std::fs::write(&file, b"not the teacher").unwrap();
-        let error = verify_repa_teacher_file(&file).expect_err("wrong size");
+        let error = verify_repa_teacher_file(&store, &file).expect_err("wrong size");
         assert!(error.contains("bytes"), "{error}");
         // Right size, wrong bytes: the sha256 refuses (sparse file, never a real 346 MB write).
         let handle = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
         handle.set_len(IRIS_REPA_TEACHER_SIZE_BYTES).unwrap();
         drop(handle);
-        let error = verify_repa_teacher_file(&file).expect_err("wrong bytes");
+        let error = verify_repa_teacher_file(&store, &file).expect_err("wrong bytes");
+        assert!(error.contains("sha256"), "{error}");
+    }
+
+    /// Every run still checks the teacher, but an unchanged teacher is read once per host; a
+    /// same-size rewrite that restores the old mtime is read again and refused.
+    #[test]
+    fn an_unchanged_teacher_is_read_once_per_host() {
+        use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
+        let _pin = test_teacher_integrity(Some(b"teacher weights"));
+        let dir = tempfile::tempdir().unwrap();
+        let store = VerifiedSourceCache::new(dir.path().join("verified"));
+        let file = dir.path().join(IRIS_REPA_TEACHER_FILE);
+        std::fs::write(&file, b"teacher weights").unwrap();
+        let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        let settle = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(settled)
+                .unwrap();
+        };
+        settle();
+        assert_eq!(
+            verify_repa_teacher_file(&store, &file),
+            Ok(SourceVerification::Hashed)
+        );
+        assert_eq!(
+            verify_repa_teacher_file(&store, &file),
+            Ok(SourceVerification::Reused)
+        );
+        std::fs::write(&file, b"TEACHER WEIGHTS").unwrap();
+        settle();
+        let error = verify_repa_teacher_file(&store, &file).expect_err("rewritten teacher");
         assert!(error.contains("sha256"), "{error}");
     }
 }

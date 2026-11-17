@@ -105,6 +105,12 @@ fn persisted_claim_projection_matches_full_worker_policy_for_routing_corpus() {
             JobType::ImageUpscale,
             json!({ "engine": "seedvr2", "model": "seedvr2" }),
         ),
+        // SW-7102: the persisted NVFP4 requirement of a frozen prompt expansion.
+        create_job(
+            &store,
+            JobType::PromptRefine,
+            json!({ "task": "minimax_h3_image_expand", "prompt": "p", "peTier": "nvfp4" }),
+        ),
     ];
     let workers = [
         worker(
@@ -131,6 +137,8 @@ fn persisted_claim_projection_matches_full_worker_policy_for_routing_corpus() {
                 "person_detect_preview",
                 "image_upscale",
                 "candle",
+                "prompt_refine",
+                "nvfp4",
             ],
             &["ltx_2_3"],
         ),
@@ -157,8 +165,8 @@ fn persisted_claim_projection_matches_full_worker_policy_for_routing_corpus() {
                         claim_mlx_eligible, claim_candle_eligible,
                         claim_candle_pose_reject, claim_training_mlx_only,
                         claim_seedvr2_upscale, claim_required_capability,
-                        claim_real_training, claim_model_key_1, claim_model_key_2,
-                        claim_model_key_3, claim_model_key_4
+                        claim_real_training, claim_requires_nvfp4, claim_model_key_1,
+                        claim_model_key_2, claim_model_key_3, claim_model_key_4
                    from jobs where id = ?1",
                 params![job.id],
                 row_to_claim_candidate,
@@ -230,7 +238,9 @@ fn startup_reprojects_pre_flux3_tier_claim_facts() {
 /// (absent model included) needs `prompt_refine`. The persisted claim header agrees.
 #[test]
 fn batch_describe_routes_by_the_capability_of_its_model() {
-    use crate::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use crate::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     let directory = tempfile::tempdir().expect("temp directory");
     let db_path = directory.path().join("jobs.db");
     let store = JobsStore::new(&db_path);
@@ -241,6 +251,8 @@ fn batch_describe_routes_by_the_capability_of_its_model() {
     for (model, capability, served_by_refiner) in [
         (Some(VISION_CAPTIONER_REPO), "prompt_refine", true),
         (None, "prompt_refine", true),
+        // SW-7119: the Qwen3.8 27B describer runs on the Vision Captioner's TextLlm path.
+        (Some(QWEN38_27B_DESCRIBER_REPO), "prompt_refine", true),
         (Some(JOYCAPTION_REPO), "training_caption", false),
     ] {
         let mut payload = json!({ "datasetId": "ds-1" });

@@ -677,7 +677,7 @@ const workflowJob = (text, name) => {
   const next=text.slice(start+1).search(/\n  [a-z][\w-]*:\n/); return text.slice(start,next<0?undefined:start+1+next);
 };
 const workflowExpression = (expression, inputs, github={}) => runInNewContext(expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/g,''),{
-  inputs,github:{event_name:'workflow_dispatch',run_id:'unit_fake_101',run_attempt:'1',ref:'refs/heads/unit_fake',...github},fromJSON:JSON.parse,toJSON:JSON.stringify,format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,n)=>String(values[Number(n)])),
+  inputs,github:{event_name:'workflow_dispatch',run_id:'unit_fake_101',run_attempt:'1',ref:'refs/heads/unit_fake',...github},fromJSON:JSON.parse,toJSON:JSON.stringify,startsWith:(value,prefix)=>String(value??'').toLowerCase().startsWith(prefix.toLowerCase()),format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,n)=>String(values[Number(n)])),
 },{timeout:100});
 test('registered Candle entrypoint positively routes only explicit H3 selections to the same-ref reusable job',async()=>{
   const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');

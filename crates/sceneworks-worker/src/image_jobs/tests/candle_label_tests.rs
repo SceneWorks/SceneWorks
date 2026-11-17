@@ -17,49 +17,45 @@ use super::resolve_candle_image_route_with_prepared_availability;
 use super::CandleImageRoute;
 use crate::PathBuf;
 use crate::Settings;
+use crate::Value;
 use serde_json::json;
+
+fn bound_request(value: Value) -> ImageRequest {
+    let payload = value.as_object().expect("request object");
+    ImageRequest::from_resolved(payload, payload).expect("fixture options bind")
+}
+
 #[test]
 fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
     let temp = tempfile::tempdir().unwrap();
     let mut settings = Settings::for_test(temp.path().join("data"));
     settings.backend_candle_enabled = true;
     for model in ["moss_image_base", "moss_image_sft"] {
-        let request = ImageRequest::from_payload(
-            json!({"model":model,"mode":"edit_image",
-                "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
-            })
-            .as_object()
-            .unwrap(),
-        );
+        let request = bound_request(json!({"model":model,"mode":"edit_image",
+            "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
+        }));
         let route = resolve_candle_image_route_with_prepared_availability(
-            &request, &settings, false, false, false, false, false, false, false,
+            &request, None, &settings, false, false, false, false, false, false, false,
         )
         .unwrap();
         assert_eq!(route, CandleImageRoute::MossImageEdit);
         assert_eq!(route.image_count(&request, &settings), 4);
         assert_eq!(route.adapter_label(&request), candle_adapter_label(model));
         assert!(!route.applies_request_loras(&request));
-        let ordinary = ImageRequest::from_payload(
-            json!({"model":model,"mode":"text_to_image"})
-                .as_object()
-                .unwrap(),
-        );
+        let ordinary = bound_request(json!({"model":model,"mode":"text_to_image"}));
         assert_eq!(
             resolve_candle_image_route_with_prepared_availability(
-                &ordinary, &settings, false, false, false, false, false, false, false
+                &ordinary, None, &settings, false, false, false, false, false, false, false
             ),
             Some(CandleImageRoute::CandleTxt2Img)
         );
     }
     settings.backend_candle_enabled = false;
-    let request = ImageRequest::from_payload(
-        json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"})
-            .as_object()
-            .unwrap(),
-    );
+    let request =
+        bound_request(json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"}));
     assert_eq!(
         resolve_candle_image_route_with_prepared_availability(
-            &request, &settings, false, false, false, false, false, false, false
+            &request, None, &settings, false, false, false, false, false, false, false
         ),
         None
     );
@@ -69,16 +65,12 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
 /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.
 #[test]
 fn qwen_image_2_1_edit_route_admits_the_request_adapter_stack() {
-    let request = ImageRequest::from_payload(
-        json!({
-            "model": "qwen_image_2_1",
-            "mode": "edit_image",
-            "referenceAssetIds": ["asset_a", "asset_b"],
-            "loras": [{ "id": "edit_style", "weight": 1.0 }]
-        })
-        .as_object()
-        .unwrap(),
-    );
+    let request = bound_request(json!({
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "referenceAssetIds": ["asset_a", "asset_b"],
+        "loras": [{ "id": "edit_style", "weight": 1.0 }]
+    }));
     assert!(
         CandleImageRoute::CandleTxt2Img.applies_request_loras(&request),
         "precondition: 2.1 T2I consumes the adapter stack"
@@ -91,14 +83,10 @@ fn qwen_image_2_1_edit_route_admits_the_request_adapter_stack() {
 
 #[test]
 fn krea_convrot_load_spec_preserves_adapters() {
-    let request = ImageRequest::from_payload(
-        json!({
-            "model": "krea_2_turbo",
-            "advanced": { "convRot": true }
-        })
-        .as_object()
-        .unwrap(),
-    );
+    let request = bound_request(json!({
+        "model": "krea_2_turbo",
+        "advanced": { "convRot": true }
+    }));
     assert!(
         CandleImageRoute::CandleTxt2Img.applies_request_loras(&request),
         "the fail-closed route guard must admit ConvRot adapters before the load seam"
@@ -153,16 +141,12 @@ fn krea_convrot_load_spec_preserves_adapters() {
 
 #[test]
 fn registered_zimage_identity_routes_scored_source_metadata() {
-    let request = ImageRequest::from_payload(
-        json!({
-            "model": "z_image_turbo",
-            "mode": "character_image",
-            "referenceAssetId": "character-42",
-            "advanced": { "referenceStrength": 0.7 }
-        })
-        .as_object()
-        .unwrap(),
-    );
+    let request = bound_request(json!({
+        "model": "z_image_turbo",
+        "mode": "character_image",
+        "referenceAssetId": "character-42",
+        "advanced": { "referenceStrength": 0.7 }
+    }));
     assert!(zimage_identity_candle_strength(&request).is_some());
     assert!(character_image_likeness_requested(&request));
 
@@ -190,16 +174,12 @@ fn registered_zimage_identity_routes_scored_source_metadata() {
 
 #[test]
 fn mage_edit_preserves_primary_then_ordered_extra_references() {
-    let request = ImageRequest::from_payload(
-        json!({
-            "mode": "edit_image",
-            "model": "mage_flow_edit_turbo",
-            "sourceAssetId": "primary",
-            "referenceAssetIds": ["second", "third"]
-        })
-        .as_object()
-        .unwrap(),
-    );
+    let request = bound_request(json!({
+        "mode": "edit_image",
+        "model": "mage_flow_edit_turbo",
+        "sourceAssetId": "primary",
+        "referenceAssetIds": ["second", "third"]
+    }));
     assert_eq!(
         mage_edit_reference_ids(&request),
         ["primary", "second", "third"]
@@ -210,15 +190,11 @@ fn mage_edit_preserves_primary_then_ordered_extra_references() {
         "Mage edit assets and generation sets must retain the Candle family label"
     );
 
-    let missing_primary = ImageRequest::from_payload(
-        json!({
-            "mode": "edit_image",
-            "model": "mage_flow_edit",
-            "referenceAssetIds": ["orphan"]
-        })
-        .as_object()
-        .unwrap(),
-    );
+    let missing_primary = bound_request(json!({
+        "mode": "edit_image",
+        "model": "mage_flow_edit",
+        "referenceAssetIds": ["orphan"]
+    }));
     assert!(
         mage_edit_reference_ids(&missing_primary).is_empty(),
         "Mage edit must not reinterpret an optional reference as its required primary source"

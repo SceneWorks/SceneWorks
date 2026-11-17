@@ -2280,7 +2280,7 @@ fn resolve_asset_source(
     }
     let expected_type = match modality {
         TrainingModality::Image => "image",
-        TrainingModality::Video | TrainingModality::Audio | TrainingModality::Unknown(_) => {
+        _ => {
             return Err(ProjectStoreError::BadRequest(
                 "Only image training datasets are supported".to_owned(),
             ))
@@ -2330,9 +2330,9 @@ fn validated_dataset_name(name: &str) -> ProjectStoreResult<String> {
 fn validate_supported_modality(modality: &TrainingModality) -> ProjectStoreResult<()> {
     match modality {
         TrainingModality::Image => Ok(()),
-        TrainingModality::Video | TrainingModality::Audio | TrainingModality::Unknown(_) => Err(
-            ProjectStoreError::BadRequest("Only image training datasets are supported".to_owned()),
-        ),
+        _ => Err(ProjectStoreError::BadRequest(
+            "Only image training datasets are supported".to_owned(),
+        )),
     }
 }
 

@@ -21,7 +21,7 @@ import { isMossImage, mossDefaults, mossWireOptions, mossPresetWithOrdinarySetti
 import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
 import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
+import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -33,10 +33,10 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
-import { linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
+import { iterateBatch, leadingResolutionTemplate, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
-  dimensionConstraintMessage,
   evaluateModelDimensions,
+  dimensionConstraintMessage,
   isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
 // sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
@@ -46,7 +46,7 @@ import {
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 
 import { orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
-import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 
@@ -57,7 +57,7 @@ import {
   seedsNegativeInMode,
 } from "../promptSeed.js";
 import { emptyCaption, injectStyleIntoCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
-import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences } from "../imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences, imageRewriteReferenceIds } from "../imageJobRequest.js";
 import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import { usePoseLibrary, useUserPoseLoader, poseRecordToPayload, WORKFLOW_POSE_CATEGORY } from "../poseLibrary.js";
 
@@ -120,13 +120,16 @@ import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeL
 import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
-import { resolveCfgInterval } from "./imageStudio/samplingControls.js";
+import { h3ImageSamplerDefaults, h3ImageSamplerFromRecipe, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
+import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
+import { issue } from "../validation/issues.js";
 import {
   downloadOffersFor,
   imageModelUsable,
@@ -139,7 +142,7 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
+import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, MINIMAX_H3_IMAGE_PE_MODEL_ID, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 
@@ -160,7 +163,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
-import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
+import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -251,6 +254,8 @@ export function ImageStudio() {
     // global: a ReferenceError at render in a module that is not in strict-undefined territory only
     // because eslint caught it first. Destructured here, beside the sibling it mirrors.
     qwenRewritePrompt,
+    // SW-7102: MiniMax-H3-Image's prompt expander, the same review-and-accept shape.
+    h3ImageExpandPrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
@@ -562,6 +567,8 @@ export function ImageStudio() {
   // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
   const [cfgInterval, setCfgInterval] = useState(saved.cfgInterval ?? "");
   const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
+  // SW-7106: MiniMax-H3-Image's sampler (Euler default, or LCM with its noise-scale ramp + clip).
+  const [h3ImageSampler, setH3ImageSampler] = useState(() => ({ ...h3ImageSamplerDefaults(), ...saved.h3ImageSampler }));
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -915,30 +922,6 @@ export function ImageStudio() {
     (id) => editImageAssets.find((asset) => asset.id === id)?.name ?? id,
     [editImageAssets],
   );
-  const qwenRewriteReferenceIds = useMemo(() => {
-    // The SAME ordered list the Generate button will send, so the rewrite sees what the render
-    // will. `referenceAssetIds` is the plural multi-reference picker; `referenceAssetId` /
-    // `sourceAssetId` are the single-reference and edit-source flows, which the engine treats as a
-    // one-reference edit.
-    if (mode === "edit_image" && referenceAssetIds.length) return referenceAssetIds;
-    const single = mode === "edit_image" ? sourceAssetId : referenceAssetId;
-    return single ? [single] : [];
-  }, [mode, referenceAssetIds, referenceAssetId, sourceAssetId]);
-  const qwenRewriteModel = useMemo(() => {
-    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
-    const id = qwenRewriteReferenceIds.length
-      ? QWEN_REWRITE_I2I_MODEL_ID
-      : QWEN_REWRITE_T2I_MODEL_ID;
-    return models.find((entry) => entry.id === id);
-  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
-  // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
-  // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
-  // install, no degraded path": with nothing installed there is no affordance at all, not a
-  // disabled button that nags.
-  const qwenRewriteAvailable =
-    Boolean(qwenRewriteModel) &&
-    qwenRewriteModel.installState !== "missing" &&
-    typeof qwenRewritePrompt === "function";
   const catalogTextEncoderOptions = selectedModel?.textEncoderOptions ?? [];
   // A replayed/saved authored id remains a real control value even if the refreshed catalog can no
   // longer advertise this surface. Keep it visible and submit it unchanged so the server rejects a
@@ -1190,7 +1173,6 @@ export function ImageStudio() {
   // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
   // request the API accepts would be a client stricter than the gate.
   const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
-  const distinctReferenceCount = mossEdit ? referenceAssetIds.length : new Set(referenceAssetIds).size;
   let mossEditError = "";
   if (mossEdit) {
     try {
@@ -1201,12 +1183,6 @@ export function ImageStudio() {
       if (referenceAssetIds.some((id) => !editImageAssets.some((asset) => asset.id === id))) mossEditError = "A MOSS reference is missing from this project. Reacquire that exact slot before editing.";
     } catch (error) { mossEditError = error.message; }
   }
-  const referenceOverflowError =
-    mode === "edit_image" && maxStudioReferences != null && distinctReferenceCount > maxStudioReferences
-      ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
-          distinctReferenceCount - maxStudioReferences
-        }.`
-      : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -1463,6 +1439,24 @@ export function ImageStudio() {
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
   }, [selectedModel, unifiedMemoryGb, activeBackend, quantTier]);
+  // Accepting a size the prompt expander/rewriter proposes. Width/Height overrides outrank the
+  // Aspect preset, so a preset must clear them or the accepted size would silently not render; a
+  // size that is not a preset lands in the override fields instead (mirrors Simple Studio).
+  const handleApplyProposedSize = (value) => {
+    if (typeof value !== "string" || !value) return;
+    if (resolutionOptions.includes(value)) {
+      handleResolutionChange(value);
+      setWidthOverride("");
+      setHeightOverride("");
+      return;
+    }
+    const match = /^(\d+)x(\d+)$/.exec(value.trim());
+    if (!match) return;
+    setReferenceDimensionIntent(null);
+    setWidthOverride(match[1]);
+    setHeightOverride(match[2]);
+    setAdvancedOpen(true);
+  };
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000
@@ -1535,6 +1529,9 @@ export function ImageStudio() {
   // these two for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // SW-7100: a fixed step count (hardMinSteps === hardMaxSteps) is no control at all — the Steps field
+  // is hidden and a stale override (a replayed recipe, another model's sticky value) is never sent.
+  const stepsFixed = fixedStepsForModel(selectedModel) != null;
   // sc-25679: a model whose negative prompt IS the CFG unconditional
   // (`image.negativePromptRequiresGuidance`, Iris-3B) refuses one with CFG off. The field stays
   // visible (the axis exists — raise Guidance and it applies) but is DISABLED and not sent while
@@ -1562,6 +1559,11 @@ export function ImageStudio() {
     guidanceOverride,
   });
   const captionOverflowChoices = selectedModel?.image?.captionOverflowPolicies ?? [];
+  const showH3ImageSampler = supportsH3ImageSampler(selectedModel);
+  const { block: outgoingH3ImageSampler, error: h3ImageSamplerError } = resolveH3ImageSampler({
+    model: selectedModel,
+    options: h3ImageSampler,
+  });
   const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
     ? captionOverflow
     : "default";
@@ -1630,6 +1632,7 @@ export function ImageStudio() {
     setSchedulerShift(mossEdit ? 5 : null);
     setCfgInterval("");
     setCaptionOverflow("default");
+    setH3ImageSampler(h3ImageSamplerDefaults());
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
@@ -1953,6 +1956,7 @@ export function ImageStudio() {
   setSchedulerShift,
   setCfgInterval,
   setCaptionOverflow,
+  setH3ImageSampler,
   setBatchMode,
   setBatchPromptsText,
   setGuidanceMethod,
@@ -2007,6 +2011,39 @@ export function ImageStudio() {
   const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
+  // The pictures the render will condition on, taken from the SAME canonical references
+  // `buildImageJobRequest` emits (`jobReferences`), so a reference retained from another model on a
+  // model with no img2img (MiniMax-H3-Image text-to-image) is not offered to the expander either.
+  const qwenRewriteReferenceIds = imageRewriteReferenceIds(jobReferences, mode);
+  const qwenRewriteModel = useMemo(() => {
+    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
+    const id = qwenRewriteReferenceIds.length
+      ? QWEN_REWRITE_I2I_MODEL_ID
+      : QWEN_REWRITE_T2I_MODEL_ID;
+    return models.find((entry) => entry.id === id);
+  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
+  // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
+  // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
+  // install, no degraded path": with nothing installed there is no affordance at all, not a
+  // disabled button that nags.
+  const qwenRewriteAvailable =
+    Boolean(qwenRewriteModel) &&
+    qwenRewriteModel.installState !== "missing" &&
+    typeof qwenRewritePrompt === "function";
+  // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
+  // edit (references present, read as `<Picture N>` in the same order the render takes), and the
+  // tile renders only when it is installed, exactly like the Qwen rewriter above.
+  const h3ExpandModel = useMemo(
+    () =>
+      h3ImageExpanderAppliesTo(selectedModel)
+        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
+        : undefined,
+    [models, selectedModel],
+  );
+  const h3ExpandAvailable =
+    Boolean(h3ExpandModel) &&
+    h3ExpandModel.installState !== "missing" &&
+    typeof h3ImageExpandPrompt === "function";
   const imageReference = useImageReferenceStatus({
     enabled: mode === "text_to_image" && supportsImg2img,
     assetId: img2imgReferenceAssetId,
@@ -2077,23 +2114,27 @@ export function ImageStudio() {
     referenceRequest: flux3ReferenceRequest,
     dimensionIntent: activeDimensionIntent,
   });
-  const { width, height, invalid: dimensionsInvalid, constraints: dimensionConstraints } = dimensionEval;
-  // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
-  const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const { width, height, constraints: dimensionConstraints } = dimensionEval;
+  // A bare native stride is advice for the editable controls, not an API request
+  // limit. The portable owner enforces the grid only with a full declared envelope.
+  const declaredMinimum = Number(selectedModel?.limits?.minDimension);
+  const declaredMaximum = Number(selectedModel?.limits?.maxDimension);
+  const uiOnlyDimensionAdvice = dimensionConstraints.step > 1 && !(
+    Number.isInteger(declaredMinimum) && declaredMinimum > 0 &&
+    Number.isInteger(declaredMaximum) && declaredMaximum > 0
+  );
+  const dimensionAdvice = uiOnlyDimensionAdvice ? dimensionConstraintMessage(dimensionEval) : null;
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
   // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
   // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
-  const promptTokenNotice = promptTokenLimitHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel, mode);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
     hiresFixEnabled && (hiresFixTargetWidth > 4096 || hiresFixTargetHeight > 4096);
-  const hiresFixTargetMessage = hiresFixTargetInvalid
-    ? `Hires.fix target ${hiresFixTargetWidth}×${hiresFixTargetHeight} exceeds the 4096px image limit.`
-    : "";
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -2172,6 +2213,9 @@ export function ImageStudio() {
         (value) => setCfgInterval(value?.join?.(", ") ?? ""),
       ],
       ["captionOverflow", setCaptionOverflow],
+      // SW-7106: restore the saved MiniMax-H3-Image sampler (absent or Euler ⇒ Euler).
+      // The preset machinery applies through a functional update (to snapshot the prior value).
+      ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2225,12 +2269,19 @@ export function ImageStudio() {
       count,
       mode,
       guidanceScale: supportsGuidance && !mossDmd ? finiteNumberOrUndefined(guidanceOverride) : undefined,
-      steps: mossDmd ? Number(mossDmdSteps) : finiteNumberOrUndefined(stepsOverride),
+      steps: mossDmd ? Number(mossDmdSteps) : stepsFixed ? undefined : finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
       schedulerShift: mossDmd ? undefined : finiteNumberOrUndefined(schedulerShiftToSend),
       ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
       ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
+      // SW-7106: a MiniMax-H3-Image preset always records its sampler, Euler included, so applying
+      // it restores Euler over a previously chosen LCM instead of leaving that choice in place.
+      // An out-of-range LCM value is saved as typed, so the preset save refuses it rather than
+      // quietly recording Euler.
+      ...(showH3ImageSampler ? {
+        h3ImageSampler: outgoingH3ImageSampler ?? { sampler: "lcm", sNoise: Number(h3ImageSampler.sNoise), sNoiseEnd: Number(h3ImageSampler.sNoiseEnd), noiseClipStd: Number(h3ImageSampler.noiseClipStd) },
+      } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2319,6 +2370,7 @@ export function ImageStudio() {
     schedulerShiftExplicit,
     cfgInterval,
     captionOverflow,
+    h3ImageSampler,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2359,13 +2411,14 @@ export function ImageStudio() {
   // Layout references and model geometry are derived once above and passed unchanged
   // to the shared request builder; exact replay tiers and MOSS components must be ready.
   function preflightError(kind) {
+    if (kind === "batch" && portableBatchRefusal) return portableBatchRefusal.detail;
     if (!mossComponents.ready || mossEditError) return mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.");
     if (!selectedModelServesMode) return `Install or select a model that supports ${modeLabel} generation.`;
     if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
     if (characterReferenceError) return characterReferenceError;
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
-    if (dimensionsInvalid || hiresFixTargetInvalid) return hiresFixTargetMessage || dimensionError || "Width and height must each be between 256 and 4096.";
     if (cfgIntervalError) return cfgIntervalError;
+    if (h3ImageSamplerError) return h3ImageSamplerError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
     if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
@@ -2581,7 +2634,8 @@ export function ImageStudio() {
       supportsSchedulerShift,
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
-      stepsOverride,
+      h3ImageSampler: outgoingH3ImageSampler,
+      stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
       // omitted entirely. The model-switch reset already clears it in the ordinary case, but a
@@ -2671,24 +2725,22 @@ export function ImageStudio() {
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
-  // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
-  // SAME per-model range + stride the single-generate gate enforces (sc-14058), not the raw backend
-  // envelope. For a native-resolution model (Mage-Flow) an off-range OR off-÷16-stride size blocks the
-  // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
-  // so the batch and single paths cannot drift.
-  const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
-    .filter(
-      (res) =>
-        res &&
-        evaluateModelDimensions({
-          model: selectedModel,
-          resolution: `${res.width}x${res.height}`,
-          widthOverride: "",
-          heightOverride: "",
-          referenceRequest: flux3ReferenceRequest,
-        }).invalid,
-    );
+  let batchDimensionAdvice = null;
+  if (uiOnlyDimensionAdvice && batchMode && batchTotal > 0) {
+    for (const { prompt: directive } of iterateBatch(batchPrompts.map(leadingResolutionTemplate), batchVariables)) {
+      const { resolution: itemResolution } = parsePromptResolution(directive, resolutionOptions);
+      const evaluation = evaluateModelDimensions({
+        model: selectedModel,
+        resolution: `${itemResolution?.width ?? width}x${itemResolution?.height ?? height}`,
+        widthOverride: "",
+        heightOverride: "",
+      });
+      if (evaluation.invalid) {
+        batchDimensionAdvice = `Width and height must be between ${dimensionConstraints.min} and ${dimensionConstraints.max} and a multiple of ${dimensionConstraints.step}.`;
+        break;
+      }
+    }
+  }
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
@@ -2719,11 +2771,7 @@ export function ImageStudio() {
       batchTotal,
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
-      resolutionIssues: batchResolutionIssues,
-      // Per-model range + stride for the inline [WxH] directive — the SAME constraints the free
-      // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
-      // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
-      dimensionConstraints,
+      dimensionAdvice: batchDimensionAdvice,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2735,8 +2783,7 @@ export function ImageStudio() {
       batchTotal,
       batchMissingKeys,
       batchGroupIssues,
-      batchResolutionIssues,
-      dimensionConstraints,
+      batchDimensionAdvice,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2769,6 +2816,7 @@ export function ImageStudio() {
       captionHasContent,
       tensorConditioning: mossEdit && Boolean(mossImageAdvanced.positive),
       prompt,
+      dimensionAdvice,
       // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
       // style is active (styleless behavior unchanged). For prose that is the Subject:/Style:
       // composition; for a structured model it is the style-injected, re-serialized caption. Either
@@ -2789,11 +2837,6 @@ export function ImageStudio() {
       modelName: selectedModel?.name,
       // Multi-phase denoise problems (sc-13885): an enabled-but-broken phase list blocks Generate.
       multiPhaseIssues: multiPhaseValidationIssues,
-      // Free Width/Height override out of the model's range or off its ÷16 stride (sc-14058). A precise
-      // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
-      // not only on click. null when the dimensions are valid.
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2805,6 +2848,7 @@ export function ImageStudio() {
       captionHasContent,
       mossEdit, mossImageAdvanced,
       prompt,
+      dimensionAdvice,
       stylePreviewActive,
       structuredStyleActive,
       styledPreviewPrompt,
@@ -2819,8 +2863,6 @@ export function ImageStudio() {
       selectedLoraValidationResult,
       selectedModel,
       multiPhaseValidationIssues,
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2828,10 +2870,51 @@ export function ImageStudio() {
   );
   const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
   const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
+  let portableDraft = null;
+  // Build the outgoing request even when a separate form requirement is unmet. The portable
+  // validator owns option refusals, including model geometry and reference limits.
+  if (!batchMode && selectedModel && (!structuredPromptModel || structuredActive)) {
+    try {
+      portableDraft = buildJobRequest({
+        promptToSend: structuredPromptModel ? serializeCaption(caption) : prompt,
+        submitIntent: prompt,
+        sendStructured: Boolean(structuredPromptModel),
+        submitCaption: caption,
+        submitBackend: magicPromptBackend,
+      });
+    } catch { /* Server keeps the authoritative gate. */ }
+  }
+  const portableFeedback = usePortableFeedback(
+    "image", portableDraft, selectedModel,
+    Boolean(prompt.trim() || (structuredActive && captionHasContent) || (mossEdit && mossImageAdvanced.positive)),
+  );
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+  let portableBatchRevision = null;
+  if (batchMode && selectedModel && !structuredPromptModel && batchTotal > 0) {
+    try {
+      portableBatchRevision = JSON.stringify({
+        common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions,
+      });
+    } catch { /* The server checks requests built from this draft. */ }
+  }
+  const portableBatchFeedback = usePortableBatchFeedback(
+    "image",
+    portableBatchRevision,
+    function* batchRequests() {
+      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+        const { prompt: cleanPrompt, resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+        yield buildBatchJobRequest(cleanPrompt, { resolution: itemResolution });
+      }
+    },
+    selectedModel,
+    Boolean(portableBatchRevision),
+  );
+  const portableBatchRefusal = portableBatchFeedback?.result.state === "invalid"
+    ? portableBatchFeedback.result.refusal : null;
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || ["invalid", "server-required"].includes(portableBatchFeedback?.result.state) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -2860,12 +2943,14 @@ export function ImageStudio() {
   batchJobCount,
   BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
+  token,
   buildBatchJobRequest,
   onMagicExpand,
   createImageJob
   });
   const generateDisabled =
     submitting ||
+    portableFeedbackBlocks(portableFeedback) ||
     replayTierUnavailable ||
     Boolean(characterReferenceError) ||
     !mossComponents.ready ||
@@ -2920,6 +3005,9 @@ export function ImageStudio() {
             batchBusy={batchBusy}
             batchError={batchError}
             batchValidity={batchValidity}
+            portableBatchRefusal={portableBatchRefusal}
+            portableBatchRefusalIndex={portableBatchFeedback?.index}
+            portableBatchCheckedCount={["valid", "partial"].includes(portableBatchFeedback?.result.state) ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
             batchRun={batchRun}
             batchRunProgress={batchRunProgress}
@@ -2980,10 +3068,15 @@ export function ImageStudio() {
             promptGuide={promptGuide}
             model={model}
             refinePrompt={refinePrompt}
-            handleResolutionChange={handleResolutionChange}
+            handleApplyProposedSize={handleApplyProposedSize}
             qwenRewriteReferenceIds={qwenRewriteReferenceIds}
             qwenRewriteModel={qwenRewriteModel}
             qwenRewritePrompt={qwenRewritePrompt}
+            h3ExpandAvailable={h3ExpandAvailable}
+            h3ExpandModel={h3ExpandModel}
+            h3ExpandPrompt={h3ImageExpandPrompt}
+            resolution={resolution}
+            selectedModel={selectedModel}
             flux3LayoutAvailable={flux3LayoutAvailable}
             flux3Layout={flux3Layout}
             setFlux3Layout={setFlux3Layout}
@@ -3005,11 +3098,13 @@ export function ImageStudio() {
                   // sc-6211: FLUX.2-dev multi-reference edit — pick 1–N reference images that the
                   // model combines/edits (Conditioning::MultiReference). Sends the plural
                   // `referenceAssetIds`; a single pick reduces to the normal single-reference edit.
-                  <AssetPickerField
+                  <ImageEditSourcePickerField
                     assets={editImageAssets}
                     buttonLabel="Select images"
                     changeLabel="Edit references"
+                    characters={characters}
                     emptyLabel="No reference images selected"
+                    importAsset={importAsset}
                     label={
                       maxStudioReferences != null
                         ? `Reference images (up to ${maxStudioReferences}, in order)`
@@ -3017,6 +3112,7 @@ export function ImageStudio() {
                     }
                     multiple
                     onChange={changeReferenceAssetIds}
+                    projectId={activeProject?.id}
                     values={referenceAssetIds}
                   />
                 ) : null}
@@ -3031,6 +3127,9 @@ export function ImageStudio() {
                     onRemove={flux3LayoutAvailable ? removeFlux3Reference : undefined}
                     labelFor={assetLabelFor}
                     onChange={changeReferenceAssetIds}
+                    // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
+                    tokenFor={(index) => referencePromptToken(selectedModel, index)}
+                    onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
                   />
                 ) : (
                   <>
@@ -3068,14 +3167,17 @@ export function ImageStudio() {
                       </>
                     ) : null}
                     {sourceWithMultiReference ? (
-                      <AssetPickerField
+                      <ImageEditSourcePickerField
                         assets={editImageAssets}
                         buttonLabel="Select references"
                         changeLabel="Edit references"
+                        characters={characters}
                         emptyLabel="No additional references selected (optional)"
+                        importAsset={importAsset}
                         label="Additional references (optional)"
                         multiple
                         onChange={changeReferenceAssetIds}
+                        projectId={activeProject?.id}
                         values={referenceAssetIds}
                       />
                     ) : null}
@@ -3472,7 +3574,8 @@ export function ImageStudio() {
 
             setSampler={setSampler}
             sampler={sampler}
-            samplerOptions={samplerOptions}
+            // SW-7106: MiniMax-H3-Image picks its sampler through its own control, not the menu.
+            samplerOptions={showH3ImageSampler ? [] : samplerOptions}
 
             setScheduler={setScheduler}
             scheduler={scheduler}
@@ -3496,6 +3599,10 @@ export function ImageStudio() {
             captionOverflowChoices={captionOverflowChoices}
             setCaptionOverflow={setCaptionOverflow}
             outgoingCaptionOverflow={outgoingCaptionOverflow}
+            showH3ImageSampler={showH3ImageSampler}
+            h3ImageSampler={h3ImageSampler}
+            setH3ImageSampler={setH3ImageSampler}
+            h3ImageSamplerError={h3ImageSamplerError}
             supportsTextStyle={supportsTextStyle}
             textStyleGainConfig={textStyleGainConfig}
             setTextStyleGain={setTextStyleGain}
@@ -3594,7 +3701,11 @@ export function ImageStudio() {
 
           {/* The preset/LoRA problems that used to be three separate .inline-warning
               paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}
-          <ValidationSummary issues={generateValidity.surfaced} label="Generate errors" />
+          <ValidationSummary issues={portableRefusal
+            ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+            : generateValidity.surfaced} label="Generate errors" />
+          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+          {portableFeedbackStatus(portableBatchFeedback?.result) ? <p role="status">{portableFeedbackStatus(portableBatchFeedback.result)}</p> : null}
 
         </WorkPanel>
 

@@ -29,6 +29,14 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+/// The destination shared by a native image route's artifact writer and receipt.
+#[cfg(native_lane)]
+#[derive(Clone, Copy)]
+struct ImageOutputTarget<'a> {
+    project_path: &'a std::path::Path,
+    backend: &'a str,
+}
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -218,17 +226,10 @@ use crate::engines::{mlx_model, ResolvedModel};
 
 /// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
 /// provider's built-in decoder byte-for-byte; every other value must be a bounded string id.
-fn requested_decoder_id(
-    advanced: &sceneworks_core::contracts::JsonObject,
-) -> WorkerResult<Option<&str>> {
-    match advanced.get("decoder") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.trim().is_empty() || value == "native" => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.as_str())),
-        Some(_) => Err(WorkerError::InvalidPayload(
-            "advanced.decoder must be a decoder id string (or 'native')".to_owned(),
-        )),
-    }
+fn requested_decoder_id(request: &ImageRequest) -> Option<&str> {
+    request
+        .advanced_text("decoder")
+        .filter(|value| !value.trim().is_empty() && *value != "native")
 }
 
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
@@ -237,9 +238,11 @@ fn requested_decoder_id(
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
-const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+#[cfg(any(test, native_lane))]
+use sceneworks_core::request_validation::prompt_enhancement::FACT_KEY as PROMPT_ENHANCEMENT_FACT_KEY;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 
+#[cfg(test)]
 fn parse_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
@@ -287,6 +290,52 @@ fn parse_prompt_enhancement_fields(
                 )
             })?;
             if !(1..=max_token_limit).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
+                )));
+            }
+            Ok(value as u32)
+        })
+        .transpose()?;
+    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
+        return Err(WorkerError::InvalidPayload(
+            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
+        ));
+    }
+    Ok((enabled, temperature, max_tokens))
+}
+
+pub(super) fn resolved_prompt_enhancement_fields(
+    request: &ImageRequest,
+) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .ok_or_else(|| WorkerError::InvalidPayload("image options were not resolved".to_owned()))?;
+    let enabled = options
+        .enhance_prompt
+        .as_ref()
+        .is_some_and(|value| value.value);
+    let temperature = options
+        .enhance_temperature
+        .as_ref()
+        .map(|value| value.value)
+        .map(|value| {
+            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+                )));
+            }
+            Ok(value as f32)
+        })
+        .transpose()?;
+    let max_token_limit = crate::prompt_enhancement_max_tokens(&request.model);
+    let max_tokens = options
+        .enhance_max_tokens
+        .as_ref()
+        .map(|value| value.value)
+        .map(|value| {
+            if !(1..=max_token_limit as i64).contains(&value) {
                 return Err(WorkerError::InvalidPayload(format!(
                     "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
                 )));
@@ -438,7 +487,22 @@ fn validate_prompt_enhancement_request(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.model, &request.advanced)?;
+    let (enabled, _, _) = if request.resolved_advanced.is_some() {
+        resolved_prompt_enhancement_fields(request)?
+    } else {
+        // Legacy fixtures still exercise the old pre-resolution refusal contract.
+        // Production must bind the shared resolver's effective request first.
+        #[cfg(test)]
+        {
+            parse_prompt_enhancement_fields(&request.model, &request.advanced)?
+        }
+        #[cfg(not(test))]
+        {
+            return Err(WorkerError::InvalidPayload(
+                "image options were not resolved".to_owned(),
+            ));
+        }
+    };
     if !enabled {
         return Ok(());
     }
@@ -451,14 +515,29 @@ fn validate_prompt_enhancement_request(
                 .to_owned(),
         ));
     }
-    let strict_control = request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-        || request.advanced.contains_key("controlWeights")
-        || request.advanced.contains_key("controlImage")
-        || request.advanced.contains_key("controlMode");
+    let strict_control = if let Some(options) = request.resolved_advanced.as_ref() {
+        options
+            .poses
+            .as_ref()
+            .is_some_and(|poses| !poses.value.is_empty())
+            || options.control_weights.is_some()
+            || options.control_image.is_some()
+            || options.control_mode.is_some()
+    } else {
+        #[cfg(test)]
+        {
+            request
+                .advanced
+                .get("poses")
+                .and_then(Value::as_array)
+                .is_some_and(|poses| !poses.is_empty())
+                || request.advanced.contains_key("controlWeights")
+                || request.advanced.contains_key("controlImage")
+                || request.advanced.contains_key("controlMode")
+        }
+        #[cfg(not(test))]
+        unreachable!("unresolved request refused above")
+    };
     if strict_control {
         return Err(WorkerError::InvalidPayload(
             "prompt enhancement cannot be combined with strict control".to_owned(),
@@ -525,12 +604,25 @@ fn resolve_pinned_native_package(
 /// Reject raw queued layout controls before dispatch, including routes that do not use the
 /// generic native render surface. Unsupported models must never silently ignore a box request.
 fn validate_flux3_layout_request(request: &ImageRequest) -> WorkerResult<()> {
-    let has_controls = ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
-        request
-            .advanced
-            .get(*key)
-            .is_some_and(|value| !value.is_null())
-    });
+    let has_controls = if let Some(options) = request.resolved_advanced.as_ref() {
+        options.flux3_layout.is_some() || options.flux3_reference_ids.is_some()
+    } else {
+        #[cfg(test)]
+        {
+            ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
+                request
+                    .advanced
+                    .get(*key)
+                    .is_some_and(|value| !value.is_null())
+            })
+        }
+        #[cfg(not(test))]
+        {
+            return Err(WorkerError::InvalidPayload(
+                "image options were not resolved".to_owned(),
+            ));
+        }
+    };
     if !sceneworks_core::image_request::flux3::is_model(&request.model) {
         if has_controls {
             return Err(WorkerError::InvalidPayload(format!(
@@ -554,8 +646,9 @@ pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
-    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    let result = run_image_generate_job_unexplained(api, settings, job, portable_aux).await;
     let result = result.map_err(|error| explain_image_reference_error(&job.payload, error));
     crate::converted_install::explain_job_result(settings, &job.payload, result).await
 }
@@ -603,6 +696,7 @@ async fn run_image_generate_job_unexplained(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     sceneworks_core::moss_image::native_request(
         &job.payload,
@@ -634,7 +728,15 @@ async fn run_image_generate_job_unexplained(
             .unwrap_or_default(),
     )
     .map_err(WorkerError::InvalidPayload)?;
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("image", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let mut request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    // The dispatcher supplies this only after RuntimeSourceGuard has verified and stamped the
+    // private source paths. Client-authored advanced fields never populate this slot.
+    request.portable_aux = portable_aux.clone();
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -645,9 +747,8 @@ async fn run_image_generate_job_unexplained(
     validate_prompt_enhancement_request(&request, settings)?;
     // sc-26241: a named precision tier is honored only on the model and lane that can load it;
     // raw queue writes and stored jobs never passed the API validator.
-    flux3_precision::validate_image_quant_tier_request(
-        &request.model,
-        &request.advanced,
+    flux3_precision::validate_image_quant_tier_request_resolved(
+        &request,
         flux3_precision::ImageLane::current(),
     )?;
     // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
@@ -666,7 +767,7 @@ async fn run_image_generate_job_unexplained(
     ) {
         return Err(WorkerError::InvalidPayload(refusal));
     }
-    if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
+    if let Some(decoder_id) = requested_decoder_id(&request) {
         #[cfg(native_lane)]
         {
             let backend = if cfg!(target_os = "macos") {
@@ -680,7 +781,7 @@ async fn run_image_generate_job_unexplained(
             )
             .or_else(|| mlx_model(&request.model).map(|model| model.engine_id().to_owned()))
             .unwrap_or_else(|| request.model.clone());
-            validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
+            validate_selected_decoder_request(&provider_id, decoder_id, &request)?;
         }
         #[cfg(not(native_lane))]
         {
@@ -689,10 +790,20 @@ async fn run_image_generate_job_unexplained(
             )));
         }
     }
+    // Lower nested pose and phase controls once before a provider chooses its route.
+    #[cfg(native_lane)]
+    let execution = conditioning::ResolvedImageExecution::new(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
+    // SW-7102: MiniMax-H3-Image's prompt expander (a 27B text model) stays resident in the refine
+    // cache for its idle window after an expansion. Stage it out before the image model loads, so
+    // the expansion the user just accepted never shares memory with the render it feeds.
+    #[cfg(native_lane)]
+    if minimax_h3_image::is_model(&request.model) {
+        crate::refine_model_cache::evict_resident_refiner().await?;
+    }
 
     // sc-8091: when the Image Studio "Upscale" toggle is on, each generated image also yields a
     // second "(Nx upscaled)" asset, so the generation set expects twice as many images. The inline
@@ -708,10 +819,10 @@ async fn run_image_generate_job_unexplained(
     // the gallery.
     #[cfg(target_os = "macos")]
     let route = {
-        let request = request.clone();
+        let execution = execution.clone();
         let route_settings = settings.clone();
         prepare_image_route_with_progress(api, settings, &job.id, move || {
-            prepare_image_route(&request, &route_settings)
+            prepare_image_route(&execution, &route_settings)
         })
         .await?
     };
@@ -725,7 +836,7 @@ async fn run_image_generate_job_unexplained(
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.as_ref().map_or(request.count, |route| {
-            route.kind().image_count(&request, settings)
+            route.kind().image_count_resolved(&execution, settings)
         }) * upscale_mult,
         route
             .as_ref()
@@ -741,10 +852,10 @@ async fn run_image_generate_job_unexplained(
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let route = {
-        let request = request.clone();
+        let execution = execution.clone();
         let route_settings = settings.clone();
         prepare_image_route_with_progress(api, settings, &job.id, move || {
-            prepare_candle_image_route(&request, &route_settings)
+            prepare_candle_image_route(&execution, &route_settings)
         })
         .await?
     };
@@ -752,7 +863,7 @@ async fn run_image_generate_job_unexplained(
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.as_ref().map_or(request.count, |route| {
-            route.kind().image_count(&request, settings)
+            route.kind().image_count_resolved(&execution, settings)
         }) * upscale_mult,
         route
             .as_ref()
@@ -866,7 +977,7 @@ async fn run_image_generate_job_unexplained(
             api,
             settings,
             job,
-            &request,
+            &execution,
             &plan,
             &project_path,
             backend,
@@ -888,7 +999,7 @@ async fn run_image_generate_job_unexplained(
             api,
             settings,
             job,
-            &request,
+            &execution,
             &plan,
             &project_path,
             backend,
@@ -990,20 +1101,441 @@ async fn run_image_generate_job_unexplained(
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
-    update_job(
-        api,
-        &job.id,
-        image_progress(
+    let execution_receipt = if crate::progress::EXECUTION_CLAIM_CAPABILITY
+        .try_with(|capability| capability.is_some())
+        .unwrap_or(false)
+    {
+        let receipt_root = project_path.clone();
+        let receipt_writes = asset_writes.clone();
+        // Inline upscale adds an asset to each logical output while preserving its base index.
+        let receipt_count = (plan.image_count / upscale_mult) as usize;
+        Some(
+            crate::load_progress::spawn_blocking(move || {
+                image_execution_receipt(&receipt_root, &receipt_writes, receipt_count)
+            })
+            .await
+            .map_err(|error| crate::task_join_error("completed image receipt", error))??,
+        )
+    } else {
+        None
+    };
+    update_job(api, &job.id, {
+        let mut terminal = image_progress(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
             &message,
             Some(streaming_result(&plan, &asset_writes)),
             backend,
-        ),
-    )
+        );
+        if let Some(receipt) = execution_receipt {
+            terminal.extra.insert(
+                "executionReceipt".to_owned(),
+                serde_json::to_value(receipt).map_err(WorkerError::Json)?,
+            );
+        }
+        terminal
+    })
     .await?;
     Ok(())
+}
+
+/// Build the output map from files already written by this worker, after all
+/// inline variants are appended and before the terminal POST. A provider report
+/// belongs to the asset's producing render; request settings and sidecars never
+/// stand in for engine observations.
+fn image_execution_receipt(
+    project_path: &Path,
+    asset_writes: &[Value],
+    image_count: usize,
+) -> WorkerResult<sceneworks_core::execution_receipt::WorkerExecutionReceipt> {
+    use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
+    use std::io::Read;
+
+    let project_root = project_path.canonicalize()?;
+    let mut outputs = (0..image_count)
+        .map(|output_index| OutputExecutionBinding {
+            output_index,
+            execution: None,
+            artifact_ids: Vec::new(),
+            artifact_sha256: Vec::new(),
+            stages: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut child_reports = vec![None; image_count];
+    for fact in asset_writes {
+        let output_index = fact
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| *index < image_count)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("completed image output index is invalid".into())
+            })?;
+        let id = fact
+            .get("assetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| WorkerError::InvalidPayload("completed image asset has no ID".into()))?;
+        let relative = fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("completed image asset has no media path".into())
+            })?;
+        let path = project_root.join(relative).canonicalize()?;
+        if !path.starts_with(&project_root) || !path.is_file() {
+            return Err(WorkerError::InvalidPayload(
+                "completed image asset escapes the project".into(),
+            ));
+        }
+        let mut file = std::fs::File::open(path)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        outputs[output_index].artifact_ids.push(id.to_owned());
+        outputs[output_index]
+            .artifact_sha256
+            .push(sceneworks_core::hashing::hex(&digest.finalize()));
+        if let Some(report) = fact.get("workerExecutionReport") {
+            let slot = &mut outputs[output_index].execution;
+            if slot.as_ref().is_some_and(|previous| previous != report) {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has conflicting provider reports".into(),
+                ));
+            }
+            *slot = Some(report.clone());
+        }
+        if let Some(stages) = fact.get("workerExecutionStages") {
+            let parsed: Vec<sceneworks_core::execution_receipt::ExecutionStageBinding> =
+                serde_json::from_value(stages.clone()).map_err(WorkerError::Json)?;
+            if parsed.is_empty() || !outputs[output_index].stages.is_empty() {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has duplicate or empty provider stages".into(),
+                ));
+            }
+            outputs[output_index].stages = parsed;
+        }
+        if let Some(report) = fact.get("workerChildExecutionReport") {
+            if child_reports[output_index]
+                .replace(report.clone())
+                .is_some()
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has more than one child provider report".into(),
+                ));
+            }
+        }
+    }
+    if outputs.iter().any(|output| output.artifact_ids.is_empty()) {
+        return Err(WorkerError::InvalidPayload(
+            "completed image output has no artifact".into(),
+        ));
+    }
+    for (output, child) in outputs.iter_mut().zip(child_reports) {
+        if let Some(child) = child {
+            if !output.stages.is_empty() {
+                output
+                    .stages
+                    .push(sceneworks_core::execution_receipt::ExecutionStageBinding {
+                        stage: "child_transform".into(),
+                        execution: child,
+                    });
+                continue;
+            }
+            let base = output.execution.take().unwrap_or_else(|| {
+                serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default())
+                    .expect("provider default serializes")
+            });
+            output.stages = vec![
+                sceneworks_core::execution_receipt::ExecutionStageBinding {
+                    stage: "base_render".into(),
+                    execution: base,
+                },
+                sceneworks_core::execution_receipt::ExecutionStageBinding {
+                    stage: "child_transform".into(),
+                    execution: child,
+                },
+            ];
+        }
+    }
+    let shared = outputs
+        .first()
+        .and_then(|output| output.execution.as_ref())
+        .cloned();
+    let shared = shared.filter(|report| {
+        report
+            .pointer("/identity/output_units")
+            .and_then(Value::as_u64)
+            == Some(image_count as u64)
+            && outputs
+                .iter()
+                .all(|output| output.execution.as_ref() == Some(report))
+    });
+    if shared.is_some() {
+        for output in &mut outputs {
+            output.execution = None;
+        }
+    }
+    Ok(WorkerExecutionReceipt {
+        version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
+        execution: shared.unwrap_or_else(|| {
+            serde_json::json!({
+                "state":"unavailable",
+                "reason":{
+                    "code":"provider_report_unavailable",
+                    "detail":"completed image route has not supplied a provider execution report",
+                    "missing_facts":["provider_resolved_execution"]
+                }
+            })
+        }),
+        outputs,
+        stages: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("assets/images")).unwrap();
+    std::fs::write(
+        project.path().join("assets/images/render.png"),
+        b"rendered bytes",
+    )
+    .unwrap();
+    std::fs::write(outside.path().join("outside.png"), b"other bytes").unwrap();
+    let facts = vec![serde_json::json!({
+        "assetId":"asset-one", "index":0, "mediaPath":"assets/images/render.png"
+    })];
+    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["asset-one"]);
+    assert_eq!(
+        receipt.outputs[0].artifact_sha256[0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"rendered bytes"))
+    );
+    assert_eq!(receipt.execution["state"], "unavailable");
+    let escaped = vec![serde_json::json!({
+        "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
+    })];
+    assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+}
+
+#[cfg(all(test, native_lane))]
+#[test]
+fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("base.png"), b"base bytes").unwrap();
+    std::fs::write(project.path().join("child.png"), b"final child bytes").unwrap();
+    let base =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let child =
+        serde_json::to_value(crate::upscale_jobs::real_esrgan_execution_unavailable()).unwrap();
+    let facts = vec![
+        serde_json::json!({"assetId":"base","index":0,"mediaPath":"base.png","workerExecutionReport":base.clone()}),
+        serde_json::json!({"assetId":"child","index":0,"mediaPath":"child.png","sourceAssetId":"base",
+            "workerExecutionReport":base,"workerChildExecutionReport":child}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["base", "child"]);
+    assert_eq!(receipt.outputs[0].stages[0].stage, "base_render");
+    assert_eq!(receipt.outputs[0].stages[1].stage, "child_transform");
+    assert_eq!(receipt.outputs[0].stages[1].execution, child);
+    assert_eq!(
+        receipt.outputs[0].artifact_sha256[1],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"final child bytes"))
+    );
+    let result = serde_json::json!({"expectedCount":2,"assetWrites":facts});
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        result.as_object().unwrap(),
+    )
+    .unwrap();
+    let mut reversed = receipt.clone();
+    reversed.outputs[0].stages.swap(0, 1);
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &reversed,
+            result.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "invalid_output_stages"
+    );
+    let mut omitted = result;
+    omitted["assetWrites"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("workerChildExecutionReport");
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            omitted.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "output_stages_changed"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn image_receipt_binds_restored_and_hires_stages_to_final_outputs() {
+    let project = tempfile::tempdir().unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    for (name, bytes) in [
+        ("direct.png", &b"direct"[..]),
+        ("restored.png", &b"restored"[..]),
+        ("hires.png", &b"hires"[..]),
+    ] {
+        std::fs::write(project.path().join(name), bytes).unwrap();
+    }
+    let restored_stages = serde_json::json!([
+        {"stage":"angle","execution":report},
+        {"stage":"restore_face","execution":report},
+    ]);
+    let hires_stages = serde_json::json!([
+        {"stage":"base","execution":report},
+        {"stage":"refine","execution":report},
+    ]);
+    let facts = vec![
+        serde_json::json!({"assetId":"direct","index":0,"mediaPath":"direct.png","workerExecutionReport":report}),
+        serde_json::json!({"assetId":"restored","index":1,"mediaPath":"restored.png","workerExecutionReport":report,"workerExecutionStages":restored_stages}),
+        serde_json::json!({"assetId":"hires","index":2,"mediaPath":"hires.png","workerExecutionReport":report,"workerExecutionStages":hires_stages}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 3).unwrap();
+    assert!(receipt.outputs[0].stages.is_empty());
+    assert_eq!(receipt.outputs[1].stages[0].stage, "angle");
+    assert_eq!(receipt.outputs[1].stages[1].stage, "restore_face");
+    assert_eq!(receipt.outputs[2].stages[0].stage, "base");
+    assert_eq!(receipt.outputs[2].stages[1].stage, "refine");
+    assert_eq!(
+        receipt.outputs[1].artifact_sha256[0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"restored"))
+    );
+    let result = serde_json::json!({"expectedCount":3,"assetWrites":facts});
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        result.as_object().unwrap(),
+    )
+    .unwrap();
+    let mut swapped = receipt.clone();
+    swapped.outputs[1].stages.swap(0, 1);
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &swapped,
+            result.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "invalid_output_stages"
+    );
+    let mut missing = result;
+    missing["assetWrites"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("workerExecutionStages");
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            missing.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "output_stages_changed"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn image_receipt_appends_child_after_inline_base_stages() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("base.png"), b"base").unwrap();
+    std::fs::write(project.path().join("child.png"), b"child").unwrap();
+    let base =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let child = serde_json::json!({"state":"unavailable","reason":{
+        "code":"provider_report_unavailable","detail":"fixture",
+        "missing_facts":["provider_resolved_execution"]
+    }});
+    for stages in [
+        serde_json::json!([
+            {"stage":"identity","execution":base},
+            {"stage":"restore_face","execution":base}
+        ]),
+        serde_json::json!([
+            {"stage":"base","execution":base},
+            {"stage":"refine","execution":base}
+        ]),
+    ] {
+        let facts = vec![
+            serde_json::json!({"assetId":"base","index":0,"mediaPath":"base.png",
+                "workerExecutionReport":base,"workerExecutionStages":stages}),
+            serde_json::json!({"assetId":"child","index":0,"mediaPath":"child.png",
+                "sourceAssetId":"base","workerExecutionReport":base,
+                "workerChildExecutionReport":child}),
+        ];
+        let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+        assert_eq!(receipt.outputs[0].stages.len(), 3);
+        assert_eq!(receipt.outputs[0].stages[2].stage, "child_transform");
+        let result = serde_json::json!({"expectedCount":2,"assetWrites":facts});
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            result.as_object().unwrap(),
+        )
+        .unwrap();
+        let mut copied = result.clone();
+        copied["assetWrites"][1]["workerExecutionStages"] = stages.clone();
+        assert_eq!(
+            sceneworks_core::execution_receipt::validate_worker_receipt(
+                &receipt,
+                copied.as_object().unwrap(),
+            )
+            .unwrap_err()
+            .reason,
+            "output_stages_changed"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn completed_image_receipt_keeps_reports_with_their_outputs() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("first.png"), b"first").unwrap();
+    std::fs::write(project.path().join("second.png"), b"second").unwrap();
+    let reports = [
+        serde_json::json!({"state":"unavailable","reason":{"code":"one"}}),
+        serde_json::json!({"state":"unavailable","reason":{"code":"two"}}),
+    ];
+    let facts = vec![
+        serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":reports[1]}),
+        serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":reports[0]}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 2).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["first"]);
+    assert_eq!(receipt.outputs[1].artifact_ids, ["second"]);
+    assert_eq!(receipt.outputs[0].execution, Some(reports[0].clone()));
+    assert_eq!(receipt.outputs[1].execution, Some(reports[1].clone()));
+
+    let batch_report = serde_json::json!({"state":"resolved","identity":{"output_units":2}});
+    let batch_facts = vec![
+        serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":batch_report}),
+        serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":batch_report}),
+    ];
+    let batch = image_execution_receipt(project.path(), &batch_facts, 2).unwrap();
+    assert_eq!(batch.execution, batch_report);
+    assert!(batch
+        .outputs
+        .iter()
+        .all(|output| output.execution.is_none()));
 }
 
 /// Procedural stub generation (sc-3020): a deterministic per-seed gradient per image.
@@ -1121,16 +1653,20 @@ fn imported_checkpoint_file_for_share(
         return None;
     }
     let raw_path = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
-        })
-        .and_then(Value::as_str)?;
+                .and_then(Value::as_str)
+        })?;
     let path = crate::paths::normalize_app_managed_model_path(
         settings,
         raw_path,
@@ -1921,14 +2457,24 @@ pub(crate) fn reattach_alpha(
 /// every image of the batch so reopening any one restores the batch.
 pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 
-fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
-    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
-        .map_err(WorkerError::InvalidPayload)?;
-    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
-        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
-            serde_json::from_value(value.clone())
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        for reference in sceneworks_core::moss_image_advanced::references(&options) {
+fn moss_input_parents(request: &ImageRequest) -> WorkerResult<Vec<String>> {
+    let carriers = json!({
+        "referenceAssetIds": request.reference_asset_ids,
+        "sourceAssetId": request.source_asset_id,
+        "referenceAssetId": request.reference_asset_id,
+    });
+    let mut parents = sceneworks_core::moss_image::edit_reference_slots(
+        carriers.as_object().expect("typed carrier object"),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    if let Some(options) = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .moss_image_advanced
+        .as_ref()
+    {
+        for reference in sceneworks_core::moss_image_advanced::references(&options.value) {
             if !parents.contains(&reference.asset_id) {
                 parents.push(reference.asset_id.clone());
             }
@@ -1995,8 +2541,12 @@ pub(crate) fn write_image_asset(
     // egress below is channel-driven — `from_engine_buffer` types whatever arrives — so those four
     // channels become an RGBA PNG with no second decision here. The count is deliberately not
     // compared against the buffer: the stub render (no weights installed) is always three-channel.
-    let requested_channels =
-        crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
+    let requested_channels = crate::qwen_alpha::resolve_output_channels_typed(
+        &request.model,
+        request
+            .advanced_bool("transparentBackground")
+            .unwrap_or(false),
+    )?;
     crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
     // A native prompt batch (sc-25681): THIS image's prompt is `prompts[index % len]`, and the
     // whole list is recorded (worker-owned — a replayed `advanced` can never forge it) so the
@@ -2189,7 +2739,7 @@ pub(crate) fn write_image_asset(
     });
     let mut fact = fact.as_object().cloned().expect("json! object literal");
     if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
-        fact.insert("parents".into(), json!(moss_input_parents(&raw_settings)?));
+        fact.insert("parents".into(), json!(moss_input_parents(request)?));
         fact.insert("batchIndex".into(), json!(index));
     }
     Ok(fact)
@@ -2302,7 +2852,7 @@ async fn apply_inline_upscale(
         )
         .await?;
 
-        let upscaled = crate::upscale_jobs::upscale_image_in_memory(
+        let (upscaled, upscale_execution) = crate::upscale_jobs::upscale_image_in_memory(
             api,
             settings,
             job,
@@ -2322,7 +2872,7 @@ async fn apply_inline_upscale(
         let base_fact_for_task = base_fact.clone();
         let engine_for_task = engine_id.to_owned();
         let project_path_for_task = project_path.to_owned();
-        let fact = crate::load_progress::spawn_blocking(move || {
+        let mut fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -2337,6 +2887,10 @@ async fn apply_inline_upscale(
         })
         .await
         .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
+        fact.insert(
+            "workerChildExecutionReport".into(),
+            serde_json::to_value(upscale_execution).map_err(WorkerError::Json)?,
+        );
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -2435,6 +2989,7 @@ pub(crate) async fn apply_inline_iris_restore(
             },
         )
         .await?;
+        let execution_report = outcome.execution;
         // A cancel requested after the last per-tile reply trips no flag; re-check the job before
         // writing the restored variant so a canceled pass publishes nothing new.
         check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
@@ -2443,7 +2998,7 @@ pub(crate) async fn apply_inline_iris_restore(
         let base_fact_for_task = base_fact.clone();
         let project_path_for_task = project_path.to_owned();
         let trained_model_for_task = trained_model.clone();
-        let fact = crate::load_progress::spawn_blocking(move || {
+        let mut fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -2458,6 +3013,10 @@ pub(crate) async fn apply_inline_iris_restore(
         })
         .await
         .map_err(|error| crate::task_join_error("restored asset write task", error))??;
+        fact.insert(
+            "workerChildExecutionReport".into(),
+            serde_json::to_value(execution_report).map_err(WorkerError::Json)?,
+        );
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -2570,6 +3129,8 @@ fn write_upscaled_asset(
     raw_settings.insert("upscale".to_owned(), upscale_record);
 
     let mut fact = base_fact.clone();
+    // The base asset owns its provider stages; this fact records the child pass separately.
+    fact.remove("workerExecutionStages");
     fact.insert("assetId".to_owned(), json!(fresh_asset_id()));
     fact.insert("mediaPath".to_owned(), json!(media_rel));
     fact.insert("width".to_owned(), json!(width));
@@ -2713,7 +3274,7 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 }
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
     // reach the asset or the job result's `prefixKvCache` summary.
     raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
@@ -2849,6 +3410,12 @@ mod iris;
 // real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
 #[cfg(native_lane)]
 mod supra2;
+
+// MiniMax-H3-Image (SW-7100): tier resolution and component staging for `minimax_h3_image` (the
+// tier's DiT plus MiniMax-H3's own text encoder) on both native lanes. Compiled on every build:
+// the API's training install gate resolves the same tier (SW-7103) without linking a backend.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) mod minimax_h3_image;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
@@ -3153,6 +3720,7 @@ pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
         "image_detail requires either the MLX or Candle inference backend".to_owned(),
@@ -3353,7 +3921,6 @@ use routing::{candle_adapter_label, is_candle_engine, prepare_candle_image_route
 // Retain the existing crate-visible interface on every original cfg lane.
 pub(crate) use sampling::{
     curated_image_menu, emit_load_event, emit_sampling_knob_unsupported, normalize_sampling_knob,
-    read_advanced_guidance_method, read_advanced_sampling_knobs,
 };
 
 #[cfg(target_os = "macos")]

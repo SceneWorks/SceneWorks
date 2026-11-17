@@ -659,6 +659,8 @@ fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
         "qwen_image_2_1",
         // sc-25907: and its distilled Turbo sibling, its own registry id on the same arm.
         "qwen_image_2_1_turbo",
+        // SW-7100: MiniMax-H3-Image on its own staged still arm.
+        "minimax_h3_image",
     ] {
         let request = json!({ "planned": { "target": { "provider": provider } } });
         let error = run(&request)
@@ -671,6 +673,7 @@ fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
     assert_eq!(QWEN_PROVIDER, "qwen_image");
     assert_eq!(QWEN_IMAGE_2_1_PROVIDER, "qwen_image_2_1");
     assert_eq!(QWEN_IMAGE_2_1_TURBO_PROVIDER, "qwen_image_2_1_turbo");
+    assert_eq!(MINIMAX_H3_IMAGE_PROVIDER, "minimax_h3_image");
     assert_eq!(QWEN_EDIT_PROVIDER, "qwen_image_edit");
     assert_eq!(QWEN_EDIT_MODEL, "qwen_image_edit_2511");
     assert_eq!(QWEN_EDIT_LIGHTNING_MODEL, "qwen_image_edit_2511_lightning");

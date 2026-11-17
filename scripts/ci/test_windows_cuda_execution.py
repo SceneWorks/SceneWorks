@@ -166,6 +166,38 @@ class FunctionalAdmissionTests(unittest.TestCase):
         # Existing callers keep their strict policy and device semantics.
         shared.require_admission_policy(shared.STRICT_POLICY, "legacy-actor", {}, "0", "all", None)
 
+    def test_the_qwen38_describer_is_admitted_only_from_its_own_manual_workflow_on_fixed_gpu1(self):
+        describer = dict(self.environment, GITHUB_WORKFLOW_REF=
+            "SceneWorks/SceneWorks/.github/workflows/qwen38-describer-validation.yml@refs/heads/feature/test")
+        self.require_policy(describer, actor="qwen38-describer")
+        # Each actor is paired with its own workflows: neither borrows the other's.
+        with self.assertRaises(RuntimeError): self.require_policy(actor="qwen38-describer")
+        with self.assertRaises(RuntimeError): self.require_policy(describer)
+        with self.assertRaises(RuntimeError): self.require_policy(describer, actor="another-actor")
+        # The same manual-dispatch and fixed-GPU1 conditions apply.
+        with self.assertRaises(RuntimeError):
+            self.require_policy(dict(describer, GITHUB_EVENT_NAME="push"), actor="qwen38-describer")
+        for key in ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+            with self.assertRaises(RuntimeError):
+                self.require_policy(dict(describer, **{key: "0"}), actor="qwen38-describer")
+        for selection in ({"physical_indices": "1"}, {"cuda_ordinals": "1"}, {"probe_visible": "0"}):
+            with self.assertRaises(RuntimeError): self.require_policy(describer, actor="qwen38-describer", **selection)
+
+    def test_free_memory_is_read_per_held_card_and_refuses_a_card_with_too_little(self):
+        reading = Mock(return_value=SimpleNamespace(stdout="30000\n"))
+        identity = shared.DeviceIdentity("trusted-smi", reading)
+        held = [{"index": 1, "uuid": "GPU-two"}]
+        readings = shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
+        self.assertEqual(readings, [{"index": 1, "uuid": "GPU-two", "free_mib": 30000, "need_mib": 28000}])
+        self.assertEqual(reading.call_args.args[0], ["trusted-smi", "--query-gpu=memory.free",
+            "--format=csv,noheader,nounits", "-i", "1"])
+        with self.assertRaisesRegex(RuntimeError, "GPU 1 has 30000 MiB free; this run needs 40000 MiB"):
+            shared.require_free_memory(identity, held, 40000, time.monotonic() + 30)
+        for value in ("", "n/a", "1,2"):
+            reading.return_value.stdout = value
+            with self.assertRaises(RuntimeError):
+                shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
+
     def test_functional_device_only_probe_and_exact_binding_refuse_gpu0_missing_or_wrong_uuid(self):
         devices = Mock(return_value=SimpleNamespace(stdout="0, GPU-one\n1, GPU-two\n"))
         identity = shared.DeviceIdentity("trusted-smi", devices)
@@ -286,6 +318,33 @@ class FunctionalAdmissionTests(unittest.TestCase):
             if accepted:
                 self.assertEqual(receipt["binding_rechecked"]["devices"][0]["index"], 1)
         self.guard.verify_idle.assert_not_called()
+
+    def test_main_prints_its_own_failure_reason_and_child_exit_into_the_job_log(self):
+        import contextlib, io
+        cases = [(Mock(side_effect=TimeoutError("exact GPU UUID lock/idle wait exhausted the existing execution budget")),
+                  {"error": "TimeoutError: exact GPU UUID lock/idle wait exhausted the existing execution budget"}),
+                 (Mock(return_value=([self.two], [], {"GPU-two": {}}, 0)),
+                  {"child": {"returncode": 2, "timeout": False, "owned_tree_empty": True}})]
+        for attempt, (claim, expected) in enumerate(cases, 1):
+            env = dict(self.environment, GITHUB_RUN_ID=str(40 + attempt), GITHUB_RUN_ATTEMPT="1",
+                       RUNNER_TEMP=str(self.out), PUBLIC=str(self.out))
+            binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+            printed = io.StringIO()
+            with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+                 patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                     "--cuda-ordinals", "0", "--", "bash", "scripts/ci/memory-catalog/run.sh"]), \
+                 patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+                 patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+                 patch.object(shared, "resolve_binding", return_value=binding), \
+                 patch.object(shared, "claim_uuids", claim), \
+                 patch.object(shared, "release_transaction"), \
+                 patch.object(shared, "execute_owned", Mock(return_value=expected.get("child"))), \
+                 contextlib.redirect_stdout(printed):
+                self.assertNotEqual(shared.main(), 0)
+            line = json.loads(printed.getvalue().strip().splitlines()[-1])
+            self.assertIs(line["resource_completed"], False)
+            for key, value in expected.items():
+                self.assertEqual(line[key], value)
 
     def test_owned_timeout_terminates_only_the_assigned_job_and_waits_for_empty_tree(self):
         child = Mock(); child.wait.side_effect = subprocess.TimeoutExpired("owned", 1)

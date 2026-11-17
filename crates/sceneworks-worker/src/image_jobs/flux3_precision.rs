@@ -20,10 +20,11 @@
 
 use crate::WorkerError;
 use crate::WorkerResult;
+#[cfg(test)]
 use sceneworks_core::contracts::JsonObject;
-use sceneworks_core::image_request::{
-    flux3_requested_tier, image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS,
-};
+#[cfg(test)]
+use sceneworks_core::image_request::{flux3_requested_tier, image_quant_tier_refusal};
+use sceneworks_core::image_request::{Flux3Tier, FLUX3_TIERED_MODEL_IDS};
 
 /// The native image lane a request is about to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl ImageLane {
 /// Worker trust-boundary check of named precision tiers for EVERY image request (raw queue writes
 /// and stored jobs never passed the API validator): a malformed or conflicting FLUX 3 tier, FP8R on
 /// a model with no package, and a FLUX 3 package this lane does not serve are all refused by name.
+#[cfg(test)]
 pub(super) fn validate_image_quant_tier_request(
     model: &str,
     advanced: &JsonObject,
@@ -73,6 +75,7 @@ pub(super) fn validate_image_quant_tier_request(
 
 /// The FLUX 3 package a request names, or `None` for any other model. A package this lane does not
 /// serve is refused: the MLX provider has bf16/q4/q8 only, the CUDA formats are Candle's.
+#[cfg(test)]
 pub(super) fn flux3_requested_tier_for_lane(
     model: &str,
     advanced: &JsonObject,
@@ -92,6 +95,45 @@ pub(super) fn flux3_requested_tier_for_lane(
         )));
     }
     Ok(Some(tier))
+}
+
+/// Route a resolved FLUX.3 precision choice without re-reading authored option JSON.
+pub(super) fn flux3_requested_tier_for_lane_resolved(
+    request: &super::ImageRequest,
+    lane: ImageLane,
+) -> WorkerResult<Option<Flux3Tier>> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&request.model.as_str()) {
+        return Ok(None);
+    }
+    let tier = request
+        .resolved_flux3_tier()
+        .map_err(|reason| WorkerError::InvalidPayload(format!("{}: {reason}", request.model)))?;
+    if !lane.serves(tier) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{}: the {} package is a CUDA format served by the Candle backend; the {} \
+             backend serves bf16, q4 and q8. Run it on a Candle CUDA worker, or select one of those",
+            request.model,
+            tier.key(),
+            lane.name()
+        )));
+    }
+    Ok(Some(tier))
+}
+
+pub(super) fn validate_image_quant_tier_request_resolved(
+    request: &super::ImageRequest,
+    lane: ImageLane,
+) -> WorkerResult<()> {
+    let options = request
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved");
+    if let Some(reason) =
+        sceneworks_core::image_request::image_quant_tier_refusal_resolved(&request.model, options)
+    {
+        return Err(WorkerError::InvalidPayload(reason));
+    }
+    flux3_requested_tier_for_lane_resolved(request, lane).map(|_| ())
 }
 
 #[cfg(any(test, native_lane))]
@@ -469,9 +511,7 @@ pub(crate) fn candle_flux3_plan(
     snapshot_root: &std::path::Path,
     supported_quants: &[gen_core::Quant],
 ) -> WorkerResult<Option<Flux3LoadPlan>> {
-    let Some(tier) =
-        flux3_requested_tier_for_lane(&request.model, &request.advanced, ImageLane::Candle)?
-    else {
+    let Some(tier) = flux3_requested_tier_for_lane_resolved(request, ImageLane::Candle)? else {
         return Ok(None);
     };
     require_advertised_flux3_tier(&request.model, tier, supported_quants)?;
@@ -494,9 +534,7 @@ pub(crate) fn mlx_flux3_plan(
     snapshot_root: &std::path::Path,
     supported_quants: &[gen_core::Quant],
 ) -> WorkerResult<Option<Flux3LoadPlan>> {
-    let Some(tier) =
-        flux3_requested_tier_for_lane(&request.model, &request.advanced, ImageLane::Mlx)?
-    else {
+    let Some(tier) = flux3_requested_tier_for_lane_resolved(request, ImageLane::Mlx)? else {
         return Ok(None);
     };
     require_advertised_flux3_tier(&request.model, tier, supported_quants)?;

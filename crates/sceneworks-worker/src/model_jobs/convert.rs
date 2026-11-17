@@ -747,15 +747,15 @@ fn unknown_converter_error(model_id: &str, converter: &str) -> ConvertPlanError 
 /// the caller performs the SINGLE `fail_job`. Still async because the LTX arm may fetch the upscaler
 /// (`ensure_ltx_upscaler_cached`), and real infra errors (`?`) propagate as the outer `WorkerError`.
 fn bound_convert_aux_source(
-    payload: &serde_json::Map<String, Value>,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     source_id: &str,
 ) -> WorkerResult<Option<PathBuf>> {
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    if !advanced.is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+    if !portable_aux.has_paths() {
         return Ok(None);
     }
-    advanced
-        .and_then(|value| crate::portable_aux_sources::bound_aux_path(value, source_id))
+    portable_aux
+        .path(source_id)
+        .map(PathBuf::from)
         .map(Some)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -770,6 +770,7 @@ async fn resolve_convert_plan(
     job: &JobSnapshot,
     checkpoint_dir: &Path,
     quantize_bits: Option<u64>,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<Result<ConvertPlan, ConvertPlanError>> {
     // Re-read the payload discriminators the caller already validated (cheap, and keeps this resolver's
     // arg list small): `modelId`/`sourceRepo` are required, `converter` optional (empty = the "no
@@ -796,7 +797,7 @@ async fn resolve_convert_plan(
                     detail: format!("Expected {source_file_name} in {source_repo}."),
                 }));
             }
-            let bound = bound_convert_aux_source(&job.payload, "flux2_convert_base")?;
+            let bound = bound_convert_aux_source(portable_aux, "flux2_convert_base")?;
             let base_snapshot = if let Some(bound) = bound {
                 Some(bound)
             } else {
@@ -815,7 +816,7 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = if job.payload.get("advanced").and_then(Value::as_object).is_some_and(crate::portable_aux_sources::has_bound_aux_paths) {
+            let base_subdir = if portable_aux.has_paths() {
                 None
             } else {
                 optional_payload_string(&job.payload, "baseSubdir")
@@ -847,7 +848,7 @@ async fn resolve_convert_plan(
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
-            let bound = bound_convert_aux_source(&job.payload, "ltx_convert_upscaler")?;
+            let bound = bound_convert_aux_source(portable_aux, "ltx_convert_upscaler")?;
             let upscaler_dir = if let Some(bound) = bound {
                 bound.join(&upscaler_file).is_file().then_some(bound)
             } else {
@@ -1113,17 +1114,20 @@ mod portable_conversion_source_tests {
 
     #[test]
     fn bound_converter_source_refuses_omission_without_legacy_fallback() {
-        let legacy = serde_json::json!({"baseRepo":"owner/base"});
-        assert!(bound_convert_aux_source(legacy.as_object().unwrap(), "flux2_convert_base")
+        let legacy = sceneworks_core::portable_aux_bindings::PortableAuxBindings::default();
+        assert!(bound_convert_aux_source(&legacy, "flux2_convert_base")
             .unwrap()
             .is_none());
-        let bound = serde_json::json!({"advanced":{"__portableAuxPaths":{"flux2_convert_base":"/leased/borrowed"}}});
+        let snapshot = tempfile::tempdir().unwrap();
+        let borrowed = snapshot.path().join("borrowed");
+        let bound = serde_json::json!({"advanced":{"__portableFrozenSources":true,"__portableAuxPaths":{"flux2_convert_base":borrowed}}});
+        let bound = sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(bound.as_object().unwrap()).unwrap();
         assert_eq!(
-            bound_convert_aux_source(bound.as_object().unwrap(), "flux2_convert_base")
+            bound_convert_aux_source(&bound, "flux2_convert_base")
                 .unwrap(),
-            Some(PathBuf::from("/leased/borrowed"))
+            Some(borrowed)
         );
-        assert!(bound_convert_aux_source(bound.as_object().unwrap(), "ltx_convert_upscaler")
+        assert!(bound_convert_aux_source(&bound, "ltx_convert_upscaler")
             .is_err());
     }
 
@@ -1164,6 +1168,7 @@ async fn provision_ltx_eros_gemma(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     update_job(
         api,
@@ -1179,7 +1184,7 @@ async fn provision_ltx_eros_gemma(
         ),
     )
     .await?;
-    crate::video_jobs::ltx::ensure_ltx_bundle_gemma_present(api, settings, job).await
+    crate::video_jobs::ltx::ensure_ltx_bundle_gemma_present(api, settings, job, portable_aux).await
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1187,6 +1192,7 @@ async fn provision_ltx_eros_gemma(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     Ok(())
 }
@@ -1195,6 +1201,7 @@ pub(crate) async fn run_model_convert_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
     let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
@@ -1282,7 +1289,7 @@ pub(crate) async fn run_model_convert_job(
     // quant variants); there is NO Python fallback — the `mlx_video.convert_wan` subprocess was retired
     // at this cutover. `resolve_convert_plan` reads the discriminator + source repo from the payload.
     let plan =
-        match resolve_convert_plan(api, settings, job, &checkpoint_dir, quantize_bits).await? {
+        match resolve_convert_plan(api, settings, job, &checkpoint_dir, quantize_bits, portable_aux).await? {
             Ok(plan) => plan,
             Err(ConvertPlanError { message, detail }) => {
                 fail_job(api, &job.id, message, Some(detail)).await?;
@@ -1460,7 +1467,7 @@ pub(crate) async fn run_model_convert_job(
     // after promotion; a failure here fails the job loud (the checkpoint stays promoted and the
     // generation path re-attempts the fetch as a backstop).
     if plan_is_ltx {
-        provision_ltx_eros_gemma(api, settings, job).await?;
+        provision_ltx_eros_gemma(api, settings, job, portable_aux).await?;
     }
     // A completed conversion is a local derivative. Stamp the producer and exact output bytes
     // before reporting success, so later training/generation admission never trusts a marker or
