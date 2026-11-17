@@ -1776,7 +1776,13 @@ where
                         error,
                     )
                 })?;
-            cold_admission(resident.map_or(0, |cached| cached.reclaimable_weight_bytes))
+            // A provider's warm set (`Generator::retained_weight_bytes`) is freed with the entry
+            // this miss drops, exactly as resident weights are.
+            cold_admission(resident.map_or(0, |cached| {
+                cached
+                    .reclaimable_weight_bytes
+                    .max(cached.generator.retained_weight_bytes().unwrap_or(0))
+            }))
         },
         load,
         run,

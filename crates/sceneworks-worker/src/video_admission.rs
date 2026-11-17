@@ -2840,6 +2840,18 @@ pub(crate) struct VideoRuntimeMemoryState {
 }
 
 impl VideoRuntimeMemoryState {
+    /// Credit the weights the loaded provider keeps warm between requests
+    /// ([`gen_core::Generator::retained_weight_bytes`]) as reclaimable. The provider releases
+    /// them before any request that does not reuse them, and keeps them only after checking that
+    /// its warm estimate fits the device, so they must not count against the next request the
+    /// way an unrelated allocation does. Bounded by the committed snapshot, so the credit never
+    /// exceeds what is allocated.
+    pub(crate) fn with_retained_provider_weights(mut self, retained: Option<u64>) -> Self {
+        let credit = retained.unwrap_or(0).min(self.budget.committed_bytes);
+        self.budget.reclaimable_bytes = self.budget.reclaimable_bytes.saturating_add(credit);
+        self
+    }
+
     fn selector_budget(self) -> Option<Budget> {
         const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         Some(Budget {

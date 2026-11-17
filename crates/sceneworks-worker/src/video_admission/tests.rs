@@ -31,6 +31,37 @@ fn candle_post_load_snapshot_preserves_committed_pressure_under_a_cap() {
     assert_eq!(budget.reserved_headroom_bytes, 2 * GIB);
     assert!(candle_budget_from_total_free(24 * GIB, 25 * GIB, None).is_none());
 }
+
+/// A provider's warm set (MiniMax-H3 on CUDA) is credited as reclaimable, never beyond what the
+/// snapshot shows committed, and a provider that retains nothing changes nothing.
+#[test]
+fn a_providers_retained_warm_set_is_credited_as_reclaimable() {
+    let runtime = |retained| {
+        VideoRuntimeMemoryState {
+            budget: candle_budget_from_total_free(96 * GIB, 30 * GIB, None)
+                .expect("valid CUDA snapshot"),
+            cache_state: MemoryCacheState::Warm,
+            load_policy: OffloadPolicy::Sequential,
+            provider_resident_bytes: 0,
+        }
+        .with_retained_provider_weights(retained)
+    };
+    assert_eq!(runtime(None).budget.reclaimable_bytes, 0);
+    let warm = runtime(Some(60 * GIB));
+    assert_eq!(warm.budget.reclaimable_bytes, 60 * GIB);
+    assert_eq!(
+        warm.budget.committed_bytes,
+        66 * GIB,
+        "the snapshot is unchanged"
+    );
+    // 30 GiB free plus the 60 GiB warm set, less the 2 GiB reserve.
+    assert_eq!(warm.budget.effective_bytes(), 88 * GIB);
+    assert_eq!(
+        runtime(Some(100 * GIB)).budget.reclaimable_bytes,
+        66 * GIB,
+        "never more than is committed"
+    );
+}
 const FITTED_CURVE_CLOSURE: &str =
     "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3";
 

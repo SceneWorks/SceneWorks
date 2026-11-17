@@ -3101,6 +3101,9 @@ pub(super) async fn generate_video_using(
                         load_policy,
                         provider_resident_bytes,
                     )?
+                    .map(|runtime| {
+                        runtime.with_retained_provider_weights(generator.retained_weight_bytes())
+                    })
                 } else {
                     None
                 };
