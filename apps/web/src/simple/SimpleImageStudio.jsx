@@ -865,12 +865,10 @@ export function SimpleImageStudio() {
                 tokenFor={(index) => referencePromptToken(selectedModel, index)}
                 onInsertToken={promptTokenInsertion.insert}
                 onChange={writeOrderedReferences}
-                // A model whose prompt names its references (MiniMax-H3-Image) gets a Remove per
-                // row; other models' rails stay as the SW-7028 frozen baseline pins them. Removing
-                // image 1 promotes image 2 onto the tile, exactly as a reorder would.
-                onRemove={referencePromptToken(selectedModel, 0)
-                  ? (index) => writeOrderedReferences(orderedReferenceIds.filter((_, at) => at !== index))
-                  : undefined}
+                // Removing image 1 promotes image 2 onto the tile, exactly as a reorder would.
+                onRemove={(index) =>
+                  writeOrderedReferences(orderedReferenceIds.filter((_, at) => at !== index))
+                }
               />
               <SheetSelect
                 kind="grid"

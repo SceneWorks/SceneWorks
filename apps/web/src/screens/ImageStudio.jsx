@@ -3128,12 +3128,8 @@ export function ImageStudio() {
                     assetIds={referenceAssetIds}
                     itemKeys={flux3LayoutAvailable ? layoutReferences.map(({ id }) => id) : undefined}
                     onMove={flux3LayoutAvailable ? moveFlux3Reference : undefined}
-                    // A model whose prompt names its references (MiniMax-H3-Image) gets a Remove
-                    // per row too. Other models' rails stay as the SW-7028 frozen baseline pins them.
                     onRemove={flux3LayoutAvailable ? removeFlux3Reference
-                      : referencePromptToken(selectedModel, 0)
-                        ? (index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))
-                        : undefined}
+                      : (index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))}
                     labelFor={assetLabelFor}
                     onChange={changeReferenceAssetIds}
                     // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
@@ -3195,6 +3191,7 @@ export function ImageStudio() {
                         assetIds={referenceAssetIds}
                         labelFor={assetLabelFor}
                         onChange={changeReferenceAssetIds}
+                        onRemove={(index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))}
                       />
                     ) : null}
                   </>
