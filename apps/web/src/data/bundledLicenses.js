@@ -125,6 +125,8 @@ import minimaxH3ImageCommunityLicense from "../../../desktop/licenses/minimax-h3
 import minimaxH3ImageQwenApache20 from "../../../desktop/licenses/minimax-h3-image/Apache-2.0.txt?url&no-inline";
 // MiniMax-H3-Image-PE (SW-7102): its own §III.4 NOTICE; the agreement is MiniMax-H3-Image's.
 import minimaxH3ImagePeNotice from "../../../desktop/licenses/minimax-h3-image-pe/NOTICE.txt?url&no-inline";
+// MiniMax-H3-Image training adapter (SW-F369): its own §III.4 NOTICE; the agreement is MiniMax-H3-Image's.
+import minimaxH3ImageTrainingAdapterNotice from "../../../desktop/licenses/minimax-h3-image-training-adapter/NOTICE.txt?url&no-inline";
 import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?url&no-inline";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?url&no-inline";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?url&no-inline";
@@ -278,6 +280,7 @@ const DOCUMENT_URL = {
   "minimax-h3-image-community-license": minimaxH3ImageCommunityLicense,
   "minimax-h3-image-qwen-apache": minimaxH3ImageQwenApache20,
   "minimax-h3-image-pe-notice": minimaxH3ImagePeNotice,
+  "minimax-h3-image-training-adapter-notice": minimaxH3ImageTrainingAdapterNotice,
   "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,

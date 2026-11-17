@@ -1200,7 +1200,34 @@
           "key": "minimax-h3-image-community-license"
         }
       ]
-    },    {
+    },
+    {
+      "id": "minimax-h3-image-training-adapter",
+      "models": [
+        "minimax_h3_image_training_adapter_v1"
+      ],
+      "name": "MiniMax-H3-Image Training Adapter",
+      "publisher": "ShootTheSound (Model Derivative of MiniMax-H3-Image by MiniMax)",
+      "license": "MiniMax-H3-Image Community License",
+      "homepage": "https://huggingface.co/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "De-distill training adapter for MiniMax-H3-Image (ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter @f1a4547596faeb98bae568dd28da296c49fbe0a1), a rank-16 LoRA. It renders no images: SceneWorks applies it to MiniMax-H3-Image only while training a LoRA, so the LoRA learns the subject instead of un-distilling the 6-step base, and removes it for previews and generation. SceneWorks downloads the unmodified file directly from the upstream repository (not re-hosted). It is a Model Derivative of MiniMax-H3-Image governed by the MiniMax-H3-Image Community License Agreement, a RESTRICTED licence: it requires separate written authorization above 1 million US dollars of annualized revenue or for any Hosted Service, requires displaying \"MiniMax-H3-Image\" on a commercial product's user interface, forbids using the Works or their Outputs to improve any other AI model, and limits its Applicable Territory to the world EXCLUDING the European Union, the United Kingdom, the Republic of Korea and the United States of America. LoRAs trained with it inherit the same Agreement. Read the full text before use.",
+      "documents": [
+        {
+          "label": "NOTICE (required by MiniMax-H3-Image Community License §III.4)",
+          "key": "minimax-h3-image-training-adapter-notice"
+        },
+        {
+          "label": "MiniMax-H3-Image Community License Agreement",
+          "key": "minimax-h3-image-community-license"
+        }
+      ]
+    },
+    {
       "id": "wan2_1_t2v_14b_diffusers",
       "models": [],
       "appliesToModels": [

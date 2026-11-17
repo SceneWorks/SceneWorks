@@ -4791,9 +4791,109 @@ fn training_adapter_keys_are_validated_as_field_errors() {
     );
 }
 
-/// sc-25213: both de-distill adapter versions are `componentOnly` utility entries in the shipped
-/// catalog at exactly the repo / revision / file the worker resolves, so the Training Studio's
-/// download installs the bytes the trainer loads. Mutation: re-pin or drop one entry ⇒ red.
+/// SW-F369: every MiniMax-H3-Image preset (text-to-image and edit) selects the Fizgig de-distill
+/// adapter by default and builds a plan that keeps the keys; blank resolves to its one version;
+/// `v2` (a Z-Image version) is a field error for this repo; and each adapter is refused on the
+/// other base's target — a de-distill LoRA for one base is noise on another.
+/// Mutations: drop the adapter from `minimax_h3_image_preset` ⇒ the preset loop goes red; drop the
+/// `target_ids` check from `validate_support` ⇒ the cross-base loop goes red; drop the H3 targets
+/// from `TRAINING_ADAPTER_TARGETS` ⇒ the plan builds go red.
+#[test]
+fn minimax_h3_image_presets_default_to_the_fizgig_training_adapter() {
+    use sceneworks_core::training::training_adapter::{
+        target_supports_training_adapter, training_adapter_model,
+        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+        ZIMAGE_TURBO_TRAINING_ADAPTER_REPO,
+    };
+    let registry = builtin_training_targets();
+    let target = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target"))
+    };
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let mut checked = 0;
+    for target_id in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+        let h3 = target(target_id);
+        assert!(target_supports_training_adapter(h3), "{target_id}");
+        for preset in presets.presets.iter().filter(|p| p.target_id == target_id) {
+            let advanced = &preset.config.advanced;
+            assert_eq!(
+                advanced["trainingAdapterRepo"], MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO,
+                "{}",
+                preset.id
+            );
+            assert_eq!(advanced["trainingAdapterVersion"], "v1", "{}", preset.id);
+            assert_eq!(
+                training_adapter_model(advanced).unwrap(),
+                Some(&MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1)
+            );
+            let plan = build_plan_for_target(h3, preset.config.clone()).expect("preset plan");
+            assert_eq!(
+                plan.config.advanced["trainingAdapterRepo"],
+                MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 5, "every MiniMax-H3-Image preset was checked");
+
+    let with = |target: &sceneworks_core::training::TrainingTarget, repo: &str, version: &str| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("trainingAdapterRepo".into(), json!(repo));
+        config
+            .advanced
+            .insert("trainingAdapterVersion".into(), json!(version));
+        config
+    };
+    let field_of = |result: Result<TrainingPlan, TrainingPlanError>| match result {
+        Err(TrainingPlanError::InvalidField { field, .. }) => field,
+        other => panic!("expected a field error, got {other:?}"),
+    };
+    let h3 = target("minimax_h3_image_lora");
+    let blank = with(h3, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, "");
+    assert_eq!(
+        training_adapter_model(&blank.advanced).unwrap(),
+        Some(&MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1)
+    );
+    for version in ["v2", "v2-default"] {
+        assert_eq!(
+            field_of(build_plan_for_target(
+                h3,
+                with(h3, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, version)
+            )),
+            "trainingAdapterVersion",
+            "{version}"
+        );
+    }
+    let zimage = target("z_image_turbo_lora");
+    for (target, repo) in [
+        (h3, ZIMAGE_TURBO_TRAINING_ADAPTER_REPO),
+        (
+            target("minimax_h3_image_edit_lora"),
+            ZIMAGE_TURBO_TRAINING_ADAPTER_REPO,
+        ),
+        (zimage, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO),
+    ] {
+        assert_eq!(
+            field_of(build_plan_for_target(target, with(target, repo, "v1"))),
+            "trainingAdapterRepo",
+            "{} / {repo}",
+            target.id
+        );
+    }
+}
+
+/// sc-25213 / SW-F369: every de-distill adapter version is a `componentOnly` utility entry in the
+/// shipped catalog at exactly the repo / revision / file the worker resolves, so the Training
+/// Studio's download installs the bytes the trainer loads. The MiniMax-H3-Image adapter is a Model
+/// Derivative of MiniMax-H3-Image, so its entry carries the same in-app licence gate as the base
+/// model's (`requiresLicenseAcknowledgment` + a notice) under the same agreement.
+/// Mutation: re-pin or drop one entry, or drop the H3 adapter's licence gate ⇒ red.
 #[test]
 fn training_adapters_are_cataloged_at_the_loaded_revision() {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
@@ -4819,6 +4919,20 @@ fn training_adapters_are_cataloged_at_the_loaded_revision() {
         assert_eq!(download["revision"], adapter.revision, "{}", adapter.id);
         assert_eq!(download["files"], json!([adapter.file]), "{}", adapter.id);
     }
+    let entry = |id: &str| models.iter().find(|m| m["id"] == id).unwrap();
+    let base = entry("minimax_h3_image");
+    let adapter =
+        entry(sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1.id);
+    assert_eq!(base["requiresLicenseAcknowledgment"], true);
+    assert_eq!(adapter["requiresLicenseAcknowledgment"], true);
+    assert_eq!(adapter["gated"], false);
+    let notice = adapter["licenseNotice"].as_str().expect("licence notice");
+    assert!(
+        notice.contains("MiniMax-H3-Image Community License Agreement"),
+        "{notice}"
+    );
+    assert!(notice.contains("Model Derivative"), "{notice}");
+    assert_eq!(adapter["ui"]["attribution"], base["ui"]["attribution"]);
 }
 
 /// sc-2124: the decoded-x0 aux losses whose upstream window was `[0, 1]` — depth anchoring, the
