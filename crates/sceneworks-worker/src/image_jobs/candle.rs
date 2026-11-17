@@ -911,9 +911,7 @@ async fn generate_candle_registry_stream_using(
             0.0
         }
     };
-    let device_budget = crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await;
-    let vram_cap_gb = crate::vram_gate::cuda_vram_cap_gb();
-    let raw_budget = crate::vram_gate::apply_vram_cap(device_budget, vram_cap_gb);
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
     // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
     // it is about to replace); crediting the reclaimable pool predicts the `free` the imminent evict will
@@ -928,7 +926,7 @@ async fn generate_candle_registry_stream_using(
     // and a warm hit's provider keeps it only after checking that its own warm estimate fits. Credit
     // the larger of the two, since both describe the resident occupant.
     let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id).max(
-        crate::vram_gate::retained_credit_gb(device_budget, vram_cap_gb, retained_gb),
+        crate::vram_gate::retained_credit_gb(raw_budget, retained_gb),
     );
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));

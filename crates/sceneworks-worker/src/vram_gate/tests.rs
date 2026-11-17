@@ -5182,22 +5182,25 @@ fn the_retained_credit_is_reduced_by_what_the_cap_clipped() {
         free_gb: 46.0,
         total_gb: 96.0,
     });
-    assert_eq!(retained_credit_gb(device, Some(32.0), 20.0), 0.0);
-    assert_eq!(retained_credit_gb(device, None, 20.0), 20.0);
-    assert_eq!(retained_credit_gb(device, None, 80.0), 50.0);
-    assert_eq!(retained_credit_gb(None, None, 20.0), 0.0);
+    let capped = |device| apply_vram_cap(device, Some(32.0));
+    assert_eq!(retained_credit_gb(capped(device), 20.0), 0.0);
+    assert_eq!(retained_credit_gb(device, 20.0), 20.0);
+    assert_eq!(retained_credit_gb(device, 80.0), 50.0);
+    assert_eq!(retained_credit_gb(None, 20.0), 0.0);
     let tight = Some(VramBudget {
         free_gb: 10.0,
         total_gb: 96.0,
     });
-    assert_eq!(retained_credit_gb(tight, Some(32.0), 20.0), 20.0);
+    assert_eq!(retained_credit_gb(capped(tight), 20.0), 20.0);
     assert_eq!(
-        retained_credit_gb(tight, Some(32.0), 40.0),
+        retained_credit_gb(capped(tight), 40.0),
         22.0,
         "up to the cap"
     );
     // With the warm set credited, the capped budget is never more than the emulated card.
-    let capped = apply_vram_cap(device, Some(32.0)).unwrap();
-    let credited = with_reclaimable(capped, retained_credit_gb(device, Some(32.0), 20.0));
+    let credited = with_reclaimable(
+        capped(device).unwrap(),
+        retained_credit_gb(capped(device), 20.0),
+    );
     assert!(credited.free_gb <= 32.0);
 }
