@@ -199,14 +199,22 @@ pub(super) fn sdxl_endpoint_context_uuid() -> Result<String, String> {
     ))
 }
 
+/// How long the SDXL endpoint waits for its card to be admissible before refusing.
+pub(super) const SDXL_ADMISSION_WAIT: Duration = Duration::from_secs(600);
+/// Owner rule (no job requires an idle GPU): the card may carry other work's residency; admit once
+/// five consecutive samples show >= 16 GiB free, <= 64 MiB memory drift and utilization <= 30 %.
+pub(super) const SDXL_MAX_UTILIZATION_PERCENT: u64 = 30;
+
 pub(super) fn wait_for_sdxl_idle(
     mut query: impl FnMut(Duration) -> Result<String, String>,
     elapsed: impl Fn() -> Duration,
     mut sleep: impl FnMut(Duration),
 ) -> Result<Vec<u64>, String> {
-    let timeout = Duration::from_secs(30);
-    let mut samples = Vec::new();
+    let timeout = SDXL_ADMISSION_WAIT;
+    // Only the latest samples ride along in a refusal; every 60 s the current one is logged.
+    let mut samples = std::collections::VecDeque::new();
     let mut used = Vec::new();
+    let mut last_log: Option<Duration> = None;
     while elapsed() < timeout {
         let fields = query(
             timeout
@@ -216,11 +224,17 @@ pub(super) fn wait_for_sdxl_idle(
         .map_err(|error| {
             format!("SDXL endpoint activity telemetry: {error}; samples={samples:?}")
         })?;
-        samples.push(format!("{}ms:{fields}", elapsed().as_millis()));
-        eprintln!(
-            "SDXL endpoint selected-device idle sample: {}",
-            samples.last().unwrap()
-        );
+        if samples.len() == 20 {
+            samples.pop_front();
+        }
+        samples.push_back(format!("{}ms:{fields}", elapsed().as_millis()));
+        if last_log.is_none_or(|at| elapsed().saturating_sub(at) >= Duration::from_secs(60)) {
+            last_log = Some(elapsed());
+            eprintln!(
+                "SDXL endpoint selected-device admission sample (memory.used,memory.free,utilization.gpu,utilization.memory): {}",
+                samples.back().unwrap()
+            );
+        }
         let values = fields
             .split(',')
             .map(|value| value.trim().parse::<u64>())
@@ -238,7 +252,7 @@ pub(super) fn wait_for_sdxl_idle(
                 "SDXL endpoint invalid activity telemetry; samples={samples:?}"
             ));
         }
-        if values[1] < 16 * 1024 || values[2] != 0 || values[3] != 0 {
+        if values[1] < 16 * 1024 || values[2] > SDXL_MAX_UTILIZATION_PERCENT {
             used.clear();
         } else {
             used.push(values[0]);
@@ -252,7 +266,7 @@ pub(super) fn wait_for_sdxl_idle(
         }
         sleep(Duration::from_millis(200).min(timeout.saturating_sub(elapsed())));
     }
-    Err(format!("SDXL endpoint did not settle within 30s to five consecutive zero-utilization samples with at least 16 GiB free and <=64 MiB drift; samples={samples:?}"))
+    Err(format!("SDXL endpoint did not settle within {}s to five consecutive samples with at least 16 GiB free, utilization <= {SDXL_MAX_UTILIZATION_PERCENT}% and <=64 MiB drift; samples={samples:?}", timeout.as_secs()))
 }
 
 pub(super) fn retain_sdxl_endpoint_output(

@@ -128,8 +128,9 @@ staging and 2.400 GB for Windows model/photo/full runtime staging. The separate
 Mac oracle inputs are 80.5 MB, and its seven primary tool
 wheels total approximately 150 MB plus recorded bounded dependencies. The oracle
 job has a 35-minute timeout; hardware proof retains its 180-minute timeout and
-Windows execution controller's 170-minute budget. CUDA uses the existing
-`strict-idle` admission policy with physical GPU 1 exposed as logical device 0.
+Windows execution controller's 170-minute budget. CUDA uses the execution wrapper's one
+admission rule (free memory and a stable window, never an idle card) with physical GPU 1 exposed as
+logical device 0 and required by `--require-physical-index 1`.
 These are bounded correctness passes, not memory matrices or calibration campaigns.
 
 ### Acceptance and artifacts

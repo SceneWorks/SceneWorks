@@ -185,7 +185,8 @@ test('assembled native proof plan binds every registered body, fixture and recei
   assert.match(controller,/delete childEnv.SCENEWORKS_TEST_UPSCALE_IMAGE/);
   assert.match(controller,/SCENEWORKS_TEST_UPSCALE_FACTOR:String\(selected.factor\)/);
   const workflow=await readFile(new URL('../.github/workflows/cv-provider-validation.yml',import.meta.url),'utf8');
-  assert.match(workflow,/--actor cv-provider-validation --admission-policy strict-idle --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1/);
+  assert.match(workflow,/--actor cv-provider-validation --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1 --require-physical-index 1/);
+  assert.doesNotMatch(workflow,/--admission-policy|strict-idle/);
   assert.doesNotMatch(workflow,/functional-coexistence/);
   assert.match(controller,/CV_BUILD_ONLY==='true'\|\|!\(await enterMacMetalExecution\(3600\)\)/);
   assert.match(controller,/metalChildOptions\(/);

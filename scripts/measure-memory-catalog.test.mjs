@@ -164,6 +164,8 @@ import {
   gpuComputeProcesses,
   nameContaminatingProcesses,
   contaminatedHostHalt,
+  CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, CO_TENANT_SETTLE_MS, coTenantGpu, coTenantShift, sampleCardBaseline, settledCardBaseline,
+  coTenantActivity, monitorCoTenants, parsePmon,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -5918,6 +5920,140 @@ function stubContext({ root, workDir }, overrides = {}) {
   };
 }
 
+test("co-tenant bracket: only a Candle capture on one numbered card is bracketed", () => {
+  const pci = { CUDA_DEVICE_ORDER: "PCI_BUS_ID" };
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { ...pci, CUDA_VISIBLE_DEVICES: "1" }), "1");
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "1" }), null, "ordinal order unknown");
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { ...pci, CUDA_VISIBLE_DEVICES: "GPU-abc" }), null);
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, pci), null);
+  assert.equal(coTenantGpu({ key: "z_image_turbo:q4:mlx" }, { ...pci, CUDA_VISIBLE_DEVICES: "1" }), null);
+});
+
+test("co-tenant bracket: a resident model that holds still is fine; one that moves or wobbles is named", () => {
+  const window = (...samples) => ({ samples, min: Math.min(...samples), max: Math.max(...samples) });
+  // A desktop app holding 31 GB on the card, idle: the capture's peak above it is its own.
+  assert.equal(coTenantShift(window(31_000, 31_010), window(31_020, 31_000)), null);
+  assert.match(coTenantShift(window(31_000), window(31_000 + CO_TENANT_MAX_SHIFT_MIB + 1)), /baseline moved \+257 MiB/);
+  assert.match(coTenantShift(window(31_000), window(20_000)), /baseline moved -11000 MiB/);
+  assert.match(coTenantShift(window(1_000, 1_400), window(1_000)), /before window unstable/);
+  // An app that exits and another that starts at the same footprint are still named.
+  assert.match(coTenantShift({ ...window(31_000), compute: [24360] }, { ...window(31_000), compute: [9001] }), /pure-compute co-tenants changed \(24360 -> 9001\)/);
+  assert.equal(coTenantShift({ ...window(31_000), compute: [24360] }, { ...window(31_000), compute: [24360] }), null);
+});
+
+test("co-tenant bracket: samples the card's memory.used through nvidia-smi and refuses an unreadable value", async () => {
+  const calls = [];
+  const pmon = "# gpu         pid   type     fb   ccpm    sm    mem\n    1      24360     C      -      -     -      -\n    1      11288   C+G      -      -     -      -\n    1          -     -      -      -     -      -\n";
+  const runCommand = async (command, argv, options) => {
+    calls.push([command, ...argv]); assert.equal(options.timeoutMs, 30_000, "a hung nvidia-smi cannot stall the walk");
+    return { stdout: argv[0] === "pmon" ? pmon : "2130\n" };
+  };
+  const window = await sampleCardBaseline("1", { runCommand, sleep: async () => {} });
+  assert.deepEqual(window, { samples: [2130, 2130, 2130, 2130, 2130], min: 2130, max: 2130, compute: [24360] });
+  assert.deepEqual(calls[0], ["nvidia-smi", "-i", "1", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]);
+  assert.deepEqual(calls.at(-1), ["nvidia-smi", "pmon", "-i", "1", "-c", "1", "-s", "um"]);
+  await assert.rejects(sampleCardBaseline("1", { runCommand: async () => ({ stdout: "[N/A]" }), sleep: async () => {} }), /unreadable memory\.used/);
+});
+
+test("co-tenant bracket: the after window waits for the exited adapter's memory to leave the counter, up to a bound", async () => {
+  const before = { samples: [2130], min: 2130, max: 2130 };
+  const readings = [20_000, 8_000, 2_140];
+  let now = 0;
+  const after = await settledCardBaseline("1", before, {
+    sample: async () => { const min = readings.shift(); return { samples: [min], min, max: min }; },
+    clock: () => now, sleep: async (ms) => { now += ms; },
+  });
+  assert.equal(after.min, 2_140);
+  now = 0;
+  const stuck = await settledCardBaseline("1", before, {
+    sample: async () => ({ samples: [9_000], min: 9_000, max: 9_000 }), clock: () => now, sleep: async (ms) => { now += ms; },
+  });
+  assert.equal(stuck.min, 9_000, "a co-tenant that stays up is reported, not waited on forever");
+  assert.ok(now >= CO_TENANT_SETTLE_MS);
+});
+
+async function bracketedCapture(windows, activity = []) {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = "t";
+  process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = "t@t";
+  const row = { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot } };
+  const sampled = [];
+  const context = stubContext(checkout, {
+    coTenantGpu: () => "1",
+    // The settle wait has its own test; here each attempt's after window is one sample.
+    settledCardBaseline: (gpu, _before, { sample, env }) => sample(gpu, { env }),
+    monitorCoTenants: () => ({ stop: async () => activity.shift() ?? [] }),
+    sampleCardBaseline: async () => { const min = windows[sampled.length]; sampled.push(min); return { samples: [min], min, max: min }; },
+  });
+  return { result: await measureAnchor(row, context), context, sampled };
+}
+
+const PMON = (rows) => "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa     fb   ccpm    command\n"
+  + "# Idx           #    C/G      %      %      %      %      %      %     MB     MB    name\n"
+  + rows.map((row) => `    1  ${row}`).join("\n") + "\n";
+
+test("co-tenant activity: pmon columns are read from its header, and an empty card has no rows", () => {
+  const rows = parsePmon(PMON(["24360     C      0      0      -      -      -      -      -      -    sceneworks-api.", "11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"]));
+  assert.deepEqual(rows[0], { pid: 24360, type: "C", sm: "0", mem: "0", command: "sceneworks-api." });
+  assert.equal(rows[1].sm, "12");
+  assert.deepEqual(parsePmon(PMON(["    -     -      -      -      -      -      -      -      -      -    -"])), []);
+  assert.equal(parsePmon("garbage"), null);
+});
+
+test("co-tenant activity: a resident model that sits idle is fine; activity, a newcomer or blind pmon refuses", () => {
+  const resident = [24360];
+  const at = (row) => coTenantActivity(parsePmon(PMON([row])), resident);
+  assert.deepEqual(at("24360     C      0      0      -      -      -      -      -      -    sceneworks-api."), []);
+  assert.deepEqual(at("31337     C     97     40      -      -      -      -      -      -    memory-candle-a"), [], "our own adapter is not a co-tenant");
+  assert.deepEqual(at("11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"), [], "desktop composition is not judged");
+  assert.match(at("24360     C     35      8      -      -      -      -      -      -    sceneworks-api.")[0], /co-tenant 24360 .* was active during the capture \(sm 35%, mem 8%\)/);
+  assert.match(at("24360     C      -      -      -      -      -      -      -      -    sceneworks-api.")[0], /activity unreadable/);
+  assert.match(at("9001     C      0      0      -      -      -      -      -      -    python.exe")[0], /compute process 9001 \(python\.exe\) appeared during the capture/);
+  assert.match(coTenantActivity(null, resident)[0], /unreadable/);
+});
+
+test("co-tenant activity: the monitor polls for the whole capture and reports what it saw once stopped", async () => {
+  let calls = 0;
+  const runCommand = async (_command, argv) => {
+    assert.equal(argv[0], "pmon");
+    calls += 1;
+    return { stdout: PMON([`24360     C      ${calls === 2 ? 50 : 0}      0      -      -      -      -      -      -    sceneworks-api.`]) };
+  };
+  const monitor = monitorCoTenants("1", [24360], { runCommand, pollMs: 1 });
+  while (calls < 4) await new Promise((done) => setTimeout(done, 2));
+  const reasons = await monitor.stop();
+  assert.equal(reasons.length, 1, "a transient seen once is remembered after it ends");
+  assert.match(reasons[0], /sm 50%/);
+});
+
+test("co-tenant bracket: activity during the capture discards the attempt even when the windows match", async () => {
+  const { result, context, sampled } = await bracketedCapture([31_000, 31_000, 31_000, 31_000], [["co-tenant 24360 (sceneworks-api.) was active during the capture (sm 35%, mem 8%)"], []]);
+  assert.equal(result.status, "committed", result.reason);
+  assert.equal(sampled.length, 4, "the active attempt was retried");
+  assert.equal(context.state.commits.length, 1);
+  assert.match(await readFile(result.log, "utf8"), /attempt 1: .*MOVED: co-tenant 24360 .*active during the capture[\s\S]*attempt 2: .* held/);
+});
+
+test("co-tenant bracket: a capture during which the co-tenant moved is discarded and retried, then committed", async () => {
+  const { result, context, sampled } = await bracketedCapture([31_000, 40_000, 40_000, 40_010]);
+  assert.equal(result.status, "committed", result.reason);
+  assert.equal(sampled.length, 4, "two attempts, each bracketed before and after");
+  assert.equal(context.state.commits.length, 1);
+  assert.match(await readFile(result.log, "utf8"), /attempt 1: .*MOVED: baseline moved \+9000 MiB[\s\S]*attempt 2: .* held/);
+});
+
+test("co-tenant bracket: a card that moves in every attempt refuses the cell instead of committing a bad peak", async () => {
+  const windows = [];
+  for (let attempt = 0; attempt < CO_TENANT_ATTEMPTS; attempt += 1) windows.push(1_000, 9_000 + attempt);
+  const { result, context, sampled } = await bracketedCapture(windows);
+  assert.equal(result.status, "capture_failed");
+  assert.match(result.reason, new RegExp(`co-tenant changed the card in all ${CO_TENANT_ATTEMPTS} attempts`));
+  assert.equal(sampled.length, 2 * CO_TENANT_ATTEMPTS);
+  assert.equal(context.state.commits.length, 0);
+});
+
 test("one anchor lands as one commit carrying the evidence, the packaged-source entry, and the regenerated files", async () => {
   const checkout = await stubCheckout();
   const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
@@ -8205,7 +8341,7 @@ function assertOwnedCudaWalk(workflow) {
   const candle = workflow.slice(workflow.indexOf("\n  candle:"));
   assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "actual shared Windows job required");
   assert.doesNotMatch(candle, /gpu-preflight\.sh/, "no name-based reap or CVD-as-NVML-index census before/inside owned walk");
-  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- bash scripts\/ci\/memory-catalog\/run\.sh/,
+  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- \$gitBash scripts\/ci\/memory-catalog\/run\.sh/,
     "actual inherited CUDA ordinal UUID guard must own the WHOLE unchanged walk");
   assert.match(candle, /CUDA_VISIBLE_DEVICES: "1"/, "original device choice is not retargeted");
   assert.doesNotMatch(candle, /--physical-indices 1/, "legacy CUDA ordinal is not guessed as NVML index");
@@ -8216,9 +8352,9 @@ test("catalog walk uses exact-UUID owned lifetime instead of destructive name-ba
   const beforeWalk = workflow.indexOf("      - name: Walk the catalog\n", workflow.indexOf("\n  candle:"));
   const broadKill = workflow.slice(0, beforeWalk) + "      - name: unsafe reap\n        run: bash scripts/ci/memory-catalog/gpu-preflight.sh\n" + workflow.slice(beforeWalk);
   assert.throws(() => assertOwnedCudaWalk(broadKill), /name-based reap/);
-  const unguarded = workflow.replace(/python -I scripts\/ci\/windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- /, "");
+  const unguarded = workflow.replace(/python -I scripts\/ci\/windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- /, "");
   assert.throws(() => assertOwnedCudaWalk(unguarded), /WHOLE unchanged walk/);
-  const wrongBinding = workflow.replace("--cuda-ordinals 0 -- bash", "--physical-indices 1 -- bash");
+  const wrongBinding = workflow.replace("--cuda-ordinals 0 --require-physical-index 1 -- $gitBash", "--physical-indices 1 -- $gitBash");
   assert.throws(() => assertOwnedCudaWalk(wrongBinding), /WHOLE unchanged walk/);
 });
 
