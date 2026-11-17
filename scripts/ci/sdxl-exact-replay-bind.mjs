@@ -11,12 +11,10 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest, sourceIdentity, verifyMembers } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = '886b915c2830e64d5887297e3b797c816ada0e38';
 // Derived from AlphaSchedule/DiscreteModelSampling/Normal 20-step source and
 // NumericScheduleDigest::f32_values, then canonicalized by the proof harness.
-// AlphaSchedule, DiscreteModelSampling, Normal scheduling and the SDXL provider
-// remain unchanged from b387b95a to this pin. The proof also compares the
-// completed runtime schedule to this digest, so later numerical drift refuses.
+// The private preparation binds the exact inference pin. The completed proof
+// also compares the runtime schedule to this digest, so schedule drift refuses.
 const SCHEDULE_SHA256 = 'e6c4fabcef6944e589759bd092184dc47baa5786c50cd92870c695bd36092289';
 let stage = 'dispatch';
 let failureHint = '';
@@ -90,7 +88,6 @@ async function main() {
   assert.equal(sourceSha, process.env.GITHUB_SHA, 'source changed');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim(), '', 'checkout dirty');
   const pin = await inferenceRevision(ROOT);
-  assert.equal(pin, PIN, 'schedule metadata requires a new pinned-source calculation');
   stage = 'preparation';
   const privateDir = path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay');
   const trustedDir = await realpath(privateDir);
