@@ -16188,3 +16188,77 @@ fn the_packaged_minimax_h3_image_anchor_prices_the_mlx_ladder() {
         "an overlay-free anchor never prices a LoRA request"
     );
 }
+
+/// SW-F363: the floor arm's activation residue (`mlx_image_anchor_activation_residue`, called with
+/// no engaged rungs as the ladder's third tier calls it) prices the packaged always-staging
+/// `minimax_h3_image` q4 anchor at the STAGED regime; with the always-staging fact cleared the
+/// same staged anchor would describe a lane that can run co-resident, and it refuses.
+#[test]
+fn the_minimax_h3_image_floor_residue_is_the_staged_regime_and_only_on_an_always_staging_lane() {
+    use sceneworks_core::memory_anchor::{AnchorBackend, ImageDeriveRequest, RequestRegime};
+
+    let mut generator = fixture_generator();
+    let contract = generator.contract.as_mut().expect("fixture contract");
+    contract.provider_id = "minimax_h3_image".to_owned();
+    contract.load_shape = gen_core::LoadShape::EagerMaterialization;
+    let contract = generator.contract.as_ref().expect("contract");
+    let plan = MlxRequestPlan {
+        engine_id: "minimax_h3_image",
+        model_id: "minimax_h3_image".to_owned(),
+        ..fixture_plan()
+    };
+    let geometry = MemoryGeometry {
+        width: 2048,
+        height: 2048,
+        batch: 1,
+        frames: 1,
+        reference_count: 0,
+    };
+    let facts = crate::video_admission::architecture_facts_from_contract(contract);
+    let packaged = sceneworks_core::memory_anchor::packaged_memory_anchors()
+        .expect("the packaged anchor store")
+        .clone();
+    let anchor = packaged
+        .image_anchor_for("minimax_h3_image", AnchorBackend::Mlx, "q4")
+        .expect("the packaged minimax_h3_image q4 MLX anchor")
+        .clone();
+    let expected = anchor
+        .derive_phase_activation_residues(
+            &ImageDeriveRequest::new(geometry.width, geometry.height, RequestRegime::staged()),
+            crate::video_admission::anchor_component_bytes(contract.asset_facts),
+            facts,
+        )
+        .expect("the staged regime prices the request");
+    let residue = |store| {
+        with_injected_image_anchor_store(store, || {
+            mlx_image_anchor_activation_residue(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                &[],
+                gen_core::MemoryStrategyParameters::default(),
+                facts,
+            )
+        })
+    };
+    assert_eq!(
+        residue(packaged.clone()),
+        Some((
+            expected
+                .conditioning
+                .max(expected.denoise)
+                .max(expected.decode),
+            anchor.id.clone()
+        ))
+    );
+
+    let mut coresident_lane = packaged;
+    for row in &mut coresident_lane.anchors {
+        if row.model_id == "minimax_h3_image" {
+            row.staged_residency_unconditional = false;
+        }
+    }
+    assert_eq!(residue(coresident_lane), None);
+}

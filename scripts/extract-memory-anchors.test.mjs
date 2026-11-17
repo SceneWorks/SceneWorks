@@ -1839,6 +1839,28 @@ test("an underived reason names the measured REGIME, never a missing geometry sp
     ),
     null,
   );
+  // SW-F363: on an always-staging MLX engine the STAGED eager unbounded render is the widest one,
+  // so it derives and the resident one (a render that cannot happen) does not; on any other
+  // provider the staged render stays underived.
+  const alwaysStaging = new Set(["always_stager"]);
+  const staged = (provider) =>
+    candidate({
+      provider,
+      measuredRegime: {
+        staged: true,
+        decodeTiled: false,
+        attentionChunked: false,
+        transformerWindowed: false,
+      },
+    });
+  assert.equal(underivedReasonFor(staged("always_stager"), alwaysStaging), null);
+  assert.match(underivedReasonFor(staged("other"), alwaysStaging), /bounded rungs/);
+  assert.match(
+    underivedReasonFor(candidate({ provider: "always_stager" }), alwaysStaging),
+    /bounded rungs/,
+  );
+  // The default reads the shipped declaration, which names minimax_h3_image on MLX.
+  assert.equal(underivedReasonFor(staged("minimax_h3_image")), null);
 });
 
 test("the LTX-2.5 component deltas are priced from the committed weights inventory, per tier and axis", async () => {
