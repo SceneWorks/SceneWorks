@@ -671,6 +671,8 @@ pub(super) async fn generate_pulid_flux_stream(
                         on_progress,
                     ) {
                         Ok(completed) => completed,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => return Err(error),
                     };

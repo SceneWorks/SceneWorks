@@ -199,6 +199,8 @@ fn generate_control_item<P: CandleStrictControl>(
     match provider.generate_one(model, control, plan, seed, cancel, preview, on_progress) {
         Ok(_) if cancel.is_cancelled() => Ok(None),
         Ok(completed) => Ok(Some(completed)),
+        // A poisoned process keeps its fatal class even when cancellation raced it.
+        Err(error @ WorkerError::ProcessPoisoned(_)) => Err(error),
         Err(_) if cancel.is_cancelled() => Ok(None),
         Err(error) => Err(error),
     }
@@ -563,6 +565,15 @@ mod report_tests {
             if seed == 3 {
                 cancel.cancel();
             }
+            if seed == 5 {
+                // A device fault that races a user cancel.
+                cancel.cancel();
+                return Err(WorkerError::ProcessPoisoned("device lost".into()));
+            }
+            if seed == 6 {
+                cancel.cancel();
+                return Err(WorkerError::Engine("canceled mid-denoise".into()));
+            }
             Ok((
                 Image {
                     width: seed as u32,
@@ -572,6 +583,44 @@ mod report_tests {
                 unavailable(&format!("attempt-{seed}")),
             ))
         }
+    }
+
+    /// Codex P1 on PR #3434: the CUDA FLUX.1 strict-control route has no cache boundary to latch
+    /// quarantine, so a `ProcessPoisoned` that races a cancel must still fail the item with its
+    /// fatal class rather than read as a clean cancel. An ordinary error under cancel stays a cancel.
+    #[test]
+    fn strict_control_keeps_process_poison_when_cancel_raced_it() {
+        let control = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0; 3],
+        };
+        let preview = gen_core::PreviewSink::default();
+        let poisoned = generate_control_item(
+            &Fixture,
+            &(),
+            &control,
+            None,
+            5,
+            &CancelFlag::default(),
+            &preview,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(poisoned, Err(WorkerError::ProcessPoisoned(ref detail)) if detail == "device lost"),
+            "{poisoned:?}"
+        );
+        let canceled = generate_control_item(
+            &Fixture,
+            &(),
+            &control,
+            None,
+            6,
+            &CancelFlag::default(),
+            &preview,
+            &mut |_| {},
+        );
+        assert!(matches!(canceled, Ok(None)), "{canceled:?}");
     }
 
     #[test]

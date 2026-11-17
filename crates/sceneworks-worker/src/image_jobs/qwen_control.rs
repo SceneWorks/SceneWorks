@@ -474,9 +474,10 @@ impl CandleStrictControl for QwenStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!(
-                    "Qwen 2512-Fun strict-control generation failed: {error}"
-                ))
+                super::render::generation_error(
+                    "Qwen 2512-Fun strict-control generation failed",
+                    error,
+                )
             })?;
         completed_control_image(completed)
     }

@@ -653,6 +653,13 @@ pub(super) async fn generate_mage_finetuned_stream(
                         &mut *on_progress,
                     ) {
                         Ok(output) => output,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            return Err(super::render::generation_error(
+                                "Fine-tuned Mage-Flow generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(

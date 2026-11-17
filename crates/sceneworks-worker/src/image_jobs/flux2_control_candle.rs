@@ -498,7 +498,7 @@ impl CandleStrictControl for Flux2StrictControl {
             None => model.generate_with_execution_report(&req, control, on_progress),
         };
         let completed = generated.map_err(|error| {
-            WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
+            super::render::generation_error("FLUX.2-dev strict-pose generation failed", error)
         })?;
         completed_control_image(completed)
     }

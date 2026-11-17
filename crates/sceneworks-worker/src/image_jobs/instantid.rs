@@ -1794,6 +1794,16 @@ pub(super) async fn generate_instantid_stream(
                         // still gets its terminal `finish`, which is what synchronizes the device and
                         // releases the request-local allocations. A cleanup error on an already-
                         // failing path is not allowed to mask the reason we are leaving.
+                        // A poisoned process keeps its fatal class even when cancellation raced it, and
+                        // its scope is never finished: like the shared memory-strategy seam, nothing may
+                        // submit more device work after the provider declared the process unsafe.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            std::mem::forget(scope);
+                            return Err(super::render::generation_error(
+                                "InstantID generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => {
                             let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
                             return Ok(None);
@@ -1852,6 +1862,16 @@ pub(super) async fn generate_instantid_stream(
                             &mut *on_progress,
                         ) {
                             Ok(completed) => completed,
+                            // A poisoned process keeps its fatal class even when cancellation raced it, and
+                            // its scope is never finished: like the shared memory-strategy seam, nothing may
+                            // submit more device work after the provider declared the process unsafe.
+                            Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                                std::mem::forget(scope);
+                                return Err(super::render::generation_error(
+                                    "InstantID face-restore failed",
+                                    error,
+                                ));
+                            }
                             Err(_) if cancel.is_cancelled() => {
                                 let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
                                 return Ok(None);

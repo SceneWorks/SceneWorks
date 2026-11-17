@@ -430,7 +430,7 @@ impl CandleStrictControl for KolorsStrictControl {
                 on_progress,
             )
             .map_err(|error| {
-                WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
+                super::render::generation_error("Kolors strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }

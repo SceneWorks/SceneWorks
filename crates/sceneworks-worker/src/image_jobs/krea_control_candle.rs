@@ -712,7 +712,7 @@ impl CandleStrictControl for KreaStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
+                super::render::generation_error("Krea 2 strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }

@@ -544,7 +544,7 @@ impl CandleStrictControl for ZImageStrictControl {
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
             .map_err(|error| {
-                WorkerError::Engine(format!("Z-Image strict-pose generation failed: {error}"))
+                super::render::generation_error("Z-Image strict-pose generation failed", error)
             })?;
         completed_control_image(completed)
     }

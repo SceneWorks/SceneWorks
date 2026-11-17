@@ -533,6 +533,13 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                         &mut *on_progress,
                     ) {
                         Ok(completed) => completed,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            return Err(super::render::generation_error(
+                                "Kolors IP-Adapter generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(

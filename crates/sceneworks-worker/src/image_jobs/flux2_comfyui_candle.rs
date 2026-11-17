@@ -565,6 +565,13 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                     let completed =
                         match model.generate_with_execution_report(&request, &mut *on_progress) {
                             Ok(completed) => completed,
+                            // A poisoned process keeps its fatal class even when cancellation raced it.
+                            Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                                return Err(super::render::generation_error(
+                                    "ComfyUI FLUX.2-dev generation failed",
+                                    error,
+                                ));
+                            }
                             Err(_) if cancel.is_cancelled() => return Ok(None),
                             Err(error) => {
                                 return Err(WorkerError::Engine(format!(
