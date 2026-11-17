@@ -769,6 +769,72 @@ class WaitReportingTests(unittest.TestCase):
         self.assertNotIn("argv", cancel["partial_receipt"])
         self.assertEqual(again["signal"], "SIGINT")
 
+    def run_main(self, run_id, execute, release):
+        """Drive main with the real cancel handler captured; return (code, stdout, stderr, receipt)."""
+        import contextlib, io
+        env = {"GITHUB_RUN_ID": str(run_id), "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.out), "PUBLIC": str(self.out)}
+        binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+        printed, logged = io.StringIO(), io.StringIO()
+        self.installed, self.handles = [], [object()]
+        with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+             patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                 "--cuda-ordinals", "0", "--", "bash", "run.sh"]), \
+             patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+             patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+             patch.object(shared, "resolve_binding", return_value=binding), \
+             patch.object(shared, "claim_uuids", return_value=([self.two], self.handles, {"GPU-two": {}}, 0)), \
+             patch.object(shared, "complete_resource", return_value=0), \
+             patch.object(shared, "release_transaction", release), \
+             patch.object(shared, "install_cancel_handler", side_effect=lambda handler: self.installed.append(handler) or {}), \
+             patch.object(shared, "execute_owned", execute), \
+             contextlib.redirect_stdout(printed), contextlib.redirect_stderr(logged):
+            code = shared.main()
+        receipt = json.loads((self.out / f"sceneworks-cuda-execution-{run_id}-1-memory-catalog-candle/resource-receipt.json").read_text())
+        return code, printed.getvalue(), logged.getvalue(), receipt
+
+    def test_a_cancel_during_the_child_releases_once_writes_the_receipt_and_ends_with_the_summary(self):
+        release = Mock()
+        execute = Mock(side_effect=lambda *_, **__: self.installed[0](shared.signal.SIGTERM, None))
+        code, printed, logged, receipt = self.run_main(81, execute, release)
+        self.assertEqual(code, 1)
+        release.assert_called_once()
+        self.assertIs(release.call_args.args[0], self.handles)
+        self.assertEqual(receipt["error"], "KeyboardInterrupt: cancelled by signal %d" % shared.signal.SIGTERM)
+        summary = json.loads(printed.strip().splitlines()[-1])
+        self.assertIs(summary["resource_completed"], False)
+        self.assertTrue(summary["error"].startswith("KeyboardInterrupt"))
+        self.assertIn('"event": "cancel"', logged)
+
+    def test_a_first_signal_during_cleanup_only_prints_and_never_interrupts_release_or_receipt(self):
+        released = []
+        def release(handles, service, locker):
+            self.installed[0](shared.signal.SIGTERM, None)  # Actions cancel lands mid-release
+            released.append(handles)
+        execute = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+        code, printed, logged, receipt = self.run_main(82, execute, release)
+        self.assertEqual(released, [self.handles])
+        self.assertNotIn("error", receipt)
+        self.assertEqual(json.loads(printed.strip().splitlines()[-1])["resource_receipt"].split("/")[-1], "resource-receipt.json")
+        self.assertIn('"event": "cancel"', logged)
+
+    def test_install_skips_missing_signals_tolerates_off_main_thread_and_restores(self):
+        calls = []
+        def fake_signal(number, handler):
+            calls.append((number, handler)); return f"previous-{number}"
+        posix = SimpleNamespace(SIGTERM=15, SIGINT=2, signal=fake_signal)  # no SIGBREAK off Windows
+        handler = object()
+        previous = shared.install_cancel_handler(handler, posix)
+        self.assertEqual(calls, [(15, handler), (2, handler)])
+        self.assertEqual(previous, {15: "previous-15", 2: "previous-2"})
+        calls.clear()
+        shared.restore_signal_handlers(previous, posix)
+        self.assertEqual(calls, [(15, "previous-15"), (2, "previous-2")])
+        def off_main_thread(number, handler):
+            raise ValueError("signal only works in main thread")
+        windows = SimpleNamespace(SIGTERM=15, SIGINT=2, SIGBREAK=21, signal=off_main_thread)
+        self.assertEqual(shared.install_cancel_handler(handler, windows), {})
+        shared.restore_signal_handlers({15: None}, windows)  # never raises
+
 
 if __name__ == "__main__":
     unittest.main()

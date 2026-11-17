@@ -641,7 +641,8 @@ def release_transaction(gpu_handles, service_handle, locker):
 
 def cancel_handler(receipt, reporter):
     """On a cancel signal, print the current wait and the partial receipt, then unwind once through
-    main's existing release/receipt path. Later signals only print; they never interrupt cleanup."""
+    main's existing release/receipt path. Later signals, and any signal after `disarm()` (main calls it
+    as soon as its body exits), only print: they never interrupt lock release or the receipt."""
     seen = []
     def handle(signum, _frame):
         partial = {key: value for key, value in receipt.items() if key != "argv"}
@@ -653,6 +654,7 @@ def cancel_handler(receipt, reporter):
         if not seen:
             seen.append(signum)
             raise KeyboardInterrupt(f"cancelled by signal {signum}")
+    handle.disarm = lambda: seen.append(None)
     return handle
 
 
@@ -721,7 +723,8 @@ def main():
     deadline = time.monotonic() + args.budget_minutes * 60
     receipt = resource_receipt(args.actor, command, args.admission_policy)
     reporter = WaitReporter()
-    previous_handlers = install_cancel_handler(cancel_handler(receipt, reporter))
+    cancel = cancel_handler(receipt, reporter)
+    previous_handlers = install_cancel_handler(cancel)
     handles = []
     service_handle = None
     code = 1
@@ -766,8 +769,10 @@ def main():
         receipt["child"] = result
         code = complete_resource(receipt, result, devices, guard, out, baselines, args.admission_policy)
     except BaseException as error:
+        cancel.disarm()
         receipt["error"] = f"{type(error).__name__}: {error}"
     finally:
+        cancel.disarm()  # from here a cancel only prints; release, receipt and summary always finish
         try:
             # Global order: service first, then exact GPU set; release in reverse.
             release_transaction(handles, service_handle, msvcrt)
