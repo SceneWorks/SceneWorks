@@ -802,6 +802,10 @@ describe("DatasetPromptBatchDialog", () => {
       // No size served for bf16 in this catalog: none rather than a guessed one.
       "Full precision — not installed",
     ]);
+    // The tier choice says what it costs: full precision is about half the describe throughput.
+    expect(document.body.querySelector('[data-tier-hint="speed"]').textContent).toContain(
+      "Full precision takes about twice as long per image",
+    );
     expect(tierInput("q4").checked).toBe(true);
     // The prompt editor follows the 27B's own default, as for the Vision Captioner.
     expect(trainingApi.defaultDescribePrompt).toHaveBeenLastCalledWith("t", expect.anything(), VISION_DESCRIBE_MODEL_REPO);
