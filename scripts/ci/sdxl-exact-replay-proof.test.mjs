@@ -8,7 +8,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch, validatePlan, verifyMembers,
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
-  finalizeEvidence } from './sdxl-exact-replay-proof.mjs';
+  finalizeEvidence, finalizeArtifacts } from './sdxl-exact-replay-proof.mjs';
+import { failureDiagnostic } from './sdxl-exact-replay-diagnostic.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 import { validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
@@ -164,6 +165,72 @@ test('task DB uses supported read-only SQLite and cannot mutate worker/receipt r
     assert.equal(hash(await readFile(file)), before);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+test('failure summaries allow only fixed stages, error classes and bounded resource metadata', () => {
+  const privateText = 'C:\\private\\model.bin pid=12345 secret';
+  const resource = { schema_version: 1, kind: 'cuda-execution-resource-lease-v1', actor: 'sdxl-exact-replay',
+    resource_completed: false, error: `TimeoutError: ${privateText}`, lock_wait_seconds: 1.23456,
+    child: { timeout: true, stdout: privateText, pid: 12345 }, argv: [privateText], binding: { privateText } };
+  const report = failureDiagnostic({ failureStage: 'render', failureErrorClass: 'Error', failureCheck: privateText, jobs: [privateText] }, resource);
+  assert.deepEqual(report, { version: 1, kind: 'sdxl-exact-replay-failure', accepted: false, bodyAccepted: false,
+    proof: { status: 'available', stage: 'render', errorClass: 'Error' },
+    resource: { status: 'available', stage: 'child-result-recorded', errorClass: 'TimeoutError',
+      lockWaitSeconds: 1.235, childTimeout: true, resource_completed: false } });
+  assert.doesNotMatch(JSON.stringify(report), /private|model|12345|secret|stdout|argv/);
+  const unknown = failureDiagnostic({ failureStage: privateText, failureErrorClass: privateText }, { ...resource, error: privateText });
+  assert.equal(unknown.proof.stage, 'unknown'); assert.equal(unknown.proof.errorClass, 'unknown'); assert.equal(unknown.resource.errorClass, 'unknown');
+  for (const wait of ['123', -1, 86401, Infinity, NaN, {}, null]) {
+    assert.equal(failureDiagnostic(null, { ...resource, lock_wait_seconds: wait }).resource.lockWaitSeconds, null);
+  }
+  assert.equal(failureDiagnostic(null, { ...resource, child: { timeout: 'true' } }).resource.childTimeout, null);
+  assert.equal(failureDiagnostic(null, { ...resource, error: `resource release failed: OSError: ${privateText}` }).resource.stage, 'resource-release');
+  assert.deepEqual(failureDiagnostic(null, { ...resource, actor: 'other' }).resource, { status: 'unavailable' });
+});
+test('finalize writes a public refusal after a guard timeout even without child evidence', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sdxl-finalize-'));
+  try {
+    const output = path.join(root, 'output'), resourceFile = path.join(root, 'resource.json');
+    const resource = { schema_version: 1, kind: 'cuda-execution-resource-lease-v1', actor: 'sdxl-exact-replay',
+      resource_completed: false, lock_wait_seconds: 2, child: { timeout: true, pid: 12345 } };
+    await writeFile(resourceFile, JSON.stringify(resource));
+    await assert.rejects(finalizeArtifacts(output, resourceFile), /did not complete/);
+    const file = path.join(output, 'evidence.json');
+    const report = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(report.accepted, false); assert.equal(report.bodyAccepted, false);
+    assert.deepEqual(report.proof, { status: 'unavailable' });
+    assert.equal(report.resource.childTimeout, true);
+    assert.doesNotMatch(JSON.stringify(report), /12345|pid/);
+    for (const content of ['{malformed', ' '.repeat(1024 * 1024 + 1), 'null', '[]']) {
+      await writeFile(file, content); await writeFile(resourceFile, content);
+      await assert.rejects(finalizeArtifacts(output, resourceFile));
+      const invalid = JSON.parse(await readFile(file, 'utf8'));
+      assert.deepEqual(invalid.proof, { status: 'unavailable' });
+      assert.deepEqual(invalid.resource, { status: 'unavailable' });
+      assert.equal(invalid.accepted, false);
+    }
+    await rm(file); await rm(resourceFile);
+    await assert.rejects(finalizeArtifacts(output, resourceFile));
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).accepted, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test('finalize retains valid acceptance and sanitizes failed existing proof evidence', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sdxl-finalize-valid-'));
+  try {
+    const file = path.join(root, 'evidence.json'), resourceFile = path.join(root, 'resource.json');
+    const evidence = { bodyAccepted: true, deviceUuid: uuid, physicalIndex: 1 };
+    const resource = { resource_completed: true, binding: { kind: 'context-free-cuda-ordinal-uuid',
+      devices: [{ index: 1, uuid }], mapping: [{ cuda_ordinal: 0, uuid, nvml_index: 1 }] } };
+    await writeFile(file, JSON.stringify(evidence)); await writeFile(resourceFile, JSON.stringify(resource));
+    assert.equal((await finalizeArtifacts(root, resourceFile)).accepted, true);
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).resourceReceiptSha256, digest(resource));
+    await writeFile(file, JSON.stringify({ ...evidence, bodyAccepted: false, failureStage: 'completed_identity',
+      failureErrorClass: 'AssertionError', failureCheck: 'C:/private/model.bin', jobs: ['secret'] }));
+    await assert.rejects(finalizeArtifacts(root, resourceFile));
+    const failure = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(failure.accepted, false); assert.equal(failure.proof.stage, 'completed_identity');
+    assert.equal(failure.proof.errorClass, 'AssertionError');
+    assert.doesNotMatch(JSON.stringify(failure), /private|model.bin|secret/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 test('workflow only dispatches manually and uploads bounded evidence, never private state', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/server-candle-linux.yml', import.meta.url), 'utf8');
   assert.match(workflow, /on:\n  workflow_dispatch:/);
@@ -180,7 +247,7 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.doesNotMatch(workflow, /options:.*sdxl-exact-replay/);
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]/);
-  assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0/);
+  assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 30 --cuda-ordinals 0/);
   assert(workflow.indexOf('sdxl-exact-replay-proof.mjs finalize') < workflow.indexOf('sdxl-exact-replay-seal.mjs'));
   assert.match(workflow, /name: Seal the reviewed qualification into a private replay plan\n        if: \$\{\{ success\(\) && fromJSON\(inputs.campaign_run_id\).phase == 'qualify' \}\}/);
   assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_SEAL_REPORT \}\}/);
