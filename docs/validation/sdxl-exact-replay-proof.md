@@ -100,9 +100,9 @@ Before a `qualify` or `replay` dispatch, inform the owner and obtain an explicit
 CodeGraph rule `9fdbfea4-e2fc-4854-8342-79f5b831737f` applies even when a runner is idle.
 Discover both organization and repository runner registrations and group access; select a
 runner with Windows/X64/cuda/**real-weights** labels. Do not infer physical GPU capacity
-from listener count. Reuse the existing `windows_cuda_execution.py` strict-idle UUID lease,
-context-free ordinal mapping, owned Windows Job and post-run drain. No bypass or relaxed
-admission policy is added here.
+from listener count. Reuse the existing `windows_cuda_execution.py` UUID lease and its one
+admission rule (free memory and a stable window), context-free ordinal mapping, owned Windows
+Job and post-run drain. No bypass or per-actor admission policy is added here.
 
 1. **Qualify:** dispatch `qualify` against the final reviewed app/inference candidate and a
    reviewed private plan. The harness runs two fresh count-one jobs through the production
