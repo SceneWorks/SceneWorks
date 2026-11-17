@@ -1493,7 +1493,7 @@ describe("DatasetPromptBatchDialog", () => {
     expect(second.condenseRows.map((row) => row.itemId)).toEqual(["item_b"]);
   });
 
-  it("marks a condensed prompt stale after a field edit and holds Save and Export until it is condensed again", async () => {
+  it("marks a condensed prompt stale after a field edit and holds Save (not Export) until it is condensed again", async () => {
     context.models = [...context.models, KREA];
     await render();
     await chooseFitTo("krea_2_turbo");
@@ -1505,13 +1505,18 @@ describe("DatasetPromptBatchDialog", () => {
     const note = document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ");
     expect(note).toContain("1 row has no usable condensed prompt for Krea 2 Turbo");
     expect(note).toContain("Condense it, or turn Fit to off to save the seven fields.");
+    expect(note).toContain("Export writes it as the seven fields.");
     expect(button("Save prompt batch").disabled).toBe(true);
-    expect(button("Export .json").disabled).toBe(true);
+    // Export still writes what the table holds.
+    expect(button("Export .json").disabled).toBe(false);
     await click(button("Condense for Krea 2 Turbo (1)"));
     await settle();
     const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
     expect(body.condenseRows.map((row) => [row.itemId, row.fields.lighting])).toEqual([["item_a", "Hard noon light"]]);
     expect(body.model).toBe(VISION_CAPTION_MODEL_REPO);
+    // The one-row condense reads as one row, never the whole dataset, and is not a describe.
+    expect(document.body.textContent).toContain("Condensing: 0 of 1 image");
+    expect(button("Describing…")).toBeUndefined();
     // Turning Fit to off is the other way out: the seven fields save.
     await act(async () => nextPoll(snapshot("failed", [], { itemCount: 1 })));
     await settle();
@@ -1768,6 +1773,38 @@ describe("DatasetPromptBatchDialog", () => {
     expect(prompts.every((prompt) => prompt.includes("\nDescription: "))).toBe(true);
   });
 
+  it("condenses over-limit rows again, condenses one row on demand, and filters to the rows needing attention", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([
+      described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+      described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo", { tokens: 1100, over: true }) }),
+      described("item_c", 400, 300, { condensed: condensedFor("krea_2_turbo", { failed: true, text: "" }) }),
+    ]);
+    const shown = () => [...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId);
+    const filter = document.body.querySelector('[data-save-note="attention-filter"] input');
+    expect(document.body.querySelector('[data-save-note="attention-filter"]').textContent).toContain("2 rows that need attention");
+    await act(async () => filter.click());
+    expect(shown()).toEqual(["item_b", "item_c"]);
+
+    const calls = trainingApi.batchDescribeJobs.mock.calls.length;
+    await click(button("Condense over-limit again (1)"));
+    await settle();
+    const over = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[calls][3].body);
+    expect(over).toMatchObject({ fitTo: "krea_2_turbo", model: VISION_CAPTION_MODEL_REPO });
+    expect(over.condenseRows.map((row) => row.itemId)).toEqual(["item_b"]);
+    await act(async () => nextPoll(snapshot("completed", [], { itemCount: 1 })));
+    await settle();
+
+    const again = document.body.querySelector('[data-item-id="item_c"] [data-row-action="condense-again"]');
+    expect(again.disabled).toBe(false);
+    await click(again);
+    await settle();
+    const one = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[calls + 1][3].body);
+    expect(one.condenseRows.map((row) => row.itemId)).toEqual(["item_c"]);
+  });
+
   it("an emptied condensed prompt blocks Save with the same message as a stale row", async () => {
     context.models = [...context.models, KREA];
     await render();
@@ -1777,7 +1814,7 @@ describe("DatasetPromptBatchDialog", () => {
     await act(async () => setText(condensedBox("item_a"), "   "));
     expect(rowNote("item_a", "condensed-empty").textContent).toContain("The condensed prompt is empty");
     expect(button("Save prompt batch").disabled).toBe(true);
-    expect(button("Export .json").disabled).toBe(true);
+    expect(button("Export .json").disabled).toBe(false);
     expect(document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ")).toContain(
       "Condense it, or turn Fit to off to save the seven fields.",
     );

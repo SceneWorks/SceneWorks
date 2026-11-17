@@ -219,9 +219,9 @@ on:
       runner_label:
         description: >-
           Which Mac the mlx lane runs on (ignored for candle). `rw-krea` is the SECOND Mac
-          (nax-macos-2); `nax` is Michael's dev Mac (nax-macos), which is also the app repo's
-          ordinary PR runner. Both label sets were verified against the runners that actually served
-          recent jobs -- see the runbook note before changing either.
+          (nax-macos-2); the `nax` choice selects `nax` + `rw-starvector`, which only Michael's dev Mac
+          (nax-macos) carries. `nax` alone matches BOTH Macs. Check `gh api orgs/SceneWorks/actions/runners`
+          before changing either -- see the runbook note.
         required: true
         type: choice
         options:
@@ -580,11 +580,13 @@ jobs:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     needs: moss-selector-preflight
     name: mlx catalog campaign
-    # `rw-krea` and `nax` are the two macOS label sets verified as carried by a live runner
-    # (nax-macos-2 and nax-macos respectively). A label NO runner carries does not fail the
+    # `rw-krea` is carried only by nax-macos-2 and `rw-starvector` only by nax-macos (checked with
+    # `gh api orgs/SceneWorks/actions/runners`, 2026-11-16). `nax` alone is carried by BOTH Macs, so
+    # the dev-Mac choice must add `rw-starvector`: run 43946963737 asked for nax-macos and landed on
+    # nax-macos-2. A label NO runner carries does not fail the
     # dispatch -- the job queues silently until the run is cancelled -- so this is a closed choice
     # rather than a free-text label.
-    runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
+    runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax","rw-starvector"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
     concurrency:
       group: memory-catalog-campaign-mlx-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
@@ -704,6 +706,26 @@ jobs:
       - name: Bind the persistent Qwen weights
         if: ${{ inputs.qwen_persistent_weights }}
         run: node scripts/ci/memory-catalog/bind-qwen-persistent-cache.mjs
+
+      - name: Provide a Hugging Face CLI for --download-missing
+        # The walk probes `hf` then `huggingface-cli` once and, finding neither, fetches nothing
+        # (run 43975075897 on nax-macos; nax-macos-2 happens to have `hf`). When neither is on PATH,
+        # install the repo's pinned client into a job-private venv under $RUNNER_TEMP -- never the
+        # runner user's Python or Homebrew -- and put its bin on PATH for the later steps. Same
+        # python3.12 + requirements-hf.txt pattern as macos-mlx.yml's provisioning steps.
+        if: ${{ inputs.download_missing }}
+        run: |
+          if command -v hf >/dev/null || command -v huggingface-cli >/dev/null; then
+            echo "Hugging Face CLI already on PATH; not installing one"
+            exit 0
+          fi
+          command -v python3.12 >/dev/null
+          python3.12 --version | grep -E '^Python 3\.12\.'
+          python3.12 -m venv "$RUNNER_TEMP/hf-cli-venv"
+          "$RUNNER_TEMP/hf-cli-venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+          "$RUNNER_TEMP/hf-cli-venv/bin/hf" version
+          echo "$RUNNER_TEMP/hf-cli-venv/bin" >> "$GITHUB_PATH"
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
@@ -997,7 +1019,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 -- bash scripts/ci/memory-catalog/run.sh
-          if ($LASTEXITCODE -ne 0) { throw 'owned CUDA catalog walk failed' }
+          $walkStatus = $LASTEXITCODE
+          if ($walkStatus -ne 0) {
+            # The wrapper prints one JSON line; its receipt (error, child exit) and the walk's own
+            # log and failing cases are printed here, and the receipt is copied into the work dir.
+            node scripts/ci/memory-catalog/walk-report.mjs --work-dir "$env:WORK_DIR_NATIVE" --receipt "$env:RUNNER_TEMP\sceneworks-cuda-execution-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-memory-catalog-candle\resource-receipt.json"
+            throw "owned CUDA catalog walk failed (exit $walkStatus)"
+          }
 
       - name: Push whatever landed
         if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}

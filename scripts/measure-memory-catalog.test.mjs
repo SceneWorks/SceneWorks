@@ -6677,6 +6677,35 @@ test("HF_TOKEN reaches only catalog walks and the bounded SDXL endpoint step tha
   }
 });
 
+// CI_IMPACT: static workflow assertion only; the provisioning step runs on dispatch, never in PR CI.
+test("the mlx lane provisions an hf CLI only under download_missing and only into RUNNER_TEMP", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  const start = workflow.indexOf("\n  mlx:");
+  const end = workflow.indexOf("\n  candle:");
+  assert.ok(start > -1 && end > start, "mlx job located");
+  const job = workflow.slice(start, end);
+  const steps = [...job.matchAll(/      - name: Provide a Hugging Face CLI for --download-missing\n([\s\S]*?)(?=\n      - |$)/g)];
+  assert.equal(steps.length, 1, "exactly one provisioning step");
+  const step = steps[0][1];
+  assert.match(step, /^        if: \$\{\{ inputs\.download_missing \}\}$/m, "gated on download_missing alone");
+  assert.match(step, /if command -v hf >\/dev\/null \|\| command -v huggingface-cli >\/dev\/null; then\n[^\n]*\n\s*exit 0/,
+    "an hf CLI already on PATH skips the install");
+  assert.match(step, /python3\.12 -m venv "\$RUNNER_TEMP\/hf-cli-venv"/);
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/python" -m pip install \\\n\s*--disable-pip-version-check --no-input -r \.github\/requirements-hf\.txt/,
+    "installs the repo-pinned client into the venv");
+  assert.match(step, /echo "\$RUNNER_TEMP\/hf-cli-venv\/bin" >> "\$GITHUB_PATH"/);
+  // huggingface_hub 0.36's `hf` has a `version` subcommand and REFUSES `--version` (exit 2), so the
+  // smoke check must use the subcommand or the step fails on every runner it provisions.
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/hf" version$/m, "smoke-checks with `hf version`");
+  assert.doesNotMatch(step, /bin\/hf" --version/, "`hf --version` exits 2 on huggingface_hub 0.36");
+  // Nothing outside the job-private venv: no bare pip, no --user, no brew, no HF cache touch.
+  const installs = step.match(/pip install/g) ?? [];
+  assert.equal(installs.length, 1);
+  assert.doesNotMatch(step, /--user|\bbrew\b|pipx|sudo|\brm\b|HF_HOME|huggingface\/hub|DEFAULT_HF_CACHE/);
+  assert.ok(job.indexOf("Provide a Hugging Face CLI") < job.indexOf("      - name: Walk the catalog"), "before the walk");
+  assert.match(await readFile(path.join(ROOT, ".github/requirements-hf.txt"), "utf8"), /^huggingface_hub==\d+\.\d+\.\d+$/m);
+});
+
 test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_9000.0s"), 9000);
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_3s"), 3);
@@ -8040,6 +8069,52 @@ test("--download-missing fetches an EMPTY snapshot too: the hub CLI resumes an i
   const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
   assert.equal(fetched.status, "runnable", fetched.reason);
   assert.equal((await stub.invocations()).length, 1, "the already-staged anchor is never re-fetched");
+});
+
+test("--download-missing completes a PARTIAL snapshot whose shard index names a missing shard, without touching present files", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // Run 43946963737's shape: the pinned tier root EXISTS and holds its index and some shards, but
+  // an earlier fetch was cut short, so a shard its own index names is absent.
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4");
+  await mkdir(tierRoot, { recursive: true });
+  await writeFile(path.join(tierRoot, "model.safetensors.index.json"), JSON.stringify({
+    weight_map: { "a.weight": "present-00001-of-00002.safetensors", "b.weight": "weights.safetensors" },
+  }));
+  const present = path.join(tierRoot, "present-00001-of-00002.safetensors");
+  await writeFile(present, "already here");
+  const presentBefore = await stat(present);
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-partial", hfCache: [hub],
+  };
+
+  // Without the flag: today's weights_missing naming the shard, and no fetch.
+  const idle = await stubHuggingFaceCli();
+  const before = await withStubCli(idle, () => planRun({ ...args, downloadMissing: false }, root));
+  const planned = before.rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(planned.status, "weights_missing");
+  assert.match(planned.reason, /is missing weights\.safetensors, which its own safetensors shard index names beside it/);
+  assert.deepEqual(await idle.invocations(), [], "no fetch without --download-missing");
+
+  // With the flag: one fetch of that pinned repo@revision and tier glob into the same hub, then a
+  // re-probe that finds the completed mirror.
+  const stub = await stubHuggingFaceCli();
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const invocations = await stub.invocations();
+  assert.equal(invocations.length, 1, JSON.stringify(invocations));
+  const [argv] = invocations;
+  assert.equal(argv[1], PROVIDER_FAMILIES.qwen_image.repo);
+  assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION);
+  assert.equal(argv[argv.indexOf("--include") + 1], "q4/*");
+  assert.equal(argv[argv.indexOf("--cache-dir") + 1], hub);
+  const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(fetched.status, "runnable", fetched.reason);
+  assert.equal(fetched.tierRoot, tierRoot);
+  const presentAfter = await stat(present);
+  assert.equal(await readFile(present, "utf8"), "already here", "a present shard is never rewritten");
+  assert.equal(presentAfter.mtimeMs, presentBefore.mtimeMs);
 });
 
 test("with no Hugging Face CLI on PATH, --download-missing says so ONCE and on every cell it silenced", { skip: skipWithoutShebang }, async () => {

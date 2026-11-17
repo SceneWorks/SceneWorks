@@ -649,8 +649,11 @@ def main():
             receipt["error"] = f"resource release failed: {type(error).__name__}: {error}"
             code = 1
         (out / "resource-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"resource_completed": receipt["resource_completed"], "model_inference_proof": False,
-                      "resource_receipt": str(out / "resource-receipt.json")}))
+    # The job log must say WHY on its own: the receipt file sits outside any uploaded artifact.
+    summary = {"resource_completed": receipt["resource_completed"], "model_inference_proof": False,
+               "resource_receipt": str(out / "resource-receipt.json")}
+    summary.update({key: receipt[key] for key in ("error", "child") if key in receipt})
+    print(json.dumps(summary), flush=True)
     return code if code != 0 or receipt["resource_completed"] else 1
 
 
