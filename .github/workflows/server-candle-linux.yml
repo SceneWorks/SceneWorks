@@ -291,7 +291,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
           $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
           if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
-          python -I scripts/ci/windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 120 --cuda-ordinals 0 -- node scripts/ci/sdxl-exact-replay-proof.mjs
+          python -I scripts/ci/windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 30 --cuda-ordinals 0 -- node scripts/ci/sdxl-exact-replay-proof.mjs
           if ($LASTEXITCODE -ne 0) { throw 'SDXL witness or physical drain refused' }
       - name: Require physical cleanup before accepting evidence
         if: ${{ always() }}

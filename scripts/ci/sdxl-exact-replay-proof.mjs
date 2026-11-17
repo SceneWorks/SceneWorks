@@ -9,6 +9,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { fileSha256, sha256 } from '../lib/file-sha256.mjs';
 import { inferenceRevision } from '../lib/inference-provenance.mjs';
+import { failureDiagnostic, readDiagnosticJson, safeErrorClass } from './sdxl-exact-replay-diagnostic.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HEX = /^[a-f0-9]{64}$/;
@@ -367,9 +368,7 @@ async function runProof() {
   } catch (error) {
     // The public artifact must never contain private cache paths, request bodies or runtime logs.
     evidence.failureStage = stage;
-    if (error instanceof assert.AssertionError && /^[A-Za-z0-9 ./:_-]{1,160}$/.test(error.message)) {
-      evidence.failureCheck = error.message;
-    }
+    evidence.failureErrorClass = safeErrorClass(error?.name);
     throw error;
   } finally {
     claimJob = null;
@@ -401,6 +400,24 @@ export function finalizeEvidence(evidence, resource) {
   assert.equal(evidence.accepted, true, 'physical guard did not complete');
   return evidence;
 }
+export async function finalizeArtifacts(output, resourceFile) {
+  assert(typeof output === 'string' && path.isAbsolute(output), 'absolute owned output required');
+  const file = path.join(output, 'evidence.json');
+  const evidence = await readDiagnosticJson(file);
+  const resource = await readDiagnosticJson(resourceFile);
+  try {
+    assert(evidence && resource, 'proof or resource evidence unavailable');
+    finalizeEvidence(evidence, resource);
+    await writeFile(file, JSON.stringify(evidence, null, 2) + '\n');
+    return evidence;
+  } catch {
+    // The guard may have killed the child before its finally block wrote evidence. Preserve a
+    // bounded failure artifact in the existing uploader's path, never acceptance or private state.
+    await mkdir(output, { recursive: true });
+    await writeFile(file, JSON.stringify(failureDiagnostic(evidence, resource), null, 2) + '\n');
+    throw new Error('SDXL proof or physical guard did not complete');
+  }
+}
 async function main() {
   if (process.argv[2] === 'preflight') {
     dispatchInput();
@@ -410,11 +427,7 @@ async function main() {
     const { DatabaseSync } = await import('node:sqlite');
     assert.equal(typeof DatabaseSync, 'function', 'Node SQLite support missing');
   } else if (process.argv[2] === 'finalize') {
-    const output = process.env.SDXL_REPLAY_OUTPUT;
-    const file = path.join(output, 'evidence.json');
-    const evidence = JSON.parse(await readFile(file, 'utf8'));
-    const resource = JSON.parse(await readFile(process.env.SDXL_REPLAY_RESOURCE_RECEIPT, 'utf8'));
-    try { finalizeEvidence(evidence, resource); } finally { await writeFile(file, JSON.stringify(evidence, null, 2) + '\n'); }
+    await finalizeArtifacts(process.env.SDXL_REPLAY_OUTPUT, process.env.SDXL_REPLAY_RESOURCE_RECEIPT);
   } else { assert.equal(process.argv.length, 2, 'unexpected proof arguments'); await runProof(); }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
