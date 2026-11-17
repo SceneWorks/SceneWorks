@@ -4471,6 +4471,13 @@ impl MemoryAnchor {
         {
             return None;
         }
+        // The law scales by the canvas the provider RENDERS on, not the output size it hands back
+        // ([`inference_canvas`]): both sides, so a provider that upsamples small outputs onto a
+        // fixed working canvas is not priced as if its activations tracked the output.
+        let (anchor_width, anchor_height) =
+            inference_canvas(&self.provider, self.geometry.width, self.geometry.height);
+        let (request_width, request_height) =
+            inference_canvas(&self.provider, request.width, request.height);
         let regime = request.regime;
         let measured = self.measured_regime;
         if (measured.decode_tiled && regime.decode_tile.is_none())
@@ -4515,8 +4522,8 @@ impl MemoryAnchor {
 
         // Geometry. Pixel counts need no fact; token counts need the VAE scale and patch size.
         let batch = i128::from(request.batch);
-        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
-        let request_pixels = i128::from(request.width) * i128::from(request.height);
+        let anchor_pixels = i128::from(anchor_width) * i128::from(anchor_height);
+        let request_pixels = i128::from(request_width) * i128::from(request_height);
         // The anchor's records do not carry the prompt length they were measured with, so the
         // anchor side of every token ratio is the documented default; the request side is its
         // own count floored at that default (a shorter prompt is never credited — erring large).
@@ -4540,8 +4547,8 @@ impl MemoryAnchor {
                     + conditioning_tokens
             })
         };
-        let anchor_tokens = tokens(self.geometry.width, self.geometry.height, default_tokens);
-        let request_tokens = tokens(request.width, request.height, conditioning_tokens);
+        let anchor_tokens = tokens(anchor_width, anchor_height, default_tokens);
+        let request_tokens = tokens(request_width, request_height, conditioning_tokens);
         // Linear activation ratio: tokens when the facts allow, else pixels; batch multiplies.
         let (linear_num, linear_den) = match (request_tokens, anchor_tokens) {
             (Some(request_tokens), Some(anchor_tokens)) if anchor_tokens > 0 => {
@@ -4583,36 +4590,35 @@ impl MemoryAnchor {
             let tokens = tokens(width, height, conditioning)?;
             Some(heads * tokens * tokens * element * batch)
         };
-        let den_activation =
-            match score_bytes(self.geometry.width, self.geometry.height, default_tokens, 1) {
-                Some(_) if measured.attention_chunked => {
-                    // The anchor's own denoise was chunked: its residue already holds a chunk
-                    // workspace instead of a score tensor, so there is nothing to separate out.
-                    scale_up(den_residue, linear_num, linear_den)
-                }
-                Some(anchor_scores) => {
-                    let non_score = den_residue - anchor_scores.min(den_residue);
-                    // The chunk budget is capped at the unchunked tensor at the request geometry: a
-                    // chunk larger than the whole tensor materializes the tensor, never more, so the
-                    // chunked rung can never price above the unchunked one.
-                    let unchunked_scores =
-                        score_bytes(request.width, request.height, conditioning_tokens, batch)?;
-                    let score_term = match regime.attention_chunk_scores {
-                        Some(chunk) => (i128::from(chunk)
-                            * i128::from(facts.activation_dtype_width.unwrap_or(1)))
-                        .min(unchunked_scores),
-                        None => unchunked_scores,
-                    };
-                    scale_up(non_score, linear_num, linear_den) + score_term
-                }
-                None => {
-                    let quadratic_num = request_pixels * request_pixels * batch;
-                    let quadratic_den = anchor_pixels * anchor_pixels;
-                    let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
-                    let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
-                    linear.max(quadratic)
-                }
-            };
+        let den_activation = match score_bytes(anchor_width, anchor_height, default_tokens, 1) {
+            Some(_) if measured.attention_chunked => {
+                // The anchor's own denoise was chunked: its residue already holds a chunk
+                // workspace instead of a score tensor, so there is nothing to separate out.
+                scale_up(den_residue, linear_num, linear_den)
+            }
+            Some(anchor_scores) => {
+                let non_score = den_residue - anchor_scores.min(den_residue);
+                // The chunk budget is capped at the unchunked tensor at the request geometry: a
+                // chunk larger than the whole tensor materializes the tensor, never more, so the
+                // chunked rung can never price above the unchunked one.
+                let unchunked_scores =
+                    score_bytes(request_width, request_height, conditioning_tokens, batch)?;
+                let score_term = match regime.attention_chunk_scores {
+                    Some(chunk) => (i128::from(chunk)
+                        * i128::from(facts.activation_dtype_width.unwrap_or(1)))
+                    .min(unchunked_scores),
+                    None => unchunked_scores,
+                };
+                scale_up(non_score, linear_num, linear_den) + score_term
+            }
+            None => {
+                let quadratic_num = request_pixels * request_pixels * batch;
+                let quadratic_den = anchor_pixels * anchor_pixels;
+                let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
+                let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
+                linear.max(quadratic)
+            }
+        };
 
         // Decode: pixel-shaped, so the residue scales in output pixels and batch. Under
         // `bounded_decode` (from an anchor measured untiled — an anchor measured tiled already
@@ -4629,7 +4635,7 @@ impl MemoryAnchor {
             if let Some(element) = facts.activation_dtype_width.filter(|width| *width > 0) {
                 let floor =
                     (request_pixels * (3 * batch * i128::from(element) + 4)).min(dec_scaled);
-                let chunk = tile.chunk_pixels(request.width)?.min(request_pixels);
+                let chunk = tile.chunk_pixels(request_width)?.min(request_pixels);
                 dec_scaled = floor + scale_up(dec_scaled - floor, chunk, request_pixels);
             }
         }
@@ -4746,8 +4752,13 @@ impl MemoryAnchor {
         } else {
             [everything; 3]
         };
-        let pixels = u128::from(request.width) * u128::from(request.height);
-        let anchor_pixels = u128::from(self.geometry.width) * u128::from(self.geometry.height);
+        // Canvas, not output, on both sides ([`inference_canvas`]).
+        let (request_width, request_height) =
+            inference_canvas(&self.provider, request.width, request.height);
+        let (anchor_width, anchor_height) =
+            inference_canvas(&self.provider, self.geometry.width, self.geometry.height);
+        let pixels = u128::from(request_width) * u128::from(request_height);
+        let anchor_pixels = u128::from(anchor_width) * u128::from(anchor_height);
         let scale = |residue: u64, quadratic: bool| {
             let ratio = |numerator: u128, denominator: u128| {
                 u128::from(residue)
@@ -4830,6 +4841,27 @@ impl MemoryAnchor {
             components,
             ArchitectureFacts::default(),
         )
+    }
+}
+
+/// The canvas `provider` renders a `width x height` still on — what its activations are sized
+/// from, and so what the image law scales between an anchor and a request (PR #3441 review).
+///
+/// The identity for every provider except MiniMax-H3-Image, which renders an output below the
+/// default minimum generation area (about 4 MP) on an upscaled canvas and resizes it back. That
+/// mapping is the engines' own: both `mlx-gen-minimax-h3` (`h3_image/memory.rs`,
+/// `h3_image/admission.rs`) and `candle-gen-minimax-h3` (`image_memory_strategy.rs`
+/// `admission_canvas`) size their resources from
+/// [`gen_core::h3_image::generation_canvas`] at
+/// [`gen_core::h3_image::MIN_GENERATION_AREA_DEFAULT`], and SceneWorks never overrides the area.
+pub fn inference_canvas(provider: &str, width: u32, height: u32) -> (u32, u32) {
+    match provider {
+        "minimax_h3_image" => gen_core::h3_image::generation_canvas(
+            width,
+            height,
+            gen_core::h3_image::MIN_GENERATION_AREA_DEFAULT,
+        ),
+        _ => (width, height),
     }
 }
 
