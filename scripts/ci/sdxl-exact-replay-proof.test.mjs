@@ -12,8 +12,8 @@ import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch
 import { failureDiagnostic } from './sdxl-exact-replay-diagnostic.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
-import { validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
-import { validatePlanDispatch } from './sdxl-exact-replay-plan.mjs';
+import { selectProofDevice, validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
+import { boundedPlanWindow, validatePlanDispatch } from './sdxl-exact-replay-plan.mjs';
 import { makeReplayPlan } from './sdxl-exact-replay-seal.mjs';
 
 const hash = (s) => createHash('sha256').update(s).digest('hex');
@@ -108,7 +108,7 @@ test('source, pin, owner window and separate reviewed declaration are mandatory'
   for (const mutation of [ { ownerGo: false }, { goStartsAt: '2026-11-14T00:01:00Z' },
     { goExpiresAt: '2020-01-01' }, { goExpiresAt: '2026-11-14T02:01:00Z' },
     { sourceSha: pin }, { inferenceRevision: sha }, { requestSha256: hash('other') },
-    { scheduleSha256: '' }, { runtimeFiles: [] } ])
+    { scheduleSha256: '' }, { runtimeFiles: [] }, { physicalIndex: 0 } ])
     assert.throws(() => validatePlan({ ...plan, ...mutation }, sha, pin, 'qualify', now));
   assert.throws(() => validatePlan(plan, sha, pin, 'replay', now));
   Object.assign(plan, { qualificationSha256: hash('qualification'), declaration: { scope: SCOPE, candidateSourceSha: sha, candidateInferenceRevision: pin, reviewUrl: 'https://github.com/SceneWorks/inference/pull/1' } });
@@ -125,10 +125,9 @@ test('qualification is immutable and cannot manufacture a deterministic support 
 });
 test('a completed deterministic qualification seals a separate bounded replay plan', () => {
   const { first, second, plan } = pair();
-  plan.physicalIndex = 0;
   const support = { kind: 'deterministic', scope: SCOPE };
   const qualification = { accepted: true, phase: 'qualify', sourceSha: sha, inferenceRevision: pin,
-    deviceUuid: uuid, physicalIndex: 0, requestSha256: plan.requestSha256,
+    deviceUuid: uuid, physicalIndex: 1, requestSha256: plan.requestSha256,
     sourceIdentitySha256: plan.sourceIdentitySha256, scheduleSha256: plan.scheduleSha256,
     loadedRuntimeLibrariesSha256: hash('loaded-runtime'),
     jobs: [{ ...first, support }, { ...second, support }] };
@@ -138,10 +137,11 @@ test('a completed deterministic qualification seals a separate bounded replay pl
   assert.equal(replayPlan.declaration.reviewUrl, 'https://github.com/SceneWorks/inference/pull/1464');
   assert.equal(Date.parse(replayPlan.goExpiresAt) - Date.parse(replayPlan.goStartsAt), 120 * 60 * 1000);
   assert.throws(() => makeReplayPlan(plan, { ...qualification, accepted: false }, sha, pin, now));
+  assert.throws(() => makeReplayPlan(plan, { ...qualification, physicalIndex: 0 }, sha, pin, now), /physical GPU changed/);
   assert.throws(() => makeReplayPlan(plan, { ...qualification, jobs: [first, second] }, sha, pin, now),
     /provider did not declare/);
 });
-test('physical ordinal zero, NVML worker label and final guard UUID must agree', () => {
+test('logical ordinal zero, physical GPU1 label and final guard UUID must agree', () => {
   const { plan } = fixture();
   const metadata = { context_created: false, devices: [{ ordinal: 0, uuid }] };
   verifyDeviceSelection(metadata, 1, plan);
@@ -247,7 +247,7 @@ test('workflow only dispatches manually and uploads bounded evidence, never priv
   assert.doesNotMatch(workflow, /options:.*sdxl-exact-replay/);
   assert.doesNotMatch(workflow, /\n  (push|pull_request|schedule|workflow_call):/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]/);
-  assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 30 --cuda-ordinals 0/);
+  assert.match(workflow, /windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 30 --min-free-mib 16384 --require-physical-index 1 --cuda-ordinals 0/);
   assert(workflow.indexOf('sdxl-exact-replay-proof.mjs finalize') < workflow.indexOf('sdxl-exact-replay-seal.mjs'));
   assert.match(workflow, /name: Seal the reviewed qualification into a private replay plan\n        if: \$\{\{ success\(\) && fromJSON\(inputs.campaign_run_id\).phase == 'qualify' \}\}/);
   assert.match(workflow, /path: \$\{\{ env.SDXL_REPLAY_SEAL_REPORT \}\}/);
@@ -290,16 +290,25 @@ test('idle-worker census accepts only a private binding and no model approval', 
   }
 });
 
-test('private plan requires owner go for one bounded future GPU window', () => {
-  const starts = new Date(Date.now() + 60_000).toISOString();
-  const expires = new Date(Date.now() + 60 * 60_000).toISOString();
+test('metadata census and plan select only the approved physical GPU1 UUID', () => {
+  const gpu0 = { physicalIndex: 0, uuid: 'GPU-00000000-0000-0000-0000-000000000000' };
+  const gpu1 = { physicalIndex: 1, uuid };
+  assert.deepEqual(selectProofDevice([gpu1, gpu0]), gpu1);
+  assert.throws(() => selectProofDevice([gpu0]), /index one unavailable/);
+  assert.throws(() => selectProofDevice([gpu1, gpu1]), /index one unavailable/);
+  assert.throws(() => selectProofDevice([{ ...gpu1, uuid: 'bad' }]), /UUID invalid/);
+});
+
+test('private plan derives one bounded execution window from standing owner go', () => {
   const input = { proof: 'sdxl-exact-replay', phase: 'plan', censusPath: 'C:\\private\\census.json',
-    deviceUuid: uuid, goStartsAt: starts, goExpiresAt: expires, ownerGo: true };
+    deviceUuid: uuid, ownerGo: true };
   assert.deepEqual(validatePlanDispatch(JSON.stringify(input)), input);
+  const window = boundedPlanWindow(Date.parse('2026-11-17T12:00:00Z'));
+  assert.deepEqual(window, { goStartsAt: '2026-11-17T12:00:00.000Z', goExpiresAt: '2026-11-17T14:00:00.000Z' });
+  assert.throws(() => boundedPlanWindow(NaN), /invalid plan clock/);
   for (const change of [{ ownerGo: false }, { censusPath: 'census.json' },
-    { goStartsAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() },
-    { goExpiresAt: new Date(Date.now() + 3 * 60 * 60_000).toISOString() },
-    { goExpiresAt: new Date(Date.now() - 1).toISOString() }, { command: 'run' }]) {
+    { goStartsAt: '2026-11-17T12:00:00Z' }, { goExpiresAt: '2026-11-17T14:00:00Z' },
+    { command: 'run' }]) {
     assert.throws(() => validatePlanDispatch(JSON.stringify({ ...input, ...change })));
   }
 });

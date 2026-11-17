@@ -76,7 +76,7 @@ export function validatePlan(plan, sourceSha, pin, phase, now = Date.now()) {
   assert(HEX.test(plan.sourceIdentitySha256) && HEX.test(plan.scheduleSha256), 'source/schedule preflight missing');
   assert.equal(plan.requestSha256, digest(REQUEST), 'authored request changed');
   assert(/^GPU-[a-f0-9-]{36}$/i.test(plan.deviceUuid), 'physical device UUID missing');
-  assert([0, 1].includes(plan.physicalIndex), 'unapproved physical ordinal');
+  assert.equal(plan.physicalIndex, 1, 'only approved physical index one');
   const starts = Date.parse(plan.goStartsAt), expires = Date.parse(plan.goExpiresAt);
   assert(Number.isFinite(starts) && Number.isFinite(expires) && starts <= now && now < expires
     && expires - starts <= 120 * 60 * 1000, 'owner go window unavailable');
