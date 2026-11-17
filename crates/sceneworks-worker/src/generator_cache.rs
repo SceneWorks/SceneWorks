@@ -1924,6 +1924,35 @@ pub(crate) fn evict_cached_generator_blocking() -> WorkerResult<bool> {
     })
 }
 
+/// The weights the cached generator keeps warm between requests
+/// ([`Generator::retained_weight_bytes`]), or `None` when nothing is cached or it holds none. A
+/// different-key load evicts them with the entry, and a warm hit's provider releases them before
+/// any request that does not reuse them, so a pre-load gate may credit them as reclaimable.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn cached_generator_retained_bytes() -> WorkerResult<Option<u64>> {
+    cached_generator_retained_bytes_on(generator_worker()).await
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+async fn cached_generator_retained_bytes_on(
+    worker: &mpsc::Sender<GeneratorJob>,
+) -> WorkerResult<Option<u64>> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<u64>>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _ = reply_tx.send(
+            cache
+                .resident_model()
+                .and_then(|cached| cached.generator.retained_weight_bytes()),
+        );
+    });
+    worker
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        crate::WorkerError::Engine("generator cache worker dropped the job result".to_owned())
+    })
+}
+
 /// The bytes the cached generator's own cold load added (its `provider_resident_bytes`), or `None`
 /// when nothing is cached — what evicting it gives back to the unified working set (sc-23001).
 #[cfg(target_os = "macos")]
@@ -5264,6 +5293,81 @@ mod tests {
         );
         assert!(evict_cached_generator_on(&tx).await.unwrap());
         assert_eq!(cached_generator_resident_bytes_on(&tx).await.unwrap(), None);
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
+
+    /// A resident provider's warm set (`Generator::retained_weight_bytes`) is what the pre-load
+    /// image gate credits; an empty slot or a provider that retains nothing reports `None`.
+    #[tokio::test]
+    async fn the_cached_generator_reports_its_retained_warm_set() {
+        struct Retaining(StubGenerator);
+        impl Generator for Retaining {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                self.0.descriptor()
+            }
+            fn validate(&self, req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+                self.0.validate(req)
+            }
+            fn generate(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(gen_core::Progress),
+            ) -> gen_core::Result<gen_core::GenerationOutput> {
+                self.0.generate(req, on_progress)
+            }
+            fn retained_weight_bytes(&self) -> Option<u64> {
+                Some(60 << 30)
+            }
+        }
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || {
+            run_generator_cache_worker(rx, None);
+        });
+        assert_eq!(cached_generator_retained_bytes_on(&tx).await.unwrap(), None);
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            seed_stub_entry(cache);
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+        assert_eq!(
+            cached_generator_retained_bytes_on(&tx).await.unwrap(),
+            None,
+            "a provider that retains nothing grants no credit"
+        );
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            cache.install(
+                stub_cache_key(),
+                CachedGenerator {
+                    generator: Box::new(Retaining(StubGenerator {
+                        descriptor: stub_descriptor(),
+                        contract: None,
+                    })),
+                    loaded_policy: ExecutionPolicy {
+                        offload_policy: OffloadPolicy::Sequential,
+                        load_shape: LoadShape::EagerMaterialization,
+                        load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+                    },
+                    external_committed_bytes: 0,
+                    reclaimable_weight_bytes: 0,
+                    provider_resident_bytes: 0,
+                },
+            );
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed retaining entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+        assert_eq!(
+            cached_generator_retained_bytes_on(&tx).await.unwrap(),
+            Some(60 << 30)
+        );
         drop(tx);
         worker.join().expect("cache worker exits");
     }

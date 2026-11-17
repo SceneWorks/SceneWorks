@@ -902,7 +902,18 @@ async fn generate_candle_registry_stream_using(
             model = %request.model,
         );
     }
-    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
+    // Read the resident provider's retained warm set BEFORE the device: the cache query may wait
+    // behind a render, and a later free reading can only show more of that set released.
+    let retained_gb = match crate::generator_cache::cached_generator_retained_bytes().await {
+        Ok(bytes) => bytes.map_or(0.0, |bytes| bytes as f64 / crate::fit_gate::BYTES_PER_GIB),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the resident generator's warm set; crediting none");
+            0.0
+        }
+    };
+    let device_budget = crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await;
+    let vram_cap_gb = crate::vram_gate::cuda_vram_cap_gb();
+    let raw_budget = crate::vram_gate::apply_vram_cap(device_budget, vram_cap_gb);
     // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
     // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
     // it is about to replace); crediting the reclaimable pool predicts the `free` the imminent evict will
@@ -911,7 +922,14 @@ async fn generate_candle_registry_stream_using(
     // component free keeps it pooled in-process. So budget against `free + reclaimable` (capped to total),
     // else a warm/swap re-gate falsely rejects a load that will actually fit (the "even with sequential
     // residency" 2nd-run reject a resident bf16 tier hits on the next generation).
-    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+    //
+    // A resident provider's warm set (MiniMax-H3 image or video on CUDA,
+    // `Generator::retained_weight_bytes`) is credited the same way: a different-key load evicts it,
+    // and a warm hit's provider keeps it only after checking that its own warm estimate fits. Credit
+    // the larger of the two, since both describe the resident occupant.
+    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id).max(
+        crate::vram_gate::retained_credit_gb(device_budget, vram_cap_gb, retained_gb),
+    );
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
     // sc-22664: the shared ladder's operational reserve is derived from the RAW probe, never from

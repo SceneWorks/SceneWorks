@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "63a3fd7762a038237a0b03023388ce9b0b84ecbe",
+  "inferenceRevision": "b3d4c73710158f3da2e94ab229ee09739fda6baa",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -29817,7 +29817,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "7efd243315bd46961c106bffad59fb22d300e3945fa3b89b5cf52ac742943165",
+      "digest": "d0142112b80ec0ccfb900d47b17dac79b564b96d72b5ec3955dd195593932cd1",
       "closureFileCount": 754,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -31093,7 +31093,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/image_model.rs"
       ],
-      "digest": "c1a60b894563fa5f830b46d49b391e3a8261b98ef719f84c34020b23f819de97",
+      "digest": "4de3e964cf83b37e0ebdc84378d2614030b78efa7c3e399fe243c1856765f640",
       "closureFileCount": 754,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -32382,7 +32382,7 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "ba30888603cf5f820dde6147a135be4b9e78f10a2134603814fd917a460b0041",
+      "digest": "cad9773986aef81011d26bbc88703e2275a255ce16c56e1568c330c1f9ed7d3b",
       "closureFileCount": 754,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",

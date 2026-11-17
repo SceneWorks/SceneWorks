@@ -2840,18 +2840,6 @@ pub(crate) struct VideoRuntimeMemoryState {
 }
 
 impl VideoRuntimeMemoryState {
-    /// Credit the weights the loaded provider keeps warm between requests
-    /// ([`gen_core::Generator::retained_weight_bytes`]) as reclaimable. The provider releases
-    /// them before any request that does not reuse them, and keeps them only after checking that
-    /// its warm estimate fits the device, so they must not count against the next request the
-    /// way an unrelated allocation does. Bounded by the committed snapshot, so the credit never
-    /// exceeds what is allocated.
-    pub(crate) fn with_retained_provider_weights(mut self, retained: Option<u64>) -> Self {
-        let credit = retained.unwrap_or(0).min(self.budget.committed_bytes);
-        self.budget.reclaimable_bytes = self.budget.reclaimable_bytes.saturating_add(credit);
-        self
-    }
-
     fn selector_budget(self) -> Option<Budget> {
         const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         Some(Budget {
@@ -2871,12 +2859,16 @@ impl VideoRuntimeMemoryState {
 /// callback supplies the fixed cold-load provider delta and cache state separately, so admission
 /// can credit only this provider's already-resident bytes while leaving unrelated live allocations
 /// charged.
+///
+/// `_retained_weight_bytes` is the Candle warm-set credit (see the CUDA variant); no MLX provider
+/// retains weights between requests.
 #[cfg(target_os = "macos")]
 pub(crate) fn live_video_runtime_state(
     engine_id: &str,
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
     provider_resident_bytes: u64,
+    _retained_weight_bytes: Option<u64>,
 ) -> crate::WorkerResult<Option<VideoRuntimeMemoryState>> {
     Ok(Some(VideoRuntimeMemoryState {
         // Keep the image lane's canonical foreign/system reserve. The caller removes this exact
@@ -2889,21 +2881,39 @@ pub(crate) fn live_video_runtime_state(
     }))
 }
 
+/// The CUDA budget from the driver's raw `total`/`free`, under an optional emulation cap, with the
+/// loaded provider's retained warm set ([`gen_core::Generator::retained_weight_bytes`]) credited as
+/// reclaimable. The provider releases that set before any request that does not reuse it and keeps
+/// it only after checking that its own warm estimate fits, so it must not count against the next
+/// request the way an unrelated allocation does.
+///
+/// The retained bytes are part of the RAW committed reading. Clipping committed to the cap already
+/// discards `raw_committed − committed` bytes, so the credit is reduced by that amount: a 32 GiB cap
+/// over 50 GiB committed with 20 GiB retained credits 2 GiB, which the 2 GiB reserve consumes, not
+/// 20 GiB. The credit also excludes `provider_resident_bytes`, which admission already credits
+/// against the predicted peak, so no byte is credited twice.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn candle_budget_from_total_free(
     raw_total_bytes: u64,
     raw_free_bytes: u64,
     cap_bytes: Option<u64>,
+    retained_bytes: Option<u64>,
+    provider_resident_bytes: u64,
 ) -> Option<MemoryBudget> {
     if raw_total_bytes == 0 || raw_free_bytes > raw_total_bytes {
         return None;
     }
     let raw_committed = raw_total_bytes.saturating_sub(raw_free_bytes);
     let total_bytes = cap_bytes.unwrap_or(raw_total_bytes).min(raw_total_bytes);
+    let committed_bytes = raw_committed.min(total_bytes);
+    let clipped = raw_committed - committed_bytes;
     Some(MemoryBudget {
         total_bytes,
-        committed_bytes: raw_committed.min(total_bytes),
-        reclaimable_bytes: 0,
+        committed_bytes,
+        reclaimable_bytes: retained_bytes
+            .unwrap_or(0)
+            .min(raw_committed.saturating_sub(provider_resident_bytes))
+            .saturating_sub(clipped),
         reserved_headroom_bytes: (crate::fit_gate::DEDICATED_VRAM_ALLOCATOR_SLACK_GB
             * 1024.0
             * 1024.0
@@ -2922,6 +2932,7 @@ pub(crate) fn live_video_runtime_state(
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
     provider_resident_bytes: u64,
+    retained_weight_bytes: Option<u64>,
 ) -> crate::WorkerResult<Option<VideoRuntimeMemoryState>> {
     let (free, total) =
         runtime_cuda::media::candle_core::cuda::cudarc::driver::result::mem_get_info().map_err(
@@ -2929,16 +2940,19 @@ pub(crate) fn live_video_runtime_state(
         )?;
     let cap_bytes = crate::vram_gate::cuda_vram_cap_gb()
         .map(|gb| (gb * 1024.0 * 1024.0 * 1024.0).floor() as u64);
-    Ok(
-        candle_budget_from_total_free(total as u64, free as u64, cap_bytes).map(|budget| {
-            VideoRuntimeMemoryState {
-                budget,
-                cache_state,
-                load_policy,
-                provider_resident_bytes,
-            }
-        }),
+    Ok(candle_budget_from_total_free(
+        total as u64,
+        free as u64,
+        cap_bytes,
+        retained_weight_bytes,
+        provider_resident_bytes,
     )
+    .map(|budget| VideoRuntimeMemoryState {
+        budget,
+        cache_state,
+        load_policy,
+        provider_resident_bytes,
+    }))
 }
 
 // Candle unit tests inject backend-neutral generators and create no CUDA context. Give those seams
@@ -2950,17 +2964,18 @@ pub(crate) fn live_video_runtime_state(
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
     provider_resident_bytes: u64,
+    _retained_weight_bytes: Option<u64>,
 ) -> crate::WorkerResult<Option<VideoRuntimeMemoryState>> {
     const TEST_TOTAL_BYTES: u64 = 24 * 1024 * 1024 * 1024;
     Ok(
-        candle_budget_from_total_free(TEST_TOTAL_BYTES, TEST_TOTAL_BYTES, None).map(|budget| {
-            VideoRuntimeMemoryState {
+        candle_budget_from_total_free(TEST_TOTAL_BYTES, TEST_TOTAL_BYTES, None, None, 0).map(
+            |budget| VideoRuntimeMemoryState {
                 budget,
                 cache_state,
                 load_policy,
                 provider_resident_bytes,
-            }
-        }),
+            },
+        ),
     )
 }
 
@@ -2970,6 +2985,7 @@ pub(crate) fn live_video_runtime_state(
     _cache_state: MemoryCacheState,
     _load_policy: OffloadPolicy,
     _provider_resident_bytes: u64,
+    _retained_weight_bytes: Option<u64>,
 ) -> crate::WorkerResult<Option<VideoRuntimeMemoryState>> {
     Ok(None)
 }

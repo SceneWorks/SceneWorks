@@ -111,6 +111,41 @@ pub(crate) fn note_loaded_peak(gpu_id: &str, peak_gb: f64) {
     }
 }
 
+/// The reclaimable credit (GB) for a resident provider's retained warm set
+/// ([`gen_core::Generator::retained_weight_bytes`]) against the capped budget [`apply_vram_cap`]
+/// builds from `device`. The warm set is part of the device's RAW used bytes, so releasing it raises
+/// the raw free reading by at most `retained.min(raw_used)`; the cap then shows
+/// `min(raw_free + released, cap)` instead of `min(raw_free, cap)`, and the credit is exactly that
+/// difference — never more than the emulated card can show. A 32 GB cap over 46 GB free credits
+/// nothing (the cap already shows a full card); over 10 GB free with 20 GB retained it credits 20.
+/// No device reading credits nothing.
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn retained_credit_gb(
+    device: Option<VramBudget>,
+    cap: Option<f64>,
+    retained_gb: f64,
+) -> f64 {
+    let Some(device) = device else {
+        return 0.0;
+    };
+    let raw_used = (device.total_gb - device.free_gb).max(0.0);
+    let released = retained_gb.max(0.0).min(raw_used);
+    let shown = |free: f64| {
+        apply_vram_cap(
+            Some(VramBudget {
+                free_gb: free,
+                ..device
+            }),
+            cap,
+        )
+        .map_or(0.0, |capped| capped.free_gb)
+    };
+    (shown(device.free_gb + released) - shown(device.free_gb)).max(0.0)
+}
+
 /// The reclaimable in-process VRAM pool (GB) for `gpu_id` — the [`note_loaded_peak`] high-water, or
 /// `0.0` when nothing has loaded on this card yet (so [`with_reclaimable`] is a no-op on a cold start).
 pub(crate) fn reclaimable_pool_gb(gpu_id: &str) -> f64 {

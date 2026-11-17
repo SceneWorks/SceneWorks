@@ -5172,3 +5172,32 @@ fn the_krea_selection_telemetry_carries_the_three_phase_peaks() {
         "only a selection emits"
     );
 }
+
+/// A resident warm set is credited only by what releasing it would raise the capped free reading
+/// (Codex, #3439): 32 GB cap over 46 GB free already shows a full card, so 20 GB retained credits
+/// nothing; over 10 GB free it credits all 20; uncapped, the warm set, never above what is used.
+#[test]
+fn the_retained_credit_is_reduced_by_what_the_cap_clipped() {
+    let device = Some(VramBudget {
+        free_gb: 46.0,
+        total_gb: 96.0,
+    });
+    assert_eq!(retained_credit_gb(device, Some(32.0), 20.0), 0.0);
+    assert_eq!(retained_credit_gb(device, None, 20.0), 20.0);
+    assert_eq!(retained_credit_gb(device, None, 80.0), 50.0);
+    assert_eq!(retained_credit_gb(None, None, 20.0), 0.0);
+    let tight = Some(VramBudget {
+        free_gb: 10.0,
+        total_gb: 96.0,
+    });
+    assert_eq!(retained_credit_gb(tight, Some(32.0), 20.0), 20.0);
+    assert_eq!(
+        retained_credit_gb(tight, Some(32.0), 40.0),
+        22.0,
+        "up to the cap"
+    );
+    // With the warm set credited, the capped budget is never more than the emulated card.
+    let capped = apply_vram_cap(device, Some(32.0)).unwrap();
+    let credited = with_reclaimable(capped, retained_credit_gb(device, Some(32.0), 20.0));
+    assert!(credited.free_gb <= 32.0);
+}
