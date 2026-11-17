@@ -569,7 +569,8 @@ def install_cancel_handler(handler, signals=signal):
             try:
                 previous[number] = signals.signal(number, handler)
             except (OSError, ValueError):
-                pass
+                # Signal not supported or unavailable here (e.g. off the main thread); try the next one.
+                continue
     return previous
 
 
@@ -578,6 +579,7 @@ def restore_signal_handlers(previous, signals=signal):
         try:
             signals.signal(number, handler)
         except (OSError, ValueError, TypeError):
+            # Best-effort restore: the previous handler or the signal may no longer be valid.
             pass
 
 
