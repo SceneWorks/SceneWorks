@@ -507,6 +507,10 @@ pub struct ImageRequest {
     pub fit_mode: String,
     /// The resolved model manifest entry (repo/quant/limits/…), passed through.
     pub model_manifest_entry: JsonObject,
+    /// The job's top-level `variant`, as the caller authored it (trimmed; blank is absent). The
+    /// API's tier admission (`requested_runtime_variant`) ranks it above `advanced.quantTier` and
+    /// `advanced.mlxQuantize`, so a loader that honours an explicit tier reads it first too.
+    pub variant: Option<String>,
     /// Per-family advanced knobs (steps, guidanceScale, mlxQuantize, …), passed through.
     pub advanced: JsonObject,
     /// Canonical effective options for execution. `None` denotes a legacy authoring/parser
@@ -682,6 +686,8 @@ impl ImageRequest {
         // Keep exactly what the caller authored for upgrade and persistence. Execution reads
         // only `resolved_advanced` and other typed fields from the effective request.
         request.advanced = object_or_empty(authored, "advanced");
+        // Admission reads the authored job payload's `variant`, so the loader must see that one.
+        request.variant = optional_id(authored, "variant");
         Ok(request)
     }
 
@@ -810,6 +816,7 @@ impl ImageRequest {
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry,
+            variant: optional_id(payload, "variant"),
             advanced: object_or_empty(payload, "advanced"),
             resolved_advanced: None,
             portable_aux: Default::default(),
@@ -1116,6 +1123,21 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    /// SW-7166: execution keeps the AUTHORED top-level `variant` — the field admission ranks
+    /// first — even when the resolved payload does not carry it; blank is absent.
+    #[test]
+    fn a_resolved_request_keeps_the_authored_top_level_variant() {
+        let authored = payload(json!({"projectId": "p", "variant": " q4 "}));
+        let effective = payload(json!({"projectId": "p"}));
+        let request = ImageRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.variant.as_deref(), Some("q4"));
+        let blank = payload(json!({"projectId": "p", "variant": "  "}));
+        assert_eq!(
+            ImageRequest::from_resolved(&blank, &blank).unwrap().variant,
+            None
+        );
     }
 
     #[test]
