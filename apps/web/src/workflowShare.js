@@ -252,6 +252,7 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // as not restored, and left out of the recipe. The safe default is "the user is told", never "it
 // quietly disappears".
 export const ADVANCED_PREFILL = {
+  lowResStart: { label: "Low-resolution start", detail: "This recipe requires low-resolution start support on the selected model and backend. This build cannot restore it.", prefill: PREFILL_NONE },
   mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
   mossImageEdit: { label: "MOSS edit controls", prefill: PREFILL_CONTROL },
   mossImageAdvanced: { label: "Native edit tensors and output", prefill: PREFILL_CONTROL },
@@ -287,6 +288,8 @@ export const ADVANCED_PREFILL = {
   // sc-25681 — Iris-3B's CFG interval and caption-overflow policy; both restore their controls.
   cfgInterval: { label: "Guidance interval", prefill: PREFILL_CONTROL },
   captionOverflow: { label: "Long prompts", prefill: PREFILL_CONTROL },
+  // SW-7106 — MiniMax-H3-Image's sampler block; restores its Sampler control.
+  h3ImageSampler: { label: "Sampler (MiniMax-H3-Image)", prefill: PREFILL_CONTROL },
   steps: { label: "Steps", prefill: PREFILL_CONTROL },
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },

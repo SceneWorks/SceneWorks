@@ -604,6 +604,99 @@ mod job_tests {
         }))
     }
 
+    struct ReportingRestorer(StubRestorer);
+
+    impl Transform for ReportingRestorer {
+        fn descriptor(&self) -> &TransformDescriptor {
+            self.0.descriptor()
+        }
+
+        fn validate(&self, req: &TransformRequest) -> gen_core::Result<()> {
+            self.0.validate(req)
+        }
+
+        fn apply(
+            &self,
+            req: &TransformRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<Image> {
+            self.0.apply(req, on_progress)
+        }
+
+        fn apply_with_execution_report(
+            &self,
+            req: &TransformRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::CompletedTransform> {
+            let image = self.apply(req, on_progress)?;
+            if req.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            let plan =
+                restoration::plan_request(req, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID)?;
+            let execution = restoration::completed_execution_identity(
+                &plan,
+                &image,
+                self.descriptor().backend,
+                "iris-restore-test@1",
+                500.0,
+                0.5,
+                json!({"device":"cpu", "fixture":"completed-transform"}),
+            )?;
+            gen_core::CompletedTransform::new(image, execution, self.descriptor())
+        }
+    }
+
+    #[test]
+    fn restoration_receipt_without_device_remains_unavailable() {
+        let request = transform_request(
+            Image {
+                width: 32,
+                height: 32,
+                pixels: vec![128; 32 * 32 * 3],
+            },
+            &params(Some(1.0), RestoreInputSizing::Original, Some(false)),
+            CancelFlag::default(),
+        );
+        let plan =
+            restoration::plan_request(&request, TileGeometry::RELEASE, IRIS_RESTORE_MODEL_ID)
+                .unwrap();
+        let image = Image {
+            width: plan.output.width,
+            height: plan.output.height,
+            pixels: vec![128; (plan.output.width * plan.output.height * 3) as usize],
+        };
+        let report = restoration::completed_execution_identity(
+            &plan,
+            &image,
+            "stub",
+            "iris-restore-test@1",
+            500.0,
+            0.5,
+            json!({"fixture":"completed-transform"}),
+        )
+        .unwrap();
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["state"], "unavailable");
+        assert_eq!(report["reason"]["code"], "restoration_device_unavailable");
+        assert_eq!(
+            report["reason"]["missing_facts"],
+            json!(["selected_execution_device"])
+        );
+    }
+
+    pub(crate) fn reporting_stub_loader(
+        id: &str,
+        spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<Box<dyn Transform>> {
+        assert_eq!(id, IRIS_RESTORE_MODEL_ID);
+        assert!(spec.components.is_empty() && spec.text_encoder.is_none());
+        Ok(Box::new(ReportingRestorer(StubRestorer {
+            descriptor: stub_descriptor(),
+            cancel_after_first_tile: false,
+        })))
+    }
+
     fn canceling_stub_loader(
         _id: &str,
         _spec: &gen_core::LoadSpec,
@@ -835,9 +928,14 @@ mod job_tests {
         let job: sceneworks_core::contracts::JobSnapshot =
             serde_json::from_value(job_value).unwrap();
 
-        crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-            .await
-            .expect("the restore job completes");
+        crate::upscale_jobs::run_iris_restore_job_using(
+            &api,
+            &settings,
+            &job,
+            reporting_stub_loader,
+        )
+        .await
+        .expect("the restore job completes");
 
         let posts = posts.lock().unwrap().clone();
         let tiles: Vec<&str> = posts
@@ -865,6 +963,28 @@ mod job_tests {
             (Some(2048), Some(1536))
         );
         assert_eq!(asset["model"], json!("iris_3b_restore"));
+        assert_eq!(asset["workerExecutionReport"]["state"], "resolved");
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["quality_policy"]["value"]["numeric"]
+                ["device"],
+            "cpu"
+        );
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["provider_id"],
+            IRIS_RESTORE_MODEL_ID
+        );
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["backend"],
+            "stub"
+        );
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["output_units"],
+            1
+        );
+        assert_eq!(
+            asset["workerExecutionReport"]["identity"]["deterministic_replay"]["kind"],
+            "non_deterministic"
+        );
         assert_eq!(asset["sourceAssetId"], json!(fixture.source_id));
         assert_eq!(asset["parents"], json!([fixture.source_id]));
         assert_eq!(
@@ -1030,10 +1150,14 @@ mod job_tests {
         let job: sceneworks_core::contracts::JobSnapshot =
             serde_json::from_value(job_value).unwrap();
         let before = png_files_under(&fixture.project_path.join("assets"));
-        let error =
-            crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-                .await
-                .unwrap_err();
+        let error = crate::upscale_jobs::run_iris_restore_job_using(
+            &api,
+            &settings,
+            &job,
+            reporting_stub_loader,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
         let posts = posts.lock().unwrap().clone();
         assert!(
@@ -1066,10 +1190,14 @@ mod job_tests {
         let job: sceneworks_core::contracts::JobSnapshot =
             serde_json::from_value(job_value).unwrap();
         let before = png_files_under(&fixture.project_path.join("assets"));
-        let error =
-            crate::upscale_jobs::run_iris_restore_job_using(&api, &settings, &job, stub_loader)
-                .await
-                .unwrap_err();
+        let error = crate::upscale_jobs::run_iris_restore_job_using(
+            &api,
+            &settings,
+            &job,
+            reporting_stub_loader,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, WorkerError::Canceled(_)), "{error:?}");
         let posts = posts.lock().unwrap().clone();
         assert!(posts.iter().any(reports_final_tile), "{posts:#?}");

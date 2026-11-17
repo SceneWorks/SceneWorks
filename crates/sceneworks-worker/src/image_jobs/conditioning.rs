@@ -24,7 +24,6 @@ use super::zimage::CHARACTER_ANGLE_SET_ORDER;
 use super::Conditioning;
 use super::Image;
 use super::ImageRequest;
-use crate::advanced;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::Path;
@@ -37,7 +36,7 @@ use crate::WorkerResult;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_conditioned_angle_set(request: &ImageRequest) -> bool {
     request.mode == "character_image"
-        && advanced::flag(&request.advanced, "angleSet")
+        && request.advanced_bool("angleSet").unwrap_or(false)
         && pose_entries(request).is_empty()
 }
 
@@ -121,14 +120,8 @@ pub(super) fn resolve_sensenova_candle_true_cfg(request: &ImageRequest) -> f32 {
         1.0
     };
     request
-        .advanced
-        .get("trueCfgScale")
-        .or_else(|| request.advanced.get("imageGuidanceScale"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .authored_advanced_f64("trueCfgScale")
+        .or_else(|| request.authored_advanced_f64("imageGuidanceScale"))
         .map(|value| value as f32)
         .unwrap_or(default)
         .clamp(1.0, 10.0)
@@ -161,7 +154,7 @@ pub(super) fn resolve_candle_kolors_edit_init(
     };
     Ok(Some((
         image,
-        advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0),
+        super::sampling::resolved_f32_clamped(request, "strength", 0.6, 0.05..=1.0),
     )))
 }
 
@@ -212,14 +205,23 @@ pub(super) enum EditGrouping {
 /// check. Shared by the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes (sc-8946 moved it from flux2.rs).
 #[cfg(target_os = "macos")]
 pub(super) fn edit_grouping(request: &ImageRequest) -> EditGrouping {
+    edit_grouping_with_pose_count(request, pose_entries(request).len())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn edit_grouping_resolved(execution: &ResolvedImageExecution) -> EditGrouping {
+    edit_grouping_with_pose_count(execution, execution.poses().len())
+}
+
+#[cfg(target_os = "macos")]
+fn edit_grouping_with_pose_count(request: &ImageRequest, poses: usize) -> EditGrouping {
     if request.mode != "character_image" {
         return EditGrouping::Plain;
     }
-    let poses = pose_entries(request).len();
     if poses > 0 {
         return EditGrouping::Poses(poses);
     }
-    if advanced::flag(&request.advanced, "angleSet") {
+    if request.advanced_bool("angleSet").unwrap_or(false) {
         return EditGrouping::Angles;
     }
     EditGrouping::Plain
@@ -463,13 +465,7 @@ pub(crate) fn load_reference_alpha(
 #[cfg(target_os = "macos")]
 pub(super) fn identity_strength(request: &ImageRequest) -> Option<f32> {
     let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+        .advanced_f64("referenceStrength")
         .filter(|strength| *strength > 0.0)?;
     let has_asset = request
         .reference_asset_id
@@ -554,7 +550,7 @@ pub(super) fn resolve_img2img_init_generic(
         asset_id,
         project_path,
     )?;
-    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.5, 0.0..=1.0);
+    let strength = super::sampling::resolved_f32_clamped(request, "strength", 0.5, 0.0..=1.0);
     Ok(Some((image, strength)))
 }
 
@@ -612,7 +608,7 @@ pub(super) fn resolve_text_style_gain(request: &ImageRequest) -> Option<f32> {
         .get("ui")
         .and_then(|ui| ui.get("textStyleGain"))
         .is_some()
-        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75))
+        .then(|| super::sampling::resolved_f32_clamped(request, "textStyleGain", 1.0, 0.25..=1.75))
 }
 
 /// Whether a Z-Image t2i request should take the generic `ui.img2img` reference-guided latent-init
@@ -723,7 +719,7 @@ pub(super) fn character_image_likeness_requested(request: &ImageRequest) -> bool
             .is_some_and(|id| !id.trim().is_empty())
         // Angle / pose sets are already scored by sc-4409 / sc-4410 through the shared seam.
         && pose_entries(request).is_empty()
-        && !advanced::flag(&request.advanced, "angleSet")
+        && !request.advanced_bool("angleSet").unwrap_or(false)
 }
 
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
@@ -735,6 +731,23 @@ const IDEOGRAM_EDIT_STRENGTH: f32 = 0.6;
 /// the sdxl 0.85 inpaint default and the engine's `DEFAULT_INPAINT_STRENGTH`.
 #[cfg(native_lane)]
 const IDEOGRAM_INPAINT_STRENGTH: f32 = 0.85;
+
+#[cfg(native_lane)]
+pub(super) fn ideogram_edit_strength(
+    request: &ImageRequest,
+    is_outpaint: bool,
+    has_user_mask: bool,
+) -> f32 {
+    request
+        .authored_advanced_f64("strength")
+        .map(|value| value as f32)
+        .unwrap_or(if is_outpaint || has_user_mask {
+            IDEOGRAM_INPAINT_STRENGTH
+        } else {
+            IDEOGRAM_EDIT_STRENGTH
+        })
+        .clamp(0.05, 1.0)
+}
 
 /// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
 /// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
@@ -965,6 +978,15 @@ pub(super) fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String
     if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
     }
+    ordered_reference_ids(request)
+}
+
+/// The ordered, first-occurrence-deduped reference list of [`qwen_image_2_1_reference_ids`] for
+/// any model: `sourceAssetId`, `maskAssetId`, every `referenceAssetIds` entry, `referenceAssetId`.
+/// The worker twin of `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`, which the API's
+/// `limits.maxReferenceAssets` gate counts for every model declaring that cap.
+#[cfg(native_lane)]
+fn ordered_reference_ids(request: &ImageRequest) -> Vec<String> {
     let scalar = |value: &Option<String>| -> Option<String> {
         value
             .as_deref()
@@ -980,6 +1002,46 @@ pub(super) fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String
     let mut seen = std::collections::HashSet::with_capacity(ids.len());
     ids.retain(|id| seen.insert(id.clone()));
     ids
+}
+
+/// Is this a MiniMax-H3-Image edit (SW-7101)? The model's one engine call is text-to-image with an
+/// empty ordered reference list and the edit with 1..=16 references, so — as for Qwen-Image 2.1 —
+/// the list, not the mode, decides.
+#[cfg(native_lane)]
+pub(super) fn is_minimax_h3_image_edit(request: &ImageRequest) -> bool {
+    super::minimax_h3_image::is_model(&request.model) && !ordered_reference_ids(request).is_empty()
+}
+
+/// The MiniMax-H3-Image edit's references (SW-7101), resolved in request order at their NATIVE
+/// geometry: the engine resizes each one itself for its vision tower and its VAE
+/// (`reference_vision_size` / `reference_vae_size`), and `<Picture N>` in the prompt names the
+/// N-th. Nothing is fitted to the output size, and an alpha channel is dropped (`Truncate`, the
+/// upstream `convert("RGB")`): the engine declares only `Reference` / `MultiReference`.
+///
+/// The ceiling is the job's own `limits.maxReferenceAssets` — the SAME key the enqueue gate read —
+/// and an over-long list is refused, never truncated (truncating renumbers nothing here, but it
+/// renders a different request than the one asked for).
+#[cfg(native_lane)]
+pub(super) fn resolve_minimax_h3_image_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let ids = ordered_reference_ids(request);
+    if let Some(cap) =
+        sceneworks_core::video_request::image_max_reference_assets(&request.model_manifest_entry)
+    {
+        if ids.len() > cap {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: {} reference images were supplied; it edits from at most {cap}",
+                request.model,
+                ids.len()
+            )));
+        }
+    }
+    ids.iter()
+        .map(|id| load_reference_image(&settings.data_dir, &request.project_id, id, project_path))
+        .collect()
 }
 
 /// Resolve those ids into engine images at their NATIVE geometry, each with the alpha plane its
@@ -1185,6 +1247,10 @@ pub(super) fn resolve_generic_lane_inputs(
         let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
         edit_ref_alpha = alpha;
         images
+    } else if is_minimax_h3_image_edit(request) {
+        // MiniMax-H3-Image edit (SW-7101): 1..=16 ordered references on the generic `Mlx` arm,
+        // sent as `Reference` (one) / `MultiReference` (many).
+        resolve_minimax_h3_image_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };
@@ -1341,16 +1407,7 @@ pub(super) fn resolve_ideogram_edit(
     )?;
     let is_outpaint = request.fit_mode == "outpaint";
     let has_user_mask = non_empty(&request.mask_asset_id);
-    let strength = advanced::f32_clamped(
-        &request.advanced,
-        "strength",
-        if is_outpaint || has_user_mask {
-            IDEOGRAM_INPAINT_STRENGTH
-        } else {
-            IDEOGRAM_EDIT_STRENGTH
-        },
-        0.05..=1.0,
-    );
+    let strength = ideogram_edit_strength(request, is_outpaint, has_user_mask);
 
     if is_outpaint {
         // Pad the source onto the target canvas (contain) and regenerate the border. The border mask
@@ -1419,9 +1476,12 @@ pub(super) fn non_empty(value: &Option<String>) -> bool {
 #[cfg(native_lane)]
 pub(super) fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
     request
-        .advanced
-        .get("poses")
-        .and_then(Value::as_array)
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .poses
+        .as_ref()
+        .map(|bound| &bound.value)
         .map(|poses| poses.iter().filter(|pose| pose.is_object()).collect())
         .unwrap_or_default()
 }
@@ -1429,10 +1489,131 @@ pub(super) fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
 /// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
 // Shared strict-control preprocessing reads the whole body on both native backends.
 #[cfg(native_lane)]
+#[derive(Clone)]
 pub(super) struct PoseInput {
     pub(super) keypoints: Vec<crate::openpose_skeleton::Keypoint>,
     pub(super) hands: Option<Vec<crate::openpose_skeleton::Hand>>,
     pub(super) face: Option<Vec<crate::openpose_skeleton::Keypoint>>,
+}
+
+/// Image options lowered once at the worker boundary, before selecting a provider.
+/// The authored map remains on the request for persistence, but route decisions use these
+/// parsed values and the request's resolved scalar fields.
+#[derive(Clone)]
+pub(super) struct ResolvedImageExecution {
+    request: std::sync::Arc<ImageRequest>,
+    poses: std::sync::Arc<Vec<PoseInput>>,
+    invalid_pose_entries: std::sync::Arc<Vec<usize>>,
+    phases: Option<std::sync::Arc<Vec<super::krea_multiphase::MultiPhaseSpec>>>,
+}
+
+impl ResolvedImageExecution {
+    pub(super) fn new(request: &ImageRequest) -> WorkerResult<Self> {
+        let invalid_pose_entries = request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .poses
+            .as_ref()
+            .map(|bound| {
+                bound
+                    .value
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| (!entry.is_object()).then_some(index))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let poses = parse_poses(request);
+        let phases = if (request.model == "krea_2_raw"
+            || request
+                .model_manifest_entry
+                .get("family")
+                .and_then(Value::as_str)
+                == Some("krea_2"))
+            && super::krea_multiphase::request_has_multiphase(request)
+        {
+            Some(super::krea_multiphase::parse_multiphase_specs(request)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            request: std::sync::Arc::new(request.clone()),
+            poses: std::sync::Arc::new(poses),
+            invalid_pose_entries: std::sync::Arc::new(invalid_pose_entries),
+            phases: phases.map(std::sync::Arc::new),
+        })
+    }
+
+    pub(super) fn poses(&self) -> &[PoseInput] {
+        &self.poses
+    }
+
+    pub(super) fn has_pose_source(&self) -> bool {
+        self.request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .poses
+            .is_some()
+    }
+
+    pub(super) fn pose_source_count(&self) -> usize {
+        self.poses.len() + self.invalid_pose_entries.len()
+    }
+
+    pub(super) fn invalid_pose_entries(&self) -> &[usize] {
+        &self.invalid_pose_entries
+    }
+
+    pub(super) fn phases(&self) -> Option<&[super::krea_multiphase::MultiPhaseSpec]> {
+        self.phases.as_ref().map(|phases| phases.as_slice())
+    }
+}
+
+impl std::ops::Deref for ResolvedImageExecution {
+    type Target = ImageRequest;
+
+    fn deref(&self) -> &Self::Target {
+        self.request.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod resolved_execution_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_lowers_effective_poses_once() {
+        let authored = serde_json::json!({"advanced": {"poses": [null, {"keypoints": []}]}});
+        let effective = authored.clone();
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        let execution = ResolvedImageExecution::new(&request).unwrap();
+        assert_eq!(execution.poses().len(), 1);
+        assert!(execution.has_pose_source());
+        assert_eq!(execution.pose_source_count(), 2);
+        assert_eq!(execution.invalid_pose_entries(), &[0]);
+        assert_eq!(execution.poses()[0].keypoints.len(), 18);
+        assert!(execution.phases().is_none());
+    }
+
+    #[test]
+    fn preflight_lowers_imported_krea_phases() {
+        let payload = serde_json::json!({
+            "model": "imported_krea_test",
+            "modelManifestEntry": {"family": "krea_2"},
+            "advanced": {"phases": [{"steps": 2}]}
+        });
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
+        let execution = ResolvedImageExecution::new(&request).unwrap();
+        assert_eq!(execution.phases().unwrap()[0].steps, 2);
+    }
 }
 
 #[cfg(native_lane)]
@@ -1464,13 +1645,14 @@ pub(super) async fn stage_likeness(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     should_stage: bool,
     warn_message: &'static str,
 ) -> Option<PathBuf> {
     if !should_stage {
         return None;
     }
-    match ensure_face_stack_dir(api, settings, job).await {
+    match ensure_face_stack_dir(api, settings, job, portable_aux).await {
         Ok(dir) => Some(dir),
         Err(error) => {
             tracing::warn!(error = %error, "{warn_message}");
@@ -1584,7 +1766,7 @@ pub(super) fn resolve_zimage_edit_init(
     } else {
         source
     };
-    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0);
+    let strength = super::sampling::resolved_f32_clamped(request, "strength", 0.6, 0.05..=1.0);
     Ok(Some((image, strength)))
 }
 
@@ -1662,8 +1844,8 @@ pub(super) fn resolve_generic_lane_conditioning(
             &reference_id,
             project_path,
         )?;
-        let scale = advanced::f32_clamped(
-            &request.advanced,
+        let scale = super::sampling::resolved_f32_clamped(
+            request,
             "ipAdapterScale",
             FLUX_IP_SCALE,
             0.0..=1.0,
@@ -1671,8 +1853,8 @@ pub(super) fn resolve_generic_lane_conditioning(
         let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
         // Real CFG only on dev (schnell is distilled — no CFG).
         let true_cfg = (request.model == "flux_dev").then(|| {
-            advanced::f32_clamped(
-                &request.advanced,
+            super::sampling::resolved_f32_clamped(
+                request,
                 "trueCfgScale",
                 FLUX_IP_TRUE_CFG,
                 1.0..=10.0,

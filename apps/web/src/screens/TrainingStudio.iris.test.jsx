@@ -1,7 +1,10 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const feedbackState = vi.hoisted(() => ({ value: { state: "valid" } }));
+vi.mock("../hooks/usePortableFeedback.js", () => ({ usePortableFeedback: (_kind, _payload, _entry, enabled = true) => enabled ? feedbackState.value : null }));
 import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // sc-25685/sc-25686 — the Training Studio wiring for the Iris-3B target end to end: picking a
 // dataset fires the data-walk preflight and shows its warning before launch, the Iris options
@@ -59,6 +62,7 @@ describe("TrainingStudio — Iris", () => {
   let fetchMock;
 
   beforeEach(() => {
+    feedbackState.value = { state: "valid" };
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -112,6 +116,13 @@ describe("TrainingStudio — Iris", () => {
       .find((label) => label.textContent.startsWith("Resume a previous run"))
       ?.querySelector("select");
     expect([...resume.options].map((option) => option.value)).toEqual(["", "job_prev"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(resume), "value").set.call(resume, "job_prev");
+      resume.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(resume.value).toBe("job_prev");
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "New training").click());
+    expect(resume.value).toBe("");
     const captionField = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.startsWith("Caption field"))
       ?.querySelector("select");
@@ -128,7 +139,24 @@ describe("TrainingStudio — Iris", () => {
     expect(config.advanced.iris).toMatchObject({ text_conditioning: "cached", ema_enabled: true, export_dtype: "fp32" });
     expect(config.advanced.iris).not.toHaveProperty("resume_from");
     expect(config.advanced.iris).not.toHaveProperty("load_from");
+    expect(config.advanced).not.toHaveProperty("resumeFromJobId");
     expect(config.advanced.gradientCheckpointing).toBe(false);
+  });
+
+  it.each(["pending", "server-required", "invalid"])("blocks the full training form while feedback is %s", async (state) => {
+    feedbackState.value = { state, refusal: { field: "config.advanced.iris", detail: "Fix the Iris options" } };
+    const ctx = context();
+    await renderAndPickDataset(ctx);
+    const start = () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Start training");
+    expect(start().disabled).toBe(true);
+    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the Iris options");
+    await act(async () => start().dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(ctx.createTrainingJob).not.toHaveBeenCalled();
+    feedbackState.value = { state: "valid" };
+    await act(async () => root.render(<AppContext.Provider value={ctx}><TrainingStudio /></AppContext.Provider>));
+    expect(start().disabled).toBe(false);
+    await act(async () => start().click());
+    expect(ctx.createTrainingJob).toHaveBeenCalledTimes(1);
   });
 
   it("does not run the preflight for a non-Iris target", async () => {

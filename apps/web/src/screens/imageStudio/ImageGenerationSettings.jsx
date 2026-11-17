@@ -1,5 +1,6 @@
 import React from "react";
 import { StudioLoraImportPanel } from "../../components/StudioLoraImportPanel.jsx";
+import { ModelAttribution } from "../../components/ModelAttribution.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
 import { noPresetId } from "../../presetUtils.js";
 import { LoraPickerSection, SavePresetPanel, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
@@ -95,7 +96,9 @@ export function ImageGenerationSettings({
                   </span>
                 ) : null}
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
-
+                {/* Licence-required attribution (MiniMax-H3-Image §IV.2, SW-7100): the generation
+                    surface, from the manifest field, as Video Studio does. */}
+                <ModelAttribution model={selectedModel} className="studio-model-attribution" />
               </label>
                   {mossAccelerationAvailable(selectedModel) && !mossEdit ? <label className="checkline">
                     <input type="checkbox" checked={Boolean(mossDmd)} onChange={(event) => setMossField("acceleration", event.target.checked ? mossAccelerationMode : "off")} />

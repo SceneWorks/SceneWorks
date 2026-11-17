@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       starvector_terminal_operation:
-        description: Run the ordinary Linux build, a terminal operation, or explicit H3 model/admission proofs.
+        description: Run the ordinary Linux build, a terminal operation, or explicit H3/SDXL proofs.
         required: true
         default: standard
         type: choice
@@ -65,7 +65,7 @@ on:
         default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       campaign_run_id:
-        description: StarVector campaign identity, or explicit H3 terminal/staging request JSON (keeps the ten standing dispatch keys; staging needs explicit asset/license inputs, not a stationary pair).
+        description: StarVector identity, H3 request JSON, or SDXL phase JSON (keeps the ten standing dispatch keys; staging needs explicit asset/license inputs, not a stationary pair).
         required: false
         type: string
 
@@ -77,10 +77,248 @@ concurrency:
   # Preserve StarVector's non-canceling bridge and ordinary ref-keyed builds.
   # Explicit CPU, import and terminal runs have separate per-run caller groups,
   # distinct from reusable callees and the unchanged native-device queues below.
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' && format('h3-cuda-memory-bridge-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt)) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
-  cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && format('sdxl-exact-replay-bridge-{0}-{1}', github.run_id, github.run_attempt) || github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' && format('h3-cuda-memory-bridge-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt)) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
+  cancel-in-progress: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && !startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') }}
 
 jobs:
+
+  # SW-7148: inventory the private Windows host before requesting a real-model window.
+  # This job never builds or starts the API/worker and never loads a model.
+  sdxl-exact-replay-prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'prepare' && fromJSON(inputs.campaign_run_id).ownerGo == false }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
+    timeout-minutes: 10
+    env:
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Gather metadata without starting inference
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-prepare-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_PREPARATION_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_PREPARATION_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata preparation failed' }
+      - name: Upload sanitized metadata report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-preparation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_PREPARATION_REPORT }}
+          if-no-files-found: error
+
+  # Metadata phases bind a queued source without a worker, then census DLLs with
+  # an idle worker in fresh empty state. Neither phase can execute a model job.
+  sdxl-exact-replay-bind:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && (fromJSON(inputs.campaign_run_id).phase == 'bind' || fromJSON(inputs.campaign_run_id).phase == 'census') && fromJSON(inputs.campaign_run_id).ownerGo == false }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
+    timeout-minutes: 180
+    env:
+      CUDA_COMPUTE_CAP: '120'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-runner
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select isolated persistent Cargo cache
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+      - name: Build the pinned API without executing models
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --locked --release -p sceneworks-rust-api --no-default-features --features backend-candle
+          if errorlevel 1 exit /b 1
+      - name: Bind queued source and hash selected cached files without a worker
+        if: ${{ fromJSON(inputs.campaign_run_id).phase == 'bind' }}
+        shell: powershell
+        run: |
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-bind-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_BIND_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_BIND_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-bind.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata binding failed' }
+      - name: Upload sanitized binding report
+        if: ${{ always() && fromJSON(inputs.campaign_run_id).phase == 'bind' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-binding-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_BIND_REPORT }}
+          if-no-files-found: warn
+      - name: Census loaded DLLs from an idle worker with zero jobs
+        if: ${{ fromJSON(inputs.campaign_run_id).phase == 'census' }}
+        shell: powershell
+        run: |
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
+          $binaryHash = (Get-FileHash -LiteralPath $env:SDXL_REPLAY_BINARY -Algorithm SHA256).Hash
+          Write-Host "Compiled SDXL API SHA256: $binaryHash"
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-census-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_CENSUS_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_CENSUS_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-census.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL metadata census failed' }
+      - name: Upload sanitized runtime census
+        if: ${{ always() && fromJSON(inputs.campaign_run_id).phase == 'census' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-census-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_CENSUS_REPORT }}
+          if-no-files-found: warn
+
+  # Metadata-only approval bridge: derive a private, time-bounded proof plan from
+  # the verified census. It never starts the API, a worker, a job, or a model.
+  sdxl-exact-replay-plan:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && fromJSON(inputs.campaign_run_id).phase == 'plan' && fromJSON(inputs.campaign_run_id).ownerGo == true }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
+    timeout-minutes: 20
+    env:
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Derive a private proof plan from the verified census without starting a runtime
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-plan-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $env:SDXL_REPLAY_PLAN_REPORT = $output
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_PLAN_REPORT=$output"
+          node scripts/ci/sdxl-exact-replay-plan.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL private plan refused' }
+      - name: Upload sanitized plan report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-plan-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_PLAN_REPORT }}
+          if-no-files-found: error
+
+  # SW-7148: fixed manual proof on the reviewed dispatch ref. This registered bridge exists
+  # on main; reuse its existing standard (compile-only) choice plus an exact marker so dispatch does
+  # not depend on GitHub accepting a newly added branch-only choice value.
+  # Routing only inspects the compact JSON prefix; plain campaign IDs never enter fromJSON.
+  # The compile job excludes this prefix even when ownerGo is false. On an old/default ref this
+  # selector can only compile; it never selects an unrelated model job. No command input.
+  sdxl-exact-replay:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.starvector_terminal_operation == 'standard' && startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') && (fromJSON(inputs.campaign_run_id).phase == 'qualify' || fromJSON(inputs.campaign_run_id).phase == 'replay') && fromJSON(inputs.campaign_run_id).ownerGo == true }}
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
+    timeout-minutes: 180
+    concurrency:
+      group: sdxl-exact-replay-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${{ fromJSON(inputs.campaign_run_id).deviceUuid }}
+      CUDA_COMPUTE_CAP: '120'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      SDXL_REPLAY_DISPATCH: ${{ inputs.campaign_run_id }}
+      SDXL_REPLAY_PLAN: ${{ fromJSON(inputs.campaign_run_id).planPath }}
+      SDXL_REPLAY_PHASE: ${{ fromJSON(inputs.campaign_run_id).phase }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-runner
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select task-owned evidence paths
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $resource = Join-Path $env:RUNNER_TEMP "sceneworks-cuda-execution-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-sdxl-exact-replay\resource-receipt.json"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_OUTPUT=$output"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_RESOURCE_RECEIPT=$resource"
+      - name: Metadata-only harness regressions
+        run: node --test scripts/ci/sdxl-exact-replay-proof.test.mjs
+      - name: Validate the private plan before building
+        run: node scripts/ci/sdxl-exact-replay-proof.mjs preflight
+      - name: Select isolated persistent Cargo cache
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+      - name: Build the pinned native API and worker without executing models
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --locked --release -p sceneworks-rust-api --no-default-features --features backend-candle
+          if errorlevel 1 exit /b 1
+      - name: Run only under the existing physical UUID lease and owned Windows Job
+        shell: powershell
+        run: |
+          $targetDirectory = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve Cargo target directory' }
+          $env:SDXL_REPLAY_BINARY = Join-Path $targetDirectory 'release\sceneworks-rust-api.exe'
+          if (-not (Test-Path -LiteralPath $env:SDXL_REPLAY_BINARY -PathType Leaf)) { throw 'Compiled SDXL API binary missing' }
+          python -I scripts/ci/windows_cuda_execution.py --actor sdxl-exact-replay --budget-minutes 30 --cuda-ordinals 0 -- node scripts/ci/sdxl-exact-replay-proof.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL witness or physical drain refused' }
+      - name: Require physical cleanup before accepting evidence
+        if: ${{ always() }}
+        run: node scripts/ci/sdxl-exact-replay-proof.mjs finalize
+      - name: Seal the reviewed qualification into a private replay plan
+        if: ${{ success() && fromJSON(inputs.campaign_run_id).phase == 'qualify' }}
+        shell: powershell
+        run: |
+          $env:SDXL_REPLAY_SEAL_REPORT = Join-Path $env:RUNNER_TEMP "sdxl-exact-replay-seal-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          Add-Content -Path $env:GITHUB_ENV -Value "SDXL_REPLAY_SEAL_REPORT=$env:SDXL_REPLAY_SEAL_REPORT"
+          node scripts/ci/sdxl-exact-replay-seal.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'SDXL replay plan seal failed' }
+      - name: Upload bounded replay plan metadata
+        if: ${{ success() && fromJSON(inputs.campaign_run_id).phase == 'qualify' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-seal-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_SEAL_REPORT }}
+          if-no-files-found: error
+      - name: Upload only bounded public hashes and identities
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdxl-exact-replay-${{ fromJSON(inputs.campaign_run_id).phase }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SDXL_REPLAY_OUTPUT }}/evidence.json
+          if-no-files-found: error
+
   h3-cuda-memory:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-cuda-memory' }}
     uses: ./.github/workflows/h3-cuda-memory-terminal.yml
@@ -339,7 +577,7 @@ jobs:
       - name: Select the existing listener-isolated Cargo dependency cache
         shell: powershell
         run: |
-          node scripts/select-windows-cargo-cache.mjs
+          node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated Cargo cache selection failed' }
       - name: Fetch source dependencies only, never model weights
         shell: cmd
@@ -361,7 +599,7 @@ jobs:
           retention-days: 30
 
   build-candle:
-    if: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
+    if: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && !startsWith(inputs.campaign_run_id, '{"proof":"sdxl-exact-replay",') }}
     runs-on: ubuntu-22.04
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
@@ -412,6 +650,17 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+      - name: Fetch verified FlashAttention archive when published
+        run: |
+          set +e
+          node scripts/fetch-flash-prebuilt.mjs --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=FlashAttention prebuilt unavailable::compiling kernels from source"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       # The candle-gen single-rev invariant the default skew gate is blind to: with
       # `--features backend-candle` the optional candle-gen providers are pulled, so
       # a candle-gen pin that resolves a different gen-core rev would split contract

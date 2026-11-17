@@ -469,6 +469,7 @@ fn workspace_manifests() -> Vec<(String, toml::Value)> {
 #[test]
 fn cargo_dependency_direction_is_an_executable_graph_rule() {
     let expected: BTreeSet<(String, String)> = [
+        ("sceneworks-core", "sceneworks-options"),
         ("sceneworks-desktop", "sceneworks-core"),
         ("sceneworks-rust-api", "sceneworks-core"),
         ("sceneworks-rust-api", "sceneworks-image-quality"),
@@ -478,6 +479,7 @@ fn cargo_dependency_direction_is_an_executable_graph_rule() {
         ("sceneworks-image-quality", "sceneworks-core"),
         ("sceneworks-mcp", "sceneworks-core"),
         ("sceneworks-memory-adapter", "sceneworks-core"),
+        ("sceneworks-options-wasm", "sceneworks-options"),
         ("sceneworks-worker", "sceneworks-core"),
         ("sceneworks-worker", "sceneworks-image-quality"),
     ]
@@ -486,7 +488,7 @@ fn cargo_dependency_direction_is_an_executable_graph_rule() {
     .collect();
     let mut manifests = workspace_manifests();
     assert_eq!(internal_edges(&manifests), expected, "internal crate edges changed: reconsider layering explicitly (including dev/build/target dependencies)");
-    // Core -> gen-core and memory-adapter -> core are valid. A renamed, target-specific
+    // Core consumes portable options and backend-neutral gen-core. A renamed, target-specific
     // dependency back to the worker is not: inspect Cargo's package field, not its alias.
     let core = manifests
         .iter_mut()
@@ -1213,7 +1215,7 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/display_util.rs", "format_bytes"),
         ("crates/sceneworks-core/src/display_util.rs", "quote_path"),
         (
-            "crates/sceneworks-core/src/payload_util.rs",
+            "crates/sceneworks-options/src/payload_util.rs",
             "json_size_to_u64",
         ),
         ("crates/sceneworks-core/src/env_util.rs", "env_string"),
@@ -1224,8 +1226,11 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ("crates/sceneworks-core/src/env_util.rs", "env_path_or"),
         ("crates/sceneworks-core/src/time.rs", "utc_now"),
         ("crates/sceneworks-core/src/time.rs", "civil_from_days"),
-        ("crates/sceneworks-core/src/ids.rs", "is_safe_id"),
-        ("crates/sceneworks-core/src/ids.rs", "is_safe_id_with_max"),
+        ("crates/sceneworks-options/src/ids.rs", "is_safe_id"),
+        (
+            "crates/sceneworks-options/src/ids.rs",
+            "is_safe_id_with_max",
+        ),
         (
             "crates/sceneworks-core/src/safe_path.rs",
             "portable_relative_path_parts",

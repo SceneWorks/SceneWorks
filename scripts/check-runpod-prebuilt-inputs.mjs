@@ -24,6 +24,33 @@ export function validatePrebuiltImageConfig(inspected) {
   return revision;
 }
 
+export function validatePrebuiltWorkerSources(revision, dockerfile, cwd = process.cwd()) {
+  // Cover every local Candle-builder COPY and the build-context filter. The
+  // directory entries remain conservative. Web source belongs to the separate
+  // web-builder stage, which the combined image rebuilds at publication time.
+  const workerInputs = [
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml",
+    ".dockerignore", ".cargo", "vendor", "crates", "apps/rust-api", "apps/rust-worker",
+    "apps/desktop/Cargo.toml", "apps/desktop/build.rs",
+    "apps/web/content-security-policy.txt", "config", "packages/schemas",
+    "docs/generated", "docs/calibration", "scripts/fetch-flash-prebuilt.py",
+  ];
+  const diff = spawnSync("git", ["diff", "--quiet", revision, "HEAD", "--", ...workerInputs], { cwd });
+  assert.equal(diff.status, 0, `prebuilt worker inputs differ from ${revision} (git diff exit ${diff.status})`);
+
+  // The Docker builder, CUDA flags, ORT packaging and runtime base must match too.
+  const sourceDockerfile = execFileSync("git", ["show", `${revision}:docker/rust.Dockerfile`],
+    { cwd, encoding: "utf8" });
+  const workerStages = (source) => {
+    const start = source.indexOf("# --- Candle GPU worker build");
+    const end = source.indexOf("# --- Combined RunPod GPU runtime", start);
+    assert.ok(start >= 0 && end > start, "missing Candle Docker stages");
+    return source.slice(start, end);
+  };
+  assert.equal(workerStages(dockerfile), workerStages(sourceDockerfile),
+    "Candle builder/runtime stages differ from the prebuilt worker source");
+}
+
 function main() {
   const dockerfile = readFileSync("docker/rust.Dockerfile", "utf8");
   const image = /^ARG RUNPOD_PREBUILT_CANDLE_IMAGE=(ghcr\.io\/sceneworks\/sceneworks-runpod@sha256:[0-9a-f]{64})$/m.exec(dockerfile)?.[1];
@@ -41,30 +68,7 @@ function main() {
       "fetch", "--no-tags", "--depth=1", "origin", revision], { stdio: "pipe" });
   }
 
-  // These are the files copied into the Candle build stage, including the
-  // worker's embedded source/configuration inputs. Keep the list conservative:
-  // an unrelated change may require a fresh prebuilt, but a changed worker must
-  // never be released with an old executable. Workflow-only changes are safe.
-  const workerInputs = [
-    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml",
-    ".cargo", "vendor", "crates", "apps/rust-api", "apps/rust-worker",
-    "apps/desktop/Cargo.toml", "apps/desktop/build.rs", "apps/web/src",
-    "apps/web/content-security-policy.txt", "config", "docs/generated",
-    "docs/calibration",
-  ];
-  const diff = spawnSync("git", ["diff", "--quiet", revision, "HEAD", "--", ...workerInputs]);
-  assert.equal(diff.status, 0, `prebuilt worker inputs differ from ${revision} (git diff exit ${diff.status})`);
-
-  // The Docker builder, CUDA flags, ORT packaging and runtime base must match too.
-  const sourceDockerfile = execFileSync("git", ["show", `${revision}:docker/rust.Dockerfile`], { encoding: "utf8" });
-  const workerStages = (source) => {
-    const start = source.indexOf("# --- Candle GPU worker build");
-    const end = source.indexOf("# --- Combined RunPod GPU runtime", start);
-    assert.ok(start >= 0 && end > start, "missing Candle Docker stages");
-    return source.slice(start, end);
-  };
-  assert.equal(workerStages(dockerfile), workerStages(sourceDockerfile),
-    "Candle builder/runtime stages differ from the prebuilt worker source");
+  validatePrebuiltWorkerSources(revision, dockerfile);
 
   const outputIndex = process.argv.indexOf("--github-output");
   if (outputIndex >= 0) {

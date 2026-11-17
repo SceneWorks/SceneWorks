@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, open, readdir, writeFile, readFile, stat, rm } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -51,6 +51,8 @@ import {
   familyFor,
   hubRoots,
   failureReason,
+  withoutTrailingLiteral,
+  stderrTail,
   FAILURE_REASON_LIMIT,
   extractSeedingNewAnchors,
   SEED_DIGEST,
@@ -120,6 +122,11 @@ import {
   MINIMAX_TIER_DIT_FILES,
   requiredFilesFor,
   QWEN_EDIT_LIGHTNING_LORA,
+  MINIMAX_H3_IMAGE_COMMUNITY_LORA,
+  sideArtifactFor,
+  recordAnchorKey,
+  readRegimeAnchorCurrency,
+  dryRunCompositionLine,
   LTX25_REPOSITORY,
   LTX_2_3_REPOSITORY,
   LTX25_DEV_REFINEMENT_LORA,
@@ -161,6 +168,7 @@ import {
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
   ANCHOR_STRATEGY,
+  ENGINES_THAT_ALWAYS_STAGE,
   LTX25_LANE_PROVIDERS,
   parseWatchdogHardStop,
   planAnchor,
@@ -386,9 +394,17 @@ test("SenseNova preflight detects config-only and truncated weights before captu
 });
 
 test("anchor keys parse into their three parts and slug without separators", () => {
-  assert.deepEqual(anchorParts("qwen_image:q4:mlx"), { modelId: "qwen_image", tier: "q4", backend: "mlx" });
+  assert.deepEqual(anchorParts("qwen_image:q4:mlx"), { modelId: "qwen_image", tier: "q4", backend: "mlx", regime: null });
   assert.equal(anchorSlug("qwen_image_edit_2511:bf16:candle"), "qwen-image-edit-2511-bf16-candle");
   assert.throws(() => anchorParts("qwen_image:fp8:mlx"), /not an anchor key/);
+  // SW-F363: the optional regime segment, a closed set.
+  assert.deepEqual(anchorParts("minimax_h3_image:q4:candle:optimized"), {
+    modelId: "minimax_h3_image", tier: "q4", backend: "candle", regime: "optimized",
+  });
+  assert.equal(anchorSlug("minimax_h3_image:q4:mlx:lora"), "minimax-h3-image-q4-mlx-lora");
+  assert.throws(() => anchorParts("minimax_h3_image:q4:mlx:staged"), /not an anchor key/);
+  assert.equal(recordAnchorKey("m", "q4", "mlx"), "m:q4:mlx");
+  assert.equal(recordAnchorKey("m", "q4", "mlx", "lora"), "m:q4:mlx:lora");
 });
 
 test("argument parsing requires the backend and the out-of-tree work dir, and --hf-cache repeats", () => {
@@ -1856,6 +1872,7 @@ test("every family's derived env names are read back by each arm it declares", a
   }
   const common = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/adapter_common.rs"), "utf8");
   const commonProduction = common.slice(0, common.indexOf("#[cfg(test)]"));
+  const libProduction = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
   assert.ok(commonProduction.includes("fn qwen_edit_artifact_source("));
   assert.match(commonProduction, /lightning\.then\(qwen_edit_lightning_source\)/);
   let checked = 0;
@@ -1872,6 +1889,8 @@ test("every family's derived env names are read back by each arm it declares", a
       // `SCENEWORKS_FLUX2_KLEIN_KV_*` and each declared arm must read those names back.
       ...Object.values(family.variants ?? {}).map((variant) => variant.env),
       ...Object.values(family.sideArtifact ?? {}).map((side) => side.env),
+      // SW-F363: an overlay artifact's env family is read by the shared protocol crate.
+      ...Object.values(family.overlayArtifact ?? {}).map((side) => side.env),
     ].filter(Boolean);
     if (envFamilies.length === 0) {
       assert.ok(family.ltx25, `${id} declares neither an env family nor the LTX-2.5 harness binding`);
@@ -1905,6 +1924,11 @@ test("every family's derived env names are read back by each arm it declares", a
           assert.match(source, /protocol::qwen_edit_artifact_source\(arm\.lightning\)/,
             `${arm} must consume the shared Qwen artifact source`);
           fieldSource = commonProduction;
+        }
+        if (Object.values(family.overlayArtifact ?? {}).some((side) => side.env === env)) {
+          assert.match(source, /protocol::minimax_h3_image_lora_adapter\(\)/,
+            `${arm} must consume the shared overlay artifact source`);
+          fieldSource = libProduction;
         }
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
@@ -2443,6 +2467,95 @@ test("a campaign directory's ingested bundles mark their anchors as already capt
   const captured = await capturedInCampaign(root, dir);
   assert.deepEqual([...captured.entries()], [["qwen_image:q4:mlx", `${dir}/a-evidence.json`]]);
   assert.equal((await capturedInCampaign(root, "docs/calibration/absent")).size, 0);
+  // SW-F363: a regime capture marks its OWN row captured, never its base row.
+  await writeFile(path.join(root, dir, "b-evidence.json"), JSON.stringify({
+    records: [{ backend: "mlx", target: { modelId: "qwen_image", tier: "q8", anchorRegime: "optimized" } }],
+  }));
+  const withRegime = await capturedInCampaign(root, dir);
+  assert.equal(withRegime.get("qwen_image:q8:mlx:optimized"), `${dir}/b-evidence.json`);
+  assert.equal(withRegime.has("qwen_image:q8:mlx"), false);
+});
+
+// SW-F363. A regime anchor is current by the same loader-closure rule a measured bound is, keyed on
+// its own plan row; the matrix (which publishes derivation anchors only) cannot see it.
+test("a regime anchor's currency is keyed on its own plan row", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-regime-"));
+  await mkdir(path.join(root, "config"), { recursive: true });
+  const digest = "d".repeat(64);
+  const row = { modelId: "minimax_h3_image", tier: "q4", backend: "mlx", regime: "optimized", source: { loaderClosureDigest: digest } };
+  const seed = async (rows) => {
+    await writeFile(path.join(root, ANCHOR_STORE_PATH), JSON.stringify({ anchors: [], regimeAnchors: rows }));
+    await writeFile(path.join(root, ANCHOR_LOADER_CONFIG_PATH), JSON.stringify({ models: { "minimax_h3_image:mlx": { digest } } }));
+  };
+  await seed([row]);
+  assert.deepEqual([...(await readRegimeAnchorCurrency(root)).entries()], [["minimax_h3_image:q4:mlx:optimized", true]]);
+  await seed([{ ...row, source: { loaderClosureDigest: "e".repeat(64) } }]);
+  assert.equal((await readRegimeAnchorCurrency(root)).get("minimax_h3_image:q4:mlx:optimized"), false);
+  assert.equal((await readRegimeAnchorCurrency(await mkdtemp(path.join(tmpdir(), "catalog-none-")))).size, 0);
+});
+
+// SW-F363. A guard stop on a REGIME row is carried in the store tagged with its regime, and it
+// classifies THAT row `exceeded_current` — never the cell's base row — so `--skip-current` does not
+// re-book it, and the base row stays runnable.
+test("a regime row's measured lower bound is keyed on its own plan row", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-regime-bound-"));
+  await mkdir(path.join(root, "config"), { recursive: true });
+  const digest = "f".repeat(64);
+  await writeFile(path.join(root, ANCHOR_STORE_PATH), JSON.stringify({
+    anchors: [],
+    exceededBounds: [{
+      modelId: "minimax_h3_image", tier: "q4", backend: "mlx", regime: "lora", observedFootprintBytes: 1,
+      source: { path: "docs/calibration/x/y.json", loaderClosureDigest: digest },
+    }],
+  }));
+  await writeFile(path.join(root, ANCHOR_LOADER_CONFIG_PATH), JSON.stringify({ models: { "minimax_h3_image:mlx": { digest } } }));
+  const bounds = await readExceededBounds(root);
+  assert.deepEqual([...bounds.keys()], ["minimax_h3_image:q4:mlx:lora"]);
+  assert.equal(bounds.get("minimax_h3_image:q4:mlx:lora").current, true);
+  assert.equal(bounds.has("minimax_h3_image:q4:mlx"), false);
+});
+
+// SW-F363. The `:lora` regime row needs a second root the manifest does not ship — the pinned
+// community LoRA — resolved from the ROW's declared overlay, never for an overlay-free row of the
+// same family; it is fetchable by `--download-missing` and is the file the adapter arm opens.
+test("a lora regime row binds the pinned community LoRA as its overlay artifact", async () => {
+  const lora = MINIMAX_H3_IMAGE_COMMUNITY_LORA;
+  const family = PROVIDER_FAMILIES.minimax_h3_image;
+  assert.equal(sideArtifactFor(family, { modelId: "minimax_h3_image", overlay: "lora" }), lora);
+  assert.equal(sideArtifactFor(family, { modelId: "minimax_h3_image", overlay: "none" }), undefined);
+  assert.equal(sideArtifactFor(family, { modelId: "minimax_h3_image" }), undefined);
+  const targets = anchorDownloadTargets(
+    { key: "minimax_h3_image:q4:mlx:lora", modelId: "minimax_h3_image", provider: "minimax_h3_image", backend: "mlx", tier: "q4", overlay: "lora" },
+    await readManifestModels(),
+    { platform: "macos" },
+  ).targets;
+  assert.deepEqual(
+    targets.filter((target) => target.repo === lora.repo).map(({ revision, include }) => ({ revision, include })),
+    [{ revision: lora.revision, include: [lora.file] }],
+  );
+  const base = anchorDownloadTargets(
+    { key: "minimax_h3_image:q4:mlx", modelId: "minimax_h3_image", provider: "minimax_h3_image", backend: "mlx", tier: "q4", overlay: "none" },
+    await readManifestModels(),
+    { platform: "macos" },
+  ).targets;
+  assert.equal(base.some((target) => target.repo === lora.repo), false);
+  // Bound to the adapter's own pin, the way the Qwen Lightning distill is.
+  const lib = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
+  assert.equal(/pub const MINIMAX_H3_IMAGE_LORA_REPOSITORY: &str = "([^"]+)"/.exec(lib)?.[1], lora.repo);
+  assert.equal(/pub const MINIMAX_H3_IMAGE_LORA_REVISION: &str = "([^"]+)"/.exec(lib)?.[1], lora.revision);
+  assert.equal(/pub const MINIMAX_H3_IMAGE_LORA_FILE: &str = "([^"]+)"/.exec(lib)?.[1], lora.file);
+  for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
+    assert.ok(lib.includes(`"SCENEWORKS_${lora.env}_${suffix}"`), `lib.rs reads SCENEWORKS_${lora.env}_${suffix}`);
+  }
+  for (const lane of ["mlx", "candle"]) {
+    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${lane}_minimax_h3_image.rs`), "utf8");
+    assert.match(arm, /protocol::minimax_h3_image_lora_adapter\(\)\?/, `${lane} installs the LoRA`);
+  }
+  // `--dry-run` states each row's composition.
+  assert.equal(
+    dryRunCompositionLine({ regime: "lora", overlay: "lora", loadShape: "eager_materialization", strategy: { rung: "resident", engagedRungs: ["resident"], parameters: {} } }),
+    "strategy=resident engaged=[resident] parameters={} overlay=lora loadShape=eager_materialization regime=lora",
+  );
 });
 
 // sc-22738. A bound's bundle has an EMPTY `records` array and the matrix publishes only anchors,
@@ -2676,7 +2789,7 @@ test("every provider the committed plan declares is either served by a family ro
   const models = await readManifestModels();
   for (const backend of ["mlx", "candle"]) {
     const { rows } = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], skipCurrent: false });
-    const keys = Object.keys(plan.anchors).filter((key) => key.endsWith(`:${backend}`));
+    const keys = Object.keys(plan.anchors).filter((key) => anchorParts(key).backend === backend);
     assert.deepEqual(rows.map((row) => row.key), keys.sort(), `${backend}: one row per plan anchor`);
     for (const row of rows) {
       // sc-22738: `exceeded_current` is the seventh — a cell whose measured lower bound is current
@@ -3958,7 +4071,11 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   let candleExempt = 0;
   let declaredEvidence = 0;
   for (const [key, anchor] of Object.entries(plan.anchors)) {
-    const { modelId, tier, backend } = anchorParts(key);
+    const { modelId, tier, backend, regime } = anchorParts(key);
+    // SW-F363: a regime row STATES its composition — that is what a regime is — and is held to it by
+    // `validatePlan` (memory-calibration-harness.mjs) and to the contract by the worker's
+    // inference_runtime.rs walk, so this inherit-or-be-forced rule is not asked of it.
+    if (regime) continue;
     const model = models.get(modelId);
     // A plan row for a model the manifest does not ship cannot be judged against manifest evidence;
     // `validatePlan` already refuses an invented model id, so this only skips fixture rows.
@@ -4017,9 +4134,15 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       );
     }
     const fallback = ANCHOR_STRATEGY[backend];
-    const expected = exempt && fallback.rung === "staged_residency"
-      ? { rung: "resident", engagedRungs: ["resident"] }
-      : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
+    // SW-F363: the fourth source — an engine that stages every request records the staged
+    // composition it actually renders (config/anchor-lane-default-strategy.json
+    // `enginesThatAlwaysStage`, bound to the MLX descriptor flag by inference_runtime.rs).
+    const alwaysStages = ENGINES_THAT_ALWAYS_STAGE[backend].has(anchor.provider);
+    const expected = alwaysStages
+      ? { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] }
+      : exempt && fallback.rung === "staged_residency"
+        ? { rung: "resident", engagedRungs: ["resident"] }
+        : { rung: fallback.rung, engagedRungs: [...fallback.engagedRungs] };
     const effective = anchor.strategy ?? fallback;
     assert.equal(
       effective.rung,
@@ -4080,6 +4203,18 @@ test("a planned anchor carries exactly the controls its engaged rungs declare", 
       for (const [parameter, value] of Object.entries(declared[rung]?.parameters ?? {})) {
         expected[parameter] = wire(parameter, value);
       }
+    }
+    // SW-F363: an `:optimized` regime row engages bounded rungs whose parameters the manifest may
+    // not declare (no shipped lane binding names them yet). Where it does declare one the row must
+    // carry exactly it; where it does not, the row's exact tuple is the contract's, checked against
+    // the contract's published ranges by inference_runtime.rs (`validate_selection`) and by each
+    // adapter arm's own plan test — never volunteered for a rung it does not engage (validatePlan).
+    if (anchorParts(key).regime === "optimized") {
+      for (const [parameter, value] of Object.entries(expected)) {
+        assert.deepEqual(planned.strategy.parameters[parameter], value, `${key}: ${parameter}`);
+      }
+      checked += 1;
+      continue;
     }
     assert.deepEqual(
       planned.strategy.parameters,
@@ -5440,6 +5575,44 @@ test("every shipped tiered model is measurable", async () => {
   }
 });
 
+// SW-F363, campaign run 43794810762: four `ingest_failed` rows quoted a bare `}`, because Node
+// prints a thrown error's own properties after its stack as an object literal whose opening brace
+// ends the last stack FRAME. The fixtures are REAL Node output — each shape is produced by throwing
+// in a child `node -e` — so a change in how Node prints them reds here rather than in a campaign.
+test("a failure reason names the error, not the object literal Node prints after it", () => {
+  const nodeStderr = (code) => {
+    const result = spawnSync(process.execPath, ["-e", code], { encoding: "utf8" });
+    assert.notEqual(result.status, 0, code);
+    return result.stderr;
+  };
+  // A real fs error, which carries errno/code/syscall/path properties.
+  const fsError = nodeStderr(
+    'require("node:fs").writeFileSync("/nonexistent-sw-f363-dir/x", "y")',
+  );
+  assert.match(fsError, /\{\n\s+errno:/, "the fixture really prints a property literal");
+  assert.match(failureReason({ stderr: fsError }), /^Error: ENOENT: no such file or directory, open '\/nonexistent-sw-f363-dir\/x'/);
+  // An ENOSPC-shaped error (the run's likely cause) with a nested cause, details object and array.
+  const nested = nodeStderr(
+    'const inner = Object.assign(new Error("inner"), { code: "X", details: { a: [1, 2] } });'
+      + 'throw Object.assign(new Error("ENOSPC: no space left on device, write", { cause: inner }), { errno: -28, code: "ENOSPC", syscall: "write" })',
+  );
+  assert.match(nested, /\[cause\]: Error: inner/);
+  assert.equal(failureReason({ stderr: nested }), "Error: ENOSPC: no space left on device, write");
+  // A real strictEqual failure: frames follow the multi-line message, then the property literal.
+  const assertion = nodeStderr('require("node:assert").strictEqual(1, 2)');
+  assert.equal(
+    failureReason({ stderr: assertion }),
+    "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1 !== 2",
+  );
+  // No literal: unchanged; and a stderr that is only a literal still reports something.
+  assert.deepEqual(withoutTrailingLiteral(["Error: x"]), ["Error: x"]);
+  assert.equal(failureReason({ stderr: "{\n}" }), "}");
+  // The step-log tail is bounded and keeps the end.
+  const long = Array.from({ length: 100 }, (_, index) => `line ${index}`).join("\n");
+  assert.equal(stderrTail({ stderr: long }, 3), "line 97\nline 98\nline 99");
+  assert.equal(stderrTail({ message: "plain" }), "plain");
+});
+
 test("failure reasons name the thrown error, not the Node banner after it", () => {
   const stderr = [
     "file:///x/harness.mjs:376",
@@ -6502,6 +6675,35 @@ test("HF_TOKEN reaches only catalog walks and the bounded SDXL endpoint step tha
     assert.equal((job.match(/secrets\.HF_TOKEN/g) ?? []).length, name === "candle" ? 2 : 1, `${name} has no other token exposure`);
     assert.match(job, /      - name: Plan the walk\n(?:        if: \$\{\{ !startsWith\(inputs\.profile, 'sdxl-cuda-'\) \}\}\n)?        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
   }
+});
+
+// CI_IMPACT: static workflow assertion only; the provisioning step runs on dispatch, never in PR CI.
+test("the mlx lane provisions an hf CLI only under download_missing and only into RUNNER_TEMP", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  const start = workflow.indexOf("\n  mlx:");
+  const end = workflow.indexOf("\n  candle:");
+  assert.ok(start > -1 && end > start, "mlx job located");
+  const job = workflow.slice(start, end);
+  const steps = [...job.matchAll(/      - name: Provide a Hugging Face CLI for --download-missing\n([\s\S]*?)(?=\n      - |$)/g)];
+  assert.equal(steps.length, 1, "exactly one provisioning step");
+  const step = steps[0][1];
+  assert.match(step, /^        if: \$\{\{ inputs\.download_missing \}\}$/m, "gated on download_missing alone");
+  assert.match(step, /if command -v hf >\/dev\/null \|\| command -v huggingface-cli >\/dev\/null; then\n[^\n]*\n\s*exit 0/,
+    "an hf CLI already on PATH skips the install");
+  assert.match(step, /python3\.12 -m venv "\$RUNNER_TEMP\/hf-cli-venv"/);
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/python" -m pip install \\\n\s*--disable-pip-version-check --no-input -r \.github\/requirements-hf\.txt/,
+    "installs the repo-pinned client into the venv");
+  assert.match(step, /echo "\$RUNNER_TEMP\/hf-cli-venv\/bin" >> "\$GITHUB_PATH"/);
+  // huggingface_hub 0.36's `hf` has a `version` subcommand and REFUSES `--version` (exit 2), so the
+  // smoke check must use the subcommand or the step fails on every runner it provisions.
+  assert.match(step, /"\$RUNNER_TEMP\/hf-cli-venv\/bin\/hf" version$/m, "smoke-checks with `hf version`");
+  assert.doesNotMatch(step, /bin\/hf" --version/, "`hf --version` exits 2 on huggingface_hub 0.36");
+  // Nothing outside the job-private venv: no bare pip, no --user, no brew, no HF cache touch.
+  const installs = step.match(/pip install/g) ?? [];
+  assert.equal(installs.length, 1);
+  assert.doesNotMatch(step, /--user|\bbrew\b|pipx|sudo|\brm\b|HF_HOME|huggingface\/hub|DEFAULT_HF_CACHE/);
+  assert.ok(job.indexOf("Provide a Hugging Face CLI") < job.indexOf("      - name: Walk the catalog"), "before the walk");
+  assert.match(await readFile(path.join(ROOT, ".github/requirements-hf.txt"), "utf8"), /^huggingface_hub==\d+\.\d+\.\d+$/m);
 });
 
 test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
@@ -7867,6 +8069,52 @@ test("--download-missing fetches an EMPTY snapshot too: the hub CLI resumes an i
   const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
   assert.equal(fetched.status, "runnable", fetched.reason);
   assert.equal((await stub.invocations()).length, 1, "the already-staged anchor is never re-fetched");
+});
+
+test("--download-missing completes a PARTIAL snapshot whose shard index names a missing shard, without touching present files", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // Run 43946963737's shape: the pinned tier root EXISTS and holds its index and some shards, but
+  // an earlier fetch was cut short, so a shard its own index names is absent.
+  const hub = await fakeHub([[PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"]]);
+  const tierRoot = snapshotPath(hub, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4");
+  await mkdir(tierRoot, { recursive: true });
+  await writeFile(path.join(tierRoot, "model.safetensors.index.json"), JSON.stringify({
+    weight_map: { "a.weight": "present-00001-of-00002.safetensors", "b.weight": "weights.safetensors" },
+  }));
+  const present = path.join(tierRoot, "present-00001-of-00002.safetensors");
+  await writeFile(present, "already here");
+  const presentBefore = await stat(present);
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-partial", hfCache: [hub],
+  };
+
+  // Without the flag: today's weights_missing naming the shard, and no fetch.
+  const idle = await stubHuggingFaceCli();
+  const before = await withStubCli(idle, () => planRun({ ...args, downloadMissing: false }, root));
+  const planned = before.rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(planned.status, "weights_missing");
+  assert.match(planned.reason, /is missing weights\.safetensors, which its own safetensors shard index names beside it/);
+  assert.deepEqual(await idle.invocations(), [], "no fetch without --download-missing");
+
+  // With the flag: one fetch of that pinned repo@revision and tier glob into the same hub, then a
+  // re-probe that finds the completed mirror.
+  const stub = await stubHuggingFaceCli();
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const invocations = await stub.invocations();
+  assert.equal(invocations.length, 1, JSON.stringify(invocations));
+  const [argv] = invocations;
+  assert.equal(argv[1], PROVIDER_FAMILIES.qwen_image.repo);
+  assert.equal(argv[argv.indexOf("--revision") + 1], DOWNLOAD_REVISION);
+  assert.equal(argv[argv.indexOf("--include") + 1], "q4/*");
+  assert.equal(argv[argv.indexOf("--cache-dir") + 1], hub);
+  const fetched = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(fetched.status, "runnable", fetched.reason);
+  assert.equal(fetched.tierRoot, tierRoot);
+  const presentAfter = await stat(present);
+  assert.equal(await readFile(present, "utf8"), "already here", "a present shard is never rewritten");
+  assert.equal(presentAfter.mtimeMs, presentBefore.mtimeMs);
 });
 
 test("with no Hugging Face CLI on PATH, --download-missing says so ONCE and on every cell it silenced", { skip: skipWithoutShebang }, async () => {

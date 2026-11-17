@@ -1,3 +1,4 @@
+import { upgradeCarrier } from "./requestUpgrade.js";
 // Durable store for the Simple studios' own knobs — model, prompt, resolution, duration,
 // LoRA picks (epic 15404's fields and whatever Simple grows next).
 //
@@ -82,7 +83,10 @@ export function seedSimpleStudiosFromServer(map) {
  */
 export function readSimpleStudioSnapshot(workspaceId) {
   const entry = readAll()[workspaceKey(workspaceId)];
-  return entry && typeof entry === "object" ? entry : {};
+  if (!entry || typeof entry !== "object") return {};
+  const upgraded = {};
+  for (const [studio, snapshot] of Object.entries(entry)) upgraded[studio] = upgradeCarrier(snapshot, "simpleSettings");
+  return upgraded;
 }
 
 /**
@@ -97,6 +101,8 @@ export function writeSimpleStudioSnapshot(workspaceId, snapshot) {
   if (!snapshot || typeof snapshot !== "object") {
     return;
   }
+  readSimpleStudioSnapshot(workspaceId); // Refuse writes over unreadable originals.
+  for (const value of Object.values(snapshot)) upgradeCarrier(value, "simpleSettings");
   const key = workspaceKey(workspaceId);
   const map = readAll();
   map[key] = snapshot;

@@ -17,6 +17,7 @@ export const MUTABLE_FILES = [
   "config/engine-capabilities/runtime/capabilities.mlx.json",
   "config/manifests/registry/route-policy.json",
   "crates/sceneworks-worker/src/training_jobs.rs",
+  "crates/sceneworks-options/src/training_validation.rs",
 ];
 export const TESTS = {
   target: ["sceneworks-core", "training::moss_training_s1_tests::moss_targets_keep_explicit_checkpoint_and_method_choices"],

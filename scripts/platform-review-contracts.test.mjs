@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile, ut
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -249,15 +250,26 @@ test("H3 dispatch queues are unique per run and leave old StarVector and ordinar
   const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
   const expression = workflowExpression(root, "group");
   const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
-  assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
-  const evaluate = (event, operation, id, attempt = 1, selected = expression) => Function("github", "inputs", "format", `return (${selected});`)(
-    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation },
-    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]));
+  assert.doesNotMatch(root, /fromJSON/);
+  const evaluate = (event, operation, id, attempt = 1, selected = expression, plan = undefined) => Function("github", "inputs", "format", "startsWith", `return (${selected});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation, campaign_run_id: plan },
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]), (value, prefix) => String(value ?? "").toLowerCase().startsWith(prefix.toLowerCase()));
+  const sdxlPlan = JSON.stringify({proof: "sdxl-exact-replay", ownerGo: true});
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, expression, sdxlPlan), "sdxl-exact-replay-bridge-10-2");
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress"), sdxlPlan), false);
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress")), true);
+  for (const plan of ["starvector-campaign-2026-11", "{", '{"proof":"other"}']) {
+    assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, expression, plan), "server-candle-linux-refs/heads/feature");
+    assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress"), plan), true);
+  }
+  const malformedMarker = '{"proof":"sdxl-exact-replay",';
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, expression, malformedMarker), "sdxl-exact-replay-bridge-10-2");
+  assert.equal(evaluate("workflow_dispatch", "standard", 10, 2, workflowExpression(root, "cancel-in-progress"), malformedMarker), false);
   // Parentheses may change when a dispatch-only arm is removed. Preserve the actual legacy
   // keys for every event instead of freezing a byte substring of the expression's formatting.
   const legacy = ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "unknown", undefined];
   for (const event of ["workflow_dispatch", "push", "pull_request", "merge_group", "schedule", undefined]) {
-    for (const operation of legacy) assert.equal(evaluate(event, operation, 10), evaluate(event, operation, 10, 1, original), `legacy queue changed: ${event}/${operation}`);
+    for (const operation of legacy) for (const plan of [undefined, "starvector-campaign-2026-11"]) assert.equal(evaluate(event, operation, 10, 1, expression, plan), evaluate(event, operation, 10, 1, original, plan), `legacy queue changed: ${event}/${operation}`);
     if (event !== "workflow_dispatch") for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof", "h3-ui-proof", "h3-terminal-mlx", "h3-terminal-cuda"]) assert.equal(evaluate(event, operation, 10), "starvector-terminal-bridge", "H3 queue isolation is positively manual");
   }
   for (const operation of ["h3-terminal-mlx", "h3-terminal-cuda"]) {
@@ -625,7 +637,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
     assert.match(setup, /node-version: 22/);
     assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
-    assert.match(select, /node scripts\/select-windows-cargo-cache\.mjs/);
+    assert.match(select, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
     assert.match(select, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
     assert.doesNotMatch(select.split("\n").filter(line => !/^\s*#/.test(line)).join("\n"), /RUNNER_TEMP|USERPROFILE|continue-on-error/);
     assert.match(fetchStep, /CARGO_NET_OFFLINE: "false"/);
@@ -716,9 +728,12 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
 // heavy compile step must run after it, and the cold-time-sized 90 min ordinary budget is pinned below.
 test("Windows candle lanes select the FlashAttention object cache before every heavy compile step", async () => {
   const select = await source("scripts/select-windows-cargo-cache.mjs");
+  assert.equal(createHash("sha256").update(select).digest("hex"), "03ad5e8a246003bbca89db839f1788de92b8f1214d4ed9335d1db45cce2f9463",
+    "the H3 matched-resident controller requires its frozen common selector bytes");
   assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttention\}/, "the selection step exports the cache to every later compile step");
   const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
   const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
+  assert.match(selectStep, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
   for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {
     assert.ok(job.indexOf(selectStep) < job.indexOf(workflowStep(job, heavy)), `${heavy} runs after the cache is selected`);
   }
@@ -2444,6 +2459,19 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   const skip =
     /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
 
+  const selector = stepBody(workflow, "Isolate Cargo dependency checkout");
+  const cacheOnly = workflowExpression(selector, "FLASH_ATTN_CACHE_ONLY");
+  for (const [event, inputs, expected] of [
+    ["pull_request", {}, false], ["workflow_dispatch", {}, false],
+    ["workflow_dispatch", { provision_snapshot: true }, true],
+    ["workflow_dispatch", { provision_snapshot: true, run_five_rung_reference: true }, false],
+  ]) {
+    assert.equal(Boolean(evaluateWorkflow(cacheOnly, event, inputs)), expected,
+      `FlashAttention cache-only selection for ${event}: ${JSON.stringify(inputs)}`);
+  }
+  assert.match(selector, /if \(\$env:FLASH_ATTN_CACHE_ONLY -eq 'true'\) \{\s+node scripts\/prepare-windows-flash-prebuilt\.mjs --cache-only/);
+  assert.match(selector, /\} else \{\s+node scripts\/prepare-windows-flash-prebuilt\.mjs\s+\}/);
+
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
   // stays green. That is not hypothetical -- it is trap 1 from sc-18677's third review round, which
@@ -3349,7 +3377,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   assert.match(mlx, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
-  // outside the worker and is NOT under `crates/**`, so without this path entry the
+  // outside the worker and is not covered by the crate paths, so without this path entry the
   // widened lint is declared but unreachable for rust-api-only PRs. That is the same
   // declaration-without-reachability trap as the bug this story came from.
   // Lint must come BEFORE test. A failed step aborts the job, so with the tests first
@@ -3364,7 +3392,11 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
 
   const mlxPaths = mlx.slice(mlx.indexOf("paths: &mlx_paths"), mlx.indexOf("pull_request:"));
   assert.ok(mlxPaths.length > 0, "macos-mlx.yml must declare an &mlx_paths anchor");
-  for (const watched of ['- "crates/**"', '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
+  const manifest = await source("Cargo.toml");
+  const defaultMembers = manifest.match(/^default-members = \[([\s\S]*?)^\]/m)?.[1];
+  assert.ok(defaultMembers, "workspace must declare default members");
+  const lintedCrates = [...defaultMembers.matchAll(/^\s+"(crates\/[^"]+)"/gm)].map(([, dir]) => `- "${dir}/**"`);
+  for (const watched of [...lintedCrates, '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
     assert.ok(mlxPaths.includes(watched), `&mlx_paths must watch ${watched}`);
   }
   // The narrow spelling this replaced. `--all-targets` on one crate is not coverage of

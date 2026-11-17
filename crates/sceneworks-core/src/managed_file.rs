@@ -1,4 +1,5 @@
 //! Catalog-owned exact identity for managed single-file components. No network or ambient path.
+use crate::verified_source_cache::{SourceVerification, VerifiedSourceCache};
 use serde_json::{Map, Value};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
@@ -67,19 +68,27 @@ impl ManagedFileIdentity {
         payload.insert("expectedSizeBytes".into(), self.bytes.into());
     }
 
-    /// Re-read bytes at each load; same filename, size, or stale install receipt is insufficient.
-    pub fn verify(&self, path: &Path) -> Result<(), String> {
-        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        if file.metadata().map_err(|e| e.to_string())?.len() != self.bytes {
+    /// Prove the bytes at `path` at each load; same filename, size, or stale install receipt is
+    /// insufficient. The SHA-256 is read at most once per host while the file keeps its stamp
+    /// (`store`, the host's shared [`VerifiedSourceCache`]); any stamp change reads it again.
+    pub fn verify(
+        &self,
+        store: &VerifiedSourceCache,
+        path: &Path,
+    ) -> Result<SourceVerification, String> {
+        if std::fs::metadata(path).map_err(|e| e.to_string())?.len() != self.bytes {
             return Err("managed component has the wrong byte count; repair/install it".into());
         }
-        let digest = crate::hashing::sha256_reader(&mut file)
-            .map_err(|e| e.to_string())?
-            .0;
-        if digest != self.sha256 {
-            return Err("managed component SHA256 mismatch; repair/install it".into());
-        }
-        Ok(())
+        let real = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+        store
+            .verify(&real, &format!("sha256:{}", self.sha256), &|| Ok(()))
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    "managed component SHA256 mismatch; repair/install it".into()
+                } else {
+                    error.to_string()
+                }
+            })
     }
 
     pub fn reconcile(&self, payload: &Map<String, Value>) -> Result<(), String> {
@@ -206,10 +215,11 @@ mod tests {
         let pin = ManagedFileIdentity::from_download(&row(b"good"))
             .unwrap()
             .unwrap();
+        let store = VerifiedSourceCache::new(tmp.path().join("verified"));
         std::fs::write(&path, b"good").unwrap();
-        pin.verify(&path).unwrap();
+        pin.verify(&store, &path).unwrap();
         std::fs::write(&path, b"evil").unwrap();
-        assert!(pin.verify(&path).unwrap_err().contains("SHA256"));
+        assert!(pin.verify(&store, &path).unwrap_err().contains("SHA256"));
         for (key, value) in [
             ("expectedSha256", json!("bad")),
             ("expectedSizeBytes", json!(0)),
@@ -221,6 +231,33 @@ mod tests {
             invalid[key] = value;
             assert!(ManagedFileIdentity::from_download(&invalid).is_err());
         }
+    }
+    /// Each load still proves the bytes, but an unchanged file is read once per host; a same-size
+    /// rewrite that restores the old mtime is read again and refused.
+    #[test]
+    fn managed_file_is_read_once_per_host_until_it_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("predictor.safetensors");
+        let pin = ManagedFileIdentity::from_download(&row(b"good"))
+            .unwrap()
+            .unwrap();
+        let store = VerifiedSourceCache::new(tmp.path().join("verified"));
+        std::fs::write(&path, b"good").unwrap();
+        let settled = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        let settle = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(settled)
+                .unwrap();
+        };
+        settle();
+        assert_eq!(pin.verify(&store, &path), Ok(SourceVerification::Hashed));
+        assert_eq!(pin.verify(&store, &path), Ok(SourceVerification::Reused));
+        std::fs::write(&path, b"evil").unwrap();
+        settle();
+        assert!(pin.verify(&store, &path).unwrap_err().contains("SHA256"));
     }
     #[test]
     fn managed_digest_is_a_typed_round_trip_contract_field() {

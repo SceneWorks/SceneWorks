@@ -5,7 +5,6 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
-use crate::image_request::image_quant_tier_refusal;
 use crate::jobs_store::routing::candle::{
     candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
     image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
@@ -1020,10 +1019,11 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             &format!(
                 "{reason}. Candle refuses rather than silently rendering at a precision the \
                  request did not name.{also}",
-                reason = payload
-                    .get("advanced")
-                    .and_then(Value::as_object)
-                    .and_then(|advanced| image_quant_tier_refusal(model, advanced))
+                reason = crate::jobs_store::routing::probe_image_precision_options(payload)
+                    .ok()
+                    .and_then(|options| {
+                        crate::image_request::image_quant_tier_refusal_resolved(model, &options)
+                    })
                     .unwrap_or_else(|| "advanced.quantTier \"fp8r\" is not loadable here".to_owned()),
             ),
             Some("sc-26241"),
@@ -1060,6 +1060,23 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
                 }
             ),
             Some("sc-24214"),
+        ),
+        CandleImageRefusal::MinimaxH3ImageSurface => UnsupportedReason::new(
+            Some(model),
+            "MiniMax-H3-Image request outside text-to-image and edit",
+            &format!(
+                "MiniMax-H3-Image serves text-to-image and edit from up to 16 ordered reference \
+                 images (LoRAs and tiers included) — no control, pose, multi-phase schedule, hires \
+                 fix, or image-to-image / character mode, on either backend. This request (mode \
+                 {mode:?}) carries one of those, so it is refused rather than rendered with the \
+                 carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as text_to_image or edit_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("SW-7100"),
         ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
@@ -1201,12 +1218,10 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             None,
         ),
         model if SENSENOVA_MODEL_IDS.contains(&model) => {
-            let has_poses = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty());
+            let has_poses = matches!(
+                crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).poses,
+                crate::resolved_options::RouteField::Valid(count) if count > 0
+            );
             if has_poses {
                 UnsupportedReason::new(
                     Some(model),
@@ -1240,6 +1255,14 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "PuLID-FLUX without a character reference",
             "PuLID-FLUX runs on MLX for character_image with a referenceAssetId (the reference face drives the identity injection); a non-character / reference-less job has no PuLID-FLUX path.",
             None,
+        ),
+        // SW-7100 / SW-7101: MiniMax-H3-Image renders text-to-image and the ordered-reference edit.
+        // Mirrors `minimax_h3_image_mlx_eligible`.
+        "minimax_h3_image" => UnsupportedReason::new(
+            Some(model),
+            "MiniMax-H3-Image request outside text-to-image and edit",
+            "MiniMax-H3-Image renders text-to-image and edits from up to 16 ordered reference images (with LoRAs), but takes no control, pose, multi-phase schedule or hires fix, and no image-to-image or character mode.",
+            Some("SW-7101"),
         ),
         // Kolors (epic 3090) runs its full surface on MLX now — T2I (sc-3875), img2img (sc-4765),
         // the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012)

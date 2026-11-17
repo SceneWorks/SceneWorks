@@ -208,6 +208,80 @@ pub(super) fn license_acknowledgment_index_for_selected(
     index
 }
 
+/// SW-7100 (E23): MiniMax-H3-Image is gated at RUN as well as at install. Its weights are fetched
+/// only through the acknowledgment gate, but a cache populated by another route (a shared HF cache,
+/// a copied data directory) would otherwise render with no acceptance on record, and the
+/// MiniMax-H3-Image agreement binds whoever uses the model (§I.9). Scoped to that family so no
+/// other model's existing run behaviour changes; the acceptance is the same terms-bound server
+/// record the download gate writes.
+pub(crate) async fn ensure_run_license_acknowledged(
+    state: &AppState,
+    entry: &JsonObject,
+) -> Result<(), ApiError> {
+    // SW-7102: the prompt expander is under the same agreement and is gated the same way.
+    if !matches!(
+        entry.get("family").and_then(Value::as_str),
+        Some(
+            sceneworks_core::model_family::MINIMAX_H3_IMAGE
+                | sceneworks_core::model_family::MINIMAX_H3_IMAGE_PE
+        )
+    ) {
+        return Ok(());
+    }
+    let entry = Value::Object(entry.clone());
+    if !model_requires_license_acknowledgment(&entry)
+        || crate::yue2_jobs::current_license_acknowledgment(state, &entry)
+            .await?
+            .is_some()
+    {
+        return Ok(());
+    }
+    let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "'{model_id}' requires accepting its license before it can be used. Accept the license \
+             on the Models screen, then retry."
+        ),
+        code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// [`ensure_run_license_acknowledged`] for every model carrier a job payload holds
+/// (`modelManifestEntry`, `baseModelManifestEntry`, `modelManifestEntries[]`). Portable admission
+/// runs it on every fresh admission and every replay, so retry, duplicate (including one whose
+/// `payloadChanges` switch the model) and every other creation route reach the same run gate as
+/// the typed image and prompt-expansion routes. Training jobs keep their own gate: the typed
+/// training route and its raw/replay twin (`raw_training_payload_license_error`) require the
+/// user's `licenseAcknowledged` assertion on the run itself.
+pub(crate) async fn ensure_payload_run_licenses_acknowledged(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(());
+    }
+    let carriers = [
+        payload.get("modelManifestEntry"),
+        payload.get("baseModelManifestEntry"),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(
+        payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    for entry in carriers.filter_map(Value::as_object) {
+        ensure_run_license_acknowledged(state, entry).await?;
+    }
+    Ok(())
+}
+
 /// A conditional component a catalog entry declares as `blocked` (sc-22998).
 #[derive(Clone)]
 pub(crate) struct BlockedComponent {

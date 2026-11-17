@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableFeedbackState.js";
 import { Segmented } from "./LabFields.jsx";
 import React from "react";
 import { Icon } from "../../components/Icons.jsx";
@@ -30,6 +31,8 @@ export function Yue2CoverPanel({
   reviewedTranscriptionVersionId,
   setReviewedTranscriptionVersionId,
   coverProblems,
+  portableRefusal,
+  portableFeedback,
   readyToRun,
   tierProblem
 }) {
@@ -166,14 +169,16 @@ export function Yue2CoverPanel({
                 <div className="prompt-cta-stack yue2-cta">
                   <button
                     className="prompt-cta"
-                    disabled={submitting || coverProblems.length > 0 || !readyToRun}
-                    onClick={() => submit("cover")}
+                    disabled={submitting || coverProblems.length > 0 || portableFeedbackBlocks(portableFeedback) || !readyToRun}
+                    onClick={() => { if (!portableFeedbackBlocks(portableFeedback)) submit("cover"); }}
                     title={coverProblems.join(" ") || tierProblem || undefined}
                     type="button"
                   >
                     <Icon.Sparkle size={14} /> Generate cover
                   </button>
                   {coverProblems.length ? <span className="yue2-muted">{coverProblems.join(" ")}</span> : null}
+                  {portableFeedbackStatus(portableFeedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(portableFeedback)}</span> : null}
+                  {portableRefusal ? <span className="yue2-muted" role="alert">{portableRefusal.detail}</span> : null}
                 </div>
               </div>
   );

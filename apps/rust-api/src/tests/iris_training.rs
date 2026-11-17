@@ -670,6 +670,126 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     assert_eq!(entry["networkType"], "lora");
     assert_eq!(entry["installState"], "installed");
 
+    // The completed-run action requires terminal state and allocates a separate adapter.
+    let continue_path = format!("/api/v1/training/jobs/{job_id}/continue");
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &continue_path,
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.to_string().contains("completed step"), "{refused}");
+    let total = config["steps"].as_u64().unwrap();
+    let accumulation = config["gradientAccumulation"].as_u64().unwrap().max(1);
+    let terminal = output_dir.join(format!(
+        "{stem}.checkpoints/step_{:08}",
+        total / accumulation
+    ));
+    std::fs::create_dir_all(&terminal).unwrap();
+    std::fs::write(terminal.join("state.json"), b"{}").unwrap();
+    let (status, continued) = request(
+        app.clone(),
+        "POST",
+        &continue_path,
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{continued}");
+    assert_eq!(continued["sourceJobId"], job_id);
+    let next = private_training_payload(&settings.data_dir, continued["id"].as_str().unwrap());
+    assert_eq!(next["plan"]["config"]["steps"], total + 1000);
+    assert_eq!(
+        next["plan"]["config"]["advanced"]["resumeFromJobId"],
+        job_id
+    );
+    assert_ne!(next["plan"]["output"]["loraId"], plan["output"]["loraId"]);
+    assert_eq!(
+        next["plan"]["provenance"]["configSnapshot"],
+        next["plan"]["config"]
+    );
+    assert_eq!(
+        next["manifestEntry"]["provenance"]["configSnapshot"],
+        next["plan"]["config"]
+    );
+    assert_eq!(next["irisReceipts"]["parentRunJobId"], job_id);
+    assert_eq!(next["manifestEntry"]["irisReceipts"], next["irisReceipts"]);
+    assert_eq!(next["irisReceipts"]["dataset"]["id"], dataset_id);
+
+    // A completed continuation carries API-resolved paths in its stored config. A further
+    // continuation must validate its client options and resolve the immediate parent's checkpoint.
+    let continued_id = continued["id"].as_str().unwrap();
+    let continued_dir = private_training_output_dir(&settings.data_dir, continued_id);
+    let continued_terminal = continued_dir.join(format!(
+        "{stem}.checkpoints/step_{:08}",
+        (total + 1000) / accumulation
+    ));
+    claim_training_job_as_mlx_worker(&app, continued_id).await;
+    std::fs::create_dir_all(&continued_terminal).unwrap();
+    std::fs::write(continued_terminal.join("state.json"), b"{}").unwrap();
+    write_test_safetensors(&continued_dir.join(&file_name));
+    complete(
+        &app,
+        continued_id,
+        "completed",
+        json!({"stepsCompleted": total + 1000}),
+    )
+    .await;
+    let (_, continued_loras) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let registered = continued_loras
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == next["plan"]["output"]["loraId"])
+        .expect("the continued adapter is registered");
+    assert_eq!(registered["irisReceipts"], next["irisReceipts"]);
+    let (status, again) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/training/jobs/{continued_id}/continue"),
+        json!({"additionalSteps":1000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    let latest = private_training_payload(&settings.data_dir, again["id"].as_str().unwrap());
+    assert_eq!(latest["plan"]["config"]["steps"], total + 2000);
+    assert_eq!(again["sourceJobId"], continued_id);
+    assert_eq!(latest["irisReceipts"]["parentRunJobId"], continued_id);
+    assert_eq!(
+        latest["manifestEntry"]["irisReceipts"],
+        latest["irisReceipts"]
+    );
+    assert_eq!(
+        std::path::Path::new(
+            latest["plan"]["config"]["advanced"]["iris"]["resume_from"]
+                .as_str()
+                .unwrap()
+        )
+        .canonicalize()
+        .unwrap(),
+        continued_terminal.canonicalize().unwrap()
+    );
+    assert_eq!(
+        latest["plan"]["config"]["advanced"]["resumeFromJobId"],
+        continued_id
+    );
+    assert_ne!(
+        latest["plan"]["output"]["loraId"],
+        next["plan"]["output"]["loraId"]
+    );
+    assert_eq!(
+        private_training_payload(&settings.data_dir, continued_id),
+        next,
+        "continuing again preserves its parent's resolved plan"
+    );
+
     // Resume: the second run names the first; SceneWorks hands the trainer its checkpoint root.
     let mut resume = config.clone();
     resume["advanced"]["resumeFromJobId"] = json!(job_id);

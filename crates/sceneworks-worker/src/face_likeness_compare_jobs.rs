@@ -144,6 +144,7 @@ pub(crate) async fn run_face_likeness_compare_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -165,7 +166,8 @@ pub(crate) async fn run_face_likeness_compare_job(
 
     // Stage the SCRFD + ArcFace bundle (download-on-first-use; a prior InstantID / kps / dataset-face
     // run leaves it cached). The same dir the candle stack loads and the MLX path joins file names in.
-    let weights_dir = crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
+    let weights_dir =
+        crate::image_jobs::ensure_face_stack_dir(api, settings, job, portable_aux).await?;
 
     // The two source reads + full image decodes are folded into the blocking compare task below
     // (sc-8909 / F-107) so they never stall the async runtime thread (protecting the heartbeat).
@@ -390,6 +392,7 @@ pub(crate) async fn run_face_likeness_compare_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,
     _job: &sceneworks_core::contracts::JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> crate::WorkerResult<()> {
     Err(crate::WorkerError::InvalidPayload(
         "Face likeness compare (SCRFD + ArcFace) needs the macOS MLX backend or the candle backend \

@@ -7,8 +7,9 @@
 // the worker crate's source tree and read with the same core parser and section choice the worker
 // uses, so the default the dialog shows and the default the worker describes with are the same
 // bytes. The limit is core's `max_describe_prompt_chars`, the one the job validation applies. The
-// `[OUTPUT]` JSON contract is never served: the worker always appends it, and the user never
-// edits it.
+// JSON contracts (`[OUTPUT]`, `[JOYCAPTION_OUTPUT]`) are never served: the worker always appends
+// the model's contract, and the user never edits it, so a preset written before a field was added
+// still gets a reply with every field.
 
 use super::*;
 use sceneworks_core::dataset_batch_describe::{

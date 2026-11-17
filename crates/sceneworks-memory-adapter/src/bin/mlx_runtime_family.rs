@@ -515,7 +515,16 @@ pub(super) fn planned_selection(request: &Value) -> Result<MemorySelection, Stri
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
-            stage_residency: None,
+            // SW-F363: explicit staging beside a deeper rung (gen-core never engages it by cost
+            // order). Absent — every row planned before — stays `None`, exactly as before.
+            stage_residency: parameters
+                .get("stageResidency")
+                .map(|value| {
+                    value.as_bool().ok_or_else(|| {
+                        "planned.strategy.parameters.stageResidency must be boolean".to_owned()
+                    })
+                })
+                .transpose()?,
             decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
@@ -946,6 +955,7 @@ pub(super) fn exceeded_bound_capture_refusal_in(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        regime_anchors: Vec::new(),
         observed_operating_envelopes: Vec::new(),
         exceeded_bounds: store
             .exceeded_bounds

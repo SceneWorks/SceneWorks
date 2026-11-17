@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,6 +14,7 @@ use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::model_artifacts::portable_binding::{
     PortableArtifactFile, PortableSourceClaim, PortableSourceProvenance,
 };
+use sceneworks_core::verified_source_cache::VerifiedSourceCache;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -206,7 +206,8 @@ pub(crate) fn find_app_managed_exact_source(
             .join(&first.relative_path)
             .metadata()
             .is_ok_and(|meta| meta.is_file() && meta.len() == first.size_bytes)
-            && capture_registered_files(&path).is_ok_and(|files| files == expected)
+            && capture_registered_files(&source_store(settings), &path)
+                .is_ok_and(|files| files == expected)
         {
             return Ok(Some(path));
         }
@@ -237,7 +238,9 @@ pub(crate) fn selected_app_managed_exact_source(
             }
         });
     if selected.is_dir() {
-        if capture_registered_files(&selected).is_ok_and(|files| files == expected) {
+        if capture_registered_files(&source_store(settings), &selected)
+            .is_ok_and(|files| files == expected)
+        {
             return Ok(Some(selected));
         }
         return Err(WorkerError::InvalidPayload(
@@ -565,7 +568,9 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
     for (model_id, path, is_file) in
         crate::text_encoder_selection::portable_registered_source_paths(settings)
     {
-        if let Ok((_, files)) = selected_text_encoder_root_and_files(&path, is_file) {
+        if let Ok((_, files)) =
+            selected_text_encoder_root_and_files(&source_store(settings), &path, is_file)
+        {
             let mut claims = Vec::new();
             append_registered_claim_files(
                 &mut claims,
@@ -692,7 +697,7 @@ pub(crate) fn registered_external_base_path(
             continue;
         };
         let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
-        if capture_registered_files_with_roots(&confined, &roots)
+        if capture_registered_files_with_roots(&source_store(settings), &confined, &roots)
             .is_ok_and(|files| files == frozen_files)
         {
             return Ok(Some(confined));
@@ -758,7 +763,7 @@ pub(crate) fn registered_external_lora_path(
             continue;
         };
         let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
-        if capture_registered_files_with_roots(&confined, &roots)
+        if capture_registered_files_with_roots(&source_store(settings), &confined, &roots)
             .is_ok_and(|files| files == frozen_files)
         {
             return Ok(Some(confined));
@@ -768,6 +773,7 @@ pub(crate) fn registered_external_lora_path(
 }
 
 fn selected_text_encoder_root_and_files(
+    store: &VerifiedSourceCache,
     selected: &Path,
     is_file: bool,
 ) -> WorkerResult<(PathBuf, Vec<PortableArtifactFile>)> {
@@ -777,7 +783,8 @@ fn selected_text_encoder_root_and_files(
                 "selected text encoder is not a directory".to_owned(),
             ));
         }
-        return capture_registered_files(selected).map(|files| (selected.to_path_buf(), files));
+        return capture_registered_files(store, selected)
+            .map(|files| (selected.to_path_buf(), files));
     }
     if !selected.is_file() {
         return Err(WorkerError::InvalidPayload(
@@ -787,8 +794,8 @@ fn selected_text_encoder_root_and_files(
     let parent = selected.parent().ok_or_else(|| {
         WorkerError::InvalidPayload("selected text encoder has no parent".to_owned())
     })?;
-    let mut files = capture_files(selected)?;
-    files.extend(capture_files(&parent.join("config.json"))?);
+    let mut files = capture_files(store, selected)?;
+    files.extend(capture_files(store, &parent.join("config.json"))?);
     files.sort();
     files.dedup();
     Ok((parent.to_path_buf(), files))
@@ -807,7 +814,9 @@ pub(crate) fn registered_text_encoder_path(
         if candidate_model != model_id || candidate_file != is_file {
             continue;
         }
-        let Ok((root, files)) = selected_text_encoder_root_and_files(&path, is_file) else {
+        let Ok((root, files)) =
+            selected_text_encoder_root_and_files(&source_store(settings), &path, is_file)
+        else {
             continue;
         };
         if files == expected {
@@ -843,7 +852,7 @@ fn registered_digest_source_claims(
                 let files = if let Some(files) = captured.get(&path) {
                     Some(files.clone())
                 } else {
-                    capture_registered_files_with_roots(&path, &roots)
+                    capture_registered_files_with_roots(&source_store(settings), &path, &roots)
                         .ok()
                         .inspect(|files| {
                             captured.insert(path.clone(), files.clone());
@@ -874,7 +883,9 @@ fn registered_digest_source_claims(
             // approved root, compiled plan, and source bytes before availability is advertised.
             if let Ok(resolved) = checkpoint_plans.resolve(checkpoint_id) {
                 for layer in resolved.layers {
-                    if let Ok(files) = capture_registered_files(&layer.path) {
+                    if let Ok(files) =
+                        capture_registered_files(&source_store(settings), &layer.path)
+                    {
                         // The same bytes may have another linked root ID or filename on a
                         // different host. The private plan binds each logical layer; availability
                         // advertises canonical file content for this registered model ID.
@@ -1036,7 +1047,9 @@ pub(crate) fn registered_character_lora_path(
         let Some(path) = character_lora_copy_path(settings, project_path, link) else {
             continue;
         };
-        if capture_registered_files(&path).is_ok_and(|files| files == frozen_files) {
+        if capture_registered_files(&source_store(settings), &path)
+            .is_ok_and(|files| files == frozen_files)
+        {
             return Ok(Some(path));
         }
     }
@@ -1120,6 +1133,9 @@ fn registered_converted_builtin_model_root(settings: &Settings, id: &str) -> Opt
     let receipt: crate::ProducedArtifactReceipt =
         serde_json::from_slice(&std::fs::read(marker).ok()?).ok()?;
     crate::verify_produced_artifact_receipt(
+        &sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &settings.data_dir,
+        ),
         &root,
         &receipt.producer_job_id,
         &receipt.source_artifact_id,
@@ -1133,7 +1149,7 @@ fn capture_converted_builtin_files(
     settings: &Settings,
     root: &Path,
 ) -> Option<Vec<PortableArtifactFile>> {
-    let files = capture_registered_files(root).ok()?;
+    let files = capture_registered_files(&source_store(settings), root).ok()?;
     for file in &files {
         crate::paths::normalize_app_managed_model_entry_path(
             settings,
@@ -1235,18 +1251,14 @@ pub(crate) fn registered_control_overlay_path(
     overlay_id: &str,
     frozen_files: &[PortableArtifactFile],
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(weights) = payload
-        .get("advanced")
-        .and_then(|advanced| advanced.get("controlWeights"))
-        .and_then(serde_json::Value::as_object)
+    let sceneworks_core::resolved_options::RouteField::Valid(weights) =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
+            .control_weights
     else {
         return Ok(None);
     };
-    if weights.get("overlayId").and_then(serde_json::Value::as_str) != Some(overlay_id)
-        || weights
-            .get("_catalogAuthorized")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
+    if weights.overlay_id.valid().map(String::as_str) != Some(overlay_id)
+        || weights.catalog_authorized.valid() != Some(&true)
     {
         return Ok(None);
     }
@@ -1267,7 +1279,9 @@ pub(crate) fn registered_control_overlay_path(
             let Some(path) = control_overlay_entry_file(settings, &manifest, &overlay) else {
                 continue;
             };
-            if capture_registered_files(&path).is_ok_and(|files| files == frozen_files) {
+            if capture_registered_files(&source_store(settings), &path)
+                .is_ok_and(|files| files == frozen_files)
+            {
                 return Ok(Some(path));
             }
         }
@@ -1485,7 +1499,10 @@ pub(crate) fn registered_builtin_lora_path(
     };
     builtin_lora_source_paths(settings, entry)
         .into_iter()
-        .find(|path| capture_registered_files(path).is_ok_and(|files| files == expected))
+        .find(|path| {
+            capture_registered_files(&source_store(settings), path)
+                .is_ok_and(|files| files == expected)
+        })
 }
 
 fn append_registered_claim(
@@ -1497,21 +1514,26 @@ fn append_registered_claim(
     selected: &Path,
 ) {
     let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
-    let Ok(files) = capture_registered_files_with_roots(selected, &roots) else {
+    let Ok(files) = capture_registered_files_with_roots(&source_store(settings), selected, &roots)
+    else {
         return;
     };
     append_registered_claim_files(claims, kind, model_id, component_id, files);
 }
 
-pub(crate) fn capture_registered_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
-    capture_registered_files_with_roots(selected, &[])
+pub(crate) fn capture_registered_files(
+    store: &VerifiedSourceCache,
+    selected: &Path,
+) -> WorkerResult<Vec<PortableArtifactFile>> {
+    capture_registered_files_with_roots(store, selected, &[])
 }
 
 pub(crate) fn capture_registered_files_with_roots(
+    store: &VerifiedSourceCache,
     selected: &Path,
     allowed_roots: &[PathBuf],
 ) -> WorkerResult<Vec<PortableArtifactFile>> {
-    let mut files = capture_files_with_roots(selected, allowed_roots)?;
+    let mut files = capture_files_with_roots(store, selected, allowed_roots)?;
     if selected.is_dir() {
         files.retain(|file| {
             !matches!(
@@ -1627,7 +1649,7 @@ pub(crate) fn registered_model_content_path(
     candidates.sort();
     candidates.dedup();
     for selected in candidates {
-        let Ok(files) = capture_registered_files(&selected) else {
+        let Ok(files) = capture_registered_files(&source_store(settings), &selected) else {
             continue;
         };
         for file in files {
@@ -1726,7 +1748,7 @@ pub(crate) fn capture_selected_source(
         } else {
             snapshot.join(tier)
         };
-        let Some(files) = capture_flux2_borrowed_files(&selected)? else {
+        let Some(files) = capture_flux2_borrowed_files(&source_store(settings), &selected)? else {
             return Ok(None);
         };
         let claim = PortableSourceClaim::new(
@@ -1742,11 +1764,30 @@ pub(crate) fn capture_selected_source(
         })?;
         return Ok(Some((claim, selected)));
     }
+    let image_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let plan_options = payload
+        .get("plan")
+        .and_then(serde_json::Value::as_object)
+        .map(sceneworks_core::resolved_options::TrainingRouteFacts::from_plan_syntax);
+    let tile_repo = match &image_options.tile_control_net_repo {
+        sceneworks_core::resolved_options::RouteField::Valid(value) => Some(value.as_str()),
+        _ => None,
+    };
+    let base_model_path = plan_options.as_ref().and_then(|options| {
+        if let sceneworks_core::resolved_options::RouteField::Valid(path) = &options.base_model_path
+        {
+            Some(path.as_str())
+        } else {
+            None
+        }
+    });
     let Some((selected, operator_selected)) =
-        crate::portable_aux_sources::resolve_selected_aux_source(
+        crate::portable_aux_sources::resolve_selected_aux_source_typed(
             source_id,
             &settings.data_dir,
-            payload,
+            tile_repo,
+            base_model_path,
         )
     else {
         return Ok(None);
@@ -1768,13 +1809,14 @@ pub(crate) fn capture_selected_source(
         PortableSourceProvenance::OperatorOverride
     };
     let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
-    let files = capture_files_with_roots(&selected, &roots)?;
+    let files = capture_files_with_roots(&source_store(settings), &selected, &roots)?;
     let claim = PortableSourceClaim::new(source_id, provenance, files)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     Ok(Some((claim, selected)))
 }
 
 fn capture_flux2_borrowed_files(
+    store: &VerifiedSourceCache,
     selected: &Path,
 ) -> WorkerResult<Option<Vec<PortableArtifactFile>>> {
     if !["vae", "text_encoder", "tokenizer"]
@@ -1789,6 +1831,7 @@ fn capture_flux2_borrowed_files(
         let allowed = vec![canonical_root.clone()];
         let mut visited = std::collections::HashSet::from([canonical_root.clone()]);
         capture_tree(
+            store,
             selected,
             &selected.join(component),
             &allowed,
@@ -1804,8 +1847,11 @@ fn capture_flux2_borrowed_files(
     Ok(Some(files))
 }
 
-fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
-    capture_files_with_roots(selected, &[])
+fn capture_files(
+    store: &VerifiedSourceCache,
+    selected: &Path,
+) -> WorkerResult<Vec<PortableArtifactFile>> {
+    capture_files_with_roots(store, selected, &[])
 }
 
 /// Capture a registered source's file ledger, following directory links the
@@ -1817,6 +1863,7 @@ fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
 /// managed roots — is refused, and canonical directories are visited once so
 /// link cycles cannot recurse forever.
 fn capture_files_with_roots(
+    store: &VerifiedSourceCache,
     selected: &Path,
     allowed_roots: &[PathBuf],
 ) -> WorkerResult<Vec<PortableArtifactFile>> {
@@ -1825,7 +1872,7 @@ fn capture_files_with_roots(
         let name = selected.file_name().ok_or_else(|| {
             WorkerError::InvalidPayload("auxiliary source has no file name".to_owned())
         })?;
-        capture_one(selected, PathBuf::from(name), &mut found)?;
+        capture_one(store, selected, PathBuf::from(name), &mut found)?;
     } else if selected.is_dir() {
         let canonical_root = std::fs::canonicalize(selected).map_err(WorkerError::Io)?;
         let mut allowed: Vec<PathBuf> = allowed_roots
@@ -1834,7 +1881,15 @@ fn capture_files_with_roots(
             .collect();
         allowed.push(canonical_root.clone());
         let mut visited = std::collections::HashSet::from([canonical_root]);
-        capture_tree(selected, selected, &allowed, &mut visited, &mut found, 0)?;
+        capture_tree(
+            store,
+            selected,
+            selected,
+            &allowed,
+            &mut visited,
+            &mut found,
+            0,
+        )?;
     } else {
         return Err(WorkerError::InvalidPayload(
             "auxiliary source is unavailable".to_owned(),
@@ -1852,6 +1907,7 @@ fn capture_files_with_roots(
 const MAX_CAPTURE_DEPTH: usize = 16;
 
 fn capture_tree(
+    store: &VerifiedSourceCache,
     root: &Path,
     current: &Path,
     allowed: &[PathBuf],
@@ -1876,14 +1932,14 @@ fn capture_tree(
                 ));
             }
             if visited.insert(canonical) {
-                capture_tree(root, &path, allowed, visited, found, depth + 1)?;
+                capture_tree(store, root, &path, allowed, visited, found, depth + 1)?;
             }
         } else if canonical.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .expect("traversed path is inside root")
                 .to_path_buf();
-            capture_one(&canonical, relative, found)?;
+            capture_one(store, &canonical, relative, found)?;
         } else {
             return Err(WorkerError::InvalidPayload(
                 "auxiliary source contains a non-file entry".to_owned(),
@@ -1893,40 +1949,50 @@ fn capture_tree(
     Ok(())
 }
 
+/// This host's hash-once store, the one API admission and the worker runtime share.
+fn source_store(settings: &Settings) -> VerifiedSourceCache {
+    VerifiedSourceCache::for_data_dir(&settings.data_dir)
+}
+
+/// A store in one process-wide temporary directory, for tests that capture sources without a
+/// host data dir of their own.
+#[cfg(test)]
+pub(crate) fn test_store() -> VerifiedSourceCache {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    VerifiedSourceCache::new(
+        DIR.get_or_init(|| tempfile::tempdir().expect("test store directory"))
+            .path(),
+    )
+}
+
+/// Capture one file through the host's store: an unchanged file (same stamp, see
+/// `sceneworks_core::verified_source_cache`) reuses the recorded digest instead of being read.
 fn capture_one(
+    store: &VerifiedSourceCache,
     path: &Path,
     relative_path: PathBuf,
     found: &mut Vec<PortableArtifactFile>,
 ) -> WorkerResult<()> {
-    let mut input = File::open(path).map_err(WorkerError::Io)?;
-    let metadata = input.metadata().map_err(WorkerError::Io)?;
+    let metadata = File::open(path)
+        .and_then(|input| input.metadata())
+        .map_err(WorkerError::Io)?;
     if !metadata.is_file() {
         return Err(WorkerError::InvalidPayload(
             "auxiliary source is not a regular file".to_owned(),
         ));
     }
-    let mut digest = Sha256::new();
-    let mut bytes = 0u64;
-    let mut buffer = [0u8; 1024 * 1024];
-    loop {
-        let read = input.read(&mut buffer).map_err(WorkerError::Io)?;
-        if read == 0 {
-            break;
+    let real = std::fs::canonicalize(path).map_err(WorkerError::Io)?;
+    let (sha256, _verification) = store.sha256(&real, &|| Ok(())).map_err(|error| {
+        if std::fs::metadata(&real).map(|now| now.len()).ok() != Some(metadata.len()) {
+            WorkerError::InvalidPayload("auxiliary source changed while hashing".to_owned())
+        } else {
+            WorkerError::Io(error)
         }
-        digest.update(&buffer[..read]);
-        bytes = bytes
-            .checked_add(read as u64)
-            .ok_or_else(|| WorkerError::Io(io::Error::other("auxiliary source is too large")))?;
-    }
-    if bytes != metadata.len() {
-        return Err(WorkerError::InvalidPayload(
-            "auxiliary source changed while hashing".to_owned(),
-        ));
-    }
+    })?;
     found.push(PortableArtifactFile {
         relative_path,
-        size_bytes: bytes,
-        sha256: format!("sha256:{:x}", digest.finalize()),
+        size_bytes: metadata.len(),
+        sha256,
     });
     Ok(())
 }
@@ -1988,7 +2054,7 @@ mod tests {
         let selected = settings.data_dir.join("different/tree/clip");
         std::fs::create_dir_all(&selected).unwrap();
         std::fs::write(selected.join("model.safetensors"), b"frozen clip bytes").unwrap();
-        let expected = capture_registered_files(&selected).unwrap();
+        let expected = capture_registered_files(&test_store(), &selected).unwrap();
         let api_path = "/api-host/another/root/clip";
         assert_eq!(
             selected_app_managed_exact_source(&settings, api_path, &expected).unwrap(),
@@ -2043,7 +2109,7 @@ mod tests {
         std::fs::create_dir_all(&selected).unwrap();
         let weights = selected.join("model.safetensors");
         std::fs::write(&weights, b"source").unwrap();
-        let files = capture_registered_files(&selected).unwrap();
+        let files = capture_registered_files(&test_store(), &selected).unwrap();
         let claim = PortableSourceClaim::new(
             "test_queued_utility".to_owned(),
             PortableSourceProvenance::OperatorOverride,
@@ -2100,7 +2166,7 @@ mod tests {
         let api_file = temp.path().join("api-root/adapter.safetensors");
         std::fs::create_dir_all(api_file.parent().unwrap()).unwrap();
         std::fs::write(&api_file, b"exact adapter bytes").unwrap();
-        let expected = capture_registered_files(&api_file).unwrap();
+        let expected = capture_registered_files(&test_store(), &api_file).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
                 &expected,
@@ -2200,7 +2266,8 @@ mod tests {
         let file = root.join("model.safetensors");
         std::fs::write(&file, b"weights").unwrap();
         std::fs::write(root.join("config.json"), b"config").unwrap();
-        let (selected_root, before) = selected_text_encoder_root_and_files(&file, true).unwrap();
+        let (selected_root, before) =
+            selected_text_encoder_root_and_files(&test_store(), &file, true).unwrap();
         assert_eq!(selected_root, root);
         assert_eq!(
             before
@@ -2211,7 +2278,9 @@ mod tests {
         );
         std::fs::write(root.join("config.json"), b"changed").unwrap();
         assert_ne!(
-            selected_text_encoder_root_and_files(&file, true).unwrap().1,
+            selected_text_encoder_root_and_files(&test_store(), &file, true)
+                .unwrap()
+                .1,
             before
         );
     }
@@ -2266,7 +2335,8 @@ mod tests {
             json!({"models":[{"id":"qwen_image","installedPath":worker_source}]}).to_string(),
         )
         .unwrap();
-        let (_, frozen) = selected_text_encoder_root_and_files(&api_source, false).unwrap();
+        let (_, frozen) =
+            selected_text_encoder_root_and_files(&test_store(), &api_source, false).unwrap();
         let (selected_root, selected_path) =
             registered_text_encoder_path(&settings, "qwen_image", false, &frozen)
                 .unwrap()
@@ -2343,7 +2413,8 @@ mod tests {
             settings.data_dir.join("cache/huggingface/hub"),
         );
         settings.external_model_roots = vec![worker_root];
-        let (_, frozen) = selected_text_encoder_root_and_files(&api_source, false).unwrap();
+        let (_, frozen) =
+            selected_text_encoder_root_and_files(&test_store(), &api_source, false).unwrap();
         let model_key = "external-comfyui:qwen-image";
         assert!(
             registered_text_encoder_path(&settings, model_key, false, &frozen)
@@ -2427,7 +2498,7 @@ mod tests {
         let link_id = link["id"].as_str().unwrap();
         let copy = project_path.join(link["projectPath"].as_str().unwrap());
         let canonical_copy = std::fs::canonicalize(&copy).unwrap();
-        let files = capture_registered_files(&copy).unwrap();
+        let files = capture_registered_files(&test_store(), &copy).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
                 .unwrap();
@@ -2600,7 +2671,7 @@ mod tests {
             before,
             "new receipt schedules a rescan"
         );
-        let files = capture_registered_files(&root).unwrap();
+        let files = capture_registered_files(&test_store(), &root).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
                 .unwrap();
@@ -2633,7 +2704,7 @@ mod tests {
             assert!(registered_converted_builtin_model_path(
                 &settings,
                 id,
-                &capture_registered_files(&root).unwrap()
+                &capture_registered_files(&test_store(), &root).unwrap()
             )
             .is_none());
         }
@@ -2674,7 +2745,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let project_files = capture_registered_files(&project_file).unwrap();
+        let project_files = capture_registered_files(&test_store(), &project_file).unwrap();
         let mut claims = Vec::new();
         registered_digest_source_claims(&settings, |claim| claims.push(claim));
         let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
@@ -2711,7 +2782,7 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        let global_files = capture_registered_files(&global_file).unwrap();
+        let global_files = capture_registered_files(&test_store(), &global_file).unwrap();
         let global_claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
             "control",
             "global-pose",
@@ -2939,7 +3010,7 @@ mod tests {
         assert_eq!(claims.len(), 1);
         assert_eq!(
             claims[0].files,
-            capture_registered_files(adapter.parent().unwrap()).unwrap()
+            capture_registered_files(&test_store(), adapter.parent().unwrap()).unwrap()
         );
         progress.acknowledge("worker-a", generation);
 
@@ -3043,7 +3114,7 @@ mod tests {
         let (id, _) = entries.into_iter().next().unwrap();
         assert!(id.starts_with("external_"), "synthetic id: {id}");
 
-        let frozen = capture_registered_files(&adapter).unwrap();
+        let frozen = capture_registered_files(&test_store(), &adapter).unwrap();
         // Scope to the external-LoRA pass: the full inventory also hashes any
         // real weights installed on the host for unrelated static sources.
         let mut claims = Vec::new();
@@ -3107,7 +3178,7 @@ mod tests {
         let id = rows[0]["id"].as_str().unwrap().to_owned();
         assert!(id.starts_with("external_base_"), "synthetic id: {id}");
 
-        let frozen = capture_registered_files(&anchor).unwrap();
+        let frozen = capture_registered_files(&test_store(), &anchor).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
                 &frozen,
@@ -3164,7 +3235,7 @@ mod tests {
 
         let settings = Settings::for_test(data.clone());
         let roots = crate::paths::allowed_model_roots(&settings).unwrap();
-        let files = capture_registered_files_with_roots(&model, &roots).unwrap();
+        let files = capture_registered_files_with_roots(&test_store(), &model, &roots).unwrap();
         let relatives: Vec<PathBuf> = files
             .iter()
             .map(|file| file.relative_path.clone())
@@ -3209,7 +3280,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.safetensors"), b"secret").unwrap();
         symlink(&outside, model.join("escaped")).unwrap();
-        assert!(capture_registered_files_with_roots(&model, &roots).is_err());
+        assert!(capture_registered_files_with_roots(&test_store(), &model, &roots).is_err());
     }
 
     #[test]
@@ -3253,7 +3324,7 @@ mod tests {
         std::fs::write(&global_manifest, serde_json::to_vec(&json!({"loras":[{"id":"global","source":{"path":"loras/global/model.safetensors"}}]})).unwrap()).unwrap();
         let mut claims = Vec::new();
         registered_digest_source_claims(&settings, |claim| claims.push(claim));
-        let files = capture_registered_files(&global).unwrap();
+        let files = capture_registered_files(&test_store(), &global).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
                 .unwrap();
@@ -3314,7 +3385,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let files = capture_registered_files(&model).unwrap();
+        let files = capture_registered_files(&test_store(), &model).unwrap();
         let ledger =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
                 .unwrap();
@@ -3405,7 +3476,8 @@ mod tests {
         registered_digest_source_claims(&settings, |claim| claims.push(claim));
         for (key, name) in [("paths/vae", "vae"), ("components/0", "encoder")] {
             let files =
-                capture_registered_files(&model.join(format!("{name}.safetensors"))).unwrap();
+                capture_registered_files(&test_store(), &model.join(format!("{name}.safetensors")))
+                    .unwrap();
             let ledger =
                 sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
                     &files,
@@ -3459,5 +3531,62 @@ mod tests {
                 .iter()
                 .any(|source| source.source_id == id));
         });
+    }
+
+    /// A registered local source is read once per host across API admission and the worker: a
+    /// digest the API recorded is reused here, an unchanged source is not read again, and a
+    /// same-size rewrite (ctime on Unix, NTFS change time on Windows) is read again.
+    #[test]
+    fn registered_source_capture_reads_each_unchanged_file_once_per_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = VerifiedSourceCache::for_data_dir(&temp.path().join("data"));
+        let model = temp.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        let weights = model.join("model.safetensors");
+        let config = model.join("config.json");
+        std::fs::write(&weights, b"weights").unwrap();
+        std::fs::write(&config, b"{}").unwrap();
+        let settled = std::time::SystemTime::now() - Duration::from_secs(10);
+        let settle = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(settled)
+                .unwrap();
+        };
+        settle(&weights);
+        settle(&config);
+        let reals = [&weights, &config].map(|path| std::fs::canonicalize(path).unwrap());
+        // Every read of either file, from any thread, in this process.
+        let hashed = || {
+            reals
+                .iter()
+                .map(|real| sceneworks_core::verified_source_cache::read_counts::of(real))
+                .sum::<usize>()
+        };
+        // API admission (`collect_source_files`) records the weights digest first.
+        store
+            .sha256(&std::fs::canonicalize(&weights).unwrap(), &|| Ok(()))
+            .unwrap();
+        let start = hashed();
+        let first = capture_registered_files(&store, &model).unwrap();
+        assert_eq!(
+            hashed(),
+            start + 1,
+            "only the config, which the API never read"
+        );
+        assert_eq!(
+            first,
+            capture_registered_files(&test_store(), &model).unwrap()
+        );
+        let start = hashed();
+        assert_eq!(capture_registered_files(&store, &model).unwrap(), first);
+        assert_eq!(hashed(), start, "an unchanged source is not read again");
+        std::fs::write(&weights, b"WEIGHTS").unwrap();
+        settle(&weights);
+        let changed = capture_registered_files(&store, &model).unwrap();
+        assert_eq!(hashed(), start + 1);
+        assert_ne!(changed, first, "the rewritten bytes get their own digest");
     }
 }

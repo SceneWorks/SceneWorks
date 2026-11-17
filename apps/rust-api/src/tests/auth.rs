@@ -1185,10 +1185,11 @@ async fn embedded_ui_root_is_reachable_with_access_token_set() {
 #[test]
 fn embedded_ui_csp_locks_down_scripts_but_allows_app_resources() {
     let csp = crate::web_assets::CONTENT_SECURITY_POLICY;
-    // The whole point: scripts only from this origin, no inline/eval escape hatch.
+    // Scripts come from this origin; neither inline code nor dynamic compilation is allowed.
     assert!(csp.contains("script-src 'self'"));
+    assert!(!csp.contains("'wasm-unsafe-eval'"));
     assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
-    assert!(!csp.contains("unsafe-eval"));
+    assert!(!csp.contains("'unsafe-eval'"));
     // Resources the app genuinely needs.
     assert!(csp.contains("default-src 'self'"));
     // Fonts are self-hosted (sc-8956): no third-party font host in the CSP.

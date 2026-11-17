@@ -48,7 +48,12 @@ on:
   push:
     branches: [main]
     paths: &mlx_paths
-      - "crates/**"
+      - "crates/sceneworks-core/**"
+      - "crates/sceneworks-image-quality/**"
+      - "crates/sceneworks-mcp/**"
+      - "crates/sceneworks-options/**"
+      - "crates/sceneworks-memory-adapter/**"
+      - "crates/sceneworks-worker/**"
       - "apps/rust-worker/**"
       # This lane lints the whole default-member set (see the clippy step), and
       # apps/rust-api carries the largest macOS-conditional surface outside the

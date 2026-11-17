@@ -1,5 +1,6 @@
 //! Execution of the one prepared image route; heartbeat and job lifecycle stay in the parent.
-use super::{ImagePlan, ImageRequest};
+use super::conditioning::ResolvedImageExecution;
+use super::{ImageOutputTarget, ImagePlan};
 use crate::{ApiClient, JobSnapshot, Settings, WorkerError, WorkerResult};
 use serde_json::Value;
 use std::path::Path;
@@ -106,12 +107,16 @@ pub(super) async fn execute_mlx_image_route(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<ImageRouteOutcome> {
+    let target = ImageOutputTarget {
+        project_path,
+        backend,
+    };
     Ok(if let Some(route) = route {
         match route.kind() {
             ImageRoute::ZImageControl => {
@@ -121,8 +126,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -135,8 +140,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -148,8 +153,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -162,8 +167,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -177,8 +182,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -191,8 +196,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -204,38 +209,22 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
             }
             ImageRoute::Flux2Edit => {
                 // FLUX.2-klein edit/reference (mode edit_image or a reference) → edit variant.
-                generate_flux2_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    plan,
-                    project_path,
-                    backend,
-                    asset_writes,
-                )
-                .await?;
+                generate_flux2_edit_stream(api, settings, job, plan, request, target, asset_writes)
+                    .await?;
             }
             ImageRoute::QwenEdit => {
                 // Qwen-Image-Edit (mode edit_image / Character-Studio reference / best-effort
                 // pose / angle set) → the engine's `qwen_image_edit` model (sc-3397).
-                generate_qwen_edit_stream(
-                    api,
-                    settings,
-                    job,
-                    plan,
-                    project_path,
-                    backend,
-                    asset_writes,
-                )
-                .await?;
+                generate_qwen_edit_stream(api, settings, job, plan, request, target, asset_writes)
+                    .await?;
             }
             ImageRoute::KreaEdit => {
                 // Krea 2 Raw Kontext-style edit (mode edit_image + a source) → the `krea_2_edit`
@@ -278,8 +267,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -318,8 +307,8 @@ pub(super) async fn execute_mlx_image_route(
                         plan,
                         sources: *sources,
                     },
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -339,8 +328,8 @@ pub(super) async fn execute_mlx_image_route(
                         plan,
                         sources: *sources,
                     },
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -385,16 +374,8 @@ pub(super) async fn execute_mlx_image_route(
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
-                generate_instantid_stream(
-                    api,
-                    settings,
-                    job,
-                    plan,
-                    project_path,
-                    backend,
-                    asset_writes,
-                )
-                .await?;
+                generate_instantid_stream(api, settings, job, plan, request, target, asset_writes)
+                    .await?;
             }
             ImageRoute::SdxlControl => {
                 generate_sdxl_control_stream(
@@ -402,6 +383,7 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
+                    request,
                     project_path,
                     backend,
                     asset_writes,
@@ -444,8 +426,8 @@ pub(super) async fn execute_mlx_image_route(
                     settings,
                     job,
                     plan,
-                    project_path,
-                    backend,
+                    request,
+                    target,
                     asset_writes,
                 )
                 .await?;
@@ -523,12 +505,16 @@ pub(super) async fn execute_candle_image_route(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<ImageRouteOutcome> {
+    let target = ImageOutputTarget {
+        project_path,
+        backend,
+    };
     Ok(match route {
         Some(route) => {
             match route.kind() {
@@ -540,8 +526,8 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
-                        project_path,
-                        backend,
+                        request,
+                        target,
                         asset_writes,
                     )
                     .await?;
@@ -552,6 +538,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -596,6 +583,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -758,6 +746,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -771,6 +760,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -789,6 +779,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -803,6 +794,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -817,6 +809,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -832,6 +825,7 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
+                        request,
                         project_path,
                         backend,
                         asset_writes,
@@ -866,8 +860,8 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
-                        project_path,
-                        backend,
+                        request,
+                        target,
                         asset_writes,
                     )
                     .await?;
@@ -906,8 +900,8 @@ pub(super) async fn execute_candle_image_route(
                             plan,
                             sources: *sources,
                         },
-                        project_path,
-                        backend,
+                        request,
+                        target,
                         asset_writes,
                     )
                     .await?;
@@ -918,8 +912,8 @@ pub(super) async fn execute_candle_image_route(
                         settings,
                         job,
                         plan,
-                        project_path,
-                        backend,
+                        request,
+                        target,
                         asset_writes,
                     )
                     .await?;
@@ -1014,6 +1008,7 @@ pub(super) async fn execute_candle_image_route(
                 CandleImageRoute::MageEdit
                 | CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
+                | CandleImageRoute::MinimaxH3ImageEdit
                 | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit

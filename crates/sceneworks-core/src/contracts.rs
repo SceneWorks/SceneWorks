@@ -172,6 +172,9 @@ string_enum! {
         // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
         // weights are not base's, so a replayed asset must say which of the two produced it.
         QwenImage21Turbo => "qwen_image_2_1_turbo",
+        // SW-7100: MiniMax-H3-Image stamps its own id — its weights, latent space and licence are
+        // its own, not MiniMax-H3's.
+        MinimaxH3Image => "minimax_h3_image",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
@@ -757,6 +760,33 @@ string_enum! {
 /// Selects Qwen-Image 2.1's official structured prompt rewrite in API and worker payloads.
 pub const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
 
+/// Selects MiniMax-H3-Image's prompt expansion (MiniMax-H3-Image-PE, SW-7102) in API and worker
+/// payloads.
+pub const MINIMAX_H3_IMAGE_EXPAND_TASK: &str = "minimax_h3_image_expand";
+
+/// Catalog id of MiniMax-H3-Image's prompt expander, the engine's `core_llm::minimax_h3_image_pe`
+/// model id.
+pub const MINIMAX_H3_IMAGE_PE_MODEL_ID: &str = "minimax_h3_image_pe";
+
+/// Catalog id of the image model the prompt expander serves.
+pub const MINIMAX_H3_IMAGE_MODEL_ID: &str = "minimax_h3_image";
+
+/// Payload key naming the expander tier a `minimax_h3_image_expand` job runs. The API freezes the
+/// tier it selects here before admission binds the job's sources, and the worker honours it by
+/// name (never substituting another tier), so the binding and the load agree on one tier.
+pub const MINIMAX_H3_IMAGE_PE_TIER_KEY: &str = "peTier";
+
+/// The expander's tiers in selection order: the published NVFP4 original first (only where a
+/// worker can run it: Blackwell CUDA), then the converted tiers densest first.
+pub const MINIMAX_H3_IMAGE_PE_TIERS: [&str; 4] = ["nvfp4", "bf16", "q8", "q4"];
+
+/// The worker capability a CUDA worker advertises when its GPU can run NVFP4 (sm_120 or newer).
+pub const NVFP4_WORKER_CAPABILITY: &str = "nvfp4";
+
+/// The most edit references one expansion may carry (`core_llm::minimax_h3_image_pe::MAX_REFERENCES`).
+pub const MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES: usize =
+    sceneworks_options::utility_validation::MAX_H3_IMAGE_EXPAND_IMAGES;
+
 /// Maximum number of images one Parquet materialization job may add.
 ///
 /// Shared by API validation and the worker clamp so a newer client cannot create
@@ -808,257 +838,15 @@ pub struct JobCreateRequest {
     pub extra: ExtraFields,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageUpscaleRequest {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_image_upscale_factor")]
-    pub factor: u8,
-    #[serde(default = "default_image_upscale_engine")]
-    pub engine: String,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
+pub use sceneworks_options::contracts::{
+    default_hires_denoising_strength, default_hires_upscale_by, default_image_upscale_engine,
+    default_image_upscale_factor, image_upscale_factor, HiresFixRequest, ImageUpscaleRequest,
+};
 
-impl Default for ImageUpscaleRequest {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            factor: default_image_upscale_factor(),
-            engine: default_image_upscale_engine(),
-            extra: ExtraFields::default(),
-        }
-    }
-}
-
-impl ImageUpscaleRequest {
-    pub fn is_disabled(&self) -> bool {
-        !self.enabled
-    }
-
-    /// SeedVR2-only input pre-blur (0..1), carried in the flattened extras. 0.0 ⇒ none.
-    pub fn softness(&self) -> f32 {
-        self.extra
-            .get("softness")
-            .and_then(Value::as_f64)
-            .map(|value| value.clamp(0.0, 1.0) as f32)
-            .unwrap_or(0.0)
-    }
-
-    /// Whether this block selects the Iris-3B restoration engine (sc-25683).
-    pub fn is_iris(&self) -> bool {
-        crate::image_restoration::is_iris_engine(&self.engine)
-    }
-
-    /// The Iris-only controls (`scale` / `inputSizing` / `colorFix`) carried in the flattened
-    /// extras, as a JSON object for [`crate::image_restoration`]'s shared parse.
-    pub fn iris_controls(&self) -> JsonObject {
-        crate::image_restoration::IRIS_ONLY_KEYS
-            .iter()
-            .filter_map(|key| {
-                self.extra
-                    .get(*key)
-                    .map(|value| ((*key).to_owned(), value.clone()))
-            })
-            .collect()
-    }
-
-    /// Shared API/worker upscale boundary. Disabled controls remain inert.
-    pub fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if self.engine.trim().is_empty() {
-            return Err("upscale.engine is required".into());
-        }
-        if self.is_iris() {
-            if self.factor != default_image_upscale_factor() {
-                return Err("upscale.factor is not a control of the Iris restoration engine; use upscale.scale".into());
-            }
-            if self.extra.contains_key("softness") {
-                return Err(
-                    "upscale.softness is not a control of the Iris restoration engine".into(),
-                );
-            }
-            self.iris_params()
-                .map_err(|error| format!("upscale.{error}"))?;
-        } else {
-            image_upscale_factor(u64::from(self.factor))
-                .map_err(|_| "upscale.factor must be 2 or 4".to_owned())?;
-            crate::image_restoration::reject_iris_only_keys(&self.iris_controls(), &self.engine)
-                .map_err(|error| format!("upscale.{error}"))?;
-        }
-        Ok(())
-    }
-
-    /// The parsed Iris restoration controls (a typed refusal for a malformed one).
-    pub fn iris_params(&self) -> Result<crate::image_restoration::IrisRestoreParams, String> {
-        crate::image_restoration::parse_iris_restore_params(&self.iris_controls())
-    }
-}
-
-/// The discrete scales supported by the non-Iris image upscalers.
-pub fn image_upscale_factor(factor: u64) -> Result<u8, String> {
-    match factor {
-        2 | 4 => Ok(factor as u8),
-        other => Err(format!(
-            "Image upscale supports only factor 2 or 4 (got {other})."
-        )),
-    }
-}
-
-pub const fn default_image_upscale_factor() -> u8 {
-    2
-}
-
-pub fn default_image_upscale_engine() -> String {
-    "real-esrgan".to_owned()
-}
-
-/// Optional A1111-style Hires.fix pass for text-to-image generation.
-///
-/// The first pass renders at the requested job dimensions. The worker then resizes that image to
-/// `upscale_by` times the original dimensions and uses it as the img2img initialization for a second
-/// pass. `steps == 0` and `cfg_scale == None` mean "inherit the first-pass value".
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HiresFixRequest {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub steps: u32,
-    #[serde(default = "default_hires_denoising_strength")]
-    pub denoising_strength: f64,
-    #[serde(default = "default_hires_upscale_by")]
-    pub upscale_by: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cfg_scale: Option<f64>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for HiresFixRequest {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            steps: 0,
-            denoising_strength: default_hires_denoising_strength(),
-            upscale_by: default_hires_upscale_by(),
-            cfg_scale: None,
-            extra: ExtraFields::default(),
-        }
-    }
-}
-
-impl HiresFixRequest {
-    pub fn is_disabled(&self) -> bool {
-        !self.enabled
-    }
-
-    pub fn effective_steps(&self, first_pass_steps: u32) -> u32 {
-        if self.steps == 0 {
-            first_pass_steps
-        } else {
-            self.steps.clamp(1, 150)
-        }
-    }
-
-    pub fn effective_denoising_strength(&self) -> f32 {
-        self.denoising_strength.clamp(0.0, 1.0) as f32
-    }
-
-    pub fn effective_upscale_by(&self) -> f32 {
-        self.upscale_by.clamp(1.0, 4.0) as f32
-    }
-
-    pub fn effective_cfg_scale(&self, first_pass_cfg: Option<f32>) -> Option<f32> {
-        self.cfg_scale
-            .filter(|value| value.is_finite())
-            .map(|value| value.clamp(0.0, 60.0) as f32)
-            .or(first_pass_cfg)
-    }
-}
-
-pub const fn default_hires_denoising_strength() -> f64 {
-    0.7
-}
-
-pub const fn default_hires_upscale_by() -> f64 {
-    2.0
-}
-
-/// Payload for a standalone `video_upscale` job (epic 4811 / sc-4816). Upscales an existing video
-/// asset with the native-MLX SeedVR2 engine. The target size is `factor × source` unless
-/// `target_width`/`target_height` override it; either way the worker snaps both dims to a multiple of
-/// 16 (the SeedVR2 VAE/patch stride). `softness` is the input pre-blur (0.0 = none, the default).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoUpscaleRequest {
-    /// The source video asset to upscale (required; the worker validates non-empty).
-    #[serde(default)]
-    pub source_asset_id: String,
-    /// Integer scale factor applied to the source dimensions (2 or 4). Ignored when explicit
-    /// `target_width`/`target_height` are supplied.
-    #[serde(default = "default_video_upscale_factor")]
-    pub factor: u8,
-    /// Explicit target width override (snapped to ÷16). `None` ⇒ `factor × source_width`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_width: Option<u32>,
-    /// Explicit target height override (snapped to ÷16). `None` ⇒ `factor × source_height`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_height: Option<u32>,
-    /// Upscale engine. Only `seedvr2` is Mac-supported today (native MLX).
-    #[serde(default = "default_video_upscale_engine")]
-    pub engine: String,
-    /// SeedVR2 model variant id. `seedvr2_3b` is the only wired variant (7B = sc-5197).
-    #[serde(default = "default_video_upscale_model")]
-    pub model: String,
-    /// SeedVR2 input pre-blur (0.0 = none, the reference default). Higher smooths source artifacts.
-    #[serde(default)]
-    pub softness: f32,
-    /// Optional reproducibility seed (SeedVR2 invents plausible detail; one-step but non-deterministic).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
-    /// Project the source asset belongs to. `None` ⇒ the worker falls back to the job's project id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    /// Optional display name for the result asset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for VideoUpscaleRequest {
-    fn default() -> Self {
-        Self {
-            source_asset_id: String::new(),
-            factor: default_video_upscale_factor(),
-            target_width: None,
-            target_height: None,
-            engine: default_video_upscale_engine(),
-            model: default_video_upscale_model(),
-            softness: 0.0,
-            seed: None,
-            project_id: None,
-            display_name: None,
-            extra: ExtraFields::default(),
-        }
-    }
-}
-
-pub const fn default_video_upscale_factor() -> u8 {
-    2
-}
-
-pub fn default_video_upscale_engine() -> String {
-    "seedvr2".to_owned()
-}
-
-pub fn default_video_upscale_model() -> String {
-    "seedvr2_3b".to_owned()
-}
+pub use sceneworks_options::contracts::{
+    default_video_upscale_engine, default_video_upscale_factor, default_video_upscale_model,
+    VideoUpscaleRequest,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1432,6 +1220,15 @@ pub struct ClaimResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_model_binding:
         Option<crate::model_artifacts::portable_binding::PortableRouteBinding>,
+    /// Private per-claim capability. Present only when the claiming worker proved
+    /// its derived key; never included in a public job snapshot or SSE event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_claim_capability: Option<String>,
+    /// Private expected identity for an exact replay claim. The worker checks
+    /// resolved execution choices before launch; the store checks the completed
+    /// report again in the terminal transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_replay_expected: Option<crate::execution_receipt::TrustedExecutionReceipt>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

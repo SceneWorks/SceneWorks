@@ -1,0 +1,904 @@
+{
+  "sourceRevision": "d3f7b05bf22826e44fd43da19cff0985fb17d68b",
+  "capture": "node scripts/capture-option-upgrade-corpus.mjs",
+  "rows": [
+    {
+      "name": "simple-image",
+      "carrier": "request",
+      "value": {
+        "mode": "text_to_image",
+        "prompt": "A fox in snow",
+        "negativePrompt": "",
+        "model": "z_image_turbo",
+        "count": 1,
+        "seed": 0,
+        "width": 1024,
+        "height": 1024,
+        "recipePresetId": null,
+        "characterId": null,
+        "characterLookId": null,
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "loras": [],
+        "advanced": {
+          "resolution": "1024x1024",
+          "steps": 9,
+          "guidanceScale": 0
+        }
+      }
+    },
+    {
+      "name": "advanced-image",
+      "carrier": "request",
+      "value": {
+        "mode": "text_to_image",
+        "prompt": "A fox in snow",
+        "negativePrompt": "",
+        "model": "z_image_turbo",
+        "count": 1,
+        "seed": 0,
+        "width": 1024,
+        "height": 1024,
+        "characterId": null,
+        "characterLookId": null,
+        "referenceAssetId": null,
+        "loras": [],
+        "advanced": {
+          "resolution": "1024x1024",
+          "sampler": "euler",
+          "scheduler": "simple",
+          "schedulerShift": 3,
+          "flashAttn": false
+        }
+      }
+    },
+    {
+      "name": "simple-video",
+      "carrier": "request",
+      "value": {
+        "mode": "text_to_video",
+        "prompt": "A fox walks",
+        "negativePrompt": "",
+        "model": "ltx_2_3",
+        "duration": 5,
+        "width": 768,
+        "height": 512,
+        "quality": "balanced",
+        "seed": null,
+        "recipePresetId": null,
+        "characterId": null,
+        "characterLookId": null,
+        "sourceAssetId": null,
+        "lastFrameAssetId": null,
+        "sourceClipAssetId": null,
+        "sourceClipAssetIds": [],
+        "bridgeRightClipAssetId": null,
+        "referenceAssetIds": [],
+        "referenceClipAssetId": null,
+        "personTrackId": null,
+        "replacementMode": "face_only",
+        "loras": [],
+        "advanced": {
+          "resolution": "768x512"
+        }
+      }
+    },
+    {
+      "name": "simple-audio",
+      "carrier": "request",
+      "value": {
+        "model": "kokoro",
+        "prompt": "hello",
+        "seed": null,
+        "voice": "af_heart"
+      }
+    },
+    {
+      "name": "recipe-regeneration",
+      "carrier": "request",
+      "value": {
+        "mode": "text_to_image",
+        "model": "z_image_turbo",
+        "prompt": "A fox in snow",
+        "negativePrompt": "",
+        "seed": null,
+        "count": 1,
+        "width": 1024,
+        "height": 1024,
+        "loras": [],
+        "characterId": null,
+        "characterLookId": null,
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "referenceAssetIds": [],
+        "maskAssetId": null,
+        "fitMode": "crop",
+        "presetPromptResolvedClientSide": true,
+        "presetLorasResolvedClientSide": true,
+        "advanced": {
+          "resolution": "1024x1024",
+          "steps": 9,
+          "guidanceScale": 0
+        }
+      }
+    },
+    {
+      "name": "training-builder",
+      "carrier": "request",
+      "value": {
+        "targetId": "z_image_turbo_lora",
+        "datasetId": "ds_abc123",
+        "datasetVersion": 3,
+        "outputName": "Aurora style set LoRA",
+        "dryRun": true,
+        "outputScope": "project",
+        "qualityPreset": "balanced",
+        "requestedGpu": "auto",
+        "config": {
+          "rank": 16,
+          "alpha": 16,
+          "learningRate": 0.0001,
+          "steps": 3000,
+          "batchSize": 1,
+          "gradientAccumulation": 1,
+          "resolution": 1024,
+          "saveEvery": 250,
+          "seed": 42,
+          "optimizer": "adamw8bit",
+          "triggerWord": "fox",
+          "advanced": {
+            "mixedPrecision": "bf16",
+            "cacheLatents": true,
+            "cacheTextEmbeddings": true,
+            "gradientCheckpointing": true,
+            "networkType": "lora",
+            "timestepType": "sigmoid",
+            "timestepBias": "high_noise",
+            "lossType": "mse",
+            "weightDecay": 0.0001,
+            "lrScheduler": "constant",
+            "sampleEvery": 250,
+            "sampleSteps": 8,
+            "sampleGuidanceScale": 1,
+            "qualityPreset": "balanced",
+            "outputScope": "project",
+            "requestedGpu": "auto",
+            "sampleCount": 4,
+            "samplePrompts": [
+              "fox, studio portrait, soft key light, detailed face",
+              "fox, full body fashion editorial photo, natural pose",
+              "fox, cinematic outdoor portrait, golden hour",
+              "fox, close-up character portrait, dramatic rim light"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "advanced-settings-writer",
+      "carrier": "studioSettings",
+      "value": {
+        "prompt": "A fox in snow",
+        "mode": "text_to_image",
+        "model": "z_image_turbo",
+        "resolution": "1024x1024",
+        "count": 1,
+        "styleId": null,
+        "seed": "0",
+        "steps": "9",
+        "guidance": "0",
+        "sampler": "euler",
+        "scheduler": "simple",
+        "schedulerShift": 3,
+        "schedulerShiftExplicit": true
+      }
+    },
+    {
+      "name": "simple-settings-writer",
+      "carrier": "simpleSettings",
+      "value": {
+        "prompt": "A fox in snow",
+        "mode": "text_to_image",
+        "model": "z_image_turbo",
+        "resolution": "1024x1024",
+        "count": 1,
+        "styleId": null,
+        "seed": "0",
+        "steps": "9",
+        "guidance": "0"
+      }
+    },
+    {
+      "name": "historical-yue2-0",
+      "carrier": "request",
+      "value": {
+        "kind": "create",
+        "style": "dream pop, airy female vocal",
+        "lyrics": "[verse]\nhello",
+        "seed": 42,
+        "cfgScale": 1.5,
+        "steps": 32,
+        "planning": "melody",
+        "scoreSampling": {
+          "temperature": 0.9,
+          "topP": 0.95,
+          "topK": 40,
+          "repetitionPenalty": 1.1,
+          "penaltyWindow": 32,
+          "minTokens": 64,
+          "maxTokens": 2048
+        },
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "count": 3,
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-1",
+      "carrier": "request",
+      "value": {
+        "kind": "create",
+        "style": "dream pop, airy female vocal",
+        "lyrics": "[verse]\nhello",
+        "seed": 42,
+        "cfgScale": 1.5,
+        "steps": 32,
+        "planning": "full",
+        "score": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|",
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "count": 3,
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-2",
+      "carrier": "request",
+      "value": {
+        "kind": "plan",
+        "style": "dream pop, airy female vocal",
+        "lyrics": "[verse]\nhello",
+        "seed": 42,
+        "cfgScale": 1.5,
+        "planning": "melody",
+        "scoreSampling": {
+          "temperature": 0.9,
+          "topP": 0.95,
+          "topK": 40,
+          "repetitionPenalty": 1.1,
+          "penaltyWindow": 32,
+          "minTokens": 64,
+          "maxTokens": 2048
+        },
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "count": 3,
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-3",
+      "carrier": "request",
+      "value": {
+        "kind": "fromPlan",
+        "style": "folk",
+        "lyrics": "[verse]\nplanned",
+        "steps": 32,
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "planJobId": "job_plan",
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-4",
+      "carrier": "request",
+      "value": {
+        "kind": "cover",
+        "style": "dream pop, airy female vocal",
+        "lyrics": "[verse]\nhello",
+        "seed": 42,
+        "cfgScale": 1.5,
+        "steps": 32,
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "cover": {
+          "versionId": "ver_1",
+          "mode": "melody",
+          "keep": "vocal",
+          "translatedFrom": "[verse]\nhola"
+        },
+        "count": 3,
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-5",
+      "carrier": "request",
+      "value": {
+        "kind": "cover",
+        "style": "dream pop, airy female vocal",
+        "lyrics": "[verse]\nhello",
+        "seed": 42,
+        "cfgScale": 1.5,
+        "steps": 32,
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "cover": {
+          "score": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|",
+          "mode": "full",
+          "translatedFrom": "[verse]\nhola"
+        },
+        "count": 3,
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-6",
+      "carrier": "request",
+      "value": {
+        "kind": "renderVersion",
+        "steps": 32,
+        "semanticSampling": {
+          "temperature": 1,
+          "topP": 0.9,
+          "topK": 50,
+          "repetitionPenalty": 1.2,
+          "penaltyWindow": 16,
+          "minTokens": 300,
+          "maxTokens": 8000
+        },
+        "decoder": "legacy",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "offloadPolicy": "sequential",
+        "versionId": "ver_1",
+        "memory": {
+          "stageResidency": true,
+          "chunkAttention": true,
+          "attentionChunkSize": 393216,
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-7",
+      "carrier": "request",
+      "value": {
+        "kind": "decode",
+        "decoder": "standard",
+        "tier": "q8",
+        "computePolicy": "fp32",
+        "sourceJobId": "job_src",
+        "memory": {
+          "tileVaeDecode": true,
+          "decodeTileEdge": 256
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-8",
+      "carrier": "request",
+      "value": {
+        "kind": "create",
+        "lyrics": "la la",
+        "planning": "full",
+        "computePolicy": "auto",
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-9",
+      "carrier": "request",
+      "value": {
+        "kind": "transcribe",
+        "sourceAudioAssetId": "asset_take",
+        "transcription": {
+          "maxSeconds": 90,
+          "overlapSeconds": 150,
+          "lookaheadSeconds": 50
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-10",
+      "carrier": "request",
+      "value": {
+        "kind": "transcribe",
+        "sourceAudioAssetId": "asset_take",
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-yue2-11",
+      "carrier": "request",
+      "value": {
+        "kind": "create",
+        "lyrics": "[verse]\nhello",
+        "planning": "full",
+        "tier": "bf16",
+        "computePolicy": "auto",
+        "arMode": "experimentalFp8",
+        "requestedGpu": "0"
+      }
+    },
+    {
+      "name": "historical-job-snapshot",
+      "carrier": "job",
+      "value": {
+        "id": "job_fixture",
+        "type": "image_generate",
+        "status": "running",
+        "projectId": "project_fixture",
+        "projectName": "Fixture Project",
+        "payload": {
+          "prompt": "mist over hills",
+          "model": "z_image_turbo"
+        },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": "gpu-0",
+        "workerId": "worker-gpu-0",
+        "progress": 0.42,
+        "stage": "rendering",
+        "message": "Rendering preview frames.",
+        "error": null,
+        "etaSeconds": 12.5,
+        "elapsedSeconds": 4,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-05-17T13:00:00Z",
+        "updatedAt": "2026-05-17T13:00:04Z",
+        "startedAt": "2026-05-17T13:00:01Z",
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": "2026-05-17T13:00:04Z"
+      }
+    },
+    {
+      "name": "historical-http-create",
+      "carrier": "request",
+      "value": {
+        "type": "image_generate",
+        "projectId": "project_fixture",
+        "projectName": "Fixture Project",
+        "payload": {
+          "prompt": "mist over hills",
+          "model": "z_image_turbo"
+        },
+        "requestedGpu": "auto"
+      }
+    },
+    {
+      "name": "historical-recipe-sidecar",
+      "carrier": "recipe",
+      "value": {
+        "mode": "text_to_image",
+        "model": "z_image_turbo",
+        "adapter": "procedural_preview",
+        "prompt": "mist over hills",
+        "negativePrompt": "",
+        "seed": 101,
+        "loras": [],
+        "stylePreset": "cinematic",
+        "normalizedSettings": {
+          "width": 1024,
+          "height": 1024,
+          "count": 4,
+          "family": "z_image"
+        },
+        "rawAdapterSettings": {}
+      }
+    },
+    {
+      "name": "historical-film-plan",
+      "carrier": "filmPlan",
+      "value": {
+        "schemaVersion": 3,
+        "id": "courier-workshop",
+        "version": 1,
+        "title": "Courier at the Workshop",
+        "synopsis": "A courier enters a cluttered workshop carrying a red parcel, sets it on the workbench and leaves; the recipient comes in, finds the parcel and opens it.",
+        "model": {
+          "id": "minimax_h3",
+          "tier": "q4",
+          "fps": 24,
+          "resolution": "576x320"
+        },
+        "limits": {
+          "maxRunSeconds": 7200,
+          "maxShotSeconds": 2700,
+          "maxAttemptsPerShot": 1,
+          "maxMemoryGb": 96
+        },
+        "sound": {
+          "generatedAudio": "mute",
+          "dialogue": {
+            "gain": 1,
+            "muted": false
+          },
+          "ambience": {
+            "role": "workshop_room_tone",
+            "gain": 0.35,
+            "fadeInSeconds": 1,
+            "fadeOutSeconds": 1.5
+          },
+          "music": {
+            "role": "main_theme",
+            "gain": 0.2,
+            "startSeconds": 0,
+            "fadeInSeconds": 2,
+            "fadeOutSeconds": 3
+          }
+        },
+        "shots": [
+          {
+            "id": "SH010",
+            "beat": "Establish the empty workshop; the door opens.",
+            "framing": "wide static, eye level, door camera-left, workbench centre",
+            "prompt": "A quiet, cluttered woodworking workshop in warm late-afternoon light. Tools hang on pegboard, sawdust on a long wooden workbench in the centre of frame, a closed door on the left. After a beat the door opens and a courier in a blue jacket steps into the doorway holding a small bright red parcel. Static wide shot, natural light, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Empty workshop, door closed, workbench clear.",
+            "endState": "Door open, courier standing in the doorway holding the red parcel, workbench still clear.",
+            "audio": "Room tone, distant birds, a door latch clicking and the door creaking open. No music.",
+            "conditioning": {
+              "mode": "text_to_video"
+            },
+            "seed": 22710,
+            "continuityRoles": [
+              "workshop_location",
+              "workbench_table",
+              "courier",
+              "red_parcel",
+              "house_style"
+            ]
+          },
+          {
+            "id": "SH020",
+            "beat": "The courier crosses to the workbench with the parcel.",
+            "framing": "medium, slow push-in following the courier to the bench",
+            "prompt": "Starting from this view of the workshop, a courier in a blue jacket walks in from the left carrying a small bright red parcel with both hands and approaches the wooden workbench in the centre. Warm late-afternoon light, sawdust in the air, natural handheld feel, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Courier in the doorway with the red parcel.",
+            "endState": "Courier standing at the workbench, parcel still in hand.",
+            "dialogue": "Courier: \"Delivery — I'll leave it on the bench.\"",
+            "dialogueClip": {
+              "role": "courier_line",
+              "offsetSeconds": 1.2,
+              "gain": 1
+            },
+            "audio": "Footsteps on a wooden floor, cardboard creak of the parcel, room tone. No music.",
+            "conditioning": {
+              "mode": "image_to_video",
+              "firstFrameRole": "workshop_plate"
+            },
+            "seed": 22711,
+            "dependsOn": [
+              {
+                "shotId": "SH010",
+                "kind": "continuity",
+                "note": "The courier and the parcel enter in SH010; SH020 starts from that doorway."
+              }
+            ],
+            "continuityRoles": [
+              "workshop_location",
+              "workbench_table",
+              "courier",
+              "red_parcel",
+              "house_style"
+            ]
+          },
+          {
+            "id": "SH030",
+            "beat": "The courier places the red parcel on the workbench.",
+            "framing": "close on the workbench surface, hands and parcel",
+            "prompt": "Close-up on a wooden workbench dusted with sawdust. Two hands in the sleeves of a blue courier jacket lower a small bright red parcel onto the bench and let go, then withdraw out of frame. Warm late-afternoon light, shallow depth of field, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Parcel in the courier's hands above the bench.",
+            "endState": "Red parcel resting on the workbench, hands gone.",
+            "audio": "Soft thump of cardboard on wood, sleeves rustling, room tone. No music.",
+            "conditioning": {
+              "mode": "text_to_video"
+            },
+            "seed": 22712,
+            "dependsOn": [
+              {
+                "shotId": "SH020",
+                "kind": "continuity",
+                "note": "SH030 starts with the parcel in the hands SH020 brought to the bench."
+              }
+            ],
+            "continuityRoles": [
+              "workbench_table",
+              "courier",
+              "red_parcel",
+              "house_style"
+            ]
+          },
+          {
+            "id": "SH040",
+            "beat": "The courier leaves; the parcel stays.",
+            "framing": "wide static, same setup as SH010",
+            "prompt": "Starting from this view of the workshop with a small bright red parcel resting on the wooden workbench, a courier in a blue jacket walks away from the bench toward the door on the left, steps out and pulls the door closed behind them. The parcel stays on the bench. Static wide shot, warm late-afternoon light, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Courier at the bench, red parcel on the bench.",
+            "endState": "Door closed, workshop empty except for the red parcel on the bench.",
+            "audio": "Footsteps receding, door creak and latch, then room tone. No music.",
+            "conditioning": {
+              "mode": "image_to_video",
+              "firstFrameRole": "workshop_plate"
+            },
+            "seed": 22713,
+            "dependsOn": [
+              {
+                "shotId": "SH030",
+                "kind": "continuity",
+                "note": "SH040 starts from the parcel SH030 left resting on the workbench."
+              }
+            ],
+            "continuityRoles": [
+              "workshop_location",
+              "workbench_table",
+              "courier",
+              "red_parcel",
+              "house_style"
+            ]
+          },
+          {
+            "id": "SH050",
+            "beat": "The recipient enters and notices the parcel.",
+            "framing": "medium, recipient enters camera-left, bench centre",
+            "prompt": "A man in a grey work apron with rolled sleeves enters a cluttered woodworking workshop through the door on the left, wiping his hands on a rag. He stops as he notices a small bright red parcel sitting on the wooden workbench in the centre and walks toward it. Warm late-afternoon light, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Empty workshop, red parcel on the bench, door closed.",
+            "endState": "Recipient standing at the bench looking down at the parcel.",
+            "dialogue": "Recipient (quietly): \"Huh. That's not mine.\"",
+            "dialogueClip": {
+              "role": "recipient_line",
+              "offsetSeconds": 2.6,
+              "gain": 1
+            },
+            "audio": "Door opening, footsteps, a rag dropped on the bench, room tone. No music.",
+            "conditioning": {
+              "mode": "text_to_video"
+            },
+            "seed": 22714,
+            "dependsOn": [
+              {
+                "shotId": "SH040",
+                "kind": "continuity",
+                "note": "SH050 starts from the empty workshop SH040 closed the door on."
+              }
+            ],
+            "continuityRoles": [
+              "workshop_location",
+              "workbench_table",
+              "recipient",
+              "red_parcel",
+              "house_style"
+            ]
+          },
+          {
+            "id": "SH060",
+            "beat": "The recipient opens the parcel.",
+            "framing": "close on hands and parcel, slight high angle",
+            "prompt": "Close-up on a small bright red parcel on a sawdust-covered wooden workbench. A man's hands with a grey apron sleeve tear the tape, fold back the flaps and lift the lid, and a soft warm glow from inside lights his fingers. Shallow depth of field, warm late-afternoon light, film grain.",
+            "targetDurationSeconds": 5.1667,
+            "startState": "Sealed red parcel on the bench, recipient's hands entering frame.",
+            "endState": "Parcel open, flaps folded back, hands resting on the bench beside it.",
+            "dialogue": "Recipient (whisper): \"Oh. Oh, that's lovely.\"",
+            "dialogueClip": {
+              "role": "recipient_reveal_line",
+              "offsetSeconds": 3,
+              "gain": 0.8,
+              "fadeOutSeconds": 0.4
+            },
+            "audio": "Tape tearing, cardboard flaps, a soft musical swell as the lid lifts.",
+            "conditioning": {
+              "mode": "text_to_video"
+            },
+            "seed": 22715,
+            "dependsOn": [
+              {
+                "shotId": "SH050",
+                "kind": "continuity",
+                "note": "SH060 opens the parcel SH050 found sealed on the bench."
+              }
+            ],
+            "continuityRoles": [
+              "workbench_table",
+              "recipient",
+              "red_parcel",
+              "house_style"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "historical-training-plan",
+      "carrier": "trainingPlan",
+      "value": {
+        "schemaVersion": 1,
+        "planVersion": 1,
+        "jobId": "job_777",
+        "target": {
+          "targetId": "z_image_turbo_lora",
+          "kernel": "z_image_lora",
+          "family": "z-image",
+          "modality": "image",
+          "outputKind": "lora",
+          "baseModel": "z_image_turbo",
+          "baseModelRepo": "Tongyi-MAI/Z-Image-Turbo",
+          "baseModelPath": "/sceneworks/data/cache/huggingface/Tongyi-MAI/Z-Image-Turbo"
+        },
+        "dataset": {
+          "datasetId": "ds_abc123",
+          "datasetVersion": 3,
+          "rootPath": "/sceneworks/data/training/ds_abc123",
+          "items": [
+            {
+              "imagePath": "/sceneworks/data/training/ds_abc123/images/001.png",
+              "caption": "a portrait of auroraStyle woman, soft light",
+              "width": 1024,
+              "height": 1024
+            },
+            {
+              "imagePath": "/sceneworks/data/training/ds_abc123/images/002.png",
+              "caption": "auroraStyle landscape, distant mountains"
+            }
+          ]
+        },
+        "config": {
+          "rank": 32,
+          "alpha": 16,
+          "learningRate": 0.0002,
+          "steps": 2500,
+          "batchSize": 2,
+          "gradientAccumulation": 1,
+          "resolution": 1024,
+          "saveEvery": 250,
+          "seed": 7,
+          "optimizer": "adamw8bit",
+          "triggerWord": "auroraStyle",
+          "advanced": {
+            "mixedPrecision": "bf16",
+            "cacheLatents": true
+          }
+        },
+        "output": {
+          "loraId": "lora_aurora_001",
+          "outputDir": "/sceneworks/data/loras/lora_aurora_001",
+          "fileName": "aurora_style.safetensors",
+          "format": "safetensors",
+          "triggerWords": [
+            "auroraStyle"
+          ]
+        },
+        "provenance": {
+          "datasetId": "ds_abc123",
+          "datasetVersion": 3,
+          "targetId": "z_image_turbo_lora",
+          "baseModel": "z_image_turbo",
+          "configSnapshot": {
+            "rank": 32,
+            "alpha": 16,
+            "learningRate": 0.0002,
+            "steps": 2500,
+            "batchSize": 2,
+            "gradientAccumulation": 1,
+            "resolution": 1024,
+            "saveEvery": 250,
+            "seed": 7,
+            "optimizer": "adamw8bit",
+            "triggerWord": "auroraStyle",
+            "advanced": {
+              "mixedPrecision": "bf16",
+              "cacheLatents": true
+            }
+          },
+          "outputLoraId": "lora_aurora_001",
+          "sourceJobId": "job_777",
+          "createdAt": "2026-05-20T13:00:00Z"
+        }
+      }
+    }
+  ]
+}

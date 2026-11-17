@@ -171,6 +171,12 @@ impl From<JobsStoreError> for ApiError {
             }
             JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
             JobsStoreError::InvalidResultItem(detail) => Self::bad_request(detail),
+            JobsStoreError::ReplayUnavailable(reason) => Self::typed(
+                StatusCode::CONFLICT,
+                "Exact replay is unavailable for this job.",
+                "replay_unavailable",
+                serde_json::json!({ "reason": reason.reason, "field": reason.field }),
+            ),
             JobsStoreError::RetryLimit { max_attempts } => Self {
                 status: StatusCode::BAD_REQUEST,
                 detail: format!("Job retry limit reached after {max_attempts} attempts."),
@@ -346,6 +352,9 @@ impl IntoResponse for ApiError {
         };
         if correlation_id.is_none() {
             if let (Some(object), Some(context)) = (body.as_object_mut(), self.context) {
+                if let Some(field) = context.get("field") {
+                    object.insert("field".to_owned(), field.clone());
+                }
                 object.insert("context".to_owned(), context);
             }
         }
@@ -353,6 +362,14 @@ impl IntoResponse for ApiError {
             body["correlationId"] = json!(id);
         }
         (self.status, Json(body)).into_response()
+    }
+}
+
+impl From<sceneworks_core::request_validation::ValidationRefusal> for ApiError {
+    fn from(error: sceneworks_core::request_validation::ValidationRefusal) -> Self {
+        let mut context = *error.context;
+        context["field"] = json!(error.field);
+        Self::typed(StatusCode::BAD_REQUEST, error.detail, error.code, context)
     }
 }
 

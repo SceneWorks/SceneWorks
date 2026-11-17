@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, settle, unmountRoot } from "../testUtils/dom.js";
 import { AppContext } from "../context/AppContext.js";
 import { VISION_CAPTION_MODEL_REPO } from "../constants.js";
+import { formatTierBytes } from "../formatting.js";
 
 vi.mock("../api/trainingResources.js", () => ({
   trainingApi: {
@@ -23,7 +24,28 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE } = await import("./DatasetPromptBatchDialog.jsx");
+const { DESCRIBE_MODELS, DatasetPromptBatchDialog, RESTORE_JOBS_PAGE, rowsNotFitted, VISION_DESCRIBE_MODEL_REPO } = await import("./DatasetPromptBatchDialog.jsx");
+const { default: candidateCatalog } = await import("../testUtils/catalogBaseline/candidate-catalog.json");
+const { readFileSync } = await import("node:fs");
+
+// The dialog's 27B tier radios must match what the catalog and the shared contract offer: the same
+// tier keys in the same order (core QWEN38_27B_DESCRIBER_TIERS, every one a catalog row); sizes come
+// from the catalog at render time, never from a label.
+describe("Qwen3.8 27B tier choices", () => {
+  it("match the core tiers and every tier has a catalog row", () => {
+    const core = readFileSync(`${process.cwd()}/../../crates/sceneworks-core/src/dataset_batch_describe.rs`, "utf8");
+    const coreTiers = [...core.match(/QWEN38_27B_DESCRIBER_TIERS: \[&str; \d+\] = \[([^\]]*)\]/)[1].matchAll(/"([a-z0-9]+)"/g)].map((m) => m[1]);
+    const entry = candidateCatalog.models.find((model) => model.id === "vision_describe_qwen3_8_27b");
+    const tiers = DESCRIBE_MODELS.find((model) => model.id === "vision_describe_qwen3_8_27b").tiers;
+    expect(tiers.map(([key]) => key)).toEqual(coreTiers);
+    for (const [key, label] of tiers) {
+      expect(entry.downloads.some((row) => row.variant === key), key).toBe(true);
+      // Sizes are never written into the label: the dialog prints each tier's catalog size.
+      expect(label, key).not.toMatch(/GB|GiB|\(/);
+    }
+  });
+});
+const { formatPromptBatch } = await import("../promptBatchDescribe.js");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
 const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
@@ -31,6 +53,7 @@ const JOY_DEFAULT_PROMPT = "You are a meticulous scene describer. Describe only 
 const DEFAULTS = {
   [VISION_CAPTION_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
   [JOY_REPO]: { prompt: JOY_DEFAULT_PROMPT, maxChars: 3000 },
+  [VISION_DESCRIBE_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
 };
 const dataset = {
   id: "ds_1",
@@ -73,6 +96,7 @@ function snapshot(status, items, extra = {}) {
       failedCount,
       canceled: status === "canceled",
       model: extra.model ?? VISION_CAPTION_MODEL_REPO,
+      ...(extra.variant ? { variant: extra.variant } : {}),
       items,
     },
   };
@@ -324,6 +348,61 @@ describe("DatasetPromptBatchDialog", () => {
 
     await click(button("Open in Image Studio"));
     expect(context.sendPromptBatchToImage).toHaveBeenCalledWith(expect.objectContaining({ id: "film_prints_prompts" }));
+  });
+
+  it("shows a Pose field after Description and saves one Pose line per person; a six-field result has an empty pose", async () => {
+    await render();
+    const pose =
+      "woman_1 — Body line: upright; Stance: standing; Facing: front\nman_1 — Body line: horizontal; Stance: lying on their back; Facing: up";
+    await runWith([
+      described("item_a", 2400, 3200, { pose }),
+      // Stored before pose existed: no pose key at all.
+      described("item_b", 4000, 2250),
+    ]);
+    const labels = (itemId) =>
+      [...document.body.querySelectorAll(`[data-item-id="${itemId}"] label`)].map((node) => node.firstChild.textContent);
+    expect(labels("item_a").slice(0, 3)).toEqual(["Description", "Pose", "Style"]);
+    const textareas = (itemId) => [...document.body.querySelectorAll(`[data-item-id="${itemId}"] textarea`)];
+    expect(textareas("item_a")[1].value).toBe(pose);
+    expect(textareas("item_b")[1].value).toBe("");
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.prompts[0]).toBe(
+      "[3:4]\nDescription: A woman, {{woman_1}}, stands (item_a).\n" +
+        "Pose: {{woman_1}} — Body line: upright; Stance: standing; Facing: front\n" +
+        "Pose: {{man_1}} — Body line: horizontal; Stance: lying on their back; Facing: up\n" +
+        "Style: 1960s color negative print\nCamera: 35mm SLR\nComposition: Medium shot\nLighting: Window light\nEnvironment: A kitchen",
+    );
+    expect(payload.prompts[1]).not.toContain("Pose:");
+    expect(payload.variables.map((variable) => variable.key)).toEqual(["woman_1", "man_1"]);
+  });
+
+  it("shows a cut-off notice on a described row and keeps the row in the saved batch", async () => {
+    await render();
+    const notice =
+      "The reply reached the length limit: the pose covers only the first 2 people in this image; the other fields are complete.";
+    await runWith([described("item_a", 2400, 3200, { pose: "woman_1 — Body line: upright", notice }), described("item_b", 4000, 2250)]);
+    const rowNote = (itemId, kind) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="${kind}"]`);
+    expect(rowNote("item_a", "cut-off").textContent).toBe(notice);
+    expect(rowNote("item_b", "cut-off")).toBeNull();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch.mock.calls[0][0].prompts).toHaveLength(2);
+  });
+
+  it("warns, without blocking Save, on a row whose prompt is over the generation limit", async () => {
+    await render();
+    await runWith([described("item_a", 2400, 3200, { environment: "x".repeat(3900) }), described("item_b", 4000, 2250)]);
+    const tooLong = (itemId) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="too-long"]`);
+    expect(tooLong("item_a").textContent).toMatch(/^This prompt is 4,\d{3} characters; image generation accepts at most 4,000/);
+    expect(tooLong("item_b")).toBeNull();
+    // Editing the row under the limit clears the warning.
+    const environment = [...document.body.querySelectorAll('[data-item-id="item_a"] textarea')].at(-1);
+    await act(async () => setText(environment, "A kitchen"));
+    expect(tooLong("item_a")).toBeNull();
+    await act(async () => setText(environment, "y".repeat(3950)));
+    expect(button("Save prompt batch").disabled).toBe(false);
   });
 
   it("exports the batch as the standard prompt-batch .json", async () => {
@@ -655,14 +734,17 @@ describe("DatasetPromptBatchDialog", () => {
     joyInstalled();
     await render();
     await runWith([described("item_a", 300, 400), described("item_b", 400, 300)]);
-    // Re-run one image with JoyCaption, then switch back to the Vision Captioner before saving.
+    // Describe the remaining image with JoyCaption, then switch back to the Vision Captioner before saving.
     await chooseModel("joycaption_beta_one");
     await settle();
-    const rowB = document.body.querySelector('[data-item-id="item_b"]');
-    await click([...rowB.querySelectorAll("button")].find((node) => node.textContent === "Re-run"));
+    await click(button("Describe remaining (1)"));
     await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toMatchObject({
+      model: JOY_REPO,
+      itemIds: ["item_c"],
+    });
     await act(async () =>
-      nextPoll(snapshot("completed", [described("item_b", 400, 300)], { itemCount: 1, model: JOY_REPO })),
+      nextPoll(snapshot("completed", [described("item_c", 400, 300)], { itemCount: 1, model: JOY_REPO })),
     );
     await settle();
     await chooseModel("vision_caption_qwen3vl_8b");
@@ -672,9 +754,355 @@ describe("DatasetPromptBatchDialog", () => {
     const payload = context.createPromptBatch.mock.calls[0][0];
     expect(payload.sourceImages.map((image) => [image.itemId, image.model])).toEqual([
       ["item_a", VISION_CAPTION_MODEL_REPO],
-      ["item_b", JOY_REPO],
+      ["item_b", VISION_CAPTION_MODEL_REPO],
+      ["item_c", JOY_REPO],
     ]);
     expect(payload.source.model).toBe("mixed");
+    // Neither model has tiers: no image records one.
+    expect(payload.sourceImages.some((image) => "variant" in image)).toBe(false);
+    expect(payload.source.variant).toBeNull();
+  });
+
+  // The 27B describer with per-tier install state: `installedTiers` lists the tiers present. The
+  // model-level size label describes the default (q4) tier; each variant carries its own bytes,
+  // except bf16 here.
+  const TIER_BYTES = { q4: 19995477764, q8: 32371297322 };
+  function describerWithTiers(...installedTierKeys) {
+    return {
+      id: "vision_describe_qwen3_8_27b",
+      name: "Vision Describer (Qwen3.8-27B)",
+      installState: installedTierKeys.length ? "installed" : "missing",
+      downloadSizeLabel: "18.6 GB",
+      hasVariantMatrix: true,
+      variants: ["q4", "q8", "bf16"].map((variant) => ({
+        variant,
+        installState: installedTierKeys.includes(variant) ? "installed" : "missing",
+        downloadSizeBytes: TIER_BYTES[variant] ?? null,
+      })),
+    };
+  }
+  const tierInput = (key) => document.body.querySelector(`input[name="dataset-prompt-batch-tier"][value="${key}"]`);
+  const rerunButton = (itemId) =>
+    [...document.body.querySelectorAll(`[data-item-id="${itemId}"] button`)].find((node) => node.textContent === "Re-run");
+
+  it("offers the 27B Vision Describer with a tier choice that defaults to q4 (SW-7122)", async () => {
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    expect(document.body.querySelector('input[value="vision_caption_qwen3vl_8b"]').checked).toBe(true);
+    expect(document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent).toContain(
+      "Vision Describer (Qwen3.8-27B)",
+    );
+    expect(tierInput("q4")).toBeNull();
+
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    expect([...document.body.querySelectorAll('input[name="dataset-prompt-batch-tier"]')].map((input) => input.closest("label").textContent)).toEqual([
+      `q4 (${formatTierBytes(TIER_BYTES.q4)})`,
+      `q8 (${formatTierBytes(TIER_BYTES.q8)}) — not installed`,
+      // No size served for bf16 in this catalog: none rather than a guessed one.
+      "Full precision — not installed",
+    ]);
+    expect(tierInput("q4").checked).toBe(true);
+    // The prompt editor follows the 27B's own default, as for the Vision Captioner.
+    expect(trainingApi.defaultDescribePrompt).toHaveBeenLastCalledWith("t", expect.anything(), VISION_DESCRIBE_MODEL_REPO);
+    expect(textarea("Describing prompt").value).toBe(DEFAULT_PROMPT);
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      requestedGpu: "auto",
+    });
+
+    await chooseModel("vision_caption_qwen3vl_8b");
+    await settle();
+    expect(tierInput("q4")).toBeNull();
+    // The Vision Captioner's run sends no variant.
+    await click(button("Describe all again"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toEqual({
+      model: VISION_CAPTION_MODEL_REPO,
+      requestedGpu: "auto",
+    });
+  });
+
+  it("shows a tier that is not installed as unavailable and downloads only that tier (SW-7122)", async () => {
+    const entry = describerWithTiers("q4");
+    context.models = [...context.models, entry];
+    context.jobs = [
+      { id: "dl_q4", type: "model_download", status: "queued", payload: { modelId: entry.id, variant: "q4" } },
+      { id: "dl_q8", type: "model_download", status: "running", payload: { modelId: entry.id, variant: "q8" } },
+    ];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    expect(document.body.querySelector(".required-models-notice")).toBeNull();
+    expect(button("Describe images").disabled).toBe(false);
+
+    await click(tierInput("bf16"));
+    await settle();
+    const notice = document.body.querySelector(".required-models-notice");
+    expect(notice.textContent).toContain("Describing the dataset needs a model");
+    expect(notice.textContent).toContain("Vision Describer (Qwen3.8-27B) Full precision");
+    // No per-tier size for bf16: no size rather than the default tier's.
+    expect(notice.querySelector("small")).toBeNull();
+    expect(button("Describe images").disabled).toBe(true);
+    await click(button("Download"));
+    expect(context.createModelDownloadJob).toHaveBeenCalledWith(entry, { variant: "bf16" });
+
+    // The progress shown is that tier's download, never another tier's, with that tier's size.
+    await click(tierInput("q8"));
+    await settle();
+    const q8Notice = document.body.querySelector(".required-models-notice");
+    // One figure in one unit: the radio and the download panel print the same catalog size.
+    expect(q8Notice.textContent).toContain("Vision Describer (Qwen3.8-27B) q8");
+    expect(q8Notice.querySelector("small").textContent).toBe(formatTierBytes(TIER_BYTES.q8));
+    expect(tierInput("q8").closest("label").textContent).toContain(`(${formatTierBytes(TIER_BYTES.q8)})`);
+    const labels = [...q8Notice.querySelectorAll("button")].map((node) => node.textContent.trim());
+    expect(labels).toContain("running");
+    expect(labels).not.toContain("queued");
+    expect(labels).not.toContain("Download");
+  });
+
+  it("lets each missing tier be downloaded after another tier's Download was clicked (SW-7122 review)", async () => {
+    const entry = describerWithTiers("q4");
+    context.models = [...context.models, entry];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("bf16"));
+    await settle();
+    await click(button("Download"));
+    await settle();
+    expect(button("Queued").disabled).toBe(true);
+
+    await click(tierInput("q8"));
+    await settle();
+    expect(button("Queued")).toBeUndefined();
+    expect(button("Download").disabled).toBe(false);
+    await click(button("Download"));
+    expect(context.createModelDownloadJob).toHaveBeenLastCalledWith(entry, { variant: "q8" });
+  });
+
+  it("records each image's tier from the live job result in the saved batch (SW-7122 review)", async () => {
+    context.models = [...context.models, describerWithTiers("q4", "q8")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400)], { model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" })),
+    );
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    await click(button("Describe remaining (2)"));
+    await settle();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [described("item_b", 400, 300), described("item_c", 300, 300)], {
+          itemCount: 2,
+          model: VISION_DESCRIBE_MODEL_REPO,
+          variant: "q8",
+        }),
+      ),
+    );
+    await settle();
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.sourceImages.map((image) => [image.itemId, image.model, image.variant])).toEqual([
+      ["item_a", VISION_DESCRIBE_MODEL_REPO, "q4"],
+      ["item_b", VISION_DESCRIBE_MODEL_REPO, "q8"],
+      ["item_c", VISION_DESCRIBE_MODEL_REPO, "q8"],
+    ]);
+    // One model at two tiers: the model is single, the tier is not.
+    expect(payload.source.model).toBe(VISION_DESCRIBE_MODEL_REPO);
+    expect(payload.source.variant).toBe("mixed");
+  });
+
+  it("blocks a re-run whose recorded tier the model does not offer instead of substituting (SW-7122 review)", async () => {
+    context.models = [...context.models, describerWithTiers("q4", "q8", "bf16")];
+    serveHistory([
+      {
+        id: "job_27b",
+        status: "completed",
+        result: { processedCount: 2, itemCount: 2, model: VISION_DESCRIBE_MODEL_REPO, variant: "q2" },
+      },
+      { id: "job_old", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO } },
+    ]);
+    serveStoredRuns({ job_27b: [described("item_a", 300, 400), described("item_b", 300, 400)], job_old: [described("item_c", 300, 400)] });
+    await render();
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toContain("“q2”");
+    // An older row with no recorded tier re-runs on the default tier.
+    expect(rerunButton("item_c").disabled).toBe(false);
+    await click(rerunButton("item_c"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toMatchObject({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      itemIds: ["item_c"],
+    });
+  });
+
+  it("loads each model's default once, and a failure does not clear or borrow another's (SW-7122 review)", async () => {
+    joyInstalled();
+    trainingApi.defaultDescribePrompt.mockImplementation(async (_token, _options, model) => {
+      if (model === JOY_REPO) throw new Error("joy default unavailable");
+      return { model, ...DEFAULTS[model] };
+    });
+    serveHistory([
+      { id: "job_joy", status: "completed", result: { processedCount: 1, itemCount: 1, model: JOY_REPO } },
+      { id: "job_27b", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" } },
+    ]);
+    serveStoredRuns({ job_joy: [described("item_a", 300, 400)], job_27b: [described("item_b", 300, 400)] });
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    const repos = trainingApi.defaultDescribePrompt.mock.calls.map((call) => call[2]);
+    expect(repos.filter((repo) => repo === VISION_CAPTION_MODEL_REPO)).toHaveLength(1);
+    expect(repos.filter((repo) => repo === VISION_DESCRIBE_MODEL_REPO)).toHaveLength(1);
+    // JoyCaption's failure belongs to its rows' re-run, not to the selected model's editor.
+    expect(document.body.textContent).not.toContain("joy default unavailable");
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toBe("joy default unavailable");
+    expect(rerunButton("item_b").disabled).toBe(false);
+  });
+
+  it("re-runs a row with the model and tier that described it (SW-7122)", async () => {
+    joyInstalled();
+    context.models = [...context.models, describerWithTiers("q4", "q8")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], {
+          model: VISION_DESCRIBE_MODEL_REPO,
+          variant: "q8",
+        }),
+      ),
+    );
+    await settle();
+
+    // Another model selected: the re-run still sends the row's own model and tier.
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    await click(rerunButton("item_b"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+      requestedGpu: "auto",
+      itemIds: ["item_b"],
+    });
+    await act(async () => nextPoll(snapshot("completed", [described("item_b", 400, 300)], { itemCount: 1, model: JOY_REPO })));
+    await settle();
+
+    // item_b is now JoyCaption's: its re-run sends no variant, even with the 27B selected.
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(rerunButton("item_b"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[2][3].body)).toEqual({
+      model: JOY_REPO,
+      requestedGpu: "auto",
+      itemIds: ["item_b"],
+    });
+  });
+
+  it("says on each row which model and tier its re-run uses, whatever is selected above", async () => {
+    context.models = [...context.models, describerWithTiers("q4")];
+    serveHistory([{ id: "job_q4", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" } }]);
+    serveStoredRuns({ job_q4: [described("item_a", 300, 400)] });
+    await render();
+    // The 27B at q8, which is not installed, selected above: the notice is about that selection.
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    expect(document.body.querySelector(".required-models-notice").textContent).toContain("Vision Describer (Qwen3.8-27B) q8");
+    // The row's re-run reproduces the row's own describer and tier, and says so.
+    const note = document.body.querySelector('[data-item-id="item_a"] [data-row-note="rerun-with"]');
+    expect(note.textContent).toBe("Re-runs with Vision Describer (Qwen3.8-27B) q4");
+    expect(rerunButton("item_a").disabled).toBe(false);
+    await click(rerunButton("item_a"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body)).toMatchObject({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q4",
+      itemIds: ["item_a"],
+    });
+  });
+
+  it("marks the 27B not installed only when no tier is, and a missing tier on its own radio", async () => {
+    const modelLabel = () => document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent;
+    context.models = [...context.models, describerWithTiers("q4")];
+    await render();
+    await chooseModel("vision_describe_qwen3_8_27b");
+    await settle();
+    await click(tierInput("q8"));
+    await settle();
+    expect(modelLabel()).not.toContain("not installed");
+    expect(tierInput("q8").closest("label").textContent).toContain("— not installed");
+  });
+
+  it("marks the 27B not installed when no tier is installed", async () => {
+    context.models = [...context.models, describerWithTiers()];
+    await render();
+    expect(document.body.querySelector('input[value="vision_describe_qwen3_8_27b"]').closest("label").textContent).toContain(
+      "— not installed",
+    );
+  });
+
+  it("says the model files are being checked when the start request is slow", async () => {
+    let answer;
+    trainingApi.batchDescribeJobs.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    const note = () => document.body.querySelector('[data-run-note="checking-files"]');
+    expect(note().textContent).toContain("Checking the model files before the job starts.");
+    await act(async () => answer({ id: "job_1", status: "queued", progress: 0 }));
+    await settle();
+    expect(note()).toBeNull();
+  });
+
+  it("checks a re-run against the row's own tier install and prompt limit (SW-7122)", async () => {
+    joyInstalled();
+    context.models = [...context.models, describerWithTiers("q4")];
+    serveHistory([
+      { id: "job_joy", status: "completed", result: { processedCount: 1, itemCount: 1, model: JOY_REPO } },
+      // Restored from the payload's variant: a tier this install no longer has.
+      {
+        id: "job_27b",
+        status: "completed",
+        payload: { model: VISION_DESCRIBE_MODEL_REPO, variant: "bf16" },
+        result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO },
+      },
+      { id: "job_vc", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({
+      job_joy: [described("item_a", 300, 400)],
+      job_27b: [described("item_b", 300, 400)],
+      job_vc: [described("item_c", 300, 400)],
+    });
+    await render();
+    expect(rerunButton("item_b").disabled).toBe(true);
+    expect(rerunButton("item_b").title).toBe("Vision Describer (Qwen3.8-27B) Full precision is not installed.");
+    expect(rerunButton("item_a").disabled).toBe(false);
+    expect(rerunButton("item_c").disabled).toBe(false);
+
+    // Over JoyCaption's limit but within the Vision Captioner's: only the JoyCaption row is blocked.
+    await act(async () => setText(textarea("Describing prompt"), "x".repeat(3001)));
+    await settle();
+    expect(rerunButton("item_a").disabled).toBe(true);
+    expect(rerunButton("item_a").title).toContain("at most 3,000");
+    expect(rerunButton("item_c").disabled).toBe(false);
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {
@@ -900,5 +1328,542 @@ describe("DatasetPromptBatchDialog", () => {
     await click(button("Close"));
     await settle();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+  // ── Fit to (SW-7163) ──────────────────────────────────────────────────────────────────────────
+
+  const KREA = { id: "krea_2_turbo", name: "Krea 2 Turbo", installState: "missing", image: { maxPromptTokens: 1024 } };
+  const KREA_RAW = { id: "krea_2_raw", name: "Krea 2 Raw", installState: "missing", image: { maxPromptTokens: 1024 } };
+  function condensedFor(target, over = {}) {
+    return {
+      target,
+      limitTokens: 1024,
+      text: "A woman, woman_1, stands by a window.",
+      tokens: 612,
+      tokenCount: "exact",
+      estimateReason: null,
+      characters: 37,
+      over: false,
+      failed: false,
+      notice: null,
+      ...over,
+    };
+  }
+  async function chooseFitTo(value) {
+    const select = [...document.body.querySelectorAll("label")]
+      .find((node) => node.firstChild?.textContent?.trim() === "Fit to")
+      .querySelector("select");
+    await act(async () => {
+      select.value = value;
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await settle();
+  }
+  const rowNote = (itemId, kind) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="${kind}"]`);
+  const condensedBox = (itemId) =>
+    [...document.body.querySelectorAll(`[data-item-id="${itemId}"] label`)]
+      .find((node) => node.firstChild?.textContent?.trim() === "Condensed prompt")
+      ?.querySelector("textarea");
+
+  it("offers the catalog's prompt-limited models as Fit to targets and sends the choice with a describe", async () => {
+    context.models = [...context.models, KREA, { id: "z_image_turbo", name: "Z-Image Turbo", image: {} }];
+    await render();
+    const fitToLabel = [...document.body.querySelectorAll("label")].find((node) => node.firstChild?.textContent?.trim() === "Fit to");
+    const options = [...fitToLabel.querySelectorAll("option")].map((node) => [node.value, node.textContent]);
+    expect(options).toEqual([
+      ["", "Off — save the seven fields"],
+      ["krea_2_turbo", "Krea 2 Turbo — 1,024 tokens"],
+    ]);
+    await chooseFitTo("krea_2_turbo");
+    expect(trainingApi.batchDescribeJobs).not.toHaveBeenCalled();
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toEqual({
+      model: VISION_CAPTION_MODEL_REPO,
+      requestedGpu: "auto",
+      fitTo: "krea_2_turbo",
+    });
+    expect(condensedBox("item_a").value).toBe("A woman, woman_1, stands by a window.");
+    expect(rowNote("item_a", "condensed-size").textContent).toBe("612 of 1,024 tokens.");
+    expect(textarea("Description").value).toBe("A woman, woman_1, stands (item_a).");
+
+    await click(button("Save prompt batch"));
+    await settle();
+    const saved = context.createPromptBatch.mock.calls[0][0];
+    expect(saved.prompts).toEqual(["[3:4]\nA woman, {{woman_1}}, stands by a window."]);
+    expect(saved.variables).toEqual([{ key: "woman_1", values: [] }]);
+
+    // Off: the seven fields again, with no job.
+    await chooseFitTo("");
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(1);
+    expect(condensedBox("item_a")).toBeUndefined();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch.mock.calls.at(-1)[0].prompts[0].startsWith("[3:4]\nDescription: A woman")).toBe(true);
+  });
+
+  it("changing the target condenses only the described Vision Captioner rows and describes nothing", async () => {
+    context.models = [...context.models, KREA, KREA_RAW];
+    serveHistory([
+      { id: "job_joy", status: "completed", result: { processedCount: 1, itemCount: 1, model: JOY_REPO } },
+      {
+        id: "job_vision",
+        status: "completed",
+        payload: { fitTo: "krea_2_turbo" },
+        result: { processedCount: 2, itemCount: 2, model: VISION_CAPTION_MODEL_REPO },
+      },
+    ]);
+    serveStoredRuns({
+      job_joy: [described("item_b", 400, 300, { description: "A man, man_1, by JoyCaption." })],
+      job_vision: [
+        described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+        described("item_c", null, null, { failed: true, error: "Bad image." }),
+      ],
+    });
+    await render();
+    // Later polls read the condense-only job's stored items.
+    jobsApi.resultItems.mockReset().mockImplementation(async (_jobId, _token, { offset = 0 } = {}) => ({
+      items: storedItems.slice(offset),
+      total: storedItems.length,
+      nextOffset: null,
+    }));
+    // The newest run (JoyCaption) had no target, so the dialog starts with Fit to off.
+    await chooseFitTo("krea_2_turbo");
+    expect(trainingApi.batchDescribeJobs).not.toHaveBeenCalled();
+    expect(condensedBox("item_a").value).toBe("A woman, woman_1, stands by a window.");
+    expect(rowNote("item_b", "not-condensed").textContent).toContain("Described by JoyCaption beta-one, which has no text step");
+
+    await chooseFitTo("krea_2_raw");
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body);
+    expect(body).toEqual({
+      model: VISION_CAPTION_MODEL_REPO,
+      requestedGpu: "auto",
+      fitTo: "krea_2_raw",
+      condenseRows: [
+        {
+          itemId: "item_a",
+          width: 300,
+          height: 400,
+          notice: null,
+          fields: {
+            description: "A woman, woman_1, stands (item_a).",
+            pose: "",
+            style: "1960s color negative print",
+            camera: "35mm SLR",
+            composition: "Medium shot",
+            lighting: "Window light",
+            environment: "A kitchen",
+          },
+        },
+      ],
+    });
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [described("item_a", 300, 400, { condensed: condensedFor("krea_2_raw", { text: "woman_1 at a window." }) })], {
+          itemCount: 1,
+        }),
+      ),
+    );
+    await settle();
+    expect(condensedBox("item_a").value).toBe("woman_1 at a window.");
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual([
+      "item_a",
+      "item_b",
+      "item_c",
+    ]);
+    expect(button("Describe all again")).toBeTruthy();
+  });
+
+  it("condenses a 27B row with the model and tier that described it", async () => {
+    context.models = [...context.models, KREA, describerWithTiers("q4", "q8")];
+    serveHistory([
+      { id: "job_q8", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q8" } },
+      { id: "job_q4", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q4" } },
+    ]);
+    serveStoredRuns({ job_q8: [described("item_a", 300, 400)], job_q4: [described("item_b", 400, 300)] });
+    await render();
+    jobsApi.resultItems.mockReset().mockImplementation(async () => ({ items: [], total: 0, nextOffset: null }));
+    await chooseFitTo("krea_2_turbo");
+    // One condense-only job per tier, each naming the tier its rows were described with.
+    const first = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body);
+    expect(first).toMatchObject({ model: VISION_DESCRIBE_MODEL_REPO, variant: "q8", fitTo: "krea_2_turbo" });
+    expect(first.condenseRows.map((row) => row.itemId)).toEqual(["item_a"]);
+    await act(async () => nextPoll(snapshot("completed", [], { itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q8" })));
+    await settle();
+    const second = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
+    expect(second).toMatchObject({ model: VISION_DESCRIBE_MODEL_REPO, variant: "q4", fitTo: "krea_2_turbo" });
+    expect(second.condenseRows.map((row) => row.itemId)).toEqual(["item_b"]);
+  });
+
+  it("marks a condensed prompt stale after a field edit and holds Save (not Export) until it is condensed again", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })]);
+    expect(button("Condense for Krea 2 Turbo (1)")).toBeUndefined();
+    await act(async () => setText(textarea("Lighting"), "Hard noon light"));
+    expect(rowNote("item_a", "condense-stale").textContent).toContain("Fields changed since this was condensed");
+    expect(condensedBox("item_a")).toBeUndefined();
+    const note = document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ");
+    expect(note).toContain("1 row has no usable condensed prompt for Krea 2 Turbo");
+    expect(note).toContain("Condense it, or turn Fit to off to save the seven fields.");
+    expect(note).toContain("Export writes it as the seven fields.");
+    expect(button("Save prompt batch").disabled).toBe(true);
+    // Export still writes what the table holds.
+    expect(button("Export .json").disabled).toBe(false);
+    await click(button("Condense for Krea 2 Turbo (1)"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
+    expect(body.condenseRows.map((row) => [row.itemId, row.fields.lighting])).toEqual([["item_a", "Hard noon light"]]);
+    expect(body.model).toBe(VISION_CAPTION_MODEL_REPO);
+    // The one-row condense reads as one row, never the whole dataset, and is not a describe.
+    expect(document.body.textContent).toContain("Condensing: 0 of 1 image");
+    expect(button("Describing…")).toBeUndefined();
+    // Turning Fit to off is the other way out: the seven fields save.
+    await act(async () => nextPoll(snapshot("failed", [], { itemCount: 1 })));
+    await settle();
+    await chooseFitTo("");
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("shows an edited prompt's live characters, never its old size, and measures it without generating", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo", { labelMentions: 1 }) })]);
+    expect(rowNote("item_a", "condensed-size").textContent).toBe("612 of 1,024 tokens, leaving room for 1 variable value.");
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window, edited."));
+    const size = rowNote("item_a", "condensed-size").textContent;
+    expect(size).toContain("of 4,000 characters; tokens not measured since your edit.");
+    expect(size).not.toContain("612");
+    expect(document.body.querySelector('[data-save-note="unmeasured"]').textContent).toContain(
+      "1 condensed prompt was edited and not measured since.",
+    );
+    expect(button("Save prompt batch").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
+    expect(body).toMatchObject({ measureOnly: true, fitTo: "krea_2_turbo" });
+    expect(body.condenseRows[0]).toMatchObject({ itemId: "item_a", condensedText: "woman_1 by the window, edited." });
+  });
+
+  // Restored rows on the krea target: item_a condensed (its prompt is then edited), item_b not.
+  async function restoreFittedRun(models, result) {
+    context.models = models;
+    serveHistory([{ id: "job_fit", status: "completed", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 2, itemCount: 2, ...result } }]);
+    serveStoredRuns({
+      job_fit: [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }), described("item_b", 400, 300)],
+    });
+    await render();
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window, edited."));
+  }
+
+  it("measures an edited prompt with no describer installed, while Condense stays blocked", async () => {
+    await restoreFittedRun(
+      [{ id: "vision_caption_qwen3vl_8b", name: "Vision Captioner (Qwen3-VL-8B)", installState: "missing" }, KREA],
+      { model: VISION_CAPTION_MODEL_REPO },
+    );
+    expect(button("Condense for Krea 2 Turbo (1)").disabled).toBe(true);
+    expect(button("Measure").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body);
+    expect(body).toMatchObject({ model: VISION_CAPTION_MODEL_REPO, measureOnly: true, fitTo: "krea_2_turbo" });
+    expect(body.condenseRows.map((row) => row.itemId)).toEqual(["item_a"]);
+  });
+
+  it("measures a 27B row whose tier was uninstalled, while Condense for it stays blocked", async () => {
+    await restoreFittedRun([...context.models, KREA, describerWithTiers("q4")], {
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+    });
+    const condense = button("Condense for Krea 2 Turbo (1)");
+    expect(condense.disabled).toBe(true);
+    expect(condense.title).toBe("Vision Describer (Qwen3.8-27B) q8 is not installed, so its rows cannot be condensed.");
+    expect(button("Measure").disabled).toBe(false);
+    await click(button("Measure"));
+    await settle();
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body);
+    // The tier only names how the row was described; a measure-only job loads nothing.
+    expect(body).toEqual({
+      model: VISION_DESCRIBE_MODEL_REPO,
+      variant: "q8",
+      requestedGpu: "auto",
+      fitTo: "krea_2_turbo",
+      condenseRows: [expect.objectContaining({ itemId: "item_a", condensedText: "woman_1 by the window, edited." })],
+      measureOnly: true,
+    });
+  });
+
+  it("remembers a cleared Fit to for the dataset even though the newest run had a target", async () => {
+    context.models = [...context.models, KREA];
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+    serveHistory([
+      { id: "job_v", status: "completed", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 1, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({ job_v: [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })] });
+    await render();
+    expect(condensedBox("item_a")).toBeTruthy();
+    await chooseFitTo("");
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render();
+    expect(condensedBox("item_a")).toBeUndefined();
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+  });
+
+  it("restores a run while an image is provisional and shows its condensed prompt once it is final", async () => {
+    context.models = [...context.models, KREA];
+    window.localStorage.setItem("sceneworks.datasetPromptBatch.fitTo.ds_1", "krea_2_turbo");
+    serveHistory([
+      { id: "job_1", status: "running", payload: { fitTo: "krea_2_turbo" }, result: { processedCount: 0, itemCount: 1, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    // Stored before its condensing step: provisional, not yet counted.
+    storedItems = [described("item_a", 300, 400, { provisional: true })];
+    await render();
+    expect(rowNote("item_a", "not-condensed")).toBeTruthy();
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })], { itemCount: 1 })),
+    );
+    await settle();
+    expect(condensedBox("item_a").value).toBe("A woman, woman_1, stands by a window.");
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+  });
+
+  it("re-reads a provisional row an ordinary poll saw until it is final", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await click(button("Describe images"));
+    await settle();
+    const first = snapshot("running", [
+      described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+      described("item_b", 400, 300, { provisional: true }),
+    ]);
+    first.result.processedCount = 1;
+    await act(async () => nextPoll(first));
+    await settle();
+    expect(rowNote("item_b", "not-condensed")).toBeTruthy();
+    await act(async () =>
+      nextPoll(
+        snapshot("completed", [
+          described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+          described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo", { text: "woman_1 at the door." }) }),
+        ]),
+      ),
+    );
+    await settle();
+    expect(condensedBox("item_b").value).toBe("woman_1 at the door.");
+    expect(jobsApi.resultItems).toHaveBeenCalledWith("job_1", "t", { offset: 1, limit: 1 }, expect.anything());
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("clears a remembered Fit to the catalog no longer offers and never sends it", async () => {
+    for (const [stored, models] of [
+      // A removed model.
+      ["user_model_gone", [...context.models, KREA]],
+      // A model whose limit is below the 512-token minimum.
+      ["small_model", [...context.models, KREA, { id: "small_model", name: "Small", image: { maxPromptTokens: 128 } }]],
+    ]) {
+      context.models = models;
+      trainingApi.batchDescribeJobs.mockClear();
+      window.localStorage.setItem("sceneworks.datasetPromptBatch.fitTo.ds_1", stored);
+      await unmountRoot(root, container);
+      ({ container, root } = mountRoot());
+      await render();
+      expect(window.localStorage.getItem("sceneworks.datasetPromptBatch.fitTo.ds_1")).toBe("");
+      await click(button("Describe images"));
+      await settle();
+      expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body).fitTo).toBeUndefined();
+      await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400)], { progress: 1 })));
+      await settle();
+    }
+    window.localStorage.removeItem("sceneworks.datasetPromptBatch.fitTo.ds_1");
+  });
+
+  // A job that stops while condensing leaves the image's description checkpointed but uncounted;
+  // the terminal poll drains it so the row shows its fields and says condensing failed.
+  async function stopWhileCondensing(status, items, processedCount) {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await click(button("Describe images"));
+    await settle();
+    const stopped = snapshot(status, items, { itemCount: 3 });
+    stopped.result.processedCount = processedCount;
+    await act(async () => nextPoll(stopped));
+    await settle();
+  }
+
+  it("shows the described fields and a plain notice when condensing fails on the first image", async () => {
+    await stopWhileCondensing("failed", [described("item_a", 300, 400, { provisional: true })], 0);
+    expect(document.body.querySelector('[data-item-id="item_a"] textarea').value).toBe("A woman, woman_1, stands (item_a).");
+    expect(rowNote("item_a", "condense-interrupted").textContent).toContain("Condensing failed for this image");
+    expect(button("Save prompt batch").disabled).toBe(true);
+  });
+
+  it("shows every described image when condensing fails on the third", async () => {
+    await stopWhileCondensing(
+      "failed",
+      [
+        described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+        described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo") }),
+        described("item_c", 400, 300, { provisional: true }),
+      ],
+      2,
+    );
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual([
+      "item_a",
+      "item_b",
+      "item_c",
+    ]);
+    expect(condensedBox("item_a")).toBeTruthy();
+    expect(rowNote("item_c", "condense-interrupted")).toBeTruthy();
+  });
+
+  it("keeps an image whose condensing was canceled, with its fields", async () => {
+    await stopWhileCondensing("canceled", [described("item_a", 300, 400, { provisional: true })], 1);
+    expect(document.body.querySelector('[data-item-id="item_a"] textarea').value).toBe("A woman, woman_1, stands (item_a).");
+    expect(rowNote("item_a", "condense-interrupted")).toBeTruthy();
+  });
+
+  it("shows an estimate as about, a result still over the limit as over, and a failed condense plainly", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([
+      described("item_a", 300, 400, {
+        condensed: condensedFor("krea_2_turbo", { tokenCount: "estimate", tokens: 700, estimateReason: "Krea 2 Turbo is not installed" }),
+      }),
+      described("item_b", 400, 300, {
+        condensed: condensedFor("krea_2_turbo", {
+          tokenCount: "estimate",
+          tokens: 1100,
+          over: true,
+          notice: "Still over the limit after one retry (about 1100 of 870 tokens). Shorten it before generating.",
+        }),
+      }),
+      described("item_c", 400, 300, {
+        condensed: condensedFor("krea_2_turbo", {
+          failed: true,
+          text: "",
+          notice: "The condensed prompt leaves out woman_1 even after one retry, so the seven fields are used.",
+        }),
+      }),
+    ]);
+    const sizeA = rowNote("item_a", "condensed-size");
+    expect(sizeA.textContent).toBe("about 700 of 1,024 tokens (estimated: Krea 2 Turbo is not installed).");
+    expect(sizeA.classList.contains("inline-warning")).toBe(false);
+    const sizeB = rowNote("item_b", "condensed-size");
+    expect(sizeB.classList.contains("inline-warning")).toBe(true);
+    expect(sizeB.textContent).toMatch(/^Over the limit: about 1,100 of 1,024 tokens \(estimated\)\. Still over the limit after one retry/);
+    expect(rowNote("item_c", "condense-failed").textContent).toContain("leaves out woman_1");
+    expect(condensedBox("item_c")).toBeUndefined();
+    // A failed row never silently saves its seven fields under an active target.
+    expect(button("Save prompt batch").disabled).toBe(true);
+    expect(document.body.querySelector('[data-save-note="not-fitted"]').textContent).toContain(
+      "1 row has no usable condensed prompt",
+    );
+    // The over row saves its condensed prompt and is reported as over, never as fitting.
+    expect(document.body.querySelector('[data-save-note="over"]').textContent).toContain(
+      "1 condensed prompt is still over the limit",
+    );
+    await chooseFitTo("");
+    await click(button("Save prompt batch"));
+    await settle();
+    const prompts = context.createPromptBatch.mock.calls[0][0].prompts;
+    expect(prompts.every((prompt) => prompt.includes("\nDescription: "))).toBe(true);
+  });
+
+  it("condenses over-limit rows again, condenses one row on demand, and filters to the rows needing attention", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([
+      described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") }),
+      described("item_b", 400, 300, { condensed: condensedFor("krea_2_turbo", { tokens: 1100, over: true }) }),
+      described("item_c", 400, 300, { condensed: condensedFor("krea_2_turbo", { failed: true, text: "" }) }),
+    ]);
+    const shown = () => [...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId);
+    const filter = document.body.querySelector('[data-save-note="attention-filter"] input');
+    expect(document.body.querySelector('[data-save-note="attention-filter"]').textContent).toContain("2 rows that need attention");
+    await act(async () => filter.click());
+    expect(shown()).toEqual(["item_b", "item_c"]);
+
+    const calls = trainingApi.batchDescribeJobs.mock.calls.length;
+    await click(button("Condense over-limit again (1)"));
+    await settle();
+    const over = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[calls][3].body);
+    expect(over).toMatchObject({ fitTo: "krea_2_turbo", model: VISION_CAPTION_MODEL_REPO });
+    expect(over.condenseRows.map((row) => row.itemId)).toEqual(["item_b"]);
+    await act(async () => nextPoll(snapshot("completed", [], { itemCount: 1 })));
+    await settle();
+
+    const again = document.body.querySelector('[data-item-id="item_c"] [data-row-action="condense-again"]');
+    expect(again.disabled).toBe(false);
+    await click(again);
+    await settle();
+    const one = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[calls + 1][3].body);
+    expect(one.condenseRows.map((row) => row.itemId)).toEqual(["item_c"]);
+  });
+
+  it("an emptied condensed prompt blocks Save with the same message as a stale row", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 300, 400, { condensed: condensedFor("krea_2_turbo") })]);
+    expect(button("Save prompt batch").disabled).toBe(false);
+    await act(async () => setText(condensedBox("item_a"), "   "));
+    expect(rowNote("item_a", "condensed-empty").textContent).toContain("The condensed prompt is empty");
+    expect(button("Save prompt batch").disabled).toBe(true);
+    expect(button("Export .json").disabled).toBe(false);
+    expect(document.body.querySelector('[data-save-note="not-fitted"]').textContent.replace(/\s+/g, " ")).toContain(
+      "Condense it, or turn Fit to off to save the seven fields.",
+    );
+    await act(async () => setText(condensedBox("item_a"), "woman_1 by the window."));
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
+  it("decides every row state with the one fitted definition the formatter uses", () => {
+    const krea = (over = {}) => condensedFor("krea_2_turbo", over);
+    const vision = VISION_CAPTION_MODEL_REPO;
+    const row = (itemId, over) => ({ itemId, model: vision, width: 300, height: 400, failed: false, fields: { description: "woman_1" }, ...over });
+    const rows = [
+      row("fitted", { condensed: krea() }),
+      row("over", { condensed: krea({ over: true }) }),
+      row("edited", { condensed: krea({ edited: true, text: "woman_1 edited." }) }),
+      row("failed", { condensed: krea({ failed: true, text: "" }) }),
+      row("stale", { condensed: krea(), fieldsEdited: true }),
+      row("emptied", { condensed: krea({ edited: true, text: "  " }) }),
+      row("provisional", { provisional: true, condensed: null }),
+      row("other_target", { condensed: condensedFor("krea_2_raw") }),
+      row("joycaption", { model: JOY_REPO, condensed: null }),
+      row("flagged", { failed: true, condensed: null }),
+    ];
+    expect(rowsNotFitted(rows, "krea_2_turbo").map((r) => r.itemId)).toEqual(["failed", "stale", "emptied", "provisional", "other_target"]);
+    // Everything the predicate passes saves a condensed block; the rest are not saved under it.
+    const { text } = formatPromptBatch(rows.filter((r) => !rowsNotFitted(rows, "krea_2_turbo").includes(r)), { fitTo: "krea_2_turbo" });
+    const blocks = text.split("\n---\n");
+    expect(blocks.filter((block) => block.includes("\nDescription: "))).toHaveLength(1); // the JoyCaption row
+    expect(rowsNotFitted(rows, "")).toEqual([]);
+  });
+
+  it("warns on the over-4,000-character limit using the block that will be saved", async () => {
+    context.models = [...context.models, KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await runWith([described("item_a", 2400, 3200, { environment: "x".repeat(3900), condensed: condensedFor("krea_2_turbo") })]);
+    expect(rowNote("item_a", "too-long")).toBeNull();
+    await chooseFitTo("");
+    expect(rowNote("item_a", "too-long")).toBeTruthy();
+  });
+
+  it("says why Fit to does nothing for JoyCaption and sends no target with it", async () => {
+    context.models = [installed("vision_caption_qwen3vl_8b", "Vision Captioner"), installed("joycaption_beta_one", "JoyCaption"), KREA];
+    await render();
+    await chooseFitTo("krea_2_turbo");
+    await click(document.body.querySelector('input[value="joycaption_beta_one"]'));
+    await settle();
+    expect(document.body.textContent).toContain("JoyCaption rows are not condensed: Fit to needs the Vision Captioner's text step.");
+    await runWith([described("item_a", 300, 400)], "completed");
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body).fitTo).toBeUndefined();
   });
 });

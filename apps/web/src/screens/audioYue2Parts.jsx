@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
@@ -8,6 +9,7 @@ import { formatRelativeTime } from "../audioTakes.js";
 import { percent } from "../formatting.js";
 import {
   EDIT_OPERATIONS,
+  buildYue2JobRequest,
   UI_PROVENANCE,
   buildEditOperation,
   defaultEditDraft,
@@ -28,6 +30,7 @@ import {
   getYue2ScoreVersion,
   inspectYue2ScoreVersion,
 } from "../api/yue2.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 
 // YuE2 Song Lab parts (sc-23000): run cards, the score preview, the score-version workbench
 // (history, bounded edits with their invariant reports, renders) and the A/B listening comparisons.
@@ -81,6 +84,29 @@ export function ErrorNotice({ error, children = null, testId = "yue2-error" }) {
         {children}
       </div>
     </div>
+  );
+}
+
+function RenderScoreVersionAction({ versionId, settings, requestedGpu, renderProblem, onRender }) {
+  const feedback = usePortableFeedback(
+    "yue2", buildYue2JobRequest("renderVersion", settings, { versionId }, requestedGpu),
+    null, Boolean(versionId),
+  );
+  const refusal = feedback?.state === "invalid" ? feedback.refusal : null;
+  return (
+    <>
+      <button
+        className="prompt-cta"
+        disabled={Boolean(renderProblem) || portableFeedbackBlocks(feedback)}
+        onClick={() => { if (!renderProblem && !portableFeedbackBlocks(feedback)) onRender(versionId); }}
+        title={renderProblem || refusal?.detail || "Regenerates the whole recording from this version's score."}
+        type="button"
+      >
+        <Icon.Sparkle size={14} /> Render this version
+      </button>
+      {portableFeedbackStatus(feedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(feedback)}</span> : null}
+      {refusal ? <span className="yue2-muted" role="alert">{refusal.detail}</span> : null}
+    </>
   );
 }
 
@@ -247,11 +273,18 @@ export function Yue2RunCard({
   onDecodeAgain,
   onFetchVersionAbc,
   decodeBlocked = null,
+  seedSettings,
+  requestedGpu,
 }) {
   const view = useMemo(() => yue2RunView(job), [job]);
   // "Decode again" picks its decoder here, on the run it re-decodes; the legacy add-on only once
   // its component is installed.
   const [decoder, setDecoder] = useState("");
+  const decodeFeedback = usePortableFeedback(
+    "yue2", buildYue2JobRequest("decode", seedSettings, { sourceJobId: view.id, decoder }, requestedGpu),
+    null, Boolean(view.decodable),
+  );
+  const decodeRefusal = decodeFeedback?.state === "invalid" ? decodeFeedback.refusal : null;
   const legacyInstalled = yue2DecoderInstalled(model, "legacy");
   const takes = useMemo(() => jobAudioResultAssets(job, assets), [job, assets]);
   const [exportError, setExportError] = useState("");
@@ -407,8 +440,8 @@ export function Yue2RunCard({
               ) : null}
               <button
                 className="secondary-action"
-                disabled={Boolean(decodeBlocked)}
-                onClick={() => onDecodeAgain?.(view.id, decoder)}
+                disabled={Boolean(decodeBlocked) || portableFeedbackBlocks(decodeFeedback)}
+                onClick={() => { if (!decodeBlocked && !portableFeedbackBlocks(decodeFeedback)) onDecodeAgain?.(view.id, decoder); }}
                 title={decodeBlocked ?? undefined}
                 type="button"
               >
@@ -419,6 +452,8 @@ export function Yue2RunCard({
                   {decodeBlocked}
                 </span>
               ) : null}
+              {portableFeedbackStatus(decodeFeedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(decodeFeedback)}</span> : null}
+              {decodeRefusal ? <span className="yue2-muted" role="alert">{decodeRefusal.detail}</span> : null}
             </span>
           ) : null}
         </div>
@@ -672,6 +707,7 @@ export function Yue2ScoreWorkbench({
   onRender,
   onUseForCover,
   renderProblem,
+  requestedGpu,
   assets,
   regenerationNotice,
   seedSettings,
@@ -896,15 +932,10 @@ export function Yue2ScoreWorkbench({
             </details>
             <RegenerationNotice text={version.renderNotice || regenerationNotice} />
             <div className="yue2-run__actions">
-              <button
-                className="prompt-cta"
-                disabled={Boolean(renderProblem)}
-                onClick={() => onRender(version.id)}
-                title={renderProblem || "Regenerates the whole recording from this version's score."}
-                type="button"
-              >
-                <Icon.Sparkle size={14} /> Render this version
-              </button>
+              <RenderScoreVersionAction
+                versionId={version.id} settings={seedSettings} requestedGpu={requestedGpu}
+                renderProblem={renderProblem} onRender={onRender}
+              />
               <button className="secondary-action" onClick={() => onUseForCover(version.id)} type="button">
                 Use as cover score
               </button>

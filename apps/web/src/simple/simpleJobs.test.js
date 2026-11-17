@@ -7,6 +7,7 @@ import {
   parseResolutionPair,
   referenceStrengthFor,
   simpleRewriteReferenceIds,
+  simpleSentArmedReferenceId,
   simpleNativeControls,
   simpleRewriteResolutionTarget,
 } from "./simpleJobs.js";
@@ -442,12 +443,71 @@ describe("simpleRewriteReferenceIds", () => {
         supportsOrderedReferences: true,
         orderedReferenceIds: ["a", "b", "c"],
         referenceAssetId: "a",
+        mode: "edit_image",
       }),
     ).toEqual(["a", "b", "c"]);
     expect(
-      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a" }),
+      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a", supportsImg2img: true }),
+    ).toEqual(["a"]);
+    expect(
+      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a", mode: "edit_image" }),
     ).toEqual(["a"]);
     expect(simpleRewriteReferenceIds({ supportsOrderedReferences: false })).toEqual([]);
+  });
+
+  // PR #3377 review: after a switch to MiniMax-H3-Image (no `ui.img2img`) with a reference retained
+  // from another model, Generate drops the reference, so the prompt expander must not see it either.
+  // *Mutation that reds this:* returning `[referenceAssetId]` without the img2img gate.
+  it("hands the rewriter no reference that Generate would drop", () => {
+    const h3 = { id: "minimax_h3_image", ui: {} };
+    const supportsImg2img = Boolean(h3.ui.img2img);
+    const inputs = { mode: "text_to_image", model: h3.id, supportsImg2img, referenceAssetId: "kept" };
+    expect(simpleRewriteReferenceIds({ supportsOrderedReferences: false, ...inputs })).toEqual([]);
+    expect(simpleSentArmedReferenceId(inputs)).toBeNull();
+    const request = buildSimpleImageRequest({ ...inputs, prompt: "a lighthouse", resolution: "1024x1024", count: 1 });
+    expect(request.sourceAssetId ?? null).toBeNull();
+    expect(JSON.stringify(request)).not.toContain("kept");
+  });
+
+  // PR #3418 review: references attached on the H3-Image Edit tab survive a switch to
+  // text-to-image, but the text request sends none of them, so the expander must not see them
+  // (it would pick its edit workflow and write `<Picture N>` instructions for hidden images).
+  // *Mutation that reds this:* returning the ordered list without the edit-tab gate.
+  it("hands the expander only the references the emitted request carries, per tab", () => {
+    const shared = {
+      model: "minimax_h3_image",
+      supportsImg2img: false,
+      referenceAssetId: "a",
+      prompt: "a lighthouse",
+      resolution: "2048x2048",
+      count: 1,
+    };
+    for (const mode of ["text_to_image", "edit_image"]) {
+      const ordered = ["a", "b"];
+      const request = buildSimpleImageRequest({ ...shared, mode, referenceAssetIds: ordered });
+      const emitted = request.referenceAssetIds?.length
+        ? request.referenceAssetIds
+        : [request.sourceAssetId, request.referenceAssetId].filter(Boolean);
+      expect(
+        simpleRewriteReferenceIds({
+          ...shared,
+          mode,
+          supportsOrderedReferences: true,
+          orderedReferenceIds: ordered,
+        }),
+      ).toEqual(emitted);
+    }
+  });
+
+  it("preserves the single-source carrier and sends multiple edit references in order", () => {
+    const common = { model: "minimax_h3_image", mode: "edit_image", referenceAssetId: "a",
+      prompt: "a lighthouse", resolution: "2048x2048", count: 1 };
+    const single = buildSimpleImageRequest({ ...common, referenceAssetIds: ["a"] });
+    expect(single.sourceAssetId).toBe("a");
+    expect(single.referenceAssetIds ?? []).toEqual([]);
+    const multiple = buildSimpleImageRequest({ ...common, referenceAssetIds: ["a", "b"] });
+    expect(multiple.sourceAssetId).toBeNull();
+    expect(multiple.referenceAssetIds).toEqual(["a", "b"]);
   });
 });
 

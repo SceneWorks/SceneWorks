@@ -2073,6 +2073,7 @@
       "projects": "<runtime-root>/data/projects"
     },
     "interruptedJobsOnStartup": 0,
+    "optionsValidatorSchemaVersion": 1,
     "readiness": {
       "criticality": "readiness-critical",
       "status": "ready"
@@ -2471,6 +2472,12 @@
     },
     "portableModelBinding": {
       "backend": "candle",
+      "expectedProvider": {
+        "modelId": "z_image_turbo",
+        "modelSlot": "modelManifestEntry",
+        "operation": "image_generate",
+        "providerId": "z_image_turbo"
+      },
       "models": [
         {
           "authoredOptionsSha256": "sha256:295ca5d853fdfb3786a120372790a1274ef483dabaf9957be7c512394653f34a",
@@ -3103,6 +3110,13 @@
         "schemaVersion": 1
       },
       "name": "Z-Image-Turbo",
+      "optionRouteFacts": {
+        "candleVideoI2v": false,
+        "candleVideoLora": false,
+        "candleVideoRouted": false,
+        "candleVideoVace": false,
+        "videoMlxRouted": false
+      },
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"
       },
@@ -3307,6 +3321,7 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "advanced": {},
       "modelManifestEntries": [
         {
           "capabilities": [],
@@ -3496,6 +3511,7 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "advanced": {},
       "detection": {
         "box": {
           "height": 0.6,
@@ -3974,6 +3990,13 @@
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx"
         },
         "name": "Wan2.2",
+        "optionRouteFacts": {
+          "candleVideoI2v": false,
+          "candleVideoLora": true,
+          "candleVideoRouted": true,
+          "candleVideoVace": true,
+          "videoMlxRouted": true
+        },
         "quantization": {
           "variants": {
             "gguf-q4_k_m": {

@@ -119,6 +119,9 @@ async fn the_official_stage_presets_are_served_and_submit_once_edited() {
     let check = plan_check(&app, edited.clone()).await;
     assert_eq!(check["ok"], true, "{check}");
     assert_eq!(check["globalBatch"], 16);
+    assert_eq!(check["expectedGlobalBatch"], Value::Null);
+    assert_eq!(check["worldSize"], 1);
+    assert_eq!(check["shareDevice"], false);
     assert_eq!(check["receipt"]["stage"], "stage1_256");
     assert_eq!(check["receipt"]["dist"]["strategy"], "fsdp2");
 
@@ -158,11 +161,16 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
     config["gradientAccumulation"] = json!(2);
     config["saveEvery"] = json!(250);
     config["advanced"]["iris"]["expected_global_batch"] = json!(8);
-    config["advanced"]["iris"]["dist"] =
-        json!({"strategy": "ddp", "world": {"world_size": 2, "share_device": true}});
+    config["advanced"]["iris"]["dist"] = json!({
+        "strategy": "ddp",
+        "world": {"world_size": 2, "share_device": true, "timeout_secs": 600}
+    });
     let check = plan_check(&app, config.clone()).await;
     assert_eq!(check["globalBatch"], 8, "{check}");
+    assert_eq!(check["expectedGlobalBatch"], 8, "{check}");
     assert_eq!(check["worldSize"], 2);
+    assert_eq!(check["shareDevice"], true);
+    assert_eq!(check["timeoutSecs"], 600);
     assert_eq!(check["ok"], true, "{check}");
     assert_eq!(check["engineChecked"], cfg!(target_os = "macos"));
     // sc-25690: one rank's floor in GiB with the provenance of the row it was read from (the

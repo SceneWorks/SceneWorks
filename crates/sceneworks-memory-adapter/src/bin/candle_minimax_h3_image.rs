@@ -1,0 +1,512 @@
+//! Physical Candle/CUDA capture arm for MiniMax-H3-Image (SW-7100, feature SW-F363).
+//!
+//! The Candle twin of `mlx_minimax_h3_image.rs`: the TOTAL pipeline the worker runs — MiniMax-H3's
+//! text encoder, the image DiT and the image VAE, staged by the engine — at the anchor request (a
+//! 1024x1024 still, seed 7100, the fixed six steps, guidance 1.0), loaded through
+//! `runtime_cuda::catalog().media()` with the spec the worker's
+//! `image_jobs::minimax_h3_image::attach_components` builds (the upstream snapshot as
+//! `LoadSpec::weights`, the tier's quant, H3's same-tier text encoder and, for a packed tier, its
+//! DiT), under the provider's own safety check and request scope. Repositories and revisions are
+//! the catalog's own rows, so a `pendingArtifact` tier is refused by name before any env var.
+//!
+//! Every phase figure is the `nvidia-smi` device-memory peak over that phase's window above the
+//! probe's idle baseline, and each phase carries its wall time. The contract publishes its
+//! calibration identity on every load ([`plan_fingerprint`], the engine constant), and the plan
+//! row runs at this lane's default staged-residency rung, which the contract implements.
+//!
+//! SW-F363: the same arm captures the cell's regime anchors — `:optimized` (a deferred load engaging every rung the contract implements, at the row's exact
+//! parameter tuple, under the same request scope) and `:lora` (the base composition with the
+//! pinned community LoRA installed through `LoadSpec::adapters`, overlay `lora` on the context as
+//! the worker's Candle image path states it). There is no `:resident` row: the generator stages
+//! every request, so the staged base row IS the least-optimized composition it can render.
+
+use super::*;
+use runtime_cuda::gen_core::MemoryCalibrationIdentity;
+use std::time::Instant;
+
+const LANE: &str = "candle";
+
+/// The env family the catalog runner exports for this arm (`PROVIDER_FAMILIES.minimax_h3_image`).
+pub(super) const ENVS: protocol::MinimaxH3ImageEnvs = protocol::MinimaxH3ImageEnvs {
+    upstream_repository_env: "SCENEWORKS_MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY",
+    upstream_revision_env: "SCENEWORKS_MINIMAX_H3_IMAGE_UPSTREAM_REVISION",
+    upstream_root_env: "SCENEWORKS_MINIMAX_H3_IMAGE_UPSTREAM_ROOT",
+    tier_repository_env: "SCENEWORKS_MINIMAX_H3_IMAGE_REPOSITORY",
+    tier_revision_env: "SCENEWORKS_MINIMAX_H3_IMAGE_REVISION",
+    tier_root_env: "SCENEWORKS_MINIMAX_H3_IMAGE_ROOT",
+    text_encoder_env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER",
+};
+
+/// The identity the Candle plan rows name: the engine's own constant, one for every tier.
+pub(super) fn plan_fingerprint() -> &'static str {
+    runtime_cuda::providers::minimax_h3::image_memory_strategy::IMAGE_MEMORY_CALIBRATION_FINGERPRINT
+}
+
+use protocol::elapsed_millis as millis;
+
+#[allow(clippy::too_many_arguments)]
+fn context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    load_shape: LoadShape,
+    overlay: Option<&str>,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    let edge = protocol::MINIMAX_H3_IMAGE_EDGE;
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width: edge,
+            height: edge,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        reference_resources: None,
+        overlay: overlay.map(str::to_owned),
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sw-7100@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// The two request boundaries the anchor render is split at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Boundary {
+    ConditioningDone,
+    ForwardDone,
+}
+
+/// The boundary one progress event crosses: conditioning ends at the first solver step, the
+/// forward at `Progress::Decoding`.
+fn boundary_of(progress: &Progress) -> Option<Boundary> {
+    match progress {
+        Progress::Step { current: 1, .. } => Some(Boundary::ConditioningDone),
+        Progress::Decoding => Some(Boundary::ForwardDone),
+        _ => None,
+    }
+}
+
+/// Run one request under the provider's own request scope, the way the worker runs it. Returns the
+/// number of images rendered.
+fn render(
+    generator: &dyn Generator,
+    request: &GenerationRequest,
+    scoped: &MemoryRunContext,
+    on_boundary: &mut dyn FnMut(Boundary),
+) -> Result<usize, String> {
+    let mut scope = open_memory_request_scope(generator, scoped, "minimax_h3_image")?;
+    let mut request = request.clone();
+    scope
+        .configure_request(&mut request)
+        .map_err(|error| format!("configure the minimax_h3_image request scope: {error}"))?;
+    let outcome = generator.generate(&request, &mut |progress| {
+        if let Some(crossed) = boundary_of(&progress) {
+            on_boundary(crossed);
+        }
+    });
+    match outcome {
+        Ok(GenerationOutput::Images(images)) => {
+            scope
+                .finish(MemoryRunOutcome::Complete)
+                .map_err(|error| format!("finish the minimax_h3_image request scope: {error}"))?;
+            Ok(images.len())
+        }
+        Ok(_) => {
+            let _ = scope.finish(MemoryRunOutcome::Error {
+                message: "non-image output".to_owned(),
+            });
+            Err("minimax_h3_image returned a non-image output".to_owned())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let _ = scope.finish(MemoryRunOutcome::Error {
+                message: message.clone(),
+            });
+            Err(format!(
+                "minimax_h3_image measured generation failed: {message}"
+            ))
+        }
+    }
+}
+
+/// The `candle:minimax_h3_image` arm.
+pub(super) fn run(request: &Value) -> Result<Value, String> {
+    // Provider, mode, tier, the still, overlay, load shape, fixture and identity — all before an
+    // env var or a weight.
+    let planned_fingerprint = plan_fingerprint();
+    let plan = protocol::validate_minimax_h3_image_plan(request, LANE, planned_fingerprint)?;
+    let (width, height, tier) = (plan.width, plan.height, plan.tier);
+    let selection = planned_selection(request)?;
+    let inputs = protocol::minimax_h3_image_inputs(ENVS, tier)?;
+    let adapters = if plan.lora {
+        vec![protocol::minimax_h3_image_lora_adapter()?]
+    } else {
+        Vec::new()
+    };
+    let overlay = plan.lora.then_some("lora");
+    let spec = protocol::minimax_h3_image_load_spec(&inputs, plan.load_shape, adapters);
+
+    let mut vram = certifying_vram_probe();
+    let load_sample = vram.phase();
+    let load_started = Instant::now();
+    let generator = runtime_cuda::catalog()
+        .map_err(|error| format!("build CUDA catalog: {error}"))?
+        .media()
+        .load(protocol::MINIMAX_H3_IMAGE_PROVIDER, &spec)
+        .map_err(|error| format!("load real minimax_h3_image provider: {error}"))?;
+    let load_millis = millis(load_started);
+    vram.end_load(load_sample);
+
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded minimax_h3_image exposed no memory-strategy contract".to_owned())?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned minimax_h3_image provider rejected planned selection: {error}")
+    })?;
+    let strategy = measured_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition_for_selection(&selection),
+    )?;
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        "the loaded minimax_h3_image contract published no calibration identity".to_owned()
+    })?;
+    if calibration.fingerprint != planned_fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if contract.load_shape != plan.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(plan.load_shape),
+            load_shape_key(contract.load_shape)
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let admitted = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        context(
+            selection,
+            calibration,
+            fingerprint,
+            plan.load_shape,
+            overlay,
+            total_bytes,
+            predicted,
+        )
+    };
+    // Admission mutation hygiene: the gate must ACCEPT a fitting request, so the rejections below
+    // cannot pass through a blanket refusal.
+    if !matches!(
+        generator.memory_strategy_safety_check(&admitted(planned_fingerprint, hardware_bytes, 1)),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "minimax_h3_image admission rejected a fitting probe budget; the scenario rejections \
+             below would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        generator.memory_strategy_safety_check(&admitted(planned_fingerprint, 0, 1)),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("minimax_h3_image admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        generator.memory_strategy_safety_check(&admitted(
+            "stale-minimax-h3-image-fingerprint",
+            hardware_bytes,
+            1
+        )),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("minimax_h3_image admission accepted stale calibration evidence".to_owned());
+    }
+
+    // The anchor render: three device-peak phases, each with its wall time.
+    let scoped = admitted(planned_fingerprint, hardware_bytes, 1);
+    let run_sample = vram.phase();
+    let mut phase_sample = Some(vram.phase());
+    let mut conditioning_peak_gb = None;
+    let mut denoise_peak_gb = None;
+    let mut phase_started = Instant::now();
+    let mut conditioning_millis = 0;
+    let mut denoise_millis = 0;
+    let render_started = Instant::now();
+    let rendered = render(
+        generator.as_ref(),
+        &protocol::minimax_h3_image_capture_request(),
+        &scoped,
+        &mut |boundary| {
+            let peak = phase_sample.take().map(|sample| vram.end_observed(sample));
+            match boundary {
+                Boundary::ConditioningDone => {
+                    conditioning_peak_gb = peak;
+                    conditioning_millis = millis(phase_started);
+                }
+                Boundary::ForwardDone => {
+                    denoise_peak_gb = peak;
+                    denoise_millis = millis(phase_started);
+                }
+            }
+            phase_started = Instant::now();
+            phase_sample = Some(vram.phase());
+        },
+    );
+    let decode_peak_gb = phase_sample.take().map(|sample| vram.end_observed(sample));
+    let decode_millis = millis(phase_started);
+    let render_millis = millis(render_started);
+    vram.end_gen(run_sample);
+    if rendered? != 1 {
+        return Err(
+            "the measured minimax_h3_image render did not return exactly one image".to_owned(),
+        );
+    }
+
+    let phase_bytes = |peak: Option<f64>, phase: &str| {
+        peak.map(decimal_gb_to_bytes)
+            .ok_or_else(|| format!("minimax_h3_image did not expose a {phase} boundary"))
+    };
+    let conditioning_bytes = phase_bytes(conditioning_peak_gb, "conditioning")?;
+    let denoise_bytes = phase_bytes(denoise_peak_gb, "forward")?;
+    let decode_bytes = phase_bytes(decode_peak_gb, "decode")?;
+    let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
+
+    let blocker = concat!(
+        "SW-7100 anchor capture measures exact per-phase device memory and the strategy identity ",
+        "for the Candle MiniMax-H3-Image lane; it stays gated because this run does not repeat the ",
+        "full promotion-quality, negative-mutation and lifecycle scenario suite"
+    );
+    let execution_path = if plan.lora {
+        "the minimax_h3_image staged text-to-image path with one community LoRA"
+    } else {
+        "the minimax_h3_image staged text-to-image path"
+    };
+    let mut fragment = json!({
+        "status": "gated",
+        "strategy": strategy,
+        "loadShape": load_shape_key(plan.load_shape),
+        "artifact": inputs.artifact_json_with_lora(plan.lora),
+        "sweep": protocol::exact_tuple_sweep(request, "passed")?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "not_run", "reason": blocker },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded MiniMax-H3-Image admission check rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded MiniMax-H3-Image admission check rejected a mutated calibration fingerprint" },
+            { "name": "warm_repeat", "result": "not_run", "reason": blocker },
+            { "name": "cancel", "result": "not_run", "reason": blocker },
+            { "name": "error", "result": "not_run", "reason": blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": null,
+        "observedMemory": {
+            "conditioning": cuda_phase_metrics(conditioning_bytes),
+            "denoise": cuda_phase_metrics(denoise_bytes),
+            "decode": cuda_phase_metrics(decode_bytes),
+            "overall": cuda_phase_metrics(overall_bytes),
+        },
+        "quality": { "result": "not_run" },
+        "negativeMutation": Value::Null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": inputs.loadability_fingerprint(),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-candle-adapter:minimax-h3-image-anchor",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("conditioningDevicePeakDelta", "bytes", conditioning_bytes),
+                ("denoiseDevicePeakDelta", "bytes", denoise_bytes),
+                ("decodeDevicePeakDelta", "bytes", decode_bytes),
+                ("overallDevicePeakDelta", "bytes", overall_bytes),
+                ("loadWallMilliseconds", "milliseconds", load_millis),
+                ("conditioningWallMilliseconds", "milliseconds", conditioning_millis),
+                ("denoiseWallMilliseconds", "milliseconds", denoise_millis),
+                ("decodeWallMilliseconds", "milliseconds", decode_millis),
+                ("renderWallMilliseconds", "milliseconds", render_millis),
+                ("admittedGeometryWidth", "count", u64::from(width)),
+                ("admittedGeometryHeight", "count", u64::from(height)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    if plan.lora {
+        protocol::settle_exact_overlay_scenario(
+            request,
+            &mut fragment,
+            "lora",
+            execution_path,
+            "the pinned community LoRA was installed through LoadSpec adapters for the load and \
+             the measured render; its factors are resident for the whole render at every rung",
+        )?;
+    } else {
+        protocol::settle_plain_overlay_scenario(request, &mut fragment, execution_path)?;
+    }
+    Ok(fragment)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Conditioning closes at the first solver step and the forward at `Decoding`.
+    #[test]
+    fn the_anchor_render_splits_at_the_first_step_and_decoding() {
+        let step = |current| Progress::Step { current, total: 6 };
+        assert_eq!(boundary_of(&step(1)), Some(Boundary::ConditioningDone));
+        assert_eq!(boundary_of(&step(2)), None);
+        assert_eq!(
+            boundary_of(&Progress::Decoding),
+            Some(Boundary::ForwardDone)
+        );
+    }
+
+    /// Every planned Candle MiniMax-H3-Image row — the three base rows and their SW-F363 regime
+    /// rows — is one this arm captures: the plan validates under the engine's own identity, the
+    /// dispatch const is the engine id, and the weights-free contract built at the row's own load
+    /// shape and adapter stack accepts the row's selection and attests exactly its engaged set.
+    /// The `:optimized` rows engage every rung that contract implements.
+    ///
+    /// *Mutation that reds this:* change a row's fixture, identity, tier, geometry, load shape,
+    /// overlay or strategy tuple in `config/memory-calibration-plan.json`, or drop a regime row.
+    #[test]
+    fn the_planned_minimax_h3_image_rows_are_the_ones_this_arm_captures() {
+        assert_eq!(MINIMAX_H3_IMAGE_ID, protocol::MINIMAX_H3_IMAGE_PROVIDER);
+        assert_eq!(
+            protocol::MINIMAX_H3_IMAGE_PROVIDER,
+            runtime_cuda::providers::minimax_h3::image_model::IMAGE_MODEL_ID
+        );
+        let plan: Value = serde_json::from_str(include_str!(
+            "../../../../config/memory-calibration-plan.json"
+        ))
+        .expect("the anchor plan parses");
+        let mut regimes = Vec::new();
+        for (key, entry) in plan["anchors"].as_object().unwrap() {
+            if !key.starts_with("minimax_h3_image:") || !key.contains(":candle") {
+                continue;
+            }
+            let parts: Vec<&str> = key.split(':').collect();
+            let (tier, regime) = (parts[1], parts.get(3).copied());
+            regimes.push((tier.to_owned(), regime.map(str::to_owned)));
+            if regime.is_none() {
+                assert!(
+                    entry.get("strategy").is_none(),
+                    "{key}: the lane default is staged"
+                );
+            }
+            let mut target = json!({
+                "provider": entry["provider"],
+                "mode": entry["mode"],
+                "tier": tier,
+                "overlay": entry["overlay"],
+                "geometry": entry["geometry"],
+            });
+            if let Some(regime) = regime {
+                target["anchorRegime"] = json!(regime);
+            }
+            let strategy = entry.get("strategy").cloned().unwrap_or_else(|| {
+                json!({ "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"] })
+            });
+            let request = json!({
+                "planned": {
+                    "backend": LANE,
+                    "loadShape": entry["loadShape"],
+                    "calibrationFingerprint": entry["calibrationFingerprint"],
+                    "fixture": entry["fixture"],
+                    "target": target,
+                    "strategy": {
+                        "rung": strategy["rung"],
+                        "engagedRungs": strategy["engagedRungs"],
+                        "parameters": strategy.get("parameters").cloned().unwrap_or(json!({})),
+                    },
+                },
+            });
+            let plan = protocol::validate_minimax_h3_image_plan(&request, LANE, plan_fingerprint())
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(
+                (plan.width, plan.height, plan.tier),
+                (1024, 1024, tier),
+                "{key}"
+            );
+            let mut spec = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+                .with_load_shape(plan.load_shape);
+            if plan.lora {
+                spec = spec.with_adapters(vec![AdapterSpec::new(
+                    "fixture-lora.safetensors".into(),
+                    1.0,
+                    AdapterKind::Lora,
+                )]);
+            }
+            let contract =
+                runtime_cuda::providers::minimax_h3::image_memory_strategy::weights_free_contract(
+                    &spec,
+                )
+                .expect("weights-free contract");
+            let selection = planned_selection(&request).unwrap();
+            contract
+                .validate_selection(&selection)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let engaged = contract.engaged_composition_for_selection(&selection);
+            assert_eq!(
+                measured_strategy(&request, &selection, &engaged)
+                    .unwrap_or_else(|error| panic!("{key}: {error}")),
+                request["planned"]["strategy"],
+                "{key}"
+            );
+            if regime == Some("optimized") {
+                let implemented: Vec<MemoryStrategy> = MemoryStrategy::ALL
+                    .into_iter()
+                    .filter(|rung| {
+                        matches!(
+                            contract
+                                .capability(*rung)
+                                .map(|capability| &capability.support),
+                            Some(runtime_cuda::gen_core::MemoryStrategySupport::Implemented)
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    engaged, implemented,
+                    "{key}: every implemented rung is engaged"
+                );
+            }
+        }
+        regimes.sort();
+        let expected: Vec<(String, Option<String>)> = [
+            ("bf16", None),
+            ("bf16", Some("optimized")),
+            ("q4", None),
+            ("q4", Some("lora")),
+            ("q4", Some("optimized")),
+            ("q8", None),
+            ("q8", Some("optimized")),
+        ]
+        .into_iter()
+        .map(|(tier, regime)| (tier.to_owned(), regime.map(str::to_owned)))
+        .collect();
+        assert_eq!(regimes, expected);
+    }
+}

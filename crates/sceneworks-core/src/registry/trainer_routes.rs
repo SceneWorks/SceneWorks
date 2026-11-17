@@ -295,6 +295,52 @@ mod tests {
         }
     }
 
+    /// SW-7103 (ported from the retired capability matrix): both runtimes register the
+    /// `minimax_h3_image` trainer (SW-7097 MLX, SW-7098 Candle) with the generator's 16-reference
+    /// edit cap, both H3-Image targets map onto it, and their LoRA and LoKr jobs are claimable on
+    /// both native lanes.
+    #[test]
+    fn minimax_h3_image_training_targets_are_claimable_on_both_native_lanes() {
+        let targets = crate::training::builtin_training_targets();
+        for id in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap();
+            for backend in ["mlx", "candle"] {
+                let facts = native(backend);
+                assert_eq!(
+                    expected_backend_local_trainer_id(target, backend).unwrap(),
+                    "minimax_h3_image"
+                );
+                assert!(
+                    facts.snapshot.trainer_capabilities.iter().any(|trainer| {
+                        trainer.id == "minimax_h3_image" && trainer.max_reference_images >= 16
+                    }),
+                    "{backend} registers the edit-capable minimax_h3_image trainer"
+                );
+            }
+            for kind in ["lora", "lokr"] {
+                let job = training_job(target, kind);
+                assert!(
+                    crate::jobs_store::training_job_is_mlx_eligible(&job),
+                    "MLX {id}/{kind}"
+                );
+                assert!(
+                    crate::jobs_store::training_job_is_candle_eligible(&job),
+                    "Candle {id}/{kind}"
+                );
+                for backend in ["mlx", "candle"] {
+                    assert!(
+                        supports(&native(backend), target, kind),
+                        "{backend} {id}/{kind} descriptor"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn native_exports_cover_exactly_the_product_training_targets() {
         let targets = crate::training::builtin_training_targets();

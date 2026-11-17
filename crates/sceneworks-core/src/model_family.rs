@@ -11,6 +11,15 @@ pub const KREA_REALTIME: &str = "krea-realtime";
 pub const MAGE_FLOW: &str = "mage-flow";
 pub const MOSS_IMAGE: &str = "moss-image";
 pub const MINIMAX_H3: &str = "minimax-h3";
+/// MiniMax-H3-Image (SW-7100): its own family. Its DiT reuses H3's layer names but drops the audio
+/// stream and adds six per-step `pdd_proj_out` heads, and it decodes through a 2-D VAE, so neither
+/// H3's fine-tune import nor H3's LoRAs apply to it. Every needle that would match `minimax-h3`
+/// is checked against this identity FIRST.
+pub const MINIMAX_H3_IMAGE: &str = "minimax-h3-image";
+/// MiniMax-H3-Image-PE (SW-7102): the image model's prompt expander, a Qwen3.8-27B fine-tune that
+/// runs on the text-LLM lane. A utility family of its own: it is never a checkpoint, LoRA base or
+/// image route, but it is under the same MiniMax-H3-Image Community License.
+pub const MINIMAX_H3_IMAGE_PE: &str = "minimax-h3-image-pe";
 pub const QWEN_IMAGE: &str = "qwen-image";
 pub const QWEN_IMAGE_2_1: &str = "qwen-image-2-1";
 pub const WAN_VIDEO: &str = "wan-video";
@@ -44,6 +53,7 @@ pub fn exact_identity(value: &str) -> Option<&'static str> {
         "mageflow" | "mage-flow" => Some(MAGE_FLOW),
         "mossimage" | "moss-image" => Some(MOSS_IMAGE),
         "minimaxh3" | "minimax-h3" => Some(MINIMAX_H3),
+        "minimaxh3image" | "minimax-h3-image" => Some(MINIMAX_H3_IMAGE),
         "qwenimage" | "qwen-image" => Some(QWEN_IMAGE),
         "qwen-image-2-1" | "qwen-image-2.1" => Some(QWEN_IMAGE_2_1),
         "wan" | "wan-video" => Some(WAN_VIDEO),
@@ -125,6 +135,12 @@ pub(crate) fn checkpoint_descriptor_family(value: &str) -> Option<String> {
     }
     let lower = value.to_ascii_lowercase();
     for (needle, family) in [
+        // MiniMax-H3-Image (SW-7100): `MiniMaxH3ImageTransformer2DModel` /
+        // `AutoencoderKLMiniMaxH3Image` contain `minimaxh3`, so the image family's needles come
+        // before H3's or every H3-Image descriptor would read as an H3 video checkpoint.
+        ("minimaxh3image", MINIMAX_H3_IMAGE),
+        ("minimax_h3_image", MINIMAX_H3_IMAGE),
+        ("minimax-h3-image", MINIMAX_H3_IMAGE),
         // MiniMax-H3's diffusers `_class_name` (`MiniMaxH3Transformer3DModel`, sc-26680). First so
         // no broader needle below can claim it.
         ("minimaxh3", MINIMAX_H3),
@@ -183,6 +199,21 @@ mod tests {
             checkpoint_descriptor_family("MiniMaxH3Transformer3DModel").as_deref(),
             Some(MINIMAX_H3)
         );
+        // SW-7100: the image family's class names contain `minimaxh3` and must not read as H3.
+        for label in [
+            "MiniMaxH3ImageTransformer2DModel",
+            "AutoencoderKLMiniMaxH3Image",
+            "minimax_h3_image",
+            "minimax-h3-image",
+        ] {
+            assert_eq!(
+                checkpoint_descriptor_family(label).as_deref(),
+                Some(MINIMAX_H3_IMAGE),
+                "{label}"
+            );
+        }
+        assert_eq!(exact_identity("minimax_h3_image"), Some(MINIMAX_H3_IMAGE));
+        assert_eq!(canonical("MiniMax_H3_Image"), MINIMAX_H3_IMAGE);
         assert_eq!(
             checkpoint_descriptor_family("unrecognized architecture"),
             None

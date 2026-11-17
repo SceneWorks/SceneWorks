@@ -2036,7 +2036,7 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
                 "sourceAssetId": raster_id,
                 "fixtureSvg": "<svg/>"
             }),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
         ),
         (
             json!({
@@ -2053,8 +2053,17 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
             StatusCode::BAD_REQUEST,
         ),
     ] {
-        let (status, _) = request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
-        assert_eq!(status, expected_status);
+        let is_unknown_field = body.get("fixtureSvg").is_some();
+        let (status, error) =
+            request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
+        assert_eq!(status, expected_status, "{error}");
+        if is_unknown_field {
+            assert_eq!(error["code"], "invalid_generation_option");
+            assert!(error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fixtureSvg"));
+        }
     }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
@@ -2937,7 +2946,8 @@ async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources(
     let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let payload = json!({
-        "model":"instantid_realvisxl", "mode":"character_image",
+        "projectId":"project-1", "model":"instantid_realvisxl", "mode":"character_image",
+        "prompt":"portrait",
         "referenceAssetId":"reference-asset",
         "modelManifestEntry":{
             "id":"instantid_realvisxl", "type":"image", "family":"sdxl",
@@ -3325,7 +3335,7 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3413,7 +3423,7 @@ async fn stalled_historical_metadata_never_delays_a_claim_past_its_deadline() {
         .jobs_store
         .create_job(create(
             crate::JobType::AudioGenerate,
-            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+            json!({"projectId":"project-1","model":"custom_tts","prompt":"historical","modelManifestEntry":entry}),
         ))
         .unwrap();
     let download = state
@@ -3502,7 +3512,7 @@ async fn historical_audio_carrier_refuses_same_id_catalog_replacement() {
             job_type: crate::JobType::AudioGenerate,
             project_id: None,
             project_name: None,
-            payload: json!({"model":"custom_tts","text":"hello","modelManifestEntry":original})
+            payload: json!({"projectId":"project-1","model":"custom_tts","prompt":"hello","modelManifestEntry":original})
                 .as_object()
                 .unwrap()
                 .clone(),
@@ -3955,6 +3965,62 @@ async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
     }
 }
 
+#[tokio::test]
+async fn interleave_shifts_survive_typed_and_raw_job_ingress() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = create_project(app.clone(), &"Interleave shifts").await;
+    let project_id = project["id"].as_str().expect("project id");
+    let payload = json!({
+        "projectId": project_id,
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "advanced": {"schedulerShift": 9, "timestepShift": 1.5},
+    });
+    for (path, body) in [
+        ("/api/v1/image/interleave/jobs", payload.clone()),
+        (
+            "/api/v1/jobs",
+            json!({
+                "type": "image_interleave",
+                "projectId": project_id,
+                "requestedGpu": "auto",
+                "payload": payload,
+            }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", path, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{path}: {response}");
+        assert_eq!(response["payload"]["advanced"]["schedulerShift"], 9);
+        assert_eq!(response["payload"]["advanced"]["timestepShift"], 1.5);
+        let job_id = response["id"].as_str().expect("created job id");
+        let (status, stored) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {stored}");
+        assert_eq!(stored["payload"]["advanced"]["schedulerShift"], 9);
+        assert_eq!(stored["payload"]["advanced"]["timestepShift"], 1.5);
+    }
+    let (status, refused) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_vqa",
+            "projectId": project_id,
+            "requestedGpu": "auto",
+            "payload": {"advanced": {"schedulerShift": 9, "timestepShift": 1.5}},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "ConflictingAliases");
+}
+
 /// sc-13617 / F-011: retry and duplicate merge payloadChanges into an existing generation
 /// payload. Validate the merged model before either operation can persist a new job.
 #[tokio::test]
@@ -4022,6 +4088,68 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(jobs.as_array().expect("jobs array").len(), 3);
+}
+
+#[tokio::test]
+async fn retry_and_duplicate_alias_patches_override_persisted_values() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().unwrap();
+    write_style_test_manifests(&temp.path().join("config"));
+    let app = pinned_jobs_fixture_app(test_settings(&temp)).unwrap();
+    let (_, project) = create_project(app.clone(), "Alias patches").await;
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"fox", "model":"sdxl",
+            "count":1,"width":1024,"height":1024,"ipAdapterScale":0.5
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().unwrap();
+    for operation in ["retry", "duplicate"] {
+        let (status, patched) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{original_id}/{operation}"),
+            json!({"payloadChanges":{"ip_adapter_scale":0.75}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {patched}");
+        assert_eq!(patched["payload"]["ipAdapterScale"], 0.75);
+        assert_eq!(patched["payload"]["ip_adapter_scale"], 0.75);
+        // A later canonical patch must also update the retained legacy spelling.
+        let id = patched["id"].as_str().unwrap();
+        let (status, repatched) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{operation}"),
+            json!({"payloadChanges":{"ipAdapterScale":0.25}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {repatched}");
+        assert_eq!(repatched["payload"]["ipAdapterScale"], 0.25);
+        assert_eq!(repatched["payload"]["ip_adapter_scale"], 0.25);
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{operation}"),
+            json!({"payloadChanges":{"ipAdapterScale":0.25,"ip_adapter_scale":0.9}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+        assert_eq!(refused["code"], "ConflictingAliases");
+    }
+    let (_, unchanged) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{original_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(unchanged["payload"], original["payload"]);
 }
 
 /// sc-13639: retry/duplicate are alternate image-job creation boundaries. Their shallow
@@ -5370,7 +5498,10 @@ async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
     }
 
     for (advanced, detail) in [
-        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": "yes" }),
+            "advanced.enhancePrompt has an invalid value",
+        ),
         (
             json!({ "enhancePrompt": true, "enhanceTemperature": 2.01 }),
             "must be between 0 and 2",
@@ -6093,7 +6224,7 @@ async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_ref
         ),
         // The typed shape guard the create path applies to the same field.
         (
-            "advanced.decoder must be a decoder id string",
+            "advanced.decoder has an invalid value",
             json!({ "decoder": 7 }),
         ),
     ] {
@@ -8457,7 +8588,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown ICL mode",
             json!({ "model": "yue_en_icl", "iclMode": "triple", "iclReferenceAssetId": "a" }),
-            "iclMode must be one of",
+            "iclMode has an invalid value",
         ),
         (
             "ICL fields without a mode",
@@ -8514,7 +8645,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown tier",
             json!({ "model": "yue_en_cot", "quantTier": "q2" }),
-            "quantTier must be",
+            "quantTier has an invalid value",
         ),
         (
             "missing lyrics",
@@ -8549,7 +8680,7 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
         (
             "unknown output limiter",
             json!({ "model": "yue_en_cot", "outputLimiter": "normalize" }),
-            "outputLimiter must be one of",
+            "outputLimiter has an invalid value",
         ),
         (
             "output limiter on a non-song model",
@@ -9783,7 +9914,8 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(error["detail"], "upscale.factor must be 2 or 4");
+    assert_eq!(error["code"], "invalid_generation_option");
+    assert_eq!(error["field"], "upscale.factor");
 }
 
 #[tokio::test]
@@ -11657,10 +11789,8 @@ async fn bernini_video_modes_validate_required_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        blank_audio["detail"],
-        "referenceAudioAssetIds must not contain blank ids"
-    );
+    assert_eq!(blank_audio["code"], "invalid_generation_option");
+    assert_eq!(blank_audio["field"], "referenceAudioAssetIds");
 
     // A complete video_to_video request creates a base video_generate job that
     // carries the source clip.
@@ -12218,7 +12348,7 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         );
 
         for (malformed, expected) in [
-            (json!("not-an-array"), "must be an array of string ids"),
+            (json!("not-an-array"), "has an invalid value for Strings"),
             (
                 json!(["character-primary", 7]),
                 "must contain only string ids",
@@ -12533,13 +12663,9 @@ async fn generation_job_routes_reject_incompatible_loras() {
         "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters"
     );
 
+    // LTX's extend, bridge, and replace routes do not support LoRAs at all; the
+    // shared admission gate rejects them before the family compatibility check.
     for (mode, extra) in [
-        ("image_to_video", json!({ "sourceAssetId": "asset-image" })),
-        ("text_to_video", json!({})),
-        (
-            "first_last_frame",
-            json!({ "sourceAssetId": "asset-first", "lastFrameAssetId": "asset-last" }),
-        ),
         ("extend_clip", json!({ "sourceClipAssetId": "asset-video" })),
         (
             "video_bridge",
@@ -12548,6 +12674,24 @@ async fn generation_job_routes_reject_incompatible_loras() {
         (
             "replace_person",
             json!({ "sourceClipAssetId": "asset-video", "personTrackId": "track-1", "characterId": "character-1" }),
+        ),
+    ] {
+        let mut payload = json!({"projectId": project_id, "mode": mode, "prompt": "motion",
+            "model": "ltx_2_3", "loras": [{ "id": "qwen_style" }]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{mode}: {error}");
+        assert_eq!(error["field"], "mode", "{mode}: {error}");
+    }
+    for (mode, extra) in [
+        ("image_to_video", json!({ "sourceAssetId": "asset-image" })),
+        ("text_to_video", json!({})),
+        (
+            "first_last_frame",
+            json!({ "sourceAssetId": "asset-first", "lastFrameAssetId": "asset-last" }),
         ),
     ] {
         let mut payload = json!({
@@ -13784,6 +13928,29 @@ fn image_dimension_cap_covers_sensenova_buckets() {
     assert!(crate::validate_dimension(255, "width", crate::MAX_IMAGE_DIMENSION).is_err());
 }
 
+/// SW-7100 (E25): the pre-model shape ceiling is exactly the largest `limits.maxDimension` any
+/// shipped image model declares (MiniMax-H3-Image's 6272), so that model's 21:9 preset reaches its
+/// own per-model check, while the per-model blanket for every undeclaring model stays 4096.
+#[test]
+fn the_shape_ceiling_covers_every_declared_image_edge() {
+    let manifest =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+    let largest = manifest["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["type"] == "image")
+        .filter_map(|model| model["limits"]["maxDimension"].as_u64())
+        .max()
+        .unwrap();
+    assert_eq!(
+        u64::from(crate::validators::SHAPE_MAX_IMAGE_DIMENSION),
+        largest
+    );
+    assert_eq!(largest, 6272);
+    assert_eq!(crate::MAX_IMAGE_DIMENSION, 4096);
+}
+
 #[test]
 fn vqa_job_validation_requires_question_and_asset() {
     let base = crate::VqaJobRequest {
@@ -13792,7 +13959,8 @@ fn vqa_job_validation_requires_question_and_asset() {
         source_asset_id: "asset_1".to_owned(),
         question: "What is in this image?".to_owned(),
         model: "sensenova_u1_8b".to_owned(),
-        max_new_tokens: 256,
+        max_new_tokens: Some(json!(256)),
+        max_image_pixels: None,
         requested_gpu: "auto".to_owned(),
         advanced: serde_json::Map::new(),
     };
@@ -13801,7 +13969,7 @@ fn vqa_job_validation_requires_question_and_asset() {
     // The UI's length presets are all valid.
     for tokens in [256u32, 512, 1024] {
         let mut request = base.clone();
-        request.max_new_tokens = tokens;
+        request.max_new_tokens = Some(json!(tokens));
         assert!(crate::validate_vqa_job(&request).is_ok());
     }
 
@@ -13818,8 +13986,8 @@ fn vqa_job_validation_requires_question_and_asset() {
     assert!(crate::validate_vqa_job(&missing_project).is_err());
 
     let mut too_many_tokens = base.clone();
-    too_many_tokens.max_new_tokens = 4096;
-    assert!(crate::validate_vqa_job(&too_many_tokens).is_err());
+    too_many_tokens.max_new_tokens = Some(json!(4096));
+    assert!(crate::validate_vqa_job(&too_many_tokens).is_ok());
 }
 
 #[test]
@@ -13830,9 +13998,9 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
         prompt: "A short illustrated guide to brewing tea".to_owned(),
         source_asset_ids: Vec::new(),
         model: "sensenova_u1_8b".to_owned(),
-        max_images: 6,
-        width: 1024,
-        height: 1024,
+        max_images: Some(json!(6)),
+        width: Some(json!(1024)),
+        height: Some(json!(1024)),
         seed: None,
         requested_gpu: "auto".to_owned(),
         advanced: serde_json::Map::new(),
@@ -13853,20 +14021,20 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
     assert!(crate::validate_interleave_job(&missing_project).is_err());
 
     let mut zero_images = base.clone();
-    zero_images.max_images = 0;
-    assert!(crate::validate_interleave_job(&zero_images).is_err());
+    zero_images.max_images = Some(json!(0));
+    assert!(crate::validate_interleave_job(&zero_images).is_ok());
 
     let mut too_many_images = base.clone();
-    too_many_images.max_images = 11;
-    assert!(crate::validate_interleave_job(&too_many_images).is_err());
+    too_many_images.max_images = Some(json!(11));
+    assert!(crate::validate_interleave_job(&too_many_images).is_ok());
 
     let mut blank_asset = base.clone();
     blank_asset.source_asset_ids = vec!["  ".to_owned()];
     assert!(crate::validate_interleave_job(&blank_asset).is_err());
 
     let mut tiny = base.clone();
-    tiny.width = 64;
-    assert!(crate::validate_interleave_job(&tiny).is_err());
+    tiny.width = Some(json!(64));
+    assert!(crate::validate_interleave_job(&tiny).is_ok());
 }
 
 #[tokio::test]
@@ -14844,6 +15012,25 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     assert_eq!(body["payload"]["hiresFix"]["steps"], 12);
     assert_eq!(body["payload"]["hiresFix"]["denoisingStrength"], 0.6);
     assert_eq!(body["payload"]["hiresFix"]["upscaleBy"], 1.5);
+    // The created job must also bind through the worker's resolved execution view. The endpoint
+    // stores authored JSON; this checks that the enabled second pass survives typed lowering.
+    let stored = body["payload"]
+        .as_object()
+        .expect("created payload")
+        .clone();
+    let facts = sceneworks_core::request_validation::facts_for_job(
+        &sceneworks_core::contracts::JobType::ImageGenerate,
+        &stored,
+    );
+    let effective = sceneworks_core::request_validation::resolve_request("image", &stored, &facts)
+        .expect("created image options resolve");
+    let bound = sceneworks_core::image_request::ImageRequest::from_resolved(
+        &stored,
+        effective.as_payload(),
+    )
+    .expect("created image options bind");
+    assert!(bound.hires_fix.enabled);
+    assert_eq!(bound.hires_fix.steps, 12);
     assert!(
         body["payload"]["hiresFix"].get("cfgScale").is_none(),
         "an omitted optional control is not minted: {body}"
@@ -15128,7 +15315,11 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
             "guidance interval",
         ),
         ("", json!({ "cfgInterval": [0.9, 0.1] }), "0 <= start"),
-        ("", json!({ "captionOverflow": "loud" }), "caption-overflow"),
+        (
+            "",
+            json!({ "captionOverflow": "loud" }),
+            "advanced.captionOverflow",
+        ),
         ("", json!({ "schedulerShift": -1 }), "> 0"),
         ("", json!({ "sampler": "heun" }), "does not offer"),
     ] {
@@ -15136,7 +15327,8 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
         let detail = body["detail"].as_str().unwrap_or_default();
         assert!(
-            detail.contains("iris_3b") && detail.contains(fragment),
+            (detail.contains("iris_3b") || body["context"]["model"] == "iris_3b")
+                && detail.contains(fragment),
             "{advanced}: {detail}"
         );
     }
@@ -17303,18 +17495,13 @@ async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
         "diffusers"
     );
 
-    for (model, advanced, needle) in [
-        (
-            "minimax_h3",
-            json!({ "referenceImageResizeMode": "crop" }),
-            "advanced.referenceImageResizeMode must be one of",
-        ),
-        (
-            "wan_i2v",
-            json!({ "referenceImageResizeMode": "match" }),
-            "is not supported by wan_i2v",
-        ),
-    ] {
+    // The non-H3 refusal is covered at the static policy owner; wan_i2v has no
+    // eligible route in this API configuration and the route refuses it first.
+    for (model, advanced, needle) in [(
+        "minimax_h3",
+        json!({ "referenceImageResizeMode": "crop" }),
+        "advanced.referenceImageResizeMode must be one of",
+    )] {
         let (status, error) = request(
             app.clone(),
             "POST",
@@ -18719,8 +18906,8 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
 
     let lora_dir = temp_dir.path().join("data/loras");
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
-    // Real MiniMax-H3 diffusers keys, so `detect_lora_family` reports `minimax-h3` and the
-    // detected-family check is exercised rather than skipped on a `None`.
+    // Real MiniMax-H3 diffusers keys. They are the key space H3-Image shares, so detection is
+    // inconclusive (SW-7101) and the DECLARED partition gate is what this test exercises.
     let keys: Vec<String> = ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"]
         .iter()
         .flat_map(|target| {
@@ -18752,7 +18939,8 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
                 "/api/v1/video/jobs",
                 json!({
                     "projectId": project_id,
-                    "mode": "text_to_video",
+                    "mode": if model == "minimax_h3_ref" { "reference_to_video" } else { "text_to_video" },
+                    "referenceAssetIds": if model == "minimax_h3_ref" { vec!["reference-image"] } else { vec![] },
                     "prompt": "a cellist on a rooftop",
                     "model": model,
                     "loras": [{ "id": lora, "weight": 1.0 }]
@@ -19461,6 +19649,14 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
         }))
         .expect("image job request parses")
     };
+    let validate = |model: &str, advanced: Value| {
+        let payload = serde_json::to_value(job(model, advanced)).unwrap();
+        sceneworks_core::request_validation::validate(
+            "image",
+            payload.as_object().unwrap(),
+            &serde_json::Map::new(),
+        )
+    };
     for advanced in [
         json!({}),
         json!({"quantTier": "fp8r"}),
@@ -19471,7 +19667,7 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
     ] {
         for model in ["flux3_klein", "flux3_klein_base"] {
             assert!(
-                crate::validate_image_job(&job(model, advanced.clone())).is_ok(),
+                validate(model, advanced.clone()).is_ok(),
                 "{model}: {advanced}"
             );
         }
@@ -19490,9 +19686,11 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
         ("flux3_klein", json!({"mlxQuantize": 6})),
         ("flux3_klein", json!({"quantTier": "int8-convrot"})),
     ] {
-        let error =
-            crate::validate_image_job(&job(model, advanced.clone())).expect_err("tier refusal");
-        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{model} {advanced}");
+        let error = validate(model, advanced.clone()).expect_err("tier refusal");
+        assert_eq!(
+            error.code, "invalid_generation_option",
+            "{model} {advanced}"
+        );
         assert!(
             error.detail.contains(model),
             "{model} {advanced}: {}",
@@ -19516,7 +19714,7 @@ async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_der
     for model in ["flux3_klein", "flux3_klein_base"] {
         for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
             let mut payload = json!({
-                "model":model,"advanced":{"quantTier":tier},
+                "projectId":"project-1","prompt":"a lighthouse","model":model,"advanced":{"quantTier":tier},
                 "modelManifestEntry":{"id":model,"downloads":[{"variant":tier}]}
             })
             .as_object()

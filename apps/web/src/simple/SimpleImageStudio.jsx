@@ -10,6 +10,8 @@ import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -32,7 +34,7 @@ import { useSimpleRefine } from "./useSimpleRefine.js";
 // the same transparency toggle and the same rewrite affordance; what it does NOT get is a second,
 // simplified version of either, which is why both reuse the advanced modules verbatim.
 import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
-import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
@@ -42,6 +44,7 @@ import {
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
 import {
+  fixedStepsForModel,
   maxStepsForModel,
   nativeResolutionHint,
   negativePromptInertAtGuidance,
@@ -50,13 +53,17 @@ import {
 } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
+  h3ImageExpanderAppliesTo,
+  MINIMAX_H3_IMAGE_PE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
+import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
@@ -102,6 +109,7 @@ export function SimpleImageStudio() {
     jobs = [],
     createLoraDownloadJob,
     qwenRewritePrompt,
+    h3ImageExpandPrompt,
     activeProject,
     characters = [],
     importAsset,
@@ -134,6 +142,7 @@ export function SimpleImageStudio() {
     false,
   );
   const [qwenRewriteOpen, setQwenRewriteOpen] = useStudioState("image", "qwenRewriteOpen", false);
+  const [h3ExpandOpen, setH3ExpandOpen] = useStudioState("image", "h3ExpandOpen", false);
   // sc-24113 — the controls Simple did not expose. Every one is STICKY like the rest of this shell
   // and lives behind a disclosure that is COLLAPSED by default, so the reduced surface stays
   // reduced for someone who never opens it.
@@ -337,11 +346,11 @@ export function SimpleImageStudio() {
     widthOverride: nativeControls ? widthOverride : "",
     heightOverride: nativeControls ? heightOverride : "",
   });
-  const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const dimensionAdvice = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
   // sc-24215: the same native-size and prompt-token statements Image Studio shows.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
-  const promptTokenNotice = promptTokenLimitHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel, mode);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
@@ -356,8 +365,15 @@ export function SimpleImageStudio() {
   // on (up to the model's cap), so its `<imageN>` numbering names the pictures actually sent.
   const qwenRewriteReferenceIds = useMemo(
     () =>
-      simpleRewriteReferenceIds({ supportsOrderedReferences, orderedReferenceIds, referenceAssetId }),
-    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
+      simpleRewriteReferenceIds({
+        supportsOrderedReferences,
+        orderedReferenceIds,
+        referenceAssetId,
+        mode,
+        model,
+        supportsImg2img,
+      }),
+    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId, mode, model, supportsImg2img],
   );
   const qwenRewriteModel = useMemo(() => {
     if (!qwenRewriterAppliesTo(selectedModel)) return null;
@@ -370,6 +386,35 @@ export function SimpleImageStudio() {
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&
     typeof qwenRewritePrompt === "function";
+  // SW-7102 — MiniMax-H3-Image's optional prompt expander, under the same gates as the Qwen
+  // rewriter: installed or absent, user-started, reviewed before it replaces the prompt.
+  const h3ExpandModel = useMemo(
+    () =>
+      h3ImageExpanderAppliesTo(selectedModel)
+        ? catalogModels.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID) ?? null
+        : null,
+    [catalogModels, selectedModel],
+  );
+  const h3ExpandAvailable =
+    Boolean(h3ExpandModel) &&
+    h3ExpandModel.installState !== "missing" &&
+    typeof h3ImageExpandPrompt === "function";
+  // Accept a rewriter's or expander's offered size. sc-24114: never silently ignored — a preset the
+  // chips offer is selected, anything else lands as the free size in the (opened) Advanced fold,
+  // like the classic studio.
+  const applySuggestedResolution = (value) => {
+    const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
+    if (!target) return;
+    if (target.resolution) {
+      setResolution(target.resolution);
+      setWidthOverride("");
+      setHeightOverride("");
+      return;
+    }
+    setWidthOverride(target.widthOverride);
+    setHeightOverride(target.heightOverride);
+    setAdvancedOpen(true);
+  };
   const referenceUsable = mode === "edit_image" || supportsImg2img;
 
   // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
@@ -434,15 +479,58 @@ export function SimpleImageStudio() {
     (Boolean(prompt.trim()) || (mossEdit && Boolean(mossImageAdvanced.positive))) &&
     Boolean(model) &&
     Boolean(resolution) &&
+    !dimensionEval.invalid &&
     !busy &&
     !needsSource &&
-    // sc-24113: a broken free-size override blocks Generate the same way it does in the full
-    // studio. Without this the enqueue gate would 400 and the user would meet the model's own
-    // envelope as a failed submit rather than as a message under the field they typed in.
-    !dimensionEval.invalid &&
     // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
     // worker reject it — the job would fail with an error the studio never surfaces.
     !editLoraMissing && mossComponents.ready && !mossEditError;
+
+  let portableDraft = null;
+  try { portableDraft = buildSimpleImageRequest({
+    prompt: mossEdit ? prompt : prompt.trim(),
+    mode,
+    model,
+    resolution,
+    count: variations,
+    styleId,
+    // One armed reference; simpleJobs routes it by mode (edit source vs img2img
+    // reference + advanced.strength) and drops it when the model can't use it.
+    referenceAssetId,
+    // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
+    // model declares the surface, so every other model's payload is byte-identical.
+    referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
+    mossImageEdit,
+    mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
+    mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
+    trainingShift: mossTrainingShift,
+    schedulerShift: mossEdit ? mossShift : null,
+    maxSequenceLength: mossContext,
+    // The advanced fold's knobs. Empty string means "the model default", exactly as the full
+    // studio's overrides do, so an untouched control adds nothing to the payload.
+    // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
+    steps: nativeControls && fixedStepsForModel(selectedModel) == null ? steps : "",
+    seed: nativeControls ? seed : "",
+    negativePrompt:
+      nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
+    guidance: nativeControls && supportsGuidance ? guidance : "",
+    width: dimensionEval.width,
+    height: dimensionEval.height,
+    supportsImg2img,
+    img2imgStrength: referenceStrengthFor(selectedModel),
+    // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
+    editLora: editLoraInstalled ? editLora : null,
+    loras: lora.serializedLoras,
+    // sc-24113 — the transparency request. `selectedModel` rides along as the capability
+    // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
+    // never leak onto a model that would refuse it.
+    selectedModel,
+    transparentBackground,
+    ...tier,
+  }); } catch { /* Draft syntax errors are already shown by the form; submit rechecks. */ }
+  // Pure option feedback still belongs beside its fields when another input is incomplete.
+  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel, Boolean(prompt.trim() || (mossEdit && mossImageAdvanced.positive)));
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
     if (!canGenerate) {
@@ -454,47 +542,7 @@ export function SimpleImageStudio() {
     }
     setSubmitting(true);
     try {
-      const request = buildSimpleImageRequest({
-        prompt: mossEdit ? prompt : prompt.trim(),
-        mode,
-        model,
-        resolution,
-        count: variations,
-        styleId,
-        // One armed reference; simpleJobs routes it by mode (edit source vs img2img
-        // reference + advanced.strength) and drops it when the model can't use it.
-        referenceAssetId,
-        // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
-        // model declares the surface, so every other model's payload is byte-identical.
-        referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
-        mossImageEdit,
-        mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
-        mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
-        trainingShift: mossTrainingShift,
-        schedulerShift: mossEdit ? mossShift : null,
-        maxSequenceLength: mossContext,
-        // The advanced fold's knobs. Empty string means "the model default", exactly as the full
-        // studio's overrides do, so an untouched control adds nothing to the payload.
-        // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
-        steps: nativeControls ? steps : "",
-        seed: nativeControls ? seed : "",
-        negativePrompt:
-          nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
-        guidance: nativeControls && supportsGuidance ? guidance : "",
-        width: dimensionEval.width,
-        height: dimensionEval.height,
-        supportsImg2img,
-        img2imgStrength: referenceStrengthFor(selectedModel),
-        // Auto-applied in edit mode; the worker's edit lane rejects the run without it.
-        editLora: editLoraInstalled ? editLora : null,
-        loras: lora.serializedLoras,
-        // sc-24113 — the transparency request. `selectedModel` rides along as the capability
-        // source so the builder can re-check it: the toggle is sticky, and a stale `true` must
-        // never leak onto a model that would refuse it.
-        selectedModel,
-        transparentBackground,
-        ...tier,
-      });
+      const request = portableDraft;
       if (!request) {
         toast("That resolution isn’t valid");
         return;
@@ -580,26 +628,31 @@ export function SimpleImageStudio() {
           <QwenRewritePromptControl
             modelId={model}
             onApply={setPrompt}
-            onApplyResolution={(value) => {
-              // sc-24114: never silently ignored — a preset the chips offer is selected, anything
-              // else lands as the free size in the (opened) Advanced fold, like the classic studio.
-              const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
-              if (!target) return;
-              if (target.resolution) {
-                setResolution(target.resolution);
-                setWidthOverride("");
-                setHeightOverride("");
-                return;
-              }
-              setWidthOverride(target.widthOverride);
-              setHeightOverride(target.heightOverride);
-              setAdvancedOpen(true);
-            }}
+            onApplyResolution={applySuggestedResolution}
             projectId={activeProject?.id ?? ""}
             prompt={prompt}
             referenceAssetIds={qwenRewriteReferenceIds}
             rewriteModel={qwenRewriteModel}
             rewritePrompt={qwenRewritePrompt}
+          />
+        ) : null}
+        {/* SW-7102 — MiniMax-H3-Image's prompt expander: the same review-and-accept control, its
+            expansion in an editable box with Apply / Keep original, its proposed size a separate
+            offer. Absent unless the expander is installed. */}
+        {h3ExpandAvailable && h3ExpandOpen ? (
+          <QwenRewritePromptControl
+            copy={H3_IMAGE_EXPAND_COPY}
+            modelId={model}
+            onApply={setPrompt}
+            onApplyResolution={applySuggestedResolution}
+            projectId={activeProject?.id ?? ""}
+            prompt={prompt}
+            referenceAssetIds={qwenRewriteReferenceIds}
+            rewriteModel={h3ExpandModel}
+            rewritePrompt={h3ImageExpandPrompt}
+            suggestedResolutionFor={(suggestion) =>
+              h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
+            }
           />
         ) : null}
         {refineOpen ? (
@@ -634,6 +687,22 @@ export function SimpleImageStudio() {
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
         />}
+        {h3ExpandAvailable ? (
+          <button
+            className={h3ExpandOpen ? "su-tile active" : "su-tile"}
+            onClick={() => {
+              setRefineOpen(false);
+              setH3ExpandOpen((open) => !open);
+            }}
+            type="button"
+          >
+            <span className="su-tile-head">
+              <Icon.Sparkle size={15} />
+              Expand prompt
+            </span>
+            <span className="su-tile-sub">MiniMax-H3-Image's own expander, plus a proposed size</span>
+          </button>
+        ) : null}
         {qwenRewriteAvailable ? (
           <button
             className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
@@ -680,6 +749,9 @@ export function SimpleImageStudio() {
           />
           {/* sc-17162 — see the note in `studioParts.jsx`. `ui.description` had one reader in the
               whole app (the advanced Models card), so Simple identified a model by NAME ALONE. */}
+          {/* Licence-required attribution (MiniMax-H3-Image §IV.2, SW-7100) — the same manifest
+              field Video Studio renders; Simple users must see it too. */}
+          <ModelAttribution model={selectedModel} />
           <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
@@ -778,6 +850,9 @@ export function SimpleImageStudio() {
               <OrderedReferenceList
                 assetIds={orderedReferenceIds}
                 labelFor={(id) => assets.find((asset) => asset.id === id)?.name ?? id}
+                // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
+                tokenFor={(index) => referencePromptToken(selectedModel, index)}
+                onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
                 onChange={(next) => {
                   // The tile owns the first slot, so a reorder writes back through BOTH pieces of
                   // state rather than letting them drift apart.
@@ -816,7 +891,7 @@ export function SimpleImageStudio() {
               ) : null}
             </div>
           ) : null}
-          <div className="su-field">
+          {fixedStepsForModel(selectedModel) == null ? <div className="su-field">
             <label htmlFor="su-image-steps">Steps</label>
             <input
               className="su-input"
@@ -829,7 +904,7 @@ export function SimpleImageStudio() {
               type="number"
               value={steps}
             />
-          </div>
+          </div> : null}
           <div className="su-field">
             <label htmlFor="su-image-seed">Seed</label>
             <input
@@ -912,7 +987,6 @@ export function SimpleImageStudio() {
                 value={heightOverride}
               />
             </div>
-            {dimensionError ? <p className="su-error">{dimensionError}</p> : null}
           </div>
         </div>
       </details>
@@ -922,13 +996,15 @@ export function SimpleImageStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate}
+        disabled={!canGenerate || portableFeedbackBlocks(portableFeedback)}
         onClick={generate}
         type="button"
       >
         {busy ? <span aria-hidden="true" className="su-spinner" /> : null}
         {busy ? "Generating…" : `Generate ${variations} image${variations > 1 ? "s" : ""}`}
       </button>
+      {dimensionAdvice || portableRefusal ? <p className="su-error" role="alert">{dimensionAdvice ?? portableRefusal.detail}</p> : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
       ) : null}

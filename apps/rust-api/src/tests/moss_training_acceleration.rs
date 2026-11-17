@@ -432,7 +432,7 @@ async fn body(
         format!("bounded product submission refused: {submitted}"),
     )?;
     let job_id = text(&submitted, "id")?.to_owned();
-    let snapshot = case.claim(app, worker, &job_id).await?;
+    let (snapshot, execution_claim_capability) = case.claim(app, worker, &job_id).await?;
     let plan: sceneworks_core::training::TrainingPlan =
         serde_json::from_value(submitted["payload"]["plan"].clone()).map_err(|e| e.to_string())?;
     let request_slot = Arc::new(Mutex::new(None::<gen_core::TrainingRequest>));
@@ -467,7 +467,9 @@ async fn body(
     );
     let (result, control) = tokio::join!(
         async {
-            let result = execution.await;
+            let result =
+                native::with_acceptance_execution_claim(execution_claim_capability, execution)
+                    .await;
             completed.store(true, Ordering::Release);
             result
         },

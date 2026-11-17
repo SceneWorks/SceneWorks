@@ -433,8 +433,8 @@ fn owner(spec: &ModelSpec) -> Result<&'static str, String> {
             "wan-video" | "scail2" | "svd" | "mochi" => "ENG-3/ENG-5/APP-6",
             "krea_2" => "ENG-4b/APP-5",
             "flux3" | "moss_image" | "iris" | "ideogram" | "supra2" => "ENG-5/APP-5",
-            "ltx-video" | "minimax-h3" | "mage-flow" | "sensenova-u1" | "bernini"
-            | "krea-realtime" => "ENG-6/APP-5/APP-6",
+            "ltx-video" | "minimax-h3" | "minimax-h3-image" | "mage-flow" | "sensenova-u1"
+            | "bernini" | "krea-realtime" => "ENG-6/APP-5/APP-6",
             other => return Err(format!("no migration owner for {}/{other}", product.id)),
         },
         other => {
@@ -476,8 +476,8 @@ fn registry_owner(
                 "wan" | "scail2" | "svd" | "mochi" => "ENG-3/ENG-5",
                 "krea_2" => "ENG-4b",
                 "flux3" | "moss_image" | "iris" | "ideogram" | "supra2" => "ENG-5",
-                "ltx" | "minimax_h3" | "mage_flow" | "sensenova-u1" | "bernini"
-                | "krea_realtime" | "seedvr2" => "ENG-6",
+                "ltx" | "minimax_h3" | "minimax_h3_image" | "mage_flow" | "sensenova-u1"
+                | "bernini" | "krea_realtime" | "seedvr2" => "ENG-6",
                 other => return Err(format!("unowned native generator {provider}/{other}")),
             }
         }

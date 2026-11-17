@@ -15,7 +15,6 @@ import {
   seedValueProblem,
   toggleYue2StyleTag,
   stripYue2ExportHeader,
-  transcriptionSettingsProblems,
   yue2AbcExport,
   yue2CoverSetup,
   yue2FieldDisabledReason,
@@ -163,10 +162,10 @@ describe("YuE2 request builder (sc-23000)", () => {
     });
   });
 
-  it("requires a policy while omitting other unset controls", () => {
+  it("omits an unset policy so Rust can report the missing option", () => {
     const settings = { ...defaultYue2Settings(), lyrics: "la la" };
     expect(buildYue2JobRequest("create", settings)).toEqual({ kind: "create", lyrics: "la la", planning: "full" });
-    expect(yue2RequestProblems("create", settings)).toContainEqual(expect.stringContaining("Choose a compute precision"));
+    expect(yue2RequestProblems("create", settings)).toEqual([]);
   });
 
   it("carries explicit FP8 AR only on generation and refuses unsupported selections before submit", () => {
@@ -184,7 +183,7 @@ describe("YuE2 request builder (sc-23000)", () => {
     expect(yue2RequestProblems("create", settings, {}, { requestedGpu: "auto" })).toEqual([
       expect.stringContaining("Select a CUDA GPU"),
     ]);
-    expect(yue2RequestProblems("create", { ...settings, tier: "q8", computePolicy: "fp32" }, {}, { requestedGpu: "mlx" })).toHaveLength(3);
+    expect(yue2RequestProblems("create", { ...settings, tier: "q8", computePolicy: "fp32" }, {}, { requestedGpu: "mlx" })).toHaveLength(1);
     expect(restoreYue2Settings({ arMode: "experimentalFp8" }).arMode).toBe("experimentalFp8");
     expect(restoreYue2Settings({ arMode: "unrecognized" }).arMode).toBe("");
     expect(restoreYue2Settings({ precision: "default", tier: "bf16" }).computePolicy).toBe("");
@@ -207,31 +206,24 @@ describe("YuE2 request builder (sc-23000)", () => {
     expect(body.scoreSampling).toBeUndefined();
   });
 
-  it("names the problems of an incomplete request in user terms", () => {
+  it("leaves static request options to the portable Rust validator", () => {
     const settings = { ...defaultYue2Settings(), computePolicy: "auto" };
-    expect(yue2RequestProblems("create", settings)).toEqual(["Write the lyrics the song sings."]);
-    expect(yue2RequestProblems("cover", { ...settings, lyrics: "x" })).toEqual([
-      "Choose the reviewed score version the cover follows.",
-    ]);
+    expect(yue2RequestProblems("create", settings)).toEqual([]);
+    expect(yue2RequestProblems("cover", { ...settings, lyrics: "x" })).toEqual([]);
     expect(
       yue2RequestProblems("create", { ...settings, lyrics: "x", planSource: "supplied", planning: "off" }),
-    ).toEqual([
-      "Paste the ABC score to plan from, or choose to sample a new plan.",
-      "A supplied score needs full or melody planning.",
-    ]);
-    expect(yue2RequestProblems("fromPlan", settings)).toEqual(["Choose the saved plan to restore."]);
-    expect(yue2RequestProblems("plan", { ...settings, lyrics: "x", planning: "off" })).toEqual([
-      "Plan only needs full or melody planning — planning off makes no score.",
-    ]);
-    expect(yue2RequestProblems("cover", { ...settings, lyrics: "x", coverVersionId: "v", coverMode: "" })).toEqual([
-      "Choose the cover mode (melody or full).",
-    ]);
+    ).toContain("Supply an ABC score before starting this run.");
+    expect(yue2RequestProblems("plan", { ...settings, planSource: "supplied", suppliedScore: "  " }))
+      .toContain("Supply an ABC score before starting this run.");
+    expect(yue2RequestProblems("fromPlan", settings)).toEqual([]);
+    expect(yue2RequestProblems("plan", { ...settings, lyrics: "x", planning: "off" })).toEqual([]);
+    expect(yue2RequestProblems("cover", { ...settings, lyrics: "x", coverVersionId: "v", coverMode: "" })).toEqual([]);
     expect(
       yue2RequestProblems("create", { ...settings, lyrics: "x", chunkAttention: "on", attentionChunkSize: "512" }),
-    ).toEqual(["The attention chunk size must be at least 393216 score elements."]);
+    ).toEqual([]);
     expect(
       yue2RequestProblems("decode", { ...settings, tileVaeDecode: "on", decodeTileEdge: "2048" }, { sourceJobId: "j" }),
-    ).toEqual(["The decode tile must be between 1 and 1024 latent frames."]);
+    ).toEqual([]);
   });
 });
 
@@ -549,18 +541,8 @@ describe("YuE2 cover from a recording (sc-23002)", () => {
     expect(body.cover.versionId).toBe("ver_1");
   });
 
-  it("checks the window rule over the resolved values", () => {
-    const at = (patch) => transcriptionSettingsProblems({ ...defaultYue2Settings(), ...patch });
-    expect(at({})).toEqual([]);
-    expect(at({ transcribeOverlapSeconds: "299.5", transcribeLookaheadSeconds: "299.5" })).toEqual([]);
-    // Mutation that reds this: `overlap > 300` instead of `>= 300`.
-    expect(at({ transcribeOverlapSeconds: "300" })).toEqual(["The window overlap must be at least 0 and under 300 seconds."]);
-    // An overlap below the DEFAULT look-ahead (100 s) is refused — the rule reads resolved values.
-    // Mutation that reds this: comparing only a typed look-ahead.
-    expect(at({ transcribeOverlapSeconds: "50" })).toEqual(["The look-ahead must be between 0 and the window overlap (50 s)."]);
-    expect(at({ transcribeLookaheadSeconds: "-1" })).toEqual(["The look-ahead must be between 0 and the window overlap (200 s)."]);
-    expect(at({ transcribeMaxSeconds: "0" })).toEqual(["The transcription length limit must be more than 0 seconds."]);
-    expect(yue2RequestProblems("transcribe", defaultYue2Settings(), {})).toEqual(["Choose the recording to transcribe."]);
+  it("leaves transcription window rules and source requirements to Rust", () => {
+    expect(yue2RequestProblems("transcribe", defaultYue2Settings(), {})).toEqual([]);
   });
 
   it("covers a transcribed score only in its own mode", () => {

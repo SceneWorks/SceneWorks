@@ -43,12 +43,8 @@ recording from its score, style and lyrics. It does not edit or preserve the ear
 singing, timbre and arrangement can differ everywhere, including outside the edited bars, and a \
 matching score does not guarantee identical audio. Compare complete recordings.";
 
-/// Largest accepted ABC score (bytes). A several-minute native score is a few tens of KiB.
-pub const MAX_ABC_BYTES: usize = 256 * 1024;
-/// Largest accepted style prompt (characters) — the API's shared prompt cap.
-pub const MAX_STYLE_CHARS: usize = crate::MAX_PROMPT_CHARS;
-/// Largest accepted lyrics text (characters).
-pub const MAX_LYRICS_CHARS: usize = 16_000;
+/// Shared score and text bounds used by both portable job policy and score-content parsing.
+pub use sceneworks_options::yue2_validation::{MAX_ABC_BYTES, MAX_LYRICS_CHARS, MAX_STYLE_CHARS};
 /// Largest accepted edit brief / listening note (characters).
 pub const MAX_BRIEF_CHARS: usize = 4_000;
 /// Upstream `SongRequest` default seed.

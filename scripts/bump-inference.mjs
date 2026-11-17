@@ -212,7 +212,10 @@ function packageSpecsForUpdate(crate, sha, lockText = readFileSync(LOCKFILE, "ut
       source: block.match(/\nsource = "([^"]+)"/)?.[1],
     }))
     .filter(({ name, source }) => name === crate && source?.includes(INFERENCE_GIT));
-  if (packages.length <= 1) return [crate];
+  // A newly introduced direct dependency has no old lock entry for `cargo update -p`.
+  // Updating the existing inference packages resolves the new manifest edge too.
+  if (packages.length === 0) return [];
+  if (packages.length === 1) return [crate];
 
   const stale = packages.filter(({ source }) => !source.includes(`?rev=${sha}#`));
   if (stale.length === 0) return [crate];
@@ -491,8 +494,16 @@ function deriveInferenceClosures(sha, repo) {
     .map((line) => line.trim())
     .filter(Boolean);
   if (revisions.length > 0) {
-    console.log(`bump-inference: fetching ${revisions.length} captured revision(s) for the backfill`);
+    console.log(`bump-inference: resolving ${revisions.length} captured revision(s) for the backfill`);
     for (const rev of revisions) {
+      try {
+        // A supplied checkout may already contain the captured commit. Avoid a network
+        // fetch for each historical record when the backfill can read it locally.
+        execFileSync("git", ["-C", repo, "cat-file", "-e", `${rev}^{commit}`], { stdio: "pipe" });
+        continue;
+      } catch {
+        // Fetch only revisions absent from the supplied checkout.
+      }
       try {
         execFileSync("git", ["-C", repo, "fetch", "-q", "--depth=1", "origin", rev], { stdio: "pipe" });
       } catch {
@@ -1043,6 +1054,10 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     "duplicate lock revisions select only the stale source-qualified package",
     packageSpecsForUpdate("mlx-gen", SHA, duplicateLock).join("\n") ===
       `git+${INFERENCE_GIT}?rev=${OLD_SHA}#mlx-gen@0.0.0`,
+  );
+  check(
+    "new inference packages absent from the old lock are not passed to cargo update -p",
+    packageSpecsForUpdate("sceneworks-gen-core-new-policy", SHA, duplicateLock).length === 0,
   );
   check(
     "stale inference lock revisions are detected",

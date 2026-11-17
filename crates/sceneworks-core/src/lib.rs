@@ -25,6 +25,7 @@ pub mod disk;
 pub mod display_util;
 pub mod download_receipt;
 pub mod env_util;
+pub mod execution_receipt;
 pub mod external_base_models;
 pub mod external_loras;
 pub mod external_roots;
@@ -79,12 +80,16 @@ pub mod moss_image;
 pub mod moss_image_advanced;
 pub mod observability;
 pub mod payload_util;
+pub mod portable_aux_bindings;
 pub mod portable_convert_sources;
 pub mod portable_sources;
 pub mod preview_support;
 pub mod process;
 pub mod project_store;
 pub mod registry;
+pub mod resolved_options;
+pub use sceneworks_options as options;
+pub mod options_context;
 pub mod safe_path;
 pub mod safetensors;
 pub mod session_log;
@@ -118,7 +123,7 @@ pub const HEALTH_ROUTE: &str = "/health";
 /// It lives here rather than in rust-api because pre-dispatch validators outside that crate
 /// (`film_plan`, sc-22710) must refuse a prompt the enqueue route would refuse; a hand-copied
 /// number turns an actionable pre-flight diagnostic into a 400 at enqueue when the two drift.
-pub const MAX_PROMPT_CHARS: usize = 4000;
+pub use sceneworks_options::MAX_PROMPT_CHARS;
 
 /// Stdout sentinel for remote worker-restart (epic 4484 story 12). The API process
 /// doesn't supervise the desktop's GPU worker, so `POST /api/v1/worker/restart` prints
@@ -179,3 +184,8 @@ pub mod test_env;
 
 pub mod appearance;
 pub mod worker_proof;
+
+pub mod generation_contracts;
+#[cfg(test)]
+mod option_carrier_upgrade_tests;
+pub mod request_validation;

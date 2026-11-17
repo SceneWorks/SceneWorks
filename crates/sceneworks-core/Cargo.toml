@@ -13,13 +13,14 @@ test-support = []
 model-inference-proof = []
 
 [dependencies]
+sceneworks-options = { path = "../sceneworks-options" }
 reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
 # The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "5891ba8b510b9bedb015936b35226f0f11ccf1f5" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "886b915c2830e64d5887297e3b797c816ada0e38" }
 directories = "5"
 fs2 = { workspace = true }
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's
@@ -33,7 +34,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 # sc-22713: a planner draft is corrected by a local 8B model that cannot count lines, so a parse
 # failure has to name the FIELD ("shots[3].startState"), not the offset. Already in the lock via
 # axum, so this adds no package to the build.
-serde_path_to_error = "0.1"
+serde_path_to_error = { workspace = true }
 mime_guess = { workspace = true }
 url = "2.5"
 # sc-6531 (Dataset Doctor): read image dimensions from the header without a full decode.
@@ -75,6 +76,10 @@ remove_dir_all = "=0.8.4"
 # Safe wrapper around GetFileInformationByHandle. The recent-project registry
 # cache uses volume + file index to distinguish atomic replacement.
 winapi-util = "0.1"
+# One Windows-only call reads a file's NTFS change time for source stamps
+# (`checkpoint_plan_store::windows_change_time`, this crate's only allowed unsafe), through
+# the workspace windows-sys (already locked), so no new package enters the lock.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
 # ARMv8 SHA-2 instructions for the resolved-cache closure verify (sc-21534's load boundary).
@@ -103,6 +108,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [build-dependencies]
+sceneworks-options = { path = "../sceneworks-options" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = "0.28"

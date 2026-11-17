@@ -22,8 +22,12 @@ pub(crate) fn settings(data_dir: &Path) -> Settings {
     }
 }
 
+fn resolved_request(payload: &serde_json::Map<String, serde_json::Value>) -> ImageRequest {
+    ImageRequest::from_resolved(payload, payload).expect("source fixture options bind")
+}
+
 fn request(model_path: &Path, spoofed_tier: &str) -> ImageRequest {
-    ImageRequest::from_payload(
+    resolved_request(
             json!({
                 "model": "fixture_model",
                 "advanced": {
@@ -165,7 +169,7 @@ fn a_backfilled_receipt_gains_its_missing_tree_stamp_baseline_on_the_mlx_path() 
         "a read that may not repair must never invent an identity"
     );
 
-    let request = ImageRequest::from_payload(
+    let request = resolved_request(
         json!({ "model": "fixture_model" })
             .as_object()
             .expect("request object"),

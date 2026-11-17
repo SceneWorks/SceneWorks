@@ -290,6 +290,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     let items = face_analysis_items(settings, &job.payload)?;
     if items.is_empty() {
@@ -318,7 +319,8 @@ pub(crate) async fn run_dataset_face_analysis_job(
 
     // Stage the SCRFD + ArcFace bundle (download-on-first-use; a prior InstantID / kps run leaves it
     // cached). The same dir the candle stack loads, and the dir the MLX path joins the two file names in.
-    let weights_dir = crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
+    let weights_dir =
+        crate::image_jobs::ensure_face_stack_dir(api, settings, job, portable_aux).await?;
     update_job(
         api,
         &job.id,
@@ -466,6 +468,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
         "Dataset face analysis (SCRFD + ArcFace) needs the macOS MLX backend or the candle backend \

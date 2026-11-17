@@ -639,28 +639,33 @@ pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
 /// `variant`, an advanced `quantTier`, or the advanced `mlxQuantize` bit width. This is
 /// request-shape vocabulary, never a model-name mapping.
 pub fn requested_runtime_variant(payload: &Map<String, Value>) -> Option<String> {
-    if let Some(variant) = payload
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    let variant = payload.get("variant").and_then(Value::as_str);
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let tier = match &route.quant_tier {
+        crate::resolved_options::RouteField::Valid(value) => Some(value.as_str()),
+        _ => None,
+    };
+    let bits = match route.mlx_quantize {
+        crate::resolved_options::RouteField::Valid(value) => Some(value),
+        _ => None,
+    };
+    requested_runtime_variant_typed(variant, tier, bits)
+}
+
+/// Select from already-bound request fields. Numeric-string compatibility and defaults must be
+/// resolved by the portable option owner before this pure artifact choice is called.
+pub fn requested_runtime_variant_typed(
+    variant: Option<&str>,
+    quant_tier: Option<&str>,
+    mlx_quantize: Option<i64>,
+) -> Option<String> {
+    if let Some(variant) = variant.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(variant.to_ascii_lowercase());
     }
-    let advanced = payload.get("advanced").and_then(Value::as_object)?;
-    if let Some(tier) = advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(tier) = quant_tier.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(tier.to_ascii_lowercase());
     }
-    let bits = advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
-    })?;
+    let bits = mlx_quantize?;
     Some(
         match bits {
             1..=4 => "q4",
@@ -669,6 +674,71 @@ pub fn requested_runtime_variant(payload: &Map<String, Value>) -> Option<String>
         }
         .to_owned(),
     )
+}
+
+/// The tier a job's model carrier `slot` (holding catalog model `model_id`) was admitted with, read
+/// from the job's own payload. The API's portable admission freezes its source binding from this,
+/// and the worker's portable guard re-derives the closure it verifies from the SAME function, so
+/// the two can never select different tiers:
+///
+/// * a training job's base model: the plan's base tier (LTX-2.5 / the MLX LTX kernel train the
+///   packed q4; MiniMax-H3-Image trains its plan's `advanced.baseTier`, bf16 when absent; every
+///   other base trains bf16);
+/// * a MiniMax-H3-Image prompt expansion's expander (`modelManifestEntry`): its frozen `peTier`;
+/// * anything else: the request's explicit tier ([`requested_runtime_variant`]).
+///
+/// `Ok(None)` leaves the caller's implicit rule (the catalog default, or the installed standard
+/// tier the binding froze). `Err` names a malformed training plan.
+pub fn admitted_runtime_variant(
+    job_type: &crate::contracts::JobType,
+    payload: &Map<String, Value>,
+    slot: &str,
+    model_id: &str,
+) -> Result<Option<String>, String> {
+    use crate::contracts::JobType;
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        let target = payload
+            .get("plan")
+            .and_then(|plan| plan.get("target"))
+            .and_then(Value::as_object)
+            .ok_or("training plan has no canonical target")?;
+        let base = target
+            .get("baseModel")
+            .and_then(Value::as_str)
+            .ok_or("training plan has no base model")?;
+        if base == model_id {
+            let kernel = target
+                .get("kernel")
+                .and_then(Value::as_str)
+                .ok_or("training plan has no native kernel")?;
+            let tier = if base == "ltx_2_5" || kernel == "ltx_mlx_lora" {
+                "q4"
+            } else if crate::training::is_minimax_h3_image_training_kernel(kernel) {
+                let advanced = payload
+                    .get("plan")
+                    .and_then(|plan| plan.pointer("/config/advanced"))
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                crate::training::minimax_h3_image_base_tier(&advanced)?.unwrap_or("bf16")
+            } else {
+                "bf16"
+            };
+            return Ok(Some(tier.to_owned()));
+        }
+        return Ok(requested_runtime_variant(payload));
+    }
+    if *job_type == JobType::PromptRefine && slot == "modelManifestEntry" {
+        if let Some(tier) = payload
+            .get(crate::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|tier| !tier.is_empty())
+        {
+            return Ok(Some(tier.to_ascii_lowercase()));
+        }
+    }
+    Ok(requested_runtime_variant(payload))
 }
 
 /// Reduce a manifest entry to the exact primary tier and hard co-requisites a worker on
@@ -704,15 +774,69 @@ pub fn selected_portable_model_artifact_closure(
     payload: &Map<String, Value>,
 ) -> Result<Value, String> {
     let model_id = model.get("id").and_then(Value::as_str);
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let options = PortableArtifactOptions {
+        conv_rot: matches!(
+            route.conv_rot,
+            crate::resolved_options::RouteField::Valid(true)
+        ),
+        yue2_decoder: if model_id == Some("yue2") {
+            payload
+                .get("yue2")
+                .filter(|block| !block.is_null())
+                .map(|block| {
+                    block
+                        .as_object()
+                        .ok_or("YuE2 request block is not an object")?
+                        .get("decoder")
+                        .filter(|decoder| !decoder.is_null())
+                        .map(|decoder| {
+                            decoder
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or("YuE2 decoder choice is not a string")
+                        })
+                        .transpose()
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        },
+    };
+    selected_portable_model_artifact_closure_resolved(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+        &options,
+    )
+}
+
+/// Companion artifact choices derived once from the shared resolved request. The route/device
+/// check remains with the source selector; YuE2's decoder choice is a typed option.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PortableArtifactOptions {
+    pub conv_rot: bool,
+    pub yue2_decoder: Option<String>,
+}
+
+pub fn selected_portable_model_artifact_closure_resolved(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    options: &PortableArtifactOptions,
+) -> Result<Value, String> {
+    let model_id = model.get("id").and_then(Value::as_str);
     if model_id == payload.get("model").and_then(Value::as_str)
-        && crate::portable_sources::krea_convrot_requested(
+        && crate::portable_sources::krea_convrot_requested_resolved(
             model_id.unwrap_or_default(),
             backend,
             platform,
-            payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("convRot")),
+            options.conv_rot,
         )
     {
         let mut available = model.clone();
@@ -761,18 +885,8 @@ pub fn selected_portable_model_artifact_closure(
         ));
     }
     let mut requested = BTreeMap::new();
-    if let Some(block) = payload.get("yue2").filter(|block| !block.is_null()) {
-        let decoder = block
-            .as_object()
-            .ok_or("YuE2 request block is not an object")?
-            .get("decoder")
-            .filter(|decoder| !decoder.is_null());
-        if let Some(decoder) = decoder {
-            let option = decoder
-                .as_str()
-                .ok_or("YuE2 decoder choice is not a string")?;
-            requested.insert("decoder".to_owned(), option.to_owned());
-        }
+    if let Some(decoder) = options.yue2_decoder.as_deref() {
+        requested.insert("decoder".to_owned(), decoder.to_owned());
     }
     let choices = resolve_co_requisite_choices(model, requested_variant, &requested)
         .map_err(|error| error.to_string())?;
@@ -798,6 +912,26 @@ pub fn selected_portable_requirements_for_model(
         platform,
         requested_variant,
         payload,
+    )?;
+    Ok(selected_requirements_for_closure(&selected, data_dir))
+}
+
+pub fn selected_portable_requirements_for_model_resolved(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    options: &PortableArtifactOptions,
+    data_dir: &Path,
+) -> Result<SelectedRequirements, String> {
+    let selected = selected_portable_model_artifact_closure_resolved(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+        options,
     )?;
     Ok(selected_requirements_for_closure(&selected, data_dir))
 }
@@ -1408,6 +1542,152 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// SW-F363 audit: for MiniMax-H3-Image (render and training) and its prompt expander, the tier
+    /// a job is admitted with ([`admitted_runtime_variant`], read by BOTH the API's portable
+    /// admission and the worker's portable guard) rebuilds an artifact closure whose primary row
+    /// is that tier in the executing platform's own layout — every tier, every OS.
+    #[test]
+    fn minimax_h3_image_admitted_tiers_select_their_own_rows_on_every_os() {
+        use crate::contracts::JobType;
+        let entry = |id: &str| {
+            Value::Object(
+                crate::builtin_manifests::builtin_model_entry(id)
+                    .unwrap_or_else(|| panic!("{id} ships"))
+                    .clone(),
+            )
+        };
+        let image = entry("minimax_h3_image");
+        let expander = entry("minimax_h3_image_pe");
+        let bits = |tier: &str| match tier {
+            "q4" => 4,
+            "q8" => 8,
+            _ => 0,
+        };
+        for (os, backend) in [("macos", "mlx"), ("windows", "candle"), ("linux", "candle")] {
+            let primary = |entry: &Value, tier: &str, payload: &Map<String, Value>| {
+                let closure = selected_portable_model_artifact_closure(
+                    entry,
+                    backend,
+                    os,
+                    Some(tier),
+                    payload,
+                )
+                .unwrap_or_else(|error| panic!("{os} {tier}: {error}"));
+                closure["downloads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| !is_co_requisite_download(row))
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{os} {tier}: a primary row"))
+            };
+            for tier in ["bf16", "q8", "q4"] {
+                // A render that names (or had frozen) its tier as `advanced.mlxQuantize`.
+                let render =
+                    json!({"model": "minimax_h3_image", "advanced": {"mlxQuantize": bits(tier)}});
+                let render = render.as_object().unwrap();
+                for job_type in [JobType::ImageGenerate, JobType::ImageEdit] {
+                    assert_eq!(
+                        admitted_runtime_variant(
+                            &job_type,
+                            render,
+                            "modelManifestEntry",
+                            "minimax_h3_image"
+                        )
+                        .unwrap()
+                        .as_deref(),
+                        Some(tier)
+                    );
+                }
+                let row = primary(&image, tier, render);
+                assert_eq!(row["variant"], tier, "{os} render {tier}");
+                // A training run over the plan's frozen base tier.
+                let training = json!({"plan": {
+                    "target": {"baseModel": "minimax_h3_image", "kernel": "minimax_h3_image_lora"},
+                    "config": {"advanced": {"baseTier": tier}},
+                }});
+                let training = training.as_object().unwrap();
+                assert_eq!(
+                    admitted_runtime_variant(&JobType::LoraTrain, training, "", "minimax_h3_image")
+                        .unwrap()
+                        .as_deref(),
+                    Some(tier)
+                );
+                assert_eq!(
+                    primary(&image, tier, training)["variant"],
+                    tier,
+                    "{os} training {tier}"
+                );
+            }
+            // A plan without a base tier trains the upstream bf16 checkpoint.
+            let auto = json!({"plan": {"target": {"baseModel": "minimax_h3_image", "kernel": "minimax_h3_image_lora"}}});
+            assert_eq!(
+                admitted_runtime_variant(
+                    &JobType::LoraTrain,
+                    auto.as_object().unwrap(),
+                    "",
+                    "minimax_h3_image"
+                )
+                .unwrap()
+                .as_deref(),
+                Some("bf16")
+            );
+            // The expander: its frozen `peTier`, in this OS's layout (`q4/` on macOS, `candle-q4/`
+            // on Windows/Linux); NVFP4 exists only on the CUDA hosts.
+            let mut expander_tiers = vec!["q8", "q4"];
+            if backend == "candle" {
+                expander_tiers.push("nvfp4");
+            }
+            for tier in expander_tiers {
+                let payload = json!({"task": "minimax_h3_image_expand", "peTier": tier});
+                let payload = payload.as_object().unwrap();
+                assert_eq!(
+                    admitted_runtime_variant(
+                        &JobType::PromptRefine,
+                        payload,
+                        "modelManifestEntry",
+                        "minimax_h3_image_pe"
+                    )
+                    .unwrap()
+                    .as_deref(),
+                    Some(tier)
+                );
+                let row = primary(&expander, tier, payload);
+                assert_eq!(row["variant"], tier, "{os} expander {tier}");
+                let first_file = row["files"][0].as_str().unwrap_or_default();
+                let expected_prefix = match (tier, backend) {
+                    ("nvfp4", _) => "",
+                    (_, "mlx") => tier,
+                    _ => {
+                        if tier == "q8" {
+                            "candle-q8"
+                        } else {
+                            "candle-q4"
+                        }
+                    }
+                };
+                if !expected_prefix.is_empty() {
+                    assert!(
+                        first_file.starts_with(&format!("{expected_prefix}/")),
+                        "{os} expander {tier}: {first_file}"
+                    );
+                }
+            }
+            // `peTier` belongs to the expander's own carrier only.
+            let payload = json!({"peTier": "q4"});
+            assert_eq!(
+                admitted_runtime_variant(
+                    &JobType::PromptRefine,
+                    payload.as_object().unwrap(),
+                    "modelManifestEntries/0",
+                    "x"
+                )
+                .unwrap(),
+                None
+            );
+        }
+    }
+
     const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
     const REV_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
@@ -1593,6 +1873,18 @@ mod tests {
     #[test]
     fn requested_runtime_variant_reads_request_data_only() {
         let payload = |value: Value| value.as_object().unwrap().clone();
+        assert_eq!(
+            requested_runtime_variant_typed(Some(" Q8 "), Some("bf16"), Some(4)),
+            Some("q8".to_owned())
+        );
+        assert_eq!(
+            requested_runtime_variant_typed(None, Some("nvfp4"), Some(8)),
+            Some("nvfp4".to_owned())
+        );
+        assert_eq!(
+            requested_runtime_variant_typed(None, None, Some(4)),
+            Some("q4".to_owned())
+        );
         assert_eq!(
             requested_runtime_variant(&payload(json!({"variant": "Q8"}))),
             Some("q8".to_owned())
@@ -1855,6 +2147,50 @@ mod tests {
             invalid.as_object().unwrap(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn resolved_artifact_choices_do_not_reparse_authored_request_options() {
+        let yue2 = builtin_yue2();
+        let authored = json!({"model":"yue2","yue2":{"decoder":"standard"}});
+        let selected = selected_portable_model_artifact_closure_resolved(
+            &yue2,
+            "cpu",
+            "macos",
+            Some("bf16"),
+            authored.as_object().unwrap(),
+            &PortableArtifactOptions {
+                yue2_decoder: Some("legacy".to_owned()),
+                ..PortableArtifactOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            repos(selected["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
+        );
+
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let krea = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .unwrap();
+        let authored = json!({"model":"krea_2_turbo","advanced":{"convRot":false}});
+        let selected = selected_portable_model_artifact_closure_resolved(
+            krea,
+            "candle",
+            "linux",
+            None,
+            authored.as_object().unwrap(),
+            &PortableArtifactOptions {
+                conv_rot: true,
+                ..PortableArtifactOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "int8-convrot");
     }
 
     #[test]

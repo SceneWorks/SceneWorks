@@ -1,6 +1,214 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[tokio::test]
+async fn training_continuation_creates_independent_linked_outputs_and_keeps_source_unchanged() {
+    let _env = isolate_hf_cache();
+    let temporary = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temporary);
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"Continue training",
+        request,
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let (id, directory, adapter) =
+        submit_real_training_job(app.clone(), project_id, &settings.data_dir).await;
+    let payload = private_training_payload(&settings.data_dir, &id);
+    let steps = payload["plan"]["config"]["steps"].as_u64().unwrap();
+    let path = format!("/api/v1/training/jobs/{id}/continue");
+    let (status, _) = request(app.clone(), "POST", &path, json!({"additionalSteps":1000})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "queued runs cannot be continued"
+    );
+    claim_training_job(&app, &id).await;
+    std::fs::create_dir_all(&directory).unwrap();
+    write_test_safetensors(&adapter);
+    let (status, completed) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/progress"), json!({
+        "status":"completed", "stage":"completed", "progress":1, "message":"Training completed.", "workerId":TEST_TRAINING_WORKER_ID,
+        "result":{"outputPath":adapter.display().to_string()}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let (_, original_snapshot) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
+    for invalid in [
+        json!({"additionalSteps":0}),
+        json!({"additionalSteps":-1}),
+        json!({"additionalSteps":1.5}),
+        json!({"additionalSteps":4294967295u64}),
+        json!({"additionalSteps":1,"outputDir":"elsewhere"}),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &path, invalid).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+            ),
+            "{error}"
+        );
+    }
+    let (status, missing) =
+        request(app.clone(), "POST", &path, json!({"additionalSteps":1000})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    assert!(
+        missing.to_string().contains("no recovery checkpoint"),
+        "{missing}"
+    );
+    let stem = adapter.file_stem().unwrap().to_str().unwrap();
+    let checkpoint = directory.join(format!("{stem}-step{steps:06}.resume.safetensors"));
+    let header = serde_json::to_vec(&json!({
+        "__metadata__":{"format":"candle-gen-resume-v1","step":steps.to_string(),"update_idx":steps.to_string(),
+            "training_config":format!("steps={steps};accum=1;scheduler=Cosine"),"request_fingerprint":"dataset-identity"},
+        "factor.test":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}
+    })).unwrap();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header);
+    bytes.extend(1.25f32.to_le_bytes());
+    std::fs::write(&checkpoint, &bytes).unwrap();
+    let adapter_before = std::fs::read(&adapter).unwrap();
+    // A saved run remains discoverable and continuable after both queue clearing and retention.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/clear"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    state
+        .jobs_store
+        .purge_terminal_jobs_completed_before("2999-01-01T00:00:00Z")
+        .unwrap();
+    let (_, queue) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(queue.as_array().unwrap().is_empty(), "{queue}");
+    let runs_path = format!("/api/v1/projects/{project_id}/training/runs?limit=1");
+    let (status, history) = request(app.clone(), "GET", &runs_path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history["jobs"][0]["id"], id);
+    assert!(history["nextOffset"].is_null());
+    assert!(
+        history["jobs"][0]["payload"]["plan"]["output"]
+            .get("outputDir")
+            .is_none(),
+        "private paths stay redacted"
+    );
+    let (_, other_project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"Other training workspace",
+        request,
+    )
+    .await;
+    let (_, other_history) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{}/training/runs",
+            other_project["id"].as_str().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    assert!(other_history["jobs"].as_array().unwrap().is_empty());
+    let (_, cleared_snapshot) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(cleared_snapshot["payload"], original_snapshot["payload"]);
+    assert_eq!(cleared_snapshot["result"], original_snapshot["result"]);
+    assert_eq!(private_training_payload(&settings.data_dir, &id), payload);
+    let original_snapshot = cleared_snapshot;
+    let manifest = directory.parent().unwrap().join("manifest.jsonc");
+    let manifest_before = std::fs::read(&manifest).unwrap();
+    let loras_path = format!("/api/v1/loras?projectId={project_id}");
+    let (_, original_loras) = request(app.clone(), "GET", &loras_path, Value::Null).await;
+    let mut outputs = Vec::new();
+    let mut continued_ids = Vec::new();
+    // Siblings may be queued concurrently: each has its own independent state.
+    for additional in [1000, 2000] {
+        let (status, continued) = request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({"additionalSteps":additional}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{continued}");
+        assert_eq!(continued["sourceJobId"], id);
+        assert_eq!(continued["status"], "queued");
+        assert_ne!(continued["id"], id);
+        let new_id = continued["id"].as_str().unwrap();
+        let next = private_training_payload(&settings.data_dir, new_id);
+        assert_eq!(next["plan"]["config"]["steps"], steps + additional);
+        assert_eq!(next["plan"]["config"]["advanced"]["resume"], true);
+        assert_eq!(next["continuation"]["sourceJobId"], id);
+        assert_eq!(next["continuation"]["initialStep"], steps);
+        assert_ne!(
+            next["plan"]["output"]["loraId"],
+            payload["plan"]["output"]["loraId"]
+        );
+        assert_eq!(next["manifestEntry"]["provenance"]["trainingJobId"], new_id);
+        assert_eq!(next["plan"]["provenance"]["sourceJobId"], new_id);
+        assert_eq!(next["plan"]["dataset"], payload["plan"]["dataset"]);
+        let output =
+            std::path::PathBuf::from(next["plan"]["output"]["outputDir"].as_str().unwrap());
+        assert_ne!(output, directory);
+        assert!(output.join(checkpoint.file_name().unwrap()).exists());
+        assert!(!output.join(adapter.file_name().unwrap()).exists());
+        outputs.push(output);
+        continued_ids.push(new_id.to_owned());
+    }
+    assert_ne!(outputs[0], outputs[1]);
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), bytes);
+    assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+    // Registering the continued export must add an adapter, preserving the parent's entry.
+    let first = &continued_ids[0];
+    claim_training_job(&app, first).await;
+    let new_adapter = outputs[0].join(adapter.file_name().unwrap());
+    write_test_safetensors(&new_adapter);
+    let (status, finished) = request(app.clone(), "POST", &format!("/api/v1/jobs/{first}/progress"), json!({
+        "status":"completed", "stage":"completed", "progress":1, "message":"Continued LoRA saved.",
+        "workerId":TEST_TRAINING_WORKER_ID, "result":{"outputPath":new_adapter.display().to_string()}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    assert_eq!(finished["result"]["loraRegistered"], true, "{finished}");
+    let (_, first_page) = request(app.clone(), "GET", &runs_path, Value::Null).await;
+    assert_eq!(first_page["jobs"][0]["id"], first.as_str());
+    assert_eq!(first_page["nextOffset"], 1);
+    let (_, older_page) = request(
+        app.clone(),
+        "GET",
+        &format!("{runs_path}&offset=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(older_page["jobs"][0]["id"], id);
+    assert!(older_page["nextOffset"].is_null());
+    let (_, loras_after) = request(app.clone(), "GET", &loras_path, Value::Null).await;
+    for original_entry in original_loras.as_array().unwrap() {
+        assert!(loras_after.as_array().unwrap().contains(original_entry));
+    }
+    assert_eq!(
+        loras_after.as_array().unwrap().len(),
+        original_loras.as_array().unwrap().len() + 1
+    );
+    assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
+    let (_, source_after) = request(app, "GET", &format!("/api/v1/jobs/{id}"), Value::Null).await;
+    assert_eq!(source_after, original_snapshot);
+}
+
 // Training endpoint fixtures use small staged snapshots; bind their exact local bytes as the
 // test publisher metadata instead of querying the real multi-gigabyte model repositories.
 fn create_app(
@@ -39,8 +247,8 @@ async fn moss_field_shapes_refuse_submission_before_queueing() {
             for dry_run in [false, true] {
                 for (field, invalid, remedy) in [
                     ("cacheLatents", json!("false"), "true or false"),
-                    ("cacheTextEmbeddings", json!(0), "true or false"),
-                    ("loraTargetModules", json!([7]), "only strings"),
+                    ("cacheTextEmbeddings", json!(0), "must be a boolean"),
+                    ("loraTargetModules", json!([7]), "wrong JSON type"),
                     (
                         "modelOptions",
                         json!({"vae_posterior":"sample"}),
@@ -246,6 +454,8 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
                 && !id.starts_with("iris_3b")
                 && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
                 && !id.starts_with("flux3_klein")
+                // SW-7103: the H3-Image trainer declares adapter noise and buckets only.
+                && !id.starts_with("minimax_h3_image")
         })
         .collect();
     assert_eq!(mlx, all);
@@ -4990,8 +5200,20 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
     let evil_manifest = temp_dir.path().join("evil-manifest.jsonc");
 
-    // Raw training jobs have no server-built plan or frozen base source. Reject each
-    // attacker-authored manifest at admission, before a worker can register anything.
+    // Supply a valid target and config so the test reaches the missing frozen-source guard.
+    let targets = sceneworks_core::training::effective_training_targets_for_candle(!cfg!(
+        target_os = "macos"
+    ));
+    let target = targets
+        .targets
+        .iter()
+        .find(|target| target.kernel == "z_image_lora")
+        .expect("Z-Image training target");
+    let plan = json!({
+        "target": {"targetId": target.id, "kernel": target.kernel, "baseModel": target.base_model},
+        "config": target.defaults,
+    });
+    // Reject each attacker-authored manifest before a worker can register anything.
     for manifest_entry in [
         json!({
             "id": "lora_crafted01", "name": "Crafted LoRA", "scope": "project",
@@ -5017,6 +5239,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
                 "projectName": "Training Project", "requestedGpu": "auto",
                 "payload": {
                     "dryRun": false,
+                    "plan": plan,
                     "manifestPath": evil_manifest.display().to_string(),
                     "manifestEntry": manifest_entry
                 }
@@ -8030,8 +8253,10 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
         "{body}"
     );
 
-    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
-    let (status, body) = request(
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10). The
+    // dataset store holds up to the largest target cap (MiniMax-H3-Image's 16, SW-7103), so the
+    // 2.1 edit target's own cap refuses the run at plan time.
+    let (status, dataset) = request(
         app.clone(),
         "POST",
         &datasets_path,
@@ -8043,6 +8268,15 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
                 "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
             }]
         }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let over_cap_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        dry_run(&edit, &over_cap_id),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -8533,4 +8767,398 @@ async fn canceling_parquet_validation_cannot_commit_a_dataset() {
     assert_eq!(current["version"], fixture.payload["datasetVersion"]);
     assert_eq!(current["items"], json!([]));
     assert!(fixture.staged_path.is_file());
+}
+
+/// Seed a complete MiniMax-H3-Image bf16 install (the upstream snapshot's DiT, image VAE and
+/// tokenizer, and MiniMax-H3's bf16 text encoder) under `data_dir`, at the shipped catalog pins.
+fn seed_minimax_h3_image_bf16_install(data_dir: &std::path::Path) {
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        std::fs::write(path, b"{}").expect("write marker");
+    };
+    let root = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    // Every selector of every member needs an installed file: a portable job binds each member's
+    // file closure from the pinned snapshot, and a member with an unmatched selector is refused
+    // as incomplete.
+    for file in [
+        "transformer_diffusers/config.json",
+        "pdd_fused_heads.safetensors",
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+        "processor/processor_config.json",
+    ] {
+        touch(root.join(file));
+    }
+    let text_encoder = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3",
+        "939557dc319dd91227e30195a763f272ba7f8765",
+    );
+    touch(text_encoder.join("text_encoder").join("config.json"));
+}
+
+fn minimax_h3_image_training_target(id: &str) -> sceneworks_core::training::TrainingTarget {
+    crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == id)
+        .unwrap_or_else(|| panic!("{id} ships"))
+}
+
+/// SW-7103 (E19/E20): a MiniMax-H3-Image run is gated on an installed tier (the worker's own tier
+/// resolution, so the gate and the trainer agree), refuses an explicit tier that is not installed,
+/// requires the community-licence acceptance, and its adapter's library entry records the
+/// `minimax-h3-image` family Image Studio's `loraCompatibility` admits, the base and the licence.
+#[tokio::test]
+async fn minimax_h3_image_real_training_needs_an_installed_tier_and_records_the_family() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"H3 Training", request)
+            .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let assets = upload_distinct_assets(&app, &project_id, "Portrait", 1).await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "H3 set",
+            "items": [{ "assetId": assets[0], "caption": { "text": "h3style portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let body = |base_tier: Option<&str>, acknowledged: bool, dry_run: bool| {
+        let mut config = serde_json::to_value(&target.defaults).expect("defaults serialize");
+        if let Some(tier) = base_tier {
+            config["advanced"]["baseTier"] = json!(tier);
+        }
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": config,
+            "outputName": "H3 Style",
+            "dryRun": dry_run,
+            "licenseAcknowledged": acknowledged
+        })
+    };
+
+    // A dry run needs no install and records what the adapter's library entry will carry.
+    let (status, dry) = request(app.clone(), "POST", &jobs_path, body(None, true, true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{dry}");
+    assert_eq!(
+        dry["payload"]["plan"]["target"]["kernel"],
+        "minimax_h3_image_lora"
+    );
+    assert_eq!(dry["payload"]["plan"]["config"]["resolution"], json!(2048));
+    let entry = &dry["payload"]["manifestEntry"];
+    assert_eq!(entry["family"], "minimax-h3-image");
+    assert_eq!(entry["baseModel"], "minimax_h3_image");
+    assert_eq!(
+        entry["license"],
+        json!(sceneworks_core::training::MINIMAX_H3_IMAGE_LICENSE)
+    );
+    assert!(
+        entry.get("trainingMode").is_none(),
+        "a T2I adapter: {entry}"
+    );
+
+    // The licence gate binds a real run.
+    let (status, refused) =
+        request(app.clone(), "POST", &jobs_path, body(None, false, false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["code"], json!("license_acknowledgment_required"));
+
+    // Nothing installed: refused before a job exists.
+    let (status, refused) = request(app.clone(), "POST", &jobs_path, body(None, true, false)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("installed tier"),
+        "{refused}"
+    );
+
+    seed_minimax_h3_image_bf16_install(&settings.data_dir);
+    // An explicit packed tier that is not installed (q4 is not published) is refused by name.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        body(Some("q4"), true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("q4"),
+        "{refused}"
+    );
+    // A malformed tier is a field error on the typed route.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        body(Some("q2"), true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // The installed bf16 tier (auto or named) queues a real run on every host: both native
+    // backends register the trainer.
+    for tier in [None, Some("bf16")] {
+        let (status, job) = request(app.clone(), "POST", &jobs_path, body(tier, true, false)).await;
+        assert_eq!(status, StatusCode::CREATED, "{tier:?}: {job}");
+        assert_eq!(
+            job["payload"]["manifestEntry"]["family"],
+            "minimax-h3-image"
+        );
+    }
+}
+
+/// Seed a complete MiniMax-H3-Image q4 install WITHOUT the bf16 DiT: the upstream snapshot's
+/// tier-agnostic image VAE, tokenizer and processor, the re-host's `q4/transformer_diffusers/`, and
+/// MiniMax-H3's q4 text encoder, at the shipped catalog pins.
+fn seed_minimax_h3_image_q4_only_install(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        std::fs::write(path, b"{}").expect("write marker");
+    };
+    let root = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    for file in [
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+        "processor/processor_config.json",
+    ] {
+        touch(root.join(file));
+    }
+    let rehost = seed_hf_snapshot(
+        data_dir,
+        "SceneWorks/minimax-h3-image-mlx",
+        "6f62669b919bccdbf51b08c696fbb84542000a87",
+    );
+    touch(rehost.join("q4/transformer_diffusers/config.json"));
+    let text_encoder = seed_hf_snapshot(
+        data_dir,
+        "SceneWorks/minimax-h3-mlx",
+        "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+    );
+    touch(text_encoder.join("q4/text_encoder/config.json"));
+    rehost.join("q4")
+}
+
+/// SW-7103 review: a run over a packed tier freezes that tier into the plan — `advanced.baseTier`
+/// and its directory as `target.baseModelPath` — so portable admission binds and verifies the q4
+/// sources the trainer loads. With only q4 installed (no bf16 DiT), an `auto` run is admitted and
+/// trains q4; before the fix admission bound the bf16 snapshot and refused the run.
+#[tokio::test]
+async fn minimax_h3_image_training_freezes_the_installed_packed_tier_into_the_plan() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = crate::create_app_with_state(settings.clone()).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"H3 q4", request).await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let assets = upload_distinct_assets(&app, &project_id, "Portrait", 1).await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "H3 set",
+            "items": [{ "assetId": assets[0], "caption": { "text": "h3style portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let tier_dir = seed_minimax_h3_image_q4_only_install(&settings.data_dir);
+    // The trainer's directory is verified against the pinned publisher ledger of the q4 row, so
+    // that ledger names the seeded bytes; every other repository keeps the offline fixture ledger.
+    *state.test_hooks.pinned_metadata_override.lock() = Some(std::sync::Arc::new(
+        |repo: &str, revision: &str, selectors: &[String]| {
+            if repo == "SceneWorks/minimax-h3-image-mlx" {
+                return vec![
+                    sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                        relative_path: "q4/transformer_diffusers/config.json".into(),
+                        size_bytes: 2,
+                        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"{}")),
+                    },
+                ];
+            }
+            crate::portable_admission::test_network::offline_pinned_files(repo, revision, selectors)
+                .expect("offline ledger")
+        },
+    ));
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    for base_tier in [None, Some("q4")] {
+        let mut config = serde_json::to_value(&target.defaults).expect("defaults serialize");
+        if let Some(tier) = base_tier {
+            config["advanced"]["baseTier"] = json!(tier);
+        }
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &jobs_path,
+            json!({
+                "targetId": target.id,
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "H3 Style",
+                "dryRun": false,
+                "licenseAcknowledged": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{base_tier:?}: {job}");
+        // The public snapshot redacts host paths; read the stored plan.
+        let stored = state
+            .jobs_store
+            .get_job(job["id"].as_str().unwrap())
+            .expect("job reads");
+        let plan = &stored.payload["plan"];
+        assert_eq!(plan["config"]["advanced"]["baseTier"], "q4", "{plan}");
+        // The worker's portable guard accepts the admitted q4 base before the trainer runs.
+        let binding = state
+            .jobs_store
+            .portable_model_binding(&stored.id)
+            .expect("binding reads")
+            .expect("the run is bound");
+        assert_eq!(
+            crate::tests::minimax_h3_image_jobs::assert_worker_guard_accepts(
+                &stored.job_type,
+                &stored.payload,
+                &binding,
+                "minimax_h3_image"
+            ),
+            "q4"
+        );
+        assert_eq!(
+            std::fs::canonicalize(plan["target"]["baseModelPath"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&tier_dir).unwrap(),
+            "{plan}"
+        );
+    }
+}
+
+/// SW-7103: an H3-Image edit-pair dataset trains on the edit target with its ordered references
+/// (up to the model's 16), recorded as an edit adapter; a 17th reference is refused naming the cap,
+/// and the T2I target refuses an edit dataset.
+#[tokio::test]
+async fn minimax_h3_image_edit_dataset_trains_up_to_sixteen_ordered_references() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"H3 Edit Training",
+        request,
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let targets = upload_distinct_assets(&app, &project_id, "Target", 1).await;
+    let refs = upload_distinct_assets(&app, &project_id, "Ref", 17).await;
+    let datasets_path = format!("/api/v1/projects/{project_id}/training/datasets");
+    let dataset_for = |name: &str, references: &[String]| {
+        json!({
+            "name": name,
+            "items": [{
+                "assetId": targets[0],
+                "caption": { "text": "Put the hat from <Picture 2> on the person in <Picture 1>" },
+                "references": references
+                    .iter()
+                    .map(|id| json!({ "assetId": id }))
+                    .collect::<Vec<_>>()
+            }]
+        })
+    };
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let edit = minimax_h3_image_training_target("minimax_h3_image_edit_lora");
+    let t2i = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let submit = |target: &sceneworks_core::training::TrainingTarget, dataset_id: &str| {
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "H3 Edit",
+            "dryRun": true
+        })
+    };
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        dataset_for("Sixteen", &refs[..16]),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (status, job) = request(app.clone(), "POST", &jobs_path, submit(&edit, &dataset_id)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let plan = &job["payload"]["plan"];
+    assert_eq!(plan["target"]["kernel"], "minimax_h3_image_edit_lora");
+    assert_eq!(
+        plan["dataset"]["items"][0]["referenceImagePaths"]
+            .as_array()
+            .map(Vec::len),
+        Some(16)
+    );
+    assert_eq!(job["payload"]["manifestEntry"]["trainingMode"], "edit");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["family"],
+        "minimax-h3-image"
+    );
+    // The T2I target refuses an edit dataset.
+    let (status, refused) =
+        request(app.clone(), "POST", &jobs_path, submit(&t2i, &dataset_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Seventeen references exceed the model's cap.
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        dataset_for("Seventeen", &refs),
+    )
+    .await;
+    if status.is_success() {
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (status, refused) =
+            request(app.clone(), "POST", &jobs_path, submit(&edit, &dataset_id)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("16"),
+            "{refused}"
+        );
+    } else {
+        // The dataset store's ceiling is the largest target cap (16), so it refuses first.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{dataset}");
+        assert!(
+            dataset["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("16"),
+            "{dataset}"
+        );
+    }
 }

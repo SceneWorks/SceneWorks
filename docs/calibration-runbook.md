@@ -161,6 +161,34 @@ fresh-five-rung-z-image-q4-768-seed16402-step2`.
 Only `authoritative` scope can ever become `current`. A `fixture`/`candidate` anchor derives no
 digest and can never be current evidence.
 
+**Regime rows (SW-F363): `<modelId>:<tier>:<backend>:<regime>`.** A cell may carry up to three
+more rows beside its base row, each the same request rendered at a different composition — the
+AGENTS.md two-anchor rule (measure the lowest- and highest-memory fits, derive everything between)
+plus one overlay witness. The suffix is a closed enum, so a regime grid is as unwritable as a rung
+grid:
+
+| suffix | composition | rule (`validatePlan`, `memory-calibration-harness.mjs`) |
+|---|---|---|
+| `resident` | the resident rung alone | only where the base row is not already resident (the candle lane default is `staged_residency`; on MLX the base row IS the resident anchor), and never for an engine that stages every request (`enginesThatAlwaysStage` in `config/anchor-lane-default-strategy.json`) |
+| `optimized` | every rung the contract implements, engaged at once, with each bounded rung's one exact parameter tuple (`strategy.parameters`) | strictly deeper than the base row, rung = deepest engaged rung; `inference_runtime.rs` checks against the weights-free contract that the engaged set is EVERY implemented rung |
+| `lora` | the base row's composition, overlay `lora` | the adapter arm installs one pinned community LoRA through `LoadSpec::adapters`; the catalog runner resolves and `--download-missing` fetches it as the family's `overlayArtifact` |
+
+🔴 **MiniMax-H3-Image's least-optimized anchor is STAGED, on both lanes.** Its generator stages every
+request (text encoder, then DiT, then VAE, each released before the next maps) whatever rung is
+selected — MLX's descriptor says so (`unconditionally_engages_staged_residency`), Candle's engine
+source says so — so a resident render does not exist to be captured. Its base rows plan
+`staged_residency` on BOTH lanes (an MLX override the always-staging declaration authorizes) so the
+record's `measuredRegime.staged` is true, and it plans no `:resident` row; its two anchors are the
+staged base row and `:optimized`.
+
+A regime row shares its base row's provider, mode, geometry, reference count and scope. The harness
+writes the suffix into `planned.target.anchorRegime`, so the record says which regime it is; the
+extractor files it under the store's `regimeAnchors` (never under `anchors`, which the derivation
+reads), `--stamp-anchors` keys it like any anchor, and `--list` / `--skip-current` track it under
+its own key. `node scripts/measure-memory-catalog.mjs --backend <lane> --campaign <c> --model
+minimax_h3_image --list` lists the model's regime rows; `--dry-run` prints every row's strategy,
+parameters, overlay and load shape.
+
 🔴 **The anchor's `geometry` is a FREE PLAN CHOICE, not a restatement of the geometry the packaged
 anchor was captured at, and the two are allowed to disagree.** The packaged anchors in
 `config/memory-anchors.json` (surfaced as `anchors[].geometry` in `docs/generated/memory-matrix.json`)
@@ -1731,14 +1759,16 @@ copied into the job environment under the names the worker itself reads.
 | backend | `runs-on` | box |
 |---|---|---|
 | `mlx` (default) | `[self-hosted, macOS, ARM64, rw-krea]` | `nax-macos-2`, the second Mac |
-| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax]` | `nax-macos`, the dev Mac |
+| `mlx` (other choice) | `[self-hosted, macOS, ARM64, nax, rw-starvector]` | `nax-macos`, the dev Mac |
 | `candle` | `[self-hosted, Windows, X64, cuda]` | the RTX PRO 6000 Windows box |
 
 🔴 Weight-set labels move between the two Macs — they name a weight set, not a machine. Both label
-sets above were confirmed against the `runner_name` of jobs that actually served them, which is the
-only way to check (`gh api /orgs/SceneWorks/actions/runners` 403s without `admin:org`). Re-confirm
-before assuming `rw-krea` is still the second Mac, and remember that a label no runner carries does
-not fail the dispatch: the job queues silently until the run is cancelled.
+sets above were checked with `gh api --paginate orgs/SceneWorks/actions/runners` on 2026-11-16:
+`rw-krea` is on nax-macos-2 only and `rw-starvector` on nax-macos only, while `nax` is on BOTH Macs.
+An earlier version of this note claimed `[…, nax]` alone selected the dev Mac; it does not (run
+43946963737 asked for nax-macos and ran on nax-macos-2). Re-check before relying on either, confirm
+the `Runner name` line in the job log, and remember that a label no runner carries does not fail the
+dispatch: the job queues silently until the run is cancelled.
 
 **What the job does.** Checks out `ref` shallowly (`fetch-depth: 1` — nothing in the campaign reads
 history beyond HEAD, and a full clone of this repo's 2+ GiB pack was costing 27+ minutes on the

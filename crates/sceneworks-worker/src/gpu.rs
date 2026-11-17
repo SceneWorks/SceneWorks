@@ -557,7 +557,7 @@ pub(crate) fn compute_cap_meets_int8_convrot(cap: Option<f32>) -> bool {
 /// surfaces it on the worker snapshot and the web picker (`quantTier.js`) shows the `nvfp4` tier only
 /// when a registered worker advertises it, so an ineligible host hides the tier gracefully.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) const NVFP4_CAPABILITY: &str = "nvfp4";
+pub(crate) const NVFP4_CAPABILITY: &str = sceneworks_core::contracts::NVFP4_WORKER_CAPABILITY;
 
 /// The minimum NVIDIA compute capability the NVFP4 tier requires: **12.0** (consumer Blackwell
 /// sm_120 — RTX PRO 6000 / RTX 50-series), the hardware epic 11037 targets and validates on.

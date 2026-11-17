@@ -1,5 +1,7 @@
 use super::*;
 use sceneworks_core::training::CaptionMode;
+mod continuation;
+pub(crate) use continuation::{continue_training_job, list_completed_training_runs};
 
 async fn portable_training_binding(
     state: &AppState,
@@ -125,7 +127,15 @@ pub(crate) async fn fresh_flux3_training_duplicate(
         .get("scope")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("FLUX.3 output scope is missing."))?;
-    if scope != training_output_scope(&plan.config.advanced)?.as_str()
+    let resolved_scope = sceneworks_core::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )
+    .map_err(ApiError::bad_request)?
+    .common
+    .output_scope;
+    if scope != resolved_scope.as_str()
         || entry.get("id").and_then(Value::as_str) != Some(plan.output.lora_id.as_str())
     {
         return Err(ApiError::bad_request(
@@ -186,21 +196,12 @@ pub(crate) async fn fresh_flux3_training_duplicate(
 /// retains the established MLX defaults; on non-macOS hosts the API projects only the Candle
 /// limitations into the response the Studio seeds and later submits. That makes the visible form,
 /// submitted config, resolved plan, and provenance snapshot agree without a worker-side override.
-fn effective_training_targets() -> TrainingTargetRegistry {
+pub(crate) fn effective_training_targets() -> TrainingTargetRegistry {
     effective_training_targets_for_candle(!cfg!(target_os = "macos"))
 }
 
 pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTargetRegistry {
-    let mut registry = builtin_training_targets();
-    if candle {
-        for target in &mut registry.targets {
-            sceneworks_core::training::apply_candle_training_defaults(
-                &target.kernel,
-                &mut target.defaults,
-            );
-        }
-    }
-    registry
+    sceneworks_core::training::effective_training_targets_for_candle(candle)
 }
 
 fn effective_training_presets() -> sceneworks_core::training::TrainingPresetRegistry {
@@ -1505,10 +1506,11 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
-/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
-/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
-/// Captioner, `training_caption` for JoyCaption). The worker
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner, JoyCaption (SW-7083) or
+/// the Qwen3.8 27B describer at a tier describes each image of the dataset (or of `itemIds`, in
+/// dataset order) as seven JSON fields plus its pixel size; `fitTo` and `condenseRows` add or run
+/// only the condensing step. The job routes by the capability of its model (`prompt_refine` for
+/// the Vision Captioner-class describers, `training_caption` for JoyCaption). The worker
 /// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
 /// the user's instruction.
 pub(crate) async fn create_training_dataset_batch_describe_job(
@@ -1516,14 +1518,51 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let (model, tier, prompt) = validate_batch_describe_request(&payload)?;
+    let fit_to = match payload
+        .fit_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => {
+            let entry = crate::models::resolve_model_manifest_entry(&state, id).await?;
+            Some((id.to_owned(), fit_to_target_entry(id, entry)?))
+        }
+        None => None,
+    };
+    let condense_rows = validate_condense_rows(&payload, fit_to.is_some())?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
         move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
     })
     .await?;
-    let items = batch_describe_items(&dataset, &dataset_root, payload.item_ids.as_deref())?;
+    let item_ids = condense_rows
+        .as_ref()
+        .map(|rows| rows.keys().cloned().collect::<Vec<_>>());
+    let mut items = batch_describe_items(
+        &dataset,
+        &dataset_root,
+        item_ids.as_deref().or(payload.item_ids.as_deref()),
+    )?;
+    if let Some(rows) = &condense_rows {
+        for item in &mut items {
+            let row = item
+                .get("itemId")
+                .and_then(Value::as_str)
+                .and_then(|id| rows.get(id));
+            if let (Some(object), Some(row)) = (item.as_object_mut(), row) {
+                object.insert("fields".to_owned(), json!(row.fields));
+                object.insert("width".to_owned(), json!(row.width));
+                object.insert("height".to_owned(), json!(row.height));
+                object.insert("notice".to_owned(), json!(row.notice));
+                if payload.measure_only {
+                    object.insert("condensedText".to_owned(), json!(row.condensed_text));
+                }
+            }
+        }
+    }
     let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_batch_describe",
@@ -1542,8 +1581,28 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
-    if let Some(prompt) = prompt {
+    // A tiered describer carries its tier on every request mode: a condense-only job reloads the
+    // tier the row was described with, never the default.
+    if let Some(tier) = tier {
+        job_payload.insert("variant".to_owned(), json!(tier));
+    }
+    if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
+    }
+    if let Some((id, entry)) = fit_to {
+        // A projection of the target's own catalog entry, so the worker reads the limit (and
+        // finds the target's tokenizer) from the server's catalog, never from a client number.
+        // It is not a model the job loads, so it rides outside the model-source carriers.
+        job_payload.insert("fitTo".to_owned(), json!(id));
+        job_payload.insert("fitToManifestEntry".to_owned(), fit_to_projection(&entry));
+    }
+    if condense_rows.is_some() {
+        let mode = if payload.measure_only {
+            "measureOnly"
+        } else {
+            "condenseOnly"
+        };
+        job_payload.insert(mode.to_owned(), json!(true));
     }
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -1551,19 +1610,43 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
+    // Describe and condense-only jobs load the tier, so it must be installed. A model-free job
+    // (measure-only) loads no describer and carries no source, the same rule the source
+    // preparation above and the claim gate apply.
+    let model_free = sceneworks_core::model_artifacts::portable_binding::model_free_job(
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+    );
+    if let Some(tier) = tier.filter(|_| !model_free) {
+        ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+    }
     let requested_gpu = payload.requested_gpu;
+    // Freeze the exact source each worker route loads (for a tiered describer, that tier's row on
+    // that platform) now, like the other dataset jobs, so a claim runs only what was admitted.
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetBatchDescribe,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetBatchDescribe,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1602,9 +1685,13 @@ pub(crate) async fn list_training_dataset_batch_describe_jobs(
 /// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
-) -> Result<(&'static str, Option<String>), ApiError> {
-    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+) -> Result<(&'static str, Option<&'static str>, Option<String>), ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        max_describe_prompt_chars, resolve_describe_tier,
+    };
     let model = resolve_describe_model(payload.model.as_deref())?;
+    let tier = resolve_describe_tier(Some(model), payload.variant.as_deref())
+        .map_err(|message| training_field_error("variant", message))?;
     let prompt = payload
         .prompt
         .as_deref()
@@ -1617,22 +1704,218 @@ pub(crate) fn validate_batch_describe_request(
             format!("The describing prompt must be at most {limit} characters for this model."),
         ));
     }
-    Ok((model, prompt.map(str::to_owned)))
+    Ok((model, tier, prompt.map(str::to_owned)))
+}
+
+/// Refuse a describe tier this host has not installed, before the job is queued. Each tier is its
+/// own download (the q4 and q8 tiers are separate folders of a re-host), so the model being
+/// installed in some tier says nothing about the tier the request names.
+fn ensure_describe_tier_installed(
+    data_dir: &std::path::Path,
+    job_payload: &JsonObject,
+    tier: &str,
+) -> Result<(), ApiError> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let Some(entry) = job_payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+    else {
+        return Err(ApiError::internal(
+            "Qwen3.8 27B describe job carries no catalog entry",
+        ));
+    };
+    let mut entry = entry.clone();
+    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
+    if crate::models::installed_variant_keys(&entry, data_dir)
+        .iter()
+        .any(|installed| installed == tier)
+    {
+        return Ok(());
+    }
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(QWEN38_27B_DESCRIBER_MODEL_ID);
+    Err(ApiError::model_artifact_conflict(
+        format!(
+            "The {tier} tier of {name} is not installed. Download that tier in the Model \
+             Manager, or choose a tier that is installed."
+        ),
+        "model_artifact_incomplete",
+    ))
+}
+
+/// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it
+/// for `id`: refused when the id is not in the catalog, or its entry declares no
+/// `image.maxPromptTokens` or one below `MIN_FIT_TO_PROMPT_TOKENS` (too small to hold every
+/// person's pose).
+pub(crate) fn fit_to_target_entry(id: &str, entry: Value) -> Result<Value, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{prompt_token_limit, MIN_FIT_TO_PROMPT_TOKENS};
+    if entry.as_object().is_none_or(|object| object.is_empty()) {
+        return Err(training_field_error(
+            "fitTo",
+            format!("Unknown Fit to model {id:?}."),
+        ));
+    }
+    match prompt_token_limit(&entry) {
+        None => Err(training_field_error(
+            "fitTo",
+            format!("Fit to model {id:?} declares no prompt token limit."),
+        )),
+        Some(limit) if limit < MIN_FIT_TO_PROMPT_TOKENS => Err(training_field_error(
+            "fitTo",
+            format!(
+                "Fit to model {id:?} reads only {limit} prompt tokens; a Fit to target needs at \
+                 least {MIN_FIT_TO_PROMPT_TOKENS} to keep every person's pose."
+            ),
+        )),
+        Some(_) => Ok(entry),
+    }
+}
+
+/// The part of a target's catalog entry the worker reads: its id, name, adapter (which picks its
+/// exact counter), `image` prompt facts, and each download's repository, revision, files and
+/// co-requisite flag (where its tokenizer is installed). Job listings carry this, not the entry.
+pub(crate) fn fit_to_projection(entry: &Value) -> Value {
+    let downloads: Vec<Value> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|download| {
+            json!({
+                "repo": download.get("repo"),
+                "revision": download.get("revision"),
+                "files": download.get("files"),
+                "coRequisite": download.get("coRequisite"),
+            })
+        })
+        .collect();
+    json!({
+        "id": entry.get("id"),
+        "name": entry.get("name"),
+        "adapter": entry.get("adapter"),
+        "image": {
+            "maxPromptTokens": entry.get("image").and_then(|image| image.get("maxPromptTokens")),
+            "promptOverflow": entry.get("image").and_then(|image| image.get("promptOverflow")),
+        },
+        "downloads": downloads,
+    })
+}
+
+/// A condense-only or measure-only request's rows by item id (SW-7163), `None` for an ordinary
+/// describe request. Condensing needs a Fit to target and a describer that condenses (JoyCaption
+/// has no text step), takes its items from the rows (so `itemIds` is refused beside them), and
+/// accepts at most one row per item. Each field is one of the seven and no longer than a described
+/// field can be; a row holds at most `MAX_CONDENSE_ROW_CHARS` across its fields and is never all
+/// empty. A measure-only row must carry its edited `condensedText`.
+pub(crate) fn validate_condense_rows(
+    payload: &DatasetBatchDescribeJobRequest,
+    has_fit_to: bool,
+) -> Result<Option<std::collections::BTreeMap<String, crate::dto::CondenseRowRequest>>, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        describer_condenses, DESCRIBE_FIELDS, MAX_CONDENSE_ROW_CHARS, MAX_DESCRIBE_FIELD_CHARS,
+    };
+    if has_fit_to && !describer_condenses(payload.model.as_deref()) {
+        return Err(training_field_error(
+            "fitTo",
+            "Fit to needs a describer with a text step; JoyCaption rows are not condensed.",
+        ));
+    }
+    let Some(rows) = payload.condense_rows.as_ref() else {
+        if payload.measure_only {
+            return Err(training_field_error(
+                "condenseRows",
+                "measureOnly needs condenseRows.",
+            ));
+        }
+        return Ok(None);
+    };
+    let refuse = |detail: String| Err(training_field_error("condenseRows", detail));
+    if !has_fit_to {
+        return refuse("condenseRows needs a fitTo target.".to_owned());
+    }
+    if payload.item_ids.is_some() {
+        return refuse("Send condenseRows or itemIds, not both.".to_owned());
+    }
+    if rows.is_empty() {
+        return refuse("condenseRows must hold at least one row.".to_owned());
+    }
+    let mut by_id = std::collections::BTreeMap::new();
+    for row in rows {
+        let id = &row.item_id;
+        if let Some(name) = row
+            .fields
+            .keys()
+            .find(|name| !DESCRIBE_FIELDS.contains(&name.as_str()))
+        {
+            return refuse(format!("Row {id} has an unknown field {name:?}."));
+        }
+        if let Some((name, _)) = row
+            .fields
+            .iter()
+            .find(|(_, text)| text.chars().count() > MAX_DESCRIBE_FIELD_CHARS)
+        {
+            return refuse(format!(
+                "Row {id} field {name:?} is longer than {MAX_DESCRIBE_FIELD_CHARS} characters."
+            ));
+        }
+        let total: usize = row.fields.values().map(|text| text.chars().count()).sum();
+        if total > MAX_CONDENSE_ROW_CHARS {
+            return refuse(format!(
+                "Row {id} has {total} characters across its fields; at most \
+                 {MAX_CONDENSE_ROW_CHARS} can be condensed."
+            ));
+        }
+        if row.fields.values().all(|text| text.trim().is_empty()) {
+            return refuse(format!("Row {id} has no text in any field to condense."));
+        }
+        let text_len = |text: &Option<String>| text.as_deref().map_or(0, |t| t.chars().count());
+        if text_len(&row.notice) > MAX_DESCRIBE_FIELD_CHARS
+            || text_len(&row.condensed_text) > MAX_DESCRIBE_FIELD_CHARS
+        {
+            return refuse(format!(
+                "Row {id} notice or condensed prompt is longer than {MAX_DESCRIBE_FIELD_CHARS} \
+                 characters."
+            ));
+        }
+        if payload.measure_only
+            && row
+                .condensed_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return refuse(format!("Row {id} has no condensed prompt to measure."));
+        }
+        if by_id.insert(id.clone(), row.clone()).is_some() {
+            return refuse(format!("Row {id} appears twice."));
+        }
+    }
+    Ok(Some(by_id))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
 /// other accepted describer, anything else is refused. Shared by the describe job and the default
 /// describing prompt route so both accept exactly the same `model` values.
 pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
-    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use sceneworks_core::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     match model.map(str::trim) {
         None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
         Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(QWEN38_27B_DESCRIBER_REPO) => Ok(QWEN38_27B_DESCRIBER_REPO),
         Some(other) => Err(training_field_error(
             "model",
             format!(
                 "Unsupported describe model {other:?}. Use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ),
         )),
     }
@@ -2195,10 +2478,57 @@ pub(crate) async fn create_training_job(
 }
 struct ValidatedTrainingSubmission {
     target: TrainingTarget,
+    controls: sceneworks_core::resolved_options::IrisTrainingOptions,
+    training_adapter: Option<&'static sceneworks_core::training::depth_anchoring::AuxTrainingModel>,
+    subject_mask_consumer: Option<&'static str>,
     is_control: bool,
     is_base_checkpoint: bool,
     preset_metadata: Option<TrainingPresetProvenance>,
     output_name: String,
+}
+
+/// Re-resolve a stored plan against the native catalog before an API admission check consumes
+/// training controls. The saved plan remains the authored provenance snapshot.
+fn bind_resolved_training_options(
+    kind: &str,
+    authored: &JsonObject,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    use sceneworks_core::resolved_options::{BindingInput, IrisTrainingOptions};
+
+    let facts =
+        serde_json::to_value(effective_training_targets()).expect("training catalog serializes");
+    let facts = facts.as_object().expect("training catalog object");
+    let resolved = sceneworks_core::request_validation::resolve_request(kind, authored, facts)
+        .map_err(ApiError::from)?;
+    IrisTrainingOptions::bind(&BindingInput::new(authored, resolved.as_payload()))
+        .map_err(|error| ApiError::bad_request(format!("Invalid training control: {error:?}")))
+}
+
+pub(crate) fn resolved_training_options_for_plan(
+    plan: &sceneworks_core::training::TrainingPlan,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    // A stored plan can contain paths that this API derived from an earlier run. The portable
+    // request validator rightly rejects those keys from clients, so remove them only from this
+    // binding view; the original plan still carries them to the trainer.
+    let authored = json!({ "plan": plan });
+    let authored = authored.as_object().expect("training plan wrapper");
+    let binding_view =
+        sceneworks_core::request_validation::trusted_training_plan_validation_view(authored);
+    let kind = if plan.target.kernel == "krea_control" {
+        "control_training"
+    } else {
+        "lora_train"
+    };
+    bind_resolved_training_options(kind, &binding_view)
+}
+
+pub(crate) fn resolved_training_options_for_config(
+    target: &TrainingTarget,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Result<sceneworks_core::resolved_options::IrisTrainingOptions, ApiError> {
+    let authored = json!({ "plan": { "target": target, "config": config } });
+    let authored = authored.as_object().expect("training config wrapper");
+    bind_resolved_training_options("lora_train", authored)
 }
 
 fn validate_training_submission(
@@ -2225,20 +2555,32 @@ fn validate_training_submission(
     // directly to clients, so every advertised numeric bound is a submit-time
     // contract rather than an advisory UI hint. This also runs the shared MOSS field-shape
     // validator used by worker preflight, before malformed controls can enter the queue.
-    sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
-        .map_err(training_plan_error_to_api_error)?;
-    if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
-        && payload
-            .config
-            .advanced
-            .get("resume")
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        return Err(ApiError::bad_request(
-            "Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity.",
-        ));
-    }
+    let submitted = serde_json::to_value(payload).expect("training request serializes");
+    let facts = serde_json::to_value(target).expect("training target serializes");
+    let authored = submitted.as_object().expect("request object");
+    let resolved = sceneworks_core::request_validation::resolve_request(
+        "training",
+        authored,
+        facts.as_object().expect("target object"),
+    )
+    .map_err(ApiError::from)?;
+    let execution = sceneworks_core::resolved_options::TrainingExecutionOptions::bind_for_target(
+        authored, &resolved, target,
+    )
+    .map_err(|error| match error {
+        sceneworks_core::resolved_options::TrainingExecutionError::Validation(error) => {
+            ApiError::from(error)
+        }
+        sceneworks_core::resolved_options::TrainingExecutionError::Technique(error) => {
+            training_plan_error_to_api_error(error)
+        }
+        sceneworks_core::resolved_options::TrainingExecutionError::Binding(error) => {
+            ApiError::bad_request(format!("Invalid training control: {error}"))
+        }
+    })?;
+    let controls = execution.iris;
+    let training_adapter = execution.training_adapter;
+    let subject_mask_consumer = execution.subject_mask_consumer;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -2259,11 +2601,6 @@ fn validate_training_submission(
         output_kind,
         sceneworks_core::training::TrainingOutputKind::BaseCheckpoint
     );
-    if is_control && payload.dry_run {
-        return Err(ApiError::bad_request(
-            "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
-        ));
-    }
     let preset_metadata = match payload.preset_id.as_deref() {
         Some(preset_id) => {
             let preset_registry = effective_training_presets();
@@ -2274,20 +2611,14 @@ fn validate_training_submission(
                 .ok_or_else(|| {
                     ApiError::bad_request(format!("Unknown training preset: {preset_id}"))
                 })?;
-            if preset.target_id != target.id {
-                return Err(ApiError::bad_request(format!(
-                    "Training preset '{}' targets '{}', but the request targets '{}'.",
-                    preset.id, preset.target_id, target.id
-                )));
-            }
-            if let Some(requested_version) = payload.preset_version {
-                if requested_version != preset.version {
-                    return Err(ApiError::bad_request(format!(
-                        "Training preset '{}' is version {}, but the request pinned version {requested_version}.",
-                        preset.id, preset.version
-                    )));
-                }
-            }
+            sceneworks_core::training::validate_preset_binding(
+                &target.id,
+                &preset.id,
+                &preset.target_id,
+                preset.version,
+                payload.preset_version,
+            )
+            .map_err(ApiError::from)?;
             let preset_config_snapshot = serde_json::to_value(&preset.config)
                 .ok()
                 .and_then(|value| match value {
@@ -2302,23 +2633,16 @@ fn validate_training_submission(
                 preset_config_snapshot,
             })
         }
-        None => {
-            if payload.preset_version.is_some() {
-                return Err(ApiError::bad_request(
-                    "presetVersion requires a matching presetId.",
-                ));
-            }
-            None
-        }
+        None => None,
     };
 
     let output_name = payload.output_name.trim().to_owned();
-    if output_name.is_empty() {
-        return Err(ApiError::bad_request("Training output name is required."));
-    }
 
     Ok(ValidatedTrainingSubmission {
         target: target.clone(),
+        controls,
+        training_adapter,
+        subject_mask_consumer,
         is_control,
         is_base_checkpoint,
         preset_metadata,
@@ -2333,16 +2657,20 @@ struct PreparedTrainingSubmission {
     job_payload: JsonObject,
     requested_gpu: String,
     training_job_type: JobType,
+    source_job_id: Option<String>,
 }
 
 async fn prepare_training_submission(
     state: AppState,
     project_id: String,
-    payload: LoraTrainingRequest,
+    mut payload: LoraTrainingRequest,
     validated: ValidatedTrainingSubmission,
 ) -> Result<PreparedTrainingSubmission, ApiError> {
     let ValidatedTrainingSubmission {
         target,
+        controls,
+        training_adapter,
+        subject_mask_consumer,
         is_control,
         is_base_checkpoint,
         preset_metadata,
@@ -2388,7 +2716,23 @@ async fn prepare_training_submission(
     // Resolve absolute on-host paths and ids the kernel will consume. The job id
     // is pre-allocated so the plan can embed its own `jobId`/`sourceJobId`.
     let data_dir = state.settings.data_dir.clone();
-    let base_model_path = resolve_base_model_path(target, &data_dir);
+    let mut base_model_path = resolve_base_model_path(target, &data_dir);
+    // MiniMax-H3-Image (SW-7103) trains over an installed tier, which may be a packed q8/q4
+    // directory of the re-host rather than the bf16 snapshot `resolve_base_model_path` names.
+    // Freeze the tier the trainer will load (`advanced.baseTier`) and its directory into the plan,
+    // so portable admission binds and verifies that tier's sources. With no installed tier the plan
+    // keeps the request's own choice; a real run is refused below with the install step.
+    if sceneworks_core::training::is_minimax_h3_image_training_kernel(&target.kernel) {
+        if let Ok((tier, dir)) =
+            sceneworks_worker::minimax_h3_image_training_base(&data_dir, &payload.config)
+        {
+            payload.config.advanced.insert(
+                sceneworks_core::training::MINIMAX_H3_IMAGE_BASE_TIER_KEY.to_owned(),
+                Value::String(tier.to_owned()),
+            );
+            base_model_path = dir.display().to_string();
+        }
+    }
     // The output id is also the on-disk directory name AND — for a full fine-tune — the catalog
     // model id the user sees in the Studio picker, so it carries what the artifact IS rather than
     // labelling an 8 GB base checkpoint `lora_…`.
@@ -2399,16 +2743,20 @@ async fn prepare_training_submission(
     };
     let file_name = format!("{}.safetensors", slugify_lora_id(&output_name));
     let job_id = format!("job_{}", Uuid::new_v4().simple());
-    let requested_gpu = training_requested_gpu(&payload.config.advanced);
+    let requested_gpu = requested_gpu_or_auto(
+        controls
+            .requested_gpu
+            .as_ref()
+            .map(|value| value.value.clone())
+            .unwrap_or_default(),
+    );
     // The adapter's network parameterization (epic 2193). Recorded on the trained
     // LoRA so generation can route LoKr off the MLX backend (which is LoRA-only)
     // without opening the file — mirrors how `baseModel` gates Wan 5B/14B.
-    let network_type = payload
-        .config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let network_type = controls
+        .network_type
+        .as_ref()
+        .map(|value| value.value.trim())
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "lora".to_owned());
@@ -2420,7 +2768,11 @@ async fn prepare_training_submission(
     // resolves the installed path on either side. The matching manifest path is
     // recomputed from the same trusted inputs at registration time
     // (`register_trained_lora`), never read back from the job payload.
-    let output_scope = training_output_scope(&payload.config.advanced)?;
+    let output_scope = controls
+        .output_scope
+        .as_ref()
+        .map(|value| value.value.clone())
+        .unwrap_or_else(|| "project".to_owned());
     // A control overlay is a distinct artifact class (registered into its own store + manifest, applied at
     // inference on a frozen base via a strict-control lane, not a mergeable adapter), so its output +
     // source path go to `control-overlays/`, never the LoRA tree (sc-10165, epic 10159 B4).
@@ -2445,12 +2797,10 @@ async fn prepare_training_submission(
     };
     // Capture the control kind before `payload.config` is moved into `build_training_plan` below; used
     // only when shaping the control-overlay manifest entry (sc-10165, B4).
-    let control_type = payload
-        .config
-        .advanced
-        .get("controlType")
-        .and_then(Value::as_str)
-        .map(str::trim)
+    let control_type = controls
+        .control_type
+        .as_ref()
+        .map(|value| value.value.trim())
         .filter(|value| !value.is_empty())
         .unwrap_or("pose")
         .to_ascii_lowercase();
@@ -2517,6 +2867,16 @@ async fn prepare_training_submission(
             ) {
                 return Err(crate::iris_curricula::iris_install_refused(refusal));
             }
+        } else if sceneworks_core::training::is_minimax_h3_image_training_kernel(&target.kernel) {
+            // MiniMax-H3-Image (SW-7103) trains over whichever tier is installed (or the one
+            // `advanced.baseTier` names), with MiniMax-H3's text encoder at that tier — the worker's
+            // own resolution, so the gate and the trainer load agree on one tier.
+            if let Some(message) = sceneworks_worker::minimax_h3_image_training_install_refusal(
+                &data_dir,
+                &payload.config,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
         } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
@@ -2529,11 +2889,7 @@ async fn prepare_training_submission(
         // sc-25213: the de-distill training adapter the plan selects resolves from the installed
         // library only (the worker refuses a missing one too) — refuse it here as a field error on
         // the version the user picked, instead of queueing a job that fails at the worker.
-        if let Some(adapter) = sceneworks_core::training::training_adapter::training_adapter_model(
-            &payload.config.advanced,
-        )
-        .map_err(training_plan_error_to_api_error)?
-        {
+        if let Some(adapter) = training_adapter {
             if sceneworks_worker::installed_aux_training_model_dir(&data_dir, adapter).is_none() {
                 return Err(training_field_error(
                     sceneworks_core::training::training_adapter::TRAINING_ADAPTER_VERSION_KEY,
@@ -2589,7 +2945,7 @@ async fn prepare_training_submission(
         &state,
         &project_id,
         &dataset,
-        &payload.config.advanced,
+        subject_mask_consumer,
         payload.dry_run,
     )
     .await?;
@@ -2843,6 +3199,7 @@ async fn prepare_training_submission(
         job_payload,
         requested_gpu,
         training_job_type,
+        source_job_id: None,
     })
 }
 
@@ -2857,6 +3214,7 @@ async fn enqueue_training_submission(
         job_payload,
         requested_gpu,
         training_job_type,
+        source_job_id,
     } = prepared;
     let portable_binding =
         portable_training_binding(&state, &training_job_type, &job_payload, &requested_gpu).await?;
@@ -2869,7 +3227,7 @@ async fn enqueue_training_submission(
                 project_name: Some(project_name),
                 payload: job_payload,
                 requested_gpu,
-                source_job_id: None,
+                source_job_id,
                 duplicate_of_job_id: None,
                 attempts: 1,
                 initial_status: None,
@@ -2901,12 +3259,10 @@ async fn training_subject_mask_prepass(
     state: &AppState,
     project_id: &str,
     dataset: &sceneworks_core::training::TrainingDataset,
-    advanced: &sceneworks_core::contracts::JsonObject,
+    subject_mask_consumer: Option<&'static str>,
     dry_run: bool,
 ) -> Result<Option<Value>, ApiError> {
-    let Some(field) = sceneworks_core::training::subject_mask_consumer(advanced)
-        .map_err(training_plan_error_to_api_error)?
-    else {
+    let Some(field) = subject_mask_consumer else {
         return Ok(None);
     };
     let report = project_call(state.clone(), {
@@ -3021,26 +3377,7 @@ pub(crate) const SUBJECT_SEGMENTER_MODEL_ID: &str = "sam3_person_segment";
 fn training_plan_error_to_api_error(
     error: sceneworks_core::training::TrainingPlanError,
 ) -> ApiError {
-    match error {
-        sceneworks_core::training::TrainingPlanError::TargetLimit(limit) => {
-            let detail = limit.to_string();
-            let context = serde_json::to_value(&limit).unwrap_or_else(|_| {
-                json!({
-                    "kind": "training_target_limit"
-                })
-            });
-            ApiError::typed(
-                StatusCode::BAD_REQUEST,
-                detail,
-                "training_target_limit",
-                context,
-            )
-        }
-        sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
-            training_field_error(&field, message)
-        }
-        other => ApiError::bad_request(other.to_string()),
-    }
+    sceneworks_core::training::policy_refusal(error).into()
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its
@@ -3542,42 +3879,7 @@ pub(crate) fn training_base_model_label(
 pub(crate) fn training_is_full_finetune(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> bool {
-    config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().eq_ignore_ascii_case("full"))
-        .unwrap_or(false)
-}
-
-/// GPU selection for a training job, read from the config's advanced bag (the
-/// request has no top-level field). Defaults to `auto`; `lora_train` is
-/// GPU-required, so a `cpu` value is rejected downstream when the job is created.
-pub(crate) fn training_requested_gpu(advanced: &JsonObject) -> String {
-    let raw = advanced
-        .get("requestedGpu")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    requested_gpu_or_auto(raw)
-}
-
-/// Resolves the output scope for a training run from the config's `advanced` bag.
-/// Defaults to `project` (the target default) and rejects anything other than the
-/// two scopes the LoRA registry understands.
-pub(crate) fn training_output_scope(advanced: &JsonObject) -> Result<String, ApiError> {
-    let scope = advanced
-        .get("outputScope")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("project");
-    match scope {
-        "project" | "global" => Ok(scope.to_owned()),
-        other => Err(ApiError::bad_request(format!(
-            "Unsupported training outputScope: {other}. Use project or global."
-        ))),
-    }
+    sceneworks_core::training::config_is_full_finetune(config)
 }
 
 /// Single source of truth for where a training run's adapter is written and its

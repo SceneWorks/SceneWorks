@@ -271,13 +271,14 @@ describe("configValidation — Iris", () => {
     expect(errorsFor(irisDraft()).ready).toBe(true);
   });
 
-  it("names each micro-step field that is not a multiple of gradient accumulation", () => {
+  it("passes micro-step values through for portable Rust alignment validation", () => {
     const summary = errorsFor(
       irisDraft({ gradientAccumulation: "4", steps: "1000", saveEvery: "250", sampleEvery: "250", lrWarmupSteps: "10" }),
     );
-    expect(summary.ready).toBe(false);
-    expect([...summary.invalidFields].sort()).toEqual(["lrWarmupSteps", "sampleEvery", "saveEvery"]);
-    expect(summary.surfaced.map((item) => item.message)).toContain("Checkpoint cadence must be a multiple of the gradient accumulation (4)");
+    expect(summary.ready).toBe(true);
+    const request = trainingConfigSnapshot({ activeDataset: DATASET, configDraft: irisDraft({ gradientAccumulation: "4", steps: "1000", saveEvery: "250", sampleEvery: "250", lrWarmupSteps: "10" }), selectedTarget: ctx.selectedTarget });
+    expect(request.config.saveEvery).toBe(250);
+    expect(request.config.advanced.sampleEvery).toBe(250);
   });
 
   it("passes when every micro-step field is a multiple", () => {
@@ -295,8 +296,8 @@ describe("configValidation — Iris", () => {
     expect(summary.invalidFields.has("saveEvery")).toBe(false);
   });
 
-  it("caps the sample count at the advertised upper bound", () => {
-    expect(errorsFor(irisDraft({ sampleCount: "5" })).invalidFields.has("sampleCount")).toBe(true);
+  it("leaves the advertised sample-count bound to portable Rust", () => {
+    expect(errorsFor(irisDraft({ sampleCount: "5" })).invalidFields.has("sampleCount")).toBe(false);
     expect(errorsFor(irisDraft({ sampleCount: "4" })).invalidFields.has("sampleCount")).toBe(false);
   });
 

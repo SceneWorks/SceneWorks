@@ -24,7 +24,7 @@ use super::*;
 #[path = "prompt_refine_parse.rs"]
 mod parse;
 #[cfg(native_lane)]
-use parse::{parse_refine_request, RefineRequest};
+use parse::{parse_refine_request, H3Expand, H3ExpandReply, RefineRequest};
 #[cfg(native_lane)]
 #[path = "prompt_refine_finalize.rs"]
 mod finalize;
@@ -106,6 +106,9 @@ fn resolve_max_new_tokens(
             RefineTask::QwenImageRewrite => rewriter
                 .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
                 .max_new_tokens(),
+            // SW-7102: the published recipe's own budget (4096, thinking and answer together) is
+            // read from the prompt files and replaces this fallback when no override is given.
+            RefineTask::MiniMaxH3ImageExpand => DEFAULT_CAPTION_MAX_NEW_TOKENS,
             RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
             RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
         })
@@ -161,6 +164,12 @@ pub(crate) enum RefineTask {
     /// DIFFERENT (vendor-frozen) system prompt and returns a structured document, none of which the
     /// generic medium-keyed rewrite rules describe. See [`crate::qwen_prompt_rewrite`].
     QwenImageRewrite,
+    /// MiniMax-H3-Image's prompt expansion (SW-7102): a short prompt, or an edit instruction with
+    /// its ordered `<Picture N>` references, → one strict JSON object carrying the expanded caption
+    /// and a proposed aspect ratio, from MiniMax-H3-Image-PE. The engine assembles the request from
+    /// the model's own verified prompt files and parses the reply
+    /// (`core_llm::minimax_h3_image_pe`); see [`crate::minimax_h3_image_prompt_expand`].
+    MiniMaxH3ImageExpand,
 }
 
 #[cfg(any(test, native_lane))]
@@ -168,14 +177,13 @@ impl RefineTask {
     /// Classify the payload's `task` discriminator (case-insensitive). Any unknown/absent value is the
     /// default free-text [`Rewrite`](RefineTask::Rewrite) — the pre-refactor behavior.
     pub(crate) fn from_payload(task: Option<&str>) -> Self {
-        match task.map(str::trim).unwrap_or_default() {
-            t if t.eq_ignore_ascii_case("magic_prompt") => RefineTask::MagicPrompt,
-            t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
-            t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
-            t if t.eq_ignore_ascii_case("film_plan") => RefineTask::FilmPlan,
-            t if t.eq_ignore_ascii_case(crate::qwen_prompt_rewrite::REWRITE_TASK) => {
-                RefineTask::QwenImageRewrite
-            }
+        match sceneworks_core::request_validation::utility_validation::prompt_refine_task(task) {
+            "magic_prompt" => RefineTask::MagicPrompt,
+            "image_caption" => RefineTask::ImageCaption,
+            "image_describe" => RefineTask::ImageDescribe,
+            "film_plan" => RefineTask::FilmPlan,
+            "qwen_image_rewrite" => RefineTask::QwenImageRewrite,
+            "minimax_h3_image_expand" => RefineTask::MiniMaxH3ImageExpand,
             _ => RefineTask::Rewrite,
         }
     }
@@ -194,7 +202,11 @@ impl RefineTask {
     /// prompt is always required, and zero references is not an error but the signal that selects
     /// the text-to-image rewriter instead of the editing one.
     pub(crate) fn takes_reference_images(self) -> bool {
-        self.is_vision() || matches!(self, RefineTask::QwenImageRewrite)
+        self.is_vision()
+            || matches!(
+                self,
+                RefineTask::QwenImageRewrite | RefineTask::MiniMaxH3ImageExpand
+            )
     }
 
     /// A caption task emits a JSON-constrained Ideogram caption (the decode is grammar-masked) and is
@@ -208,7 +220,13 @@ impl RefineTask {
     /// outermost `{ … }` instead of unwrapping surrounding quotes. The caption tasks and the film
     /// plan are; the free-text rewrite and the prose describe are not.
     pub(crate) fn emits_json(self) -> bool {
-        self.is_caption() || matches!(self, RefineTask::FilmPlan | RefineTask::QwenImageRewrite)
+        self.is_caption()
+            || matches!(
+                self,
+                RefineTask::FilmPlan
+                    | RefineTask::QwenImageRewrite
+                    | RefineTask::MiniMaxH3ImageExpand
+            )
     }
 
     /// Sampling temperature: the caption tasks and the prose describe sample cool for a faithful,
@@ -223,6 +241,9 @@ impl RefineTask {
             // NOT a SceneWorks choice: 1.0 is the temperature both PE model cards publish, and the
             // rewriters were tuned at it. Frozen with `top_p`/`top_k` in `qwen_prompt_rewrite`.
             RefineTask::QwenImageRewrite => crate::qwen_prompt_rewrite::REWRITE_TEMPERATURE,
+            // Informational only: the expansion runs the engine-built request, whose sampling is
+            // the published recipe read from the model's `request_params.json` (temperature 1.0).
+            RefineTask::MiniMaxH3ImageExpand => 1.0,
         }
     }
 
@@ -234,6 +255,7 @@ impl RefineTask {
             RefineTask::MagicPrompt => "Expanding to a caption…",
             RefineTask::FilmPlan => "Planning shots…",
             RefineTask::QwenImageRewrite => "Rewriting prompt…",
+            RefineTask::MiniMaxH3ImageExpand => "Expanding prompt…",
             RefineTask::Rewrite => "Refining prompt…",
         }
     }
@@ -247,6 +269,7 @@ impl RefineTask {
             // "Ready to review", not "applied": the rewrite is a suggestion the user edits and
             // accepts. The copy is part of the guarantee that nothing is replaced silently.
             RefineTask::QwenImageRewrite => "Rewritten prompt ready to review.",
+            RefineTask::MiniMaxH3ImageExpand => "Expanded prompt ready to review.",
             RefineTask::Rewrite => "Prompt refined.",
         }
     }
@@ -363,11 +386,8 @@ fn base_rules(medium: &str) -> String {
 /// plus the model's prompt guide when one is supplied. Port of the Python `build_system_prompt`.
 #[cfg(any(test, native_lane))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
-    let medium = match workflow.map(str::trim) {
-        Some(value) if value.eq_ignore_ascii_case("video") => "video",
-        Some(value) if value.eq_ignore_ascii_case("audio") => "audio",
-        _ => "image",
-    };
+    let medium =
+        sceneworks_core::request_validation::utility_validation::prompt_refine_workflow(workflow);
     let rules = base_rules(medium);
     let guide = guide.unwrap_or("").trim();
     if guide.is_empty() {
@@ -722,8 +742,10 @@ impl DescribeStyle {
     /// Parse the `captionStyle` payload value; only `"tags"` (case-insensitive) selects tags, everything
     /// else — including absent/empty/unknown — is prose.
     pub(crate) fn from_payload(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
-            Some(v) if v.eq_ignore_ascii_case("tags") => DescribeStyle::Tags,
+        match sceneworks_core::request_validation::utility_validation::prompt_refine_caption_style(
+            value,
+        ) {
+            "tags" => DescribeStyle::Tags,
             _ => DescribeStyle::Prose,
         }
     }
@@ -809,18 +831,29 @@ fn downscale_to_pixel_budget(image: image::DynamicImage, max_pixels: u64) -> ima
 /// [`VISION_REFERENCE_MAX_PIXELS`] BEFORE conversion so a large reference image cannot OOM the dense
 /// ViT attention in the vision tower.
 pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::ImageRef> {
+    load_vision_reference(path).map(|(image, _)| image)
+}
+
+/// [`load_caption_image_ref`] plus the SOURCE pixel size, read before the downscale. MiniMax-H3-
+/// Image's edit expansion labels each `<Picture N>` with its original ratio (SW-7102), which the
+/// downscaled copy's rounding would change.
+pub(crate) fn load_vision_reference(
+    path: &Path,
+) -> WorkerResult<(gen_core::core_llm::ImageRef, (u32, u32))> {
     let decoded = crate::image_decode::decode_image_any(path).map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "image-caption reference image {}: {error}",
             path.display()
         ))
     })?;
-    vision_image_ref(decoded).map_err(|error| {
+    let source_size = (decoded.width(), decoded.height());
+    let image = vision_image_ref(decoded).map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "image-caption reference image {}: {error}",
             path.display()
         ))
-    })
+    })?;
+    Ok((image, source_size))
 }
 
 /// An already-decoded image as the vision contract's `ImageRef` (RGB8), capped to
@@ -873,7 +906,14 @@ pub(crate) async fn run_prompt_refine_job(
         weights_dir,
         system,
         user_message,
+        h3_expand,
     } = parse_refine_request(settings, job).await?;
+    // SW-7102: an expansion runs the request the engine assembled; only its reply contract travels
+    // on to the completion.
+    let (prepared_request, h3_expand_reply) = match h3_expand {
+        Some(H3Expand { request, reply }) => (Some(request), Some(reply)),
+        None => (None, None),
+    };
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
     // + UI architecture pill (mirrors the image/video paths), not the gpu-id device label.
     let backend = REFINE_BACKEND;
@@ -940,6 +980,23 @@ pub(crate) async fn run_prompt_refine_job(
     if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
     }
+    // SW-7102: render then expand. The MiniMax-H3-Image generator a render just used stays in the
+    // generator cache for its idle window, and the 27B expander does not fit beside it on most
+    // hosts; a cold expander load stages it out first (the render stages the expander out the
+    // other way round, in `image_jobs`).
+    #[cfg(native_lane)]
+    if task == RefineTask::MiniMaxH3ImageExpand {
+        let (probe_spec, probe_reqs) = (refine_spec.clone(), refine_reqs.clone());
+        crate::minimax_h3_image_prompt_expand::evict_generator_before_cold_load(
+            || async move {
+                crate::refine_model_cache::refiner_admission_access(&probe_spec, &probe_reqs)
+                    .await
+                    .map(|(access, _)| access)
+            },
+            crate::generator_cache::evict_cached_generator,
+        )
+        .await?;
+    }
     let blocking = crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
         refine_spec,
         refine_reqs,
@@ -971,104 +1028,120 @@ pub(crate) async fn run_prompt_refine_job(
             // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
             let output = {
                 use gen_core::core_llm::{Content, Message, Role, Sampling, StreamEvent};
-                let mut messages = Vec::with_capacity(2);
-                if !system.trim().is_empty() {
-                    messages.push(Message::system(system));
-                }
-                // A vision task (image_caption / image_describe) user turn carries the reference image(s)
-                // as `Content::Image` block(s) BEFORE the instruction text, so the loaded provider examines
-                // the picture(s) at generate time. The provider collects every `Content::Image` in the turn
-                // and expands per-image vision tokens (mlx-llama + candle-llama both loop over all images),
-                // so a mood board of N references (sc-8595) rides one generate call. Every other task is a
-                // plain text user turn.
-                let carries_image = !image_refs.is_empty();
-                if carries_image {
-                    let mut content: Vec<Content> =
-                        image_refs.into_iter().map(Content::Image).collect();
-                    content.push(Content::text(prompt));
-                    messages.push(Message {
-                        role: Role::User,
-                        content,
-                        thinking: None,
-                        tool_calls: Vec::new(),
-                    });
+                // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
+                // budget and reasoning knobs; it gains this job's cancel flag, progress observer,
+                // KV opt-in and decode constraint, as the request built below does.
+                let request = if let Some(mut request) = prepared_request {
+                    request.cancel = blocking_cancel.clone();
+                    request.progress = Some(crate::load_progress::text_observer());
+                    request.kv_compression = kv_compression;
+                    request.constraint = json_decode_constraint(
+                        emits_json,
+                        refiner.descriptor().capabilities.supports_thinking,
+                        request.thinking,
+                    );
+                    request
                 } else {
-                    messages.push(Message::user(prompt));
-                }
-                // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
-                // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
-                //
-                // sc-24113: the Qwen rewriters are the one task that does NOT take the house
-                // sampler. Their model cards publish the full recipe the checkpoints were tuned
-                // at (temperature 1.0, top_p 0.95, top_k 20), and it is frozen verbatim in
-                // `qwen_prompt_rewrite` beside the template it belongs to.
-                let sampling = match qwen_rewriter {
-                    Some(_) => Sampling {
-                        temperature,
-                        top_p: crate::qwen_prompt_rewrite::REWRITE_TOP_P,
-                        top_k: crate::qwen_prompt_rewrite::REWRITE_TOP_K,
-                        ..Sampling::default()
-                    },
-                    None => Sampling {
-                        temperature,
-                        top_p: 0.9,
-                        ..Sampling::default()
-                    },
+                    let mut messages = Vec::with_capacity(2);
+                    if !system.trim().is_empty() {
+                        messages.push(Message::system(system));
+                    }
+                    // A vision task (image_caption / image_describe) user turn carries the reference image(s)
+                    // as `Content::Image` block(s) BEFORE the instruction text, so the loaded provider examines
+                    // the picture(s) at generate time. The provider collects every `Content::Image` in the turn
+                    // and expands per-image vision tokens (mlx-llama + candle-llama both loop over all images),
+                    // so a mood board of N references (sc-8595) rides one generate call. Every other task is a
+                    // plain text user turn.
+                    let carries_image = !image_refs.is_empty();
+                    if carries_image {
+                        let mut content: Vec<Content> =
+                            image_refs.into_iter().map(Content::Image).collect();
+                        content.push(Content::text(prompt));
+                        messages.push(Message {
+                            role: Role::User,
+                            content,
+                            thinking: None,
+                            tool_calls: Vec::new(),
+                        });
+                    } else {
+                        messages.push(Message::user(prompt));
+                    }
+                    // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
+                    // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
+                    //
+                    // sc-24113: the Qwen rewriters are the one task that does NOT take the house
+                    // sampler. Their model cards publish the full recipe the checkpoints were tuned
+                    // at (temperature 1.0, top_p 0.95, top_k 20), and it is frozen verbatim in
+                    // `qwen_prompt_rewrite` beside the template it belongs to.
+                    let sampling = match qwen_rewriter {
+                        Some(_) => Sampling {
+                            temperature,
+                            top_p: crate::qwen_prompt_rewrite::REWRITE_TOP_P,
+                            top_k: crate::qwen_prompt_rewrite::REWRITE_TOP_K,
+                            ..Sampling::default()
+                        },
+                        None => Sampling {
+                            temperature,
+                            top_p: 0.9,
+                            ..Sampling::default()
+                        },
+                    };
+                    // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
+                    // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
+                    // free-text rewrite is unconstrained. (On the candle lane this constraint actually
+                    // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
+                    // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
+                    // costs a whole repair round this prevents outright.
+                    //
+                    // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
+                    // JSON — and says nothing about the object's shape (core-llm has no schema or
+                    // grammar variant; `Json` is the only one). So a well-formed reply with a field
+                    // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
+                    // duly produced one: `startState` as an object on every shot. The plan schema is
+                    // enforced after the decode by `film_planner::parse_planner_output`, which is the
+                    // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
+                    // where the FilmPlan task should take it.
+                    // A reasoning-capable model must be allowed to close its `<think>` block before
+                    // emitting the answer. Its final answer is still parsed and validated strictly,
+                    // and the planner's existing bounded repair loop handles malformed plans.
+                    let constraint = json_decode_constraint(
+                        emits_json,
+                        refiner.descriptor().capabilities.supports_thinking,
+                        thinking_mode,
+                    );
+                    let request = refine_text_request(
+                        messages,
+                        sampling,
+                        max_new_tokens,
+                        constraint,
+                        blocking_cancel.clone(),
+                        thinking_mode,
+                        kv_compression,
+                    );
+                    // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
+                    // block) were built by the caller and folded into the cache key: only the request's output
+                    // constraint — the JSON grammar for a caption task; NONE for the prose `image_describe` task
+                    // (sc-8204), which resolves on architecture `can_load` ALONE. A Qwen-VL snapshot has no
+                    // statically vision+Json provider, so demanding vision here would fail `select` before
+                    // `load`; that still admits `mlx-llama` (the only provider that `can_load`s a Qwen-VL wrapper
+                    // — `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
+                    // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
+                    // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
+                    //
+                    // sc-24113 widened this from `carries_image == is_vision_task`. That equality was true
+                    // only while the VISION tasks were the sole image carriers; the Qwen rewrite carries
+                    // images with `is_vision()` FALSE (it is driven by the user's text and merely accepts
+                    // pictures), so the old form panicked every I2I rewrite in a debug build. The invariant
+                    // that actually holds — and the one worth asserting — is the one-directional implication:
+                    // if images are present, the task must be one that declares it takes them. The converse
+                    // is deliberately NOT asserted, because a rewrite with zero references is the legitimate
+                    // text-to-image case.
+                    debug_assert!(image_carrier_invariant_holds(
+                        carries_image,
+                        takes_reference_images
+                    ));
+                    request
                 };
-                // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
-                // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
-                // free-text rewrite is unconstrained. (On the candle lane this constraint actually
-                // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
-                // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
-                // costs a whole repair round this prevents outright.
-                //
-                // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
-                // JSON — and says nothing about the object's shape (core-llm has no schema or
-                // grammar variant; `Json` is the only one). So a well-formed reply with a field
-                // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
-                // duly produced one: `startState` as an object on every shot. The plan schema is
-                // enforced after the decode by `film_planner::parse_planner_output`, which is the
-                // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
-                // where the FilmPlan task should take it.
-                // A reasoning-capable model must be allowed to close its `<think>` block before
-                // emitting the answer. Its final answer is still parsed and validated strictly,
-                // and the planner's existing bounded repair loop handles malformed plans.
-                let constraint = json_decode_constraint(
-                    emits_json,
-                    refiner.descriptor().capabilities.supports_thinking,
-                    thinking_mode,
-                );
-                let request = refine_text_request(
-                    messages,
-                    sampling,
-                    max_new_tokens,
-                    constraint,
-                    blocking_cancel.clone(),
-                    thinking_mode,
-                    kv_compression,
-                );
-                // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
-                // block) were built by the caller and folded into the cache key: only the request's output
-                // constraint — the JSON grammar for a caption task; NONE for the prose `image_describe` task
-                // (sc-8204), which resolves on architecture `can_load` ALONE. A Qwen-VL snapshot has no
-                // statically vision+Json provider, so demanding vision here would fail `select` before
-                // `load`; that still admits `mlx-llama` (the only provider that `can_load`s a Qwen-VL wrapper
-                // — `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
-                // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
-                // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
-                //
-                // sc-24113 widened this from `carries_image == is_vision_task`. That equality was true
-                // only while the VISION tasks were the sole image carriers; the Qwen rewrite carries
-                // images with `is_vision()` FALSE (it is driven by the user's text and merely accepts
-                // pictures), so the old form panicked every I2I rewrite in a debug build. The invariant
-                // that actually holds — and the one worth asserting — is the one-directional implication:
-                // if images are present, the task must be one that declares it takes them. The converse
-                // is deliberately NOT asserted, because a rewrite with zero references is the legitimate
-                // text-to-image case.
-                debug_assert!(image_carrier_invariant_holds(
-                    carries_image,
-                    takes_reference_images
-                ));
                 emit_event(
                     "prompt_refine_load_complete",
                     json!({ "jobId": job_id, "engine": engine_label }),
@@ -1160,6 +1233,7 @@ pub(crate) async fn run_prompt_refine_job(
             max_new_tokens,
             done_message,
             qwen_rewriter,
+            h3_expand: h3_expand_reply,
             image_reference_count,
             emits_json,
             output,

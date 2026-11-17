@@ -149,6 +149,22 @@ Reproduce either locally with:
 npm run rust:check:candle
 ```
 
+For a native Windows or Linux Candle build with a CUDA toolkit, fetch and verify the
+published FlashAttention archive before Cargo compiles it:
+
+```bash
+node scripts/fetch-flash-prebuilt.mjs -- cargo build --locked -p sceneworks-worker --features backend-candle
+```
+
+The wrapper chooses the archive for the exact pinned FlashAttention source and
+host target, checks its contents against the library hashes in
+`config/flash-attn-prebuilt.json`, then runs Cargo with `CANDLE_FLASH_ATTN_PREBUILT_DIR`.
+When bumping inference to new FlashAttention source, add reviewed hashes from its
+verified release to that file. Without a trusted hash, Cargo builds from source.
+The crate also checks the CUDA and host compiler versions before linking. If no
+matching release exists, Cargo builds the kernels from source. A corrupt archive
+fails the build. Desktop sidecar builds fetch the archive automatically.
+
 macOS hosts cross-compile to `x86_64-unknown-linux-gnu` (`rustup target add
 x86_64-unknown-linux-gnu` once); Linux/Windows hosts build for the host. **No CUDA toolkit is
 required**: `cudarc` and `candle-kernels` only need `nvcc`/`nvidia-smi` in their *build

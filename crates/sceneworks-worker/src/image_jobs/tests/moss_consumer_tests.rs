@@ -45,6 +45,10 @@ use gen_core::moss_image::*;
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 
+fn resolved_request(payload: &JsonObject) -> ImageRequest {
+    ImageRequest::from_resolved(payload, payload).expect("MOSS fixture options bind")
+}
+
 // Request metadata only: no model fixture, source payload, device, tensor or
 // native backend invocation. The tests below stop before backend header pricing.
 fn preload_payload_for_pure_test(variant: MossImageVariant, mode: &str) -> JsonObject {
@@ -84,7 +88,7 @@ fn checked_preload_refuses_cancellation_before_any_source_lookup() {
         .as_object()
         .unwrap()
         .clone();
-    let request = ImageRequest::from_payload(&payload);
+    let request = resolved_request(&payload);
     let mut checks = 0;
     let error = prepare_moss_preload_with_check(
         &settings,
@@ -116,7 +120,7 @@ fn prepared_preload_refuses_non_moss_before_source_lookup() {
         .as_object()
         .unwrap()
         .clone();
-    let request = ImageRequest::from_payload(&payload);
+    let request = resolved_request(&payload);
     let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
         .err()
         .expect("non-MOSS must fail before snapshot/backend preparation");
@@ -142,7 +146,7 @@ fn prepared_preload_preserves_base_dmd_refusal_before_source_lookup() {
     let settings = Settings::for_test(temp.path().join("data"));
     for mode in ["unmerged_bf16", "full_fp32"] {
         let payload = preload_payload_for_pure_test(MossImageVariant::Base, mode);
-        let request = ImageRequest::from_payload(&payload);
+        let request = resolved_request(&payload);
         let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
             .err()
             .expect("Base+DMD must fail before source/backend preparation");
@@ -188,7 +192,7 @@ fn prepared_preload_requires_exact_frozen_snapshot_for_each_admissible_mode() {
             .join("0000000000000000000000000000000000000000");
         std::fs::create_dir_all(&wrong).unwrap();
         let payload = preload_payload_for_pure_test(variant, mode);
-        let request = ImageRequest::from_payload(&payload);
+        let request = resolved_request(&payload);
         let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
             .err()
             .expect("absent frozen snapshot must refuse before backend demand pricing");
@@ -306,7 +310,7 @@ fn moss_worker_persisted_batch_recipe_keeps_per_prompt_count_and_total_generatio
     .unwrap();
     let prompts = fixture["rawAdapterSettings"]["promptBatch"].clone();
     let payload = json!({"model":"moss_image_sft","mode":"text_to_image","prompt":prompts[0],"prompts":prompts,"count":2,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":{"acceleration":"off"}}});
-    let request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let request = resolved_request(payload.as_object().unwrap());
     let plan = ImagePlan::with_count_and_adapter(&request, 4, "mlx_moss_image_sft", None);
     assert_eq!(plan.generation_set["count"], 4);
     assert_eq!(streaming_result(&plan, &[])["expectedCount"], 4);
@@ -366,7 +370,7 @@ fn moss_edit_history_writer_persists_all_semantic_slots_and_authored_controls() 
     for ids in [json!(["a"]), json!(["a", "b", "a", "c"])] {
         let options = json!({"reference_max_edge":768,"use_kv_cache":false});
         let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":ids,"sourceAssetId":"a","referenceAssetId":"a","count":1,"width":512,"height":512,"advanced":{"mossImage":{"acceleration":"off","uncond_skip_layers":[]},"mossImageEdit":options,"steps":30,"guidanceScale":4,"schedulerShift":5,"referenceAssetIds":["forged-output"]}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let request = resolved_request(payload.as_object().unwrap());
         let plan = ImagePlan::with_count_and_adapter(&request, 1, "mlx_moss_image_sft", None);
         let temp = tempfile::tempdir().unwrap();
         let store = ProjectStore::new(temp.path().to_path_buf(), "test");
@@ -422,7 +426,7 @@ fn moss_edit_history_writer_persists_all_semantic_slots_and_authored_controls() 
 #[test]
 fn moss_edit_history_writer_refuses_conflicting_scalar_alias_before_writing_output() {
     let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":["a","b","a","c"],"sourceAssetId":"different-source","width":16,"height":16,"advanced":{"mossImageEdit":{"reference_max_edge":512,"use_kv_cache":true},"referenceAssetIds":["forged-output"]}});
-    let request = ImageRequest::from_payload(payload.as_object().unwrap());
+    let request = resolved_request(payload.as_object().unwrap());
     let plan = ImagePlan::with_count_and_adapter(&request, 1, "mlx_moss_image_sft", None);
     let temp = tempfile::tempdir().unwrap();
     let store = ProjectStore::new(temp.path().to_path_buf(), "test");
@@ -588,6 +592,7 @@ fn completed_receipt_for(
     }
     MossImageExecutionReport::new(MossImageExecutionData {
         execution_device: MossImageExecutionDevice::Cpu,
+        selected_stream_device: None,
         resolved,
         assets,
         sampling,
@@ -627,7 +632,7 @@ fn moss_png_recipe_roundtrip_preserves_requested_mode_and_complete_actual_receip
         let report = completed_receipt(&native);
         let options = serde_json::to_value(native.moss_image.unwrap()).unwrap();
         let payload=json!({"model":"moss_image_sft","mode":"text_to_image","prompt":"日本語 <tag> {\"items\":[]}","count":1,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":options}}).as_object().unwrap().clone();
-        let request = ImageRequest::from_payload(&payload);
+        let request = resolved_request(&payload);
         let plan = ImagePlan::with_count_and_adapter(
             &request,
             1,
@@ -1006,7 +1011,7 @@ fn advanced_images_use_shared_image_events_and_preserve_explicit_noise_seed() {
     let temp = tempfile::tempdir().unwrap();
     let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["rgb"],"width":16,"height":16,"count":1}).as_object().unwrap().clone();
     let plan = ImagePlan::with_count_and_adapter(
-        &ImageRequest::from_payload(&payload),
+        &resolved_request(&payload),
         1,
         "mlx_moss_image_sft",
         Some(Arc::new(payload)),
@@ -1038,6 +1043,7 @@ fn advanced_images_use_shared_image_events_and_preserve_explicit_noise_seed() {
         &mut |_| {},
     )
     .unwrap();
+    assert_eq!(facts["workerExecutionReport"]["state"], "unavailable");
     let (tx, mut rx) = tokio::sync::mpsc::channel(2);
     emit_moss_advanced_outputs(
         &tx,
@@ -1132,7 +1138,7 @@ fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_or
     let native = sceneworks_core::moss_image::native_request(&payload, &entry)
         .unwrap()
         .unwrap();
-    let request = ImageRequest::from_payload(&payload);
+    let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         4,
@@ -1187,6 +1193,7 @@ fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_or
     )
     .unwrap();
     drop(tx);
+    let mut receipt_facts = Vec::new();
     for index in 0..4 {
         let GenEvent::AssetWritten {
             index: actual_index,
@@ -1197,6 +1204,8 @@ fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_or
         };
         assert_eq!(actual_index, index);
         assert_eq!(fact["seed"], Value::Null);
+        assert_eq!(fact["index"], index);
+        receipt_facts.push(Value::Object(fact.clone()));
         let asset = store
             .persist_generated_asset(
                 &project.id,
@@ -1252,6 +1261,16 @@ fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_or
         );
     }
     assert!(rx.try_recv().is_err());
+    let receipt =
+        super::super::image_execution_receipt(Path::new(&project.path), &receipt_facts, 4).unwrap();
+    assert_eq!(
+        receipt
+            .outputs
+            .iter()
+            .map(|output| output.output_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
     assert!(!Path::new(&project.path)
         .join(format!("assets/images/{}", plan.genset_id))
         .exists());
@@ -1305,7 +1324,13 @@ async fn direct_moss_edit_worker_refuses_invalid_controls_before_any_api_or_prov
                     "payload":payload,"result":{},"requestedGpu":"auto","progress":0,"stage":"queued","message":"","attempts":1,
                     "cancelRequested":false,"createdAt":"2026-10-23T00:00:00Z","updatedAt":"2026-10-23T00:00:00Z"})).unwrap();
             assert!(matches!(
-                run_image_generate_job_unexplained(&api, &settings, &job).await,
+                run_image_generate_job_unexplained(
+                    &api,
+                    &settings,
+                    &job,
+                    &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+                )
+                .await,
                 Err(WorkerError::InvalidPayload(_))
             ));
         }
@@ -1644,6 +1669,7 @@ fn actual_provider_receipt_and_seed_reach_facts_and_failed_attempt_never_reads_s
         facts[sceneworks_core::moss_image::REPORT_KEY]["samples"][0]["seed"],
         173
     );
+    assert_eq!(facts["workerExecutionReport"]["state"], "unavailable");
     assert_eq!(progress, 1);
     probe.failure.set(true);
     assert!(moss_render(&probe, &req, &[], &mut |_| {}).is_err());
@@ -2069,7 +2095,13 @@ async fn moss_real_native_product_worker_campaign() {
             crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
-        let result = run_image_generate_job(&api, &settings, &job).await;
+        let result = run_image_generate_job(
+            &api,
+            &settings,
+            &job,
+            &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+        )
+        .await;
         let events = posts.lock().unwrap().clone();
         server.abort();
         std::fs::write(

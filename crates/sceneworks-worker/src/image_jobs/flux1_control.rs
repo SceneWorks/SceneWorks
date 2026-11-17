@@ -2,7 +2,6 @@ use super::adapters::resolve_adapters;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
 use super::artifact_resolution::resolved_mlx_artifact_tier;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
@@ -31,27 +30,28 @@ use super::AdapterSpec;
 use super::CancelFlag;
 use super::Conditioning;
 use super::ControlKind;
+#[cfg(test)]
 use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
 use super::Image;
+use super::ImageOutputTarget;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::LoadSpec;
 use super::Progress;
 use super::Quant;
 use super::WeightsSource;
-use crate::advanced;
 use crate::safe_weight_filename;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::JsonObject;
-use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+use gen_core::generator::ExecutionIdentity;
 use serde_json::json;
 // ---------------------------------------------------------------------------
 // FLUX.1-dev strict-control Fun-Controlnet-Union (macOS, sc-8244; engine E2 sc-8239):
@@ -90,9 +90,24 @@ const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
 /// entry is the structural hint carrier for every kind (pose renders a skeleton; canny/depth pair the
 /// pose with `advanced.controlMode` + an input image — the pose set still drives the per-image loop).
 pub(super) fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux1_dev_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux1_dev_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux1_dev_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn flux1_dev_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX1_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -100,22 +115,15 @@ pub(super) fn flux1_dev_control_available(request: &ImageRequest, settings: &Set
 /// overrides, else the Shakker Union-Pro-2.0 default (parity with the FLUX.2 / Z-Image resolvers).
 /// The payload filename must be a plain component (sc-8821 / F-019).
 pub(super) fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
-    let cw = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object);
-    let pick = |key: &str, default: &str| {
-        cw.and_then(|m| m.get(key))
-            .and_then(crate::payload::trimmed_value_str)
-            .unwrap_or(default)
-            .to_owned()
-    };
-    let repo = pick(
-        "repo",
-        strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID),
-    );
+    let control = super::strict_control::resolved_control_weights(request);
+    let repo = control
+        .and_then(|fields| fields.repo.valid_trimmed())
+        .unwrap_or(strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID))
+        .to_owned();
     let file = safe_weight_filename(
-        &pick("filename", FLUX1_CONTROL_FILE),
+        control
+            .and_then(|fields| fields.filename.valid_trimmed())
+            .unwrap_or(FLUX1_CONTROL_FILE),
         "advanced.controlWeights.filename",
     )?;
     trusted_control_weight_revision(request, FLUX1_DEV_CONTROL_ENGINE_ID, &repo, &file)?;
@@ -136,8 +144,11 @@ async fn ensure_flux1_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
-        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+    if request.portable_aux.has_paths() {
+        return request
+            .portable_aux
+            .path("strict_control")
+            .map(std::path::Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable strict control source is not bound".to_owned(),
@@ -184,7 +195,7 @@ async fn ensure_flux1_control_weights(
 /// Control lock strength for FLUX.1-dev: `advanced.controlScale` (default 0.7, clamp [0,2]). The Shakker
 /// Union-Pro-2.0 README recommends ~0.7 (the engine default too), so the worker default matches.
 fn flux1_control_scale(request: &ImageRequest) -> f32 {
-    advanced::f32_clamped(&request.advanced, "controlScale", 0.7, 0.0..=2.0)
+    super::sampling::resolved_f32_clamped(request, "controlScale", 0.7, 0.0..=2.0)
 }
 
 /// The FLUX.1-dev strict-control request for one pose: the pre-built `conditioning` (the required
@@ -227,35 +238,23 @@ fn flux1_control_request(
 }
 
 /// Render one FLUX.1-dev strict-control image from the request [`flux1_control_request`] built and
-/// the render plan compiled for it before load (SW-6936), inside the admitted memory scope.
+/// the render plan compiled for it before load (SW-6936), inside the admitted memory scope. Returns
+/// the image with the provider's execution identity for this same attempt.
 pub(super) fn flux1_control_generate_one(
     generator: &dyn Generator,
     mut request: GenerationRequest,
     plan: &gen_core::RenderPlan,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let report = crate::memory_strategy::generate_with_scope_report_planned(
+) -> WorkerResult<(Image, ExecutionIdentity)> {
+    super::render::generate_planned_single_image(
         generator,
         &mut request,
         plan,
         memory_evaluation.map(|evaluation| &evaluation.context),
+        "FLUX.1-dev control",
         on_progress,
     )
-    .map_err(|error| {
-        WorkerError::Engine(format!("FLUX.1-dev control generation failed: {error}"))
-    })?;
-    match report.output {
-        Some(GenerationOutput::Images(mut images)) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::Engine("FLUX.1-dev control generator produced no image".to_owned())
-            })?;
-            Ok((image.width, image.height, image.pixels))
-        }
-        _ => Err(WorkerError::Engine(
-            "FLUX.1-dev control generator returned non-image output".to_owned(),
-        )),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -268,7 +267,7 @@ fn flux1_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = request.effective_advanced_wire();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -378,7 +377,8 @@ pub(super) fn flux1_control_render_for_test(
         spec,
         &request,
     )?;
-    flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})
+    let (image, _) = flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})?;
+    Ok((image.width, image.height, image.pixels))
 }
 
 /// Real FLUX.1-dev strict-control generation: one image per pose, each conditioned on the requested
@@ -392,10 +392,14 @@ pub(super) async fn generate_flux1_dev_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
-    project_path: &Path,
-    backend: &str,
+    execution: &super::conditioning::ResolvedImageExecution,
+    target: ImageOutputTarget<'_>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let ImageOutputTarget {
+        project_path,
+        backend,
+    } = target;
     let request = &plan.request;
     let sampling = super::sampling::explicit_sampling_request(request);
 
@@ -424,11 +428,11 @@ pub(super) async fn generate_flux1_dev_control_stream(
     // depth map (the passthrough short-circuits estimation). Shared across the set; fetched once on the
     // first depth job (sc-8242).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = flux1_control_raw_settings(
         request,
@@ -454,6 +458,7 @@ pub(super) async fn generate_flux1_dev_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "pose-set face-stack staging failed; likeness scores omitted",
     )
@@ -627,10 +632,11 @@ pub(super) async fn generate_flux1_dev_control_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let report_tx = tx.clone();
             drive_gen_items_scored(
                 tx,
                 planned_poses,
-                move |_index, (conditioning, render_plan), preview, on_progress| {
+                move |index, (conditioning, render_plan), preview, on_progress| {
                     let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                         generator,
                         &memory_plan,
@@ -657,13 +663,17 @@ pub(super) async fn generate_flux1_dev_control_stream(
                         preview,
                         &cancel,
                     );
-                    let (out_w, out_h, pixels) = flux1_control_generate_one(
+                    let (image, execution) = flux1_control_generate_one(
                         generator,
                         request,
                         &render_plan,
                         Some(&memory_evaluation),
                         on_progress,
                     )?;
+                    if !super::render::send_execution_report(&report_tx, index, execution)? {
+                        return Ok(None);
+                    }
+                    let (out_w, out_h, pixels) = (image.width, image.height, image.pixels);
                     // Score this finished pose against the cached source embedding (sc-4410). The strict-
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
                     // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose

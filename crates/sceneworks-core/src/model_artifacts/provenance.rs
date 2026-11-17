@@ -617,6 +617,14 @@ pub(crate) fn stage_h3_component_with_receipts(
         .into_iter()
         .map(
             |(source, staged, revision, sha256, size_bytes, source_stamp)| {
+                // Adding a hard link to the source moves its NTFS change time, which a Windows
+                // stamp carries: bind the source as it stands once staged. The bytes are still
+                // proven against the recorded SHA/size when the pin is redeemed.
+                #[cfg(windows)]
+                let source_stamp = {
+                    let _ = source_stamp;
+                    SourceStampV1::of(&source, StoreClockV1::SYSTEM).map_err(|e| e.to_string())?
+                };
                 let receipt = H3ComponentStagingReceipt {
                     staged_stamp: SourceStampV1::of(&staged, StoreClockV1::SYSTEM)
                         .map_err(|e| e.to_string())?,

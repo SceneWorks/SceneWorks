@@ -28,6 +28,11 @@ use serde_json::{json, Value};
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
 
+pub use sceneworks_options::training_validation::*;
+impl crate::contracts::string_enum_sealed::Sealed for TrainingModality {}
+impl crate::contracts::StringEnum for TrainingModality {}
+impl crate::contracts::string_enum_sealed::Sealed for TrainingOutputKind {}
+impl crate::contracts::StringEnum for TrainingOutputKind {}
 pub mod flux3;
 pub mod iris;
 
@@ -37,497 +42,6 @@ pub const TRAINING_CONTRACT_SCHEMA_VERSION: u32 = 1;
 /// Version of the normalized [`TrainingPlan`] handed to the Python kernel. The
 /// kernel rejects plans whose `planVersion` it does not understand.
 pub const TRAINING_PLAN_VERSION: u32 = 1;
-
-/// Learning-rate schedulers both worker kernels honor. Submit-time validation
-/// rejects any `advanced.lrScheduler` outside this set so a non-constant choice
-/// is never accepted as no-op metadata. This is the *learning-rate* scheduler;
-/// the flow-matching noise scheduler is configured separately via
-/// `advanced.timestepType`/`timestepBias`.
-pub const SUPPORTED_LR_SCHEDULERS: [&str; 3] = ["constant", "linear", "cosine"];
-
-/// `advanced` key of the relative-mode **weight noising** strength (epic 2123, sc-24826): after
-/// every optimizer update the native trainer perturbs each adapter tensor by
-/// `N(0,1) · sigma · rms(w)`. Absent or `0` is off.
-pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
-/// Inclusive upper bound submit-time validation accepts for [`WEIGHT_NOISE_SIGMA_KEY`]. The web
-/// form enforces the identical bound (`weightNoiseSigmaMax` in
-/// `apps/web/src/training/trainingConfig.js`; a parity test pins the two together, epic 2123 E6).
-/// The upstream suggested strength is [`WEIGHT_NOISE_SIGMA_SUGGESTED`]; 0.1 is eight times that —
-/// far into "destroys the adapter" territory, so anything above it is a typo, not a choice.
-pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
-/// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
-pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
-/// Target `limits` flag: `true` when this target's native trainer honors
-/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. Since
-/// sc-24827 every LoRA/LoKr trainer declares it on BOTH backends (MLX and Candle), so the builtin
-/// value is the truth on every platform; the Krea control-branch target (a full-weight ControlNet
-/// branch, no adapter) does not carry it. The web form shows the weight-noise toggle only where this
-/// is `true`, and submit-time validation refuses a non-zero sigma elsewhere. A worker test pins the
-/// flag to the linked trainer descriptors on each platform, so it cannot drift from the engine.
-pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
-/// Target `limits` flag for [`GRADIENT_NOISE_ETA_KEY`] (`TrainerDescriptor::techniques
-/// .gradient_noise`, sc-24827) — same contract, gating, and drift test as
-/// [`WEIGHT_NOISE_SUPPORT_LIMIT`].
-pub const GRADIENT_NOISE_SUPPORT_LIMIT: &str = "supportsGradientNoise";
-
-/// Epic 2123 JSON-null policy: an explicit JSON `null` on any technique key of `advanced` (weight
-/// and gradient noise, resolution buckets, subject-masked loss, and the depth / body / face /
-/// latent-perceptual losses) means exactly what an absent key means — off, or the knob's default.
-/// Every technique parser (submit-time validation and the worker's preflight alike) reads its keys
-/// through this one accessor, so the policy cannot differ between keys or between API and worker.
-pub fn technique_value<'a>(advanced: &'a JsonObject, key: &str) -> Option<&'a Value> {
-    advanced.get(key).filter(|value| !value.is_null())
-}
-
-/// The field-error message for an aux loss's inverted noise window (`min_t > max_t`). When
-/// `max_key` is unset the message says so and names its default `max_t` — sc-2124 lowered the
-/// decoded-x0 losses' default to `0.5`, so a carried-over `*MinT` above it is now refused with
-/// the reason spelled out instead of only the numbers.
-pub(crate) fn inverted_window_message(
-    advanced: &JsonObject,
-    (min_key, min_t): (&str, f64),
-    (max_key, max_t): (&str, f64),
-) -> String {
-    if technique_value(advanced, max_key).is_some() {
-        format!("{max_key} ({max_t}) must be at least {min_key} ({min_t}).")
-    } else {
-        format!(
-            "{max_key} must be at least {min_key} ({min_t}): {max_key} is unset and its default \
-             is now {max_t}. Set {max_key} explicitly or lower {min_key}."
-        )
-    }
-}
-
-/// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
-const BASIC_TECHNIQUE_KEYS: &[&str] = &[
-    WEIGHT_NOISE_SIGMA_KEY,
-    GRADIENT_NOISE_ETA_KEY,
-    GRADIENT_NOISE_GAMMA_KEY,
-    RESOLUTION_BUCKETS_KEY,
-    SUBJECT_MASK_LOSS_KEY,
-    SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
-    SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
-];
-const TECHNIQUE_KEY_GROUPS: &[&[&str]] = &[
-    BASIC_TECHNIQUE_KEYS,
-    depth_anchoring::TECHNIQUE_KEYS,
-    body_losses::TECHNIQUE_KEYS,
-    face_losses::TECHNIQUE_KEYS,
-    latent_perceptual::TECHNIQUE_KEYS,
-];
-
-const fn technique_key_count() -> usize {
-    let mut count = 0;
-    let mut i = 0;
-    while i < TECHNIQUE_KEY_GROUPS.len() {
-        count += TECHNIQUE_KEY_GROUPS[i].len();
-        i += 1;
-    }
-    count
-}
-
-const fn technique_keys() -> [&'static str; technique_key_count()] {
-    let mut keys = [""; technique_key_count()];
-    let mut index = 0;
-    let mut group = 0;
-    while group < TECHNIQUE_KEY_GROUPS.len() {
-        let mut key = 0;
-        while key < TECHNIQUE_KEY_GROUPS[group].len() {
-            keys[index] = TECHNIQUE_KEY_GROUPS[group][key];
-            index += 1;
-            key += 1;
-        }
-        group += 1;
-    }
-    keys
-}
-
-/// Every technique key, derived from the owning modules in stable parser order.
-pub const TECHNIQUE_KEYS: [&str; technique_key_count()] = technique_keys();
-
-fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
-    target.limits.get(flag).and_then(Value::as_bool) == Some(true)
-}
-
-/// Whether `target` advertises weight-noise support.
-pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
-    target_limit_flag(target, WEIGHT_NOISE_SUPPORT_LIMIT)
-}
-
-/// Whether `target` advertises gradient-noise support.
-pub fn target_supports_gradient_noise(target: &TrainingTarget) -> bool {
-    target_limit_flag(target, GRADIENT_NOISE_SUPPORT_LIMIT)
-}
-
-/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
-/// [`RESOLUTION_BUCKETS_KEY`] (its `TrainerDescriptor::techniques.resolution_buckets`, sc-2127).
-/// Absent = no. The same mechanism as [`WEIGHT_NOISE_SUPPORT_LIMIT`]: the web form shows the
-/// buckets toggle only where this is `true`, submit-time validation refuses a bucket list
-/// elsewhere, and a worker test pins the flag to the linked trainer descriptors per platform.
-pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
-
-/// Builtin targets whose trainer does NOT honor resolution buckets on any platform: LTX-2.5 trains
-/// on prepared latent packs whose geometry is fixed by the bundle, so there is no spatial edge to
-/// bucket; the Iris-3B trainers (generation, depth, restoration) declare no epic 2123 technique —
-/// they bucket by their own `shape_policy` / `aspect_ratio_bucket` options instead. Every other
-/// builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
-const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 6] = [
-    "flux3_klein_lora",
-    "flux3_klein_edit_lora",
-    "ltx_2_5_video_lora",
-    "iris_3b_generation",
-    "iris_3b_depth",
-    "iris_3b_restore",
-];
-
-/// Whether `target` advertises resolution-bucket support.
-pub fn target_supports_resolution_buckets(target: &TrainingTarget) -> bool {
-    target_limit_flag(target, RESOLUTION_BUCKETS_SUPPORT_LIMIT)
-}
-
-/// `advanced` key of the **multi-resolution buckets** list (epic 2123, sc-2127): an array of
-/// `{ "resolution": <px>, "repeats": <n> }` rows. Each dataset image is trained at every listed
-/// resolution, `repeats` times per epoch per row (ai-toolkit's `resolution` + `num_repeats` lists),
-/// so rows 512/768/1024 with repeats 16/4/1 train on a 16:4:1 per-image mix. Absent is off (one
-/// bucket at `resolution`, today's behaviour); present-but-empty is a field error.
-pub const RESOLUTION_BUCKETS_KEY: &str = "resolutionBuckets";
-/// Most bucket rows submit-time validation accepts — the engine's own cap
-/// (`gen_core::MAX_RESOLUTION_BUCKETS`; the worker pins the two together). The web form enforces the
-/// same bound (`resolutionBucketsMax` in `apps/web/src/training/trainingConfig.js`, parity-tested).
-pub const RESOLUTION_BUCKETS_MAX: usize = 8;
-/// Largest per-bucket repeat count submit-time validation accepts (web `resolutionBucketRepeatsMax`).
-/// Repeats are a per-image mix ratio; 100:1 is already far past any useful skew.
-pub const RESOLUTION_BUCKET_REPEATS_MAX: u64 = 100;
-/// Every bucket resolution must be a multiple of this (web `resolutionBucketStride`): the native
-/// trainers floor each training edge to a multiple of 32 so the latent grid tiles cleanly, so any
-/// other value would silently train at a different size than the one requested.
-pub const RESOLUTION_BUCKET_STRIDE: u64 = 32;
-
-/// One validated `advanced.resolutionBuckets` row (see [`RESOLUTION_BUCKETS_KEY`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolutionBucketSpec {
-    pub resolution: u32,
-    pub repeats: u32,
-}
-
-/// A rectangular aspect-ratio bucket accepted alongside the established square form.
-/// Row order remains meaningful: the native resolver preserves it for tie breaking and schedule
-/// provenance, and portrait geometry is distinct from landscape geometry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AspectRatioBucketSpec {
-    pub width: u32,
-    pub height: u32,
-    pub repeats: u32,
-}
-
-/// The product bucket wire contract. Legacy square rows retain their existing all-items-at-each-row
-/// semantics; rectangular rows are an additive native contract.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResolutionBucketConfig {
-    Legacy(Vec<ResolutionBucketSpec>),
-    AspectRatio(Vec<AspectRatioBucketSpec>),
-}
-
-fn bucket_repeats(row: &serde_json::Map<String, Value>, n: usize) -> Result<u32, String> {
-    row.get("repeats")
-        .and_then(Value::as_u64)
-        .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| format!(
-            "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 and {RESOLUTION_BUCKET_REPEATS_MAX}."
-        ))
-}
-
-fn bucket_dimension(
-    row: &serde_json::Map<String, Value>,
-    key: &str,
-    n: usize,
-) -> Result<u32, String> {
-    row.get(key)
-        .and_then(Value::as_u64)
-        .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| format!(
-            "{RESOLUTION_BUCKETS_KEY} row {n}: {key} must be a positive whole number of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
-        ))
-}
-
-/// Parse either the legacy square `[{resolution,repeats}]` list or the additive rectangular
-/// `[{width,height,repeats}]` list. Input may use exactly one form: mixed, incomplete, fractional,
-/// duplicate-geometry and present-empty lists refuse rather than being normalized into an altered
-/// training plan.
-pub fn parse_resolution_bucket_config(
-    advanced: &serde_json::Map<String, Value>,
-) -> Result<Option<ResolutionBucketConfig>, String> {
-    let Some(value) = technique_value(advanced, RESOLUTION_BUCKETS_KEY) else {
-        return Ok(None);
-    };
-    let rows = value.as_array().ok_or_else(|| {
-        format!("{RESOLUTION_BUCKETS_KEY} must be a list of square or rectangular bucket rows.")
-    })?;
-    if rows.is_empty() {
-        return Err(format!(
-            "{RESOLUTION_BUCKETS_KEY} must list at least one bucket (omit it to disable bucketing)."
-        ));
-    }
-    if rows.len() > RESOLUTION_BUCKETS_MAX {
-        return Err(format!(
-            "{RESOLUTION_BUCKETS_KEY} has {} buckets; at most {RESOLUTION_BUCKETS_MAX} are allowed.",
-            rows.len()
-        ));
-    }
-
-    let mut legacy = Vec::with_capacity(rows.len());
-    let mut aspect = Vec::with_capacity(rows.len());
-    let mut form: Option<&str> = None;
-    for (index, value) in rows.iter().enumerate() {
-        let n = index + 1;
-        let row = value
-            .as_object()
-            .ok_or_else(|| format!("{RESOLUTION_BUCKETS_KEY} row {n} must be an object."))?;
-        let has_resolution = row.contains_key("resolution");
-        let has_width = row.contains_key("width");
-        let has_height = row.contains_key("height");
-        let row_form = match (has_resolution, has_width, has_height) {
-            (true, false, false) => "legacy",
-            (false, true, true) => "aspect",
-            _ => return Err(format!(
-                "{RESOLUTION_BUCKETS_KEY} row {n} must use exactly {{resolution, repeats}} or {{width, height, repeats}}."
-            )),
-        };
-        if form.is_some_and(|previous| previous != row_form) {
-            return Err(format!(
-                "{RESOLUTION_BUCKETS_KEY} must not mix square and rectangular bucket rows."
-            ));
-        }
-        form = Some(row_form);
-        let repeats = bucket_repeats(row, n)?;
-        match row_form {
-            "legacy" => {
-                if row.len() != 2 || !row.contains_key("repeats") {
-                    return Err(format!(
-                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only resolution and repeats."
-                    ));
-                }
-                let resolution = bucket_dimension(row, "resolution", n)?;
-                if legacy
-                    .iter()
-                    .any(|bucket: &ResolutionBucketSpec| bucket.resolution == resolution)
-                {
-                    return Err(format!(
-                        "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
-                    ));
-                }
-                legacy.push(ResolutionBucketSpec {
-                    resolution,
-                    repeats,
-                });
-            }
-            "aspect" => {
-                if row.len() != 3 || !row.contains_key("repeats") {
-                    return Err(format!(
-                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only width, height and repeats."
-                    ));
-                }
-                let width = bucket_dimension(row, "width", n)?;
-                let height = bucket_dimension(row, "height", n)?;
-                if aspect.iter().any(|bucket: &AspectRatioBucketSpec| {
-                    bucket.width == width && bucket.height == height
-                }) {
-                    return Err(format!(
-                        "{RESOLUTION_BUCKETS_KEY} lists geometry {width}x{height} more than once."
-                    ));
-                }
-                aspect.push(AspectRatioBucketSpec {
-                    width,
-                    height,
-                    repeats,
-                });
-            }
-            _ => unreachable!("row form is classified above"),
-        }
-    }
-    Ok(Some(match form {
-        Some("legacy") => ResolutionBucketConfig::Legacy(legacy),
-        Some("aspect") => ResolutionBucketConfig::AspectRatio(aspect),
-        _ => unreachable!("non-empty rows have a form"),
-    }))
-}
-
-/// Backwards-compatible reader for native square-bucket consumers. New rectangular consumers use
-/// [`parse_resolution_bucket_config`] so they receive width and height without lossy projection.
-pub fn parse_resolution_buckets(
-    advanced: &serde_json::Map<String, Value>,
-) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
-    match parse_resolution_bucket_config(advanced)? {
-        None => Ok(None),
-        Some(ResolutionBucketConfig::Legacy(rows)) => Ok(Some(rows)),
-        Some(ResolutionBucketConfig::AspectRatio(_)) => Err(format!(
-            "{RESOLUTION_BUCKETS_KEY} rectangular rows require a native aspect-ratio bucket trainer."
-        )),
-    }
-}
-
-/// The largest training resolution a config trains at: the largest
-/// [`RESOLUTION_BUCKETS_KEY`] row when buckets are set (they replace `resolution`), else
-/// `resolution`. Memory admission sizes for this (epic 2123 E7). A malformed bucket list falls back
-/// to `resolution` here only because plan validation refuses it before any job is queued.
-pub fn training_max_resolution(config: &TrainingConfig) -> u32 {
-    match parse_resolution_bucket_config(&config.advanced) {
-        Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
-            .iter()
-            .map(|bucket| bucket.resolution)
-            .max()
-            .unwrap_or(config.resolution),
-        Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
-            .iter()
-            .flat_map(|bucket| [bucket.width, bucket.height])
-            .max()
-            .unwrap_or(config.resolution),
-        _ => config.resolution,
-    }
-}
-
-/// `advanced` key of the annealed **gradient noise** initial scale `eta` (epic 2123, sc-24827):
-/// on every optimizer update `t` the native trainer adds `N(0,1) · eta / (1 + t)^gamma` to each
-/// adapter gradient (after the norm clip, before the step). Absent or `0` is off.
-pub const GRADIENT_NOISE_ETA_KEY: &str = "gradientNoiseEta";
-/// `advanced` key of the gradient-noise annealing exponent `gamma` (absent ⇒
-/// [`GRADIENT_NOISE_GAMMA_DEFAULT`]; only meaningful while eta is on).
-pub const GRADIENT_NOISE_GAMMA_KEY: &str = "gradientNoiseGamma";
-/// Inclusive upper bound for [`GRADIENT_NOISE_ETA_KEY`]. The web form enforces the identical bound
-/// (`gradientNoiseEtaMax` in `apps/web/src/training/trainingConfig.js`; a parity test pins them,
-/// epic 2123 E6). Ten times the upstream suggestion [`GRADIENT_NOISE_ETA_SUGGESTED`]: the noise is
-/// per element, so even 0.1 already dwarfs a unit-norm-clipped gradient on any real adapter.
-pub const GRADIENT_NOISE_ETA_MAX: f64 = 0.1;
-/// The upstream (ai-toolkit-perceptual `neelakantan` mode) suggested eta when enabled.
-pub const GRADIENT_NOISE_ETA_SUGGESTED: f64 = 0.01;
-/// Inclusive upper bound for [`GRADIENT_NOISE_GAMMA_KEY`] (web parity: `gradientNoiseGammaMax`).
-/// The annealed-noise analysis (Neelakantan et al. 2015, after Welling & Teh) needs `gamma <= 1`;
-/// larger exponents switch the noise off within a handful of updates.
-pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
-/// Default annealing exponent (the paper's and upstream's 0.55).
-pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
-
-/// Body losses (epic 2123, sc-24832): ViTPose proportion, HybrIK shape and Sapiens normal losses —
-/// keys, bounds, the shared strict parser, support flags and auxiliary catalog models.
-pub mod body_losses;
-
-/// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
-/// catalog models.
-pub mod depth_anchoring;
-
-/// Face losses (epic 2123, sc-24831): the ArcFace identity loss and the FaceMesh landmark loss —
-/// keys, bounds, the shared strict parsers, support flags and auxiliary catalog models.
-pub mod face_losses;
-
-/// The latent-space perceptual losses (epic 2123, sc-24833): VAE anchor + E-LatentLPIPS keys,
-/// bounds, the shared strict parser, support flags and auxiliary catalog models.
-pub mod latent_perceptual;
-
-/// The de-distill training adapter (sc-25213): keys, the strict version→catalog-model parser, the
-/// support flag and the cataloged adapter files.
-pub mod training_adapter;
-
-/// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
-/// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
-/// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
-/// and the Krea ControlNet branch, so the flag is static per target and needs no Candle
-/// projection; a worker test pins it to the linked trainer descriptors on each platform. The web
-/// form shows the toggle only where this is `true`, and submit-time validation refuses mask loss
-/// elsewhere with a `subjectMaskLoss` field error.
-pub const SUBJECT_MASK_LOSS_SUPPORT_LIMIT: &str = "supportsSubjectMaskLoss";
-
-/// Whether `target` advertises subject-masked-loss support.
-pub fn target_supports_subject_mask_loss(target: &TrainingTarget) -> bool {
-    target_limit_flag(target, SUBJECT_MASK_LOSS_SUPPORT_LIMIT)
-}
-
-/// `advanced` key that turns on **subject-masked loss weighting** (epic 2123, sc-24828): each
-/// image's subject mask (`<dataset>/masks/<content hash>.png`, see
-/// [`crate::training_subject_masks`]) weights the native trainer's per-element loss. A boolean;
-/// absent or `false` is off.
-pub const SUBJECT_MASK_LOSS_KEY: &str = "subjectMaskLoss";
-/// `advanced` key of the loss weight of a pure-background latent cell, in
-/// `SUBJECT_MASK_BACKGROUND_WEIGHT_RANGE` (absent ⇒ [`SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT`]).
-pub const SUBJECT_MASK_BACKGROUND_WEIGHT_KEY: &str = "subjectMaskBackgroundWeight";
-/// `advanced` key of the loss weight of a pure-subject latent cell, `> 0` and at most
-/// [`SUBJECT_MASK_WEIGHT_MAX`] (absent ⇒ [`SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT`]).
-pub const SUBJECT_MASK_SUBJECT_WEIGHT_KEY: &str = "subjectMaskSubjectWeight";
-/// Upper bound of both mask weights — the engine's `SubjectMaskLoss` bounds. The web form uses the
-/// identical bound (`subjectMaskWeightMax` in `apps/web/src/training/trainingConfig.js`; a parity
-/// test pins the two together, epic 2123 E6). The background weight may be `0` (drop the
-/// background); the subject weight must be `> 0`.
-pub const SUBJECT_MASK_WEIGHT_MAX: f64 = 1.0;
-/// Default background weight when masked loss is on: keep a little background signal so the
-/// adapter does not learn arbitrary backgrounds, while the subject dominates.
-pub const SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT: f64 = 0.1;
-/// Default subject weight when masked loss is on.
-pub const SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT: f64 = 1.0;
-
-string_enum! {
-    /// Output modality of a training target. `Image` is the first production
-    /// target; `Video` and `Audio` are reserved so the contract stays generic.
-    pub enum TrainingModality {
-        Image => "image",
-        Video => "video",
-        Audio => "audio",
-    }
-}
-
-string_enum! {
-    /// What a training run produces. `Lora` is a LoRA/LoKr adapter; `ControlBranch` is a
-    /// ControlNet control branch (an "overlay" the engine writes, distinct from a LoRA — it
-    /// injects a conditioning residual rather than reparameterizing weights). ControlNet
-    /// training (epic 10159, the `krea_control` kernel) produces the latter. `BaseCheckpoint` is a
-    /// FULL base fine-tune (sc-14056/sc-15036): every backbone weight retrained, emitted as a
-    /// diffusers-shaped transformer component directory (~8 GB) rather than an adapter file — so it
-    /// belongs in the **model catalog**, not the LoRA registry.
-    ///
-    /// Unlike the other two, `BaseCheckpoint` is a per-**job** property, not a per-target one: the
-    /// Mage target advertises `networkTypes: ["lora", "lokr", "full"]`, so the very same target
-    /// produces an adapter or a base checkpoint depending on `advanced.networkType`. See
-    /// [`training_output_kind`] — the single discriminator both the plan builder and the API use.
-    pub enum TrainingOutputKind {
-        Lora => "lora",
-        ControlBranch => "control_branch",
-        BaseCheckpoint => "base_checkpoint",
-    }
-}
-
-/// The `advanced.networkType` value that selects a FULL base fine-tune (sc-14056). Every other
-/// value (`lora`, `lokr`, absent, unrecognized) is an adapter run.
-pub const NETWORK_TYPE_FULL: &str = "full";
-
-/// Whether a training config's `advanced.networkType` selects a FULL base fine-tune.
-///
-/// The ONE discriminator, so the plan's declared `outputKind`, the API's output-location fork, and
-/// the worker's `full_finetune` engine flag can never disagree about what a run produces. Trimmed
-/// and case-insensitive, matching the worker's `map_training_config`.
-pub fn config_is_full_finetune(config: &TrainingConfig) -> bool {
-    config
-        .advanced
-        .get("networkType")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(NETWORK_TYPE_FULL))
-}
-
-/// What a run against `target` with `config` actually produces.
-///
-/// A target declares the kind it produces by default, but a target that offers `"full"` among its
-/// `limits.networkTypes` produces a [`TrainingOutputKind::BaseCheckpoint`] for a full run —
-/// derived here rather than copied off the target, so there is one discriminator and not two. A
-/// control-branch target is never a full fine-tune (no control kernel offers `"full"`), so its kind
-/// is returned unchanged.
-pub fn training_output_kind(
-    target_kind: &TrainingOutputKind,
-    config: &TrainingConfig,
-) -> TrainingOutputKind {
-    if matches!(target_kind, TrainingOutputKind::Lora) && config_is_full_finetune(config) {
-        return TrainingOutputKind::BaseCheckpoint;
-    }
-    target_kind.clone()
-}
 
 string_enum! {
     /// Lifecycle state of a training dataset.
@@ -671,36 +185,6 @@ pub struct Caption {
     pub extra: ExtraFields,
 }
 
-/// A registered training target: the combination of a base model, output kind,
-/// and execution kernel, plus the defaults and bounds the UI builds on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainingTarget {
-    /// Stable target id, e.g. `z_image_turbo_lora`.
-    pub id: String,
-    pub name: String,
-    pub modality: TrainingModality,
-    pub output_kind: TrainingOutputKind,
-    /// SceneWorks LoRA/model family, e.g. `z-image`. Drives downstream
-    /// generation-side compatibility of the produced LoRA.
-    pub family: String,
-    /// Manifest model id this target trains against.
-    pub base_model: String,
-    /// Optional source repository for the base model weights.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_model_repo: Option<String>,
-    /// Identifier of the native execution kernel that runs this target.
-    pub kernel: String,
-    /// Visible (simple-panel) config defaults for this target.
-    pub defaults: TrainingConfig,
-    /// Bounds and choices for advanced fields; free-form to stay generic.
-    pub limits: JsonObject,
-    /// Presentation hints (labels, descriptions); free-form.
-    pub ui: JsonObject,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
 /// The registry of available training targets. Rust owns the built-in set
 /// returned by [`builtin_training_targets`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -740,87 +224,6 @@ pub struct TrainingPreset {
 pub struct TrainingPresetRegistry {
     pub schema_version: u32,
     pub presets: Vec<TrainingPreset>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-/// Project a target's (or preset's) config onto what its Candle trainer executes. The registry keeps
-/// the established MLX defaults; a Candle host's API serves this projection, so the form the Studio
-/// seeds, the submitted config and the worker preflight agree.
-pub fn apply_candle_training_defaults(kernel: &str, config: &mut TrainingConfig) {
-    match kernel {
-        // These Candle trainers are intentionally dense and do not render previews. MLX retains
-        // its established checkpointing/preview defaults in the core catalog and macOS response.
-        "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "anima_lora" => {
-            config
-                .advanced
-                .insert("gradientCheckpointing".to_owned(), json!(false));
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-            if kernel == "mage_flow_lora" {
-                config.advanced.insert(
-                    "fullFinetuneConfig".to_owned(),
-                    json!({
-                        "mixedPrecision": "f32",
-                        "gradientCheckpointing": false
-                    }),
-                );
-            }
-        }
-        // The Wan single-DiT and I2V trainers do not preview. Both A14B variants require
-        // checkpointing on Candle; TI2V-5B remains a negative and honors its existing value.
-        "wan_lora" => {
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-        }
-        "wan_moe_lora" => {
-            config
-                .advanced
-                .insert("gradientCheckpointing".to_owned(), json!(true));
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-        }
-        _ => {}
-    }
-}
-
-/// Generic LoRA training hyperparameters.
-///
-/// The visible fields back the simple config panel; engine-specific knobs live
-/// in the free-form `advanced` bag so the contract never couples to a specific
-/// trainer's option set. This shape doubles as a target's `defaults` and as the
-/// resolved config inside a [`TrainingPlan`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainingConfig {
-    /// LoRA network rank (dimension).
-    pub rank: u32,
-    /// LoRA alpha scaling factor. This stays a JSON number so MOSS can use a
-    /// finite positive fractional scale while legacy targets retain their own
-    /// explicitly advertised integral policies.
-    pub alpha: ContractNumber,
-    pub learning_rate: ContractNumber,
-    /// Total training steps.
-    pub steps: u32,
-    pub batch_size: u32,
-    pub gradient_accumulation: u32,
-    /// Square training resolution edge in pixels (e.g. `1024`). Aspect-ratio
-    /// bucketing details, when used, live in `advanced`.
-    pub resolution: u32,
-    /// Checkpoint cadence, in steps.
-    pub save_every: u32,
-    /// MOSS uses a literal nonnegative seed, including zero. Its Studio Randomize
-    /// action persists a concrete value; there is no negative/None Auto sentinel.
-    pub seed: i64,
-    /// Optimizer name, kept a free string to stay engine-agnostic.
-    pub optimizer: String,
-    /// Trigger word baked into captions and surfaced on the output LoRA.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger_word: Option<String>,
-    /// Advanced, collapsed-by-default fields. Free-form by design. Preview-sample
-    /// knobs live here: `sampleEvery` (cadence in steps; 0 disables), `sampleSteps`,
-    /// `sampleGuidanceScale`, `sampleCount` (images per step; default 4), and
-    /// `samplePrompts` (string array; the UI prefills trigger-derived defaults).
-    /// All native backends cap the prompt pool at `sampleCount`
-    /// (one preview per prompt, truncated — never padded).
-    pub advanced: JsonObject,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1032,6 +435,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             moss_image_lora_target(true),
             qwen_image_2_1_lora_target(),
             qwen_image_2_1_edit_lora_target(),
+            minimax_h3_image_lora_target(),
+            minimax_h3_image_edit_lora_target(),
             flux3::target(false),
             flux3::target(true),
             ltx_video_lora_target(),
@@ -1119,6 +524,10 @@ const NOISE_TARGETS: &[&str] = &[
     "mage_flow_base_lora",
     "qwen_image_2_1_lora",
     "qwen_image_2_1_edit_lora",
+    // SW-7103: the H3-Image trainer declares `TrainingTechniques::ADAPTER_NOISE` (weight and
+    // gradient noise at the shared adapter update) plus resolution buckets, and nothing else.
+    "minimax_h3_image_lora",
+    "minimax_h3_image_edit_lora",
     "moss_image_base_lora",
     "moss_image_sft_lora",
 ];
@@ -1195,6 +604,8 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let anima_target = anima_base_lora_target();
     let qwen_image_2_1_target = qwen_image_2_1_lora_target();
     let qwen_image_2_1_edit_target = qwen_image_2_1_edit_lora_target();
+    let minimax_h3_image_target = minimax_h3_image_lora_target();
+    let minimax_h3_image_edit_target = minimax_h3_image_edit_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1853,6 +1264,84 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 },
                 object(json!({
                     "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+                    "order": 20
+                })),
+            ),
+            // MiniMax-H3-Image (SW-7103): the target defaults carry the 2048x2048 canvas,
+            // checkpointing and the flow-match knobs, so these only pick capacity/LR.
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on MiniMax-H3-Image at its native 2048x2048 canvas (the adapter inherits the MiniMax-H3-Image Community License).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = ContractNumber::from(8);
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR MiniMax-H3-Image character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = ContractNumber::from(16);
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity MiniMax-H3-Image style LoRA for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_edit_target,
+                "minimax_h3_image_edit_lora.edit.adamw8bit.balanced",
+                "Edit balanced",
+                &["edit"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 20-50 edit pairs (1-16 ordered references + target + instruction) on MiniMax-H3-Image (the adapter inherits the MiniMax-H3-Image Community License).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_edit_target,
+                "minimax_h3_image_edit_lora.edit.adamw8bit.conservative",
+                "Edit conservative",
+                &["edit"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = ContractNumber::from(8);
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR MiniMax-H3-Image edit preset for small or tightly consistent edit-pair datasets.",
                     "order": 20
                 })),
             ),
@@ -3586,148 +3075,6 @@ pub struct TrainingPresetProvenance {
     pub preset_config_snapshot: JsonObject,
 }
 
-/// Error produced when a [`LoraTrainingRequest`] cannot be resolved into a valid
-/// [`TrainingPlan`]. These map to client errors: the request is structurally
-/// fine but the dataset or config cannot produce a runnable plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrainingPlanError {
-    /// The dataset has no items to train on.
-    EmptyDataset,
-    /// A hyperparameter is out of range; carries a human-facing reason.
-    InvalidConfig(String),
-    /// A value falls outside the target capability that was advertised to the
-    /// client. Kept structured so the API can return a field-specific error
-    /// without scraping a human-facing sentence.
-    TargetLimit(TrainingTargetLimitError),
-    /// A config field holds an invalid value (wrong type, out of range, or an incompatible
-    /// combination). Names the request `field` so the API returns a field-level error.
-    InvalidField { field: String, message: String },
-    /// The dataset's shape does not fit the target — an instruction-edit dataset (items carrying
-    /// ordered reference images, sc-24161) on a target that cannot train edits, a mixed or
-    /// over-cap edit dataset, or a plain dataset on an edit-only target. Human-facing reason.
-    InvalidDataset(String),
-}
-
-/// A target-advertised limit rejected while normalizing a training request.
-///
-/// These errors deliberately name the request field and the advertised bound.
-/// A target catalog is a capability contract, not presentation-only metadata:
-/// an unknown numeric entry fails closed rather than becoming an unenforced UI
-/// hint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TrainingTargetLimitError {
-    BelowMinimum {
-        field: String,
-        value: u64,
-        minimum: u64,
-    },
-    AboveMaximum {
-        field: String,
-        value: u64,
-        maximum: u64,
-    },
-    UnsupportedValue {
-        field: String,
-        value: String,
-        allowed: Vec<String>,
-    },
-    UnsupportedNumericValue {
-        field: String,
-        value: u64,
-        allowed: Vec<u64>,
-    },
-    InvalidAdvertisedLimit {
-        field: String,
-        detail: String,
-    },
-    UnsupportedNumericLimit {
-        field: String,
-    },
-    /// A micro-step quantity that must be a whole number of gradient-accumulation windows
-    /// (Iris: checkpoints, previews and the warmup land on optimizer-step boundaries).
-    NotMultipleOf {
-        field: String,
-        value: u64,
-        multiple: u64,
-    },
-}
-
-impl std::fmt::Display for TrainingTargetLimitError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BelowMinimum {
-                field,
-                value,
-                minimum,
-            } => write!(formatter, "{field} ({value}) must be at least {minimum}."),
-            Self::AboveMaximum {
-                field,
-                value,
-                maximum,
-            } => write!(formatter, "{field} ({value}) must be at most {maximum}."),
-            Self::UnsupportedValue {
-                field,
-                value,
-                allowed,
-            } => write!(
-                formatter,
-                "Unsupported {field} '{value}'. Allowed values: {}.",
-                allowed.join(", ")
-            ),
-            Self::UnsupportedNumericValue {
-                field,
-                value,
-                allowed,
-            } => write!(
-                formatter,
-                "Unsupported {field} {value}. Allowed values: {}.",
-                allowed
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::InvalidAdvertisedLimit { field, detail } => {
-                write!(
-                    formatter,
-                    "Training target limit '{field}' is invalid: {detail}."
-                )
-            }
-            Self::UnsupportedNumericLimit { field } => write!(
-                formatter,
-                "Training target advertises unsupported numeric limit '{field}'."
-            ),
-            Self::NotMultipleOf {
-                field,
-                value,
-                multiple,
-            } => write!(
-                formatter,
-                "{field} ({value}) is counted in micro-steps and must be a multiple of the \
-                 gradient accumulation ({multiple})."
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for TrainingPlanError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyDataset => {
-                formatter.write_str("Training dataset has no items. Add at least one image.")
-            }
-            Self::InvalidConfig(detail) | Self::InvalidDataset(detail) => {
-                formatter.write_str(detail)
-            }
-            Self::TargetLimit(error) => error.fmt(formatter),
-            Self::InvalidField { message, .. } => formatter.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for TrainingPlanError {}
-
 /// Normalizes resolved request inputs into the [`TrainingPlan`] the Python
 /// kernel consumes. Validates the dataset is non-empty and the config is
 /// runnable; absolute paths and ids are resolved by the caller.
@@ -3917,30 +3264,6 @@ fn resolve_item_path(
     })
 }
 
-/// The target limit naming how many ORDERED reference images one instruction-edit item may carry
-/// (sc-24161). A scalar, not a numeric range, so the advertised-numeric-limit validator skips it
-/// and [`validate_dataset_shape_for_target`] enforces it against the dataset instead.
-pub const MAX_REFERENCE_IMAGES_LIMIT: &str = "maxReferenceImages";
-
-/// How many ordered reference images one instruction-edit training item may carry for `target`
-/// (`limits.maxReferenceImages`), or `0` when the target cannot train on edit pairs at all — every
-/// target before sc-24161. For Qwen Image 2.1 this mirrors the base model's own
-/// `limits.maxReferenceAssets` (10) and the engine trainer's `max_reference_images`; the contract
-/// tests pin all three together so the cap is never a second, drifting number.
-pub fn training_target_max_reference_images(target: &TrainingTarget) -> u32 {
-    target
-        .limits
-        .get(MAX_REFERENCE_IMAGES_LIMIT)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0)
-}
-
-/// Whether `target` trains on instruction-edit pairs (its reference cap is non-zero, sc-24161).
-pub fn training_target_trains_edit_pairs(target: &TrainingTarget) -> bool {
-    training_target_max_reference_images(target) > 0
-}
-
 /// The largest per-item reference count any shipped training target accepts — the dataset store's
 /// storage ceiling (a dataset is target-agnostic until a run picks a target, so the per-target cap
 /// is enforced at plan time; this only stops a dataset from holding references no target could use).
@@ -4060,811 +3383,6 @@ fn validate_dataset_shape_for_target(
                 "Dataset item '{}' is an edit pair with an empty instruction: its caption is the \
                  edit instruction.",
                 label(item)
-            )));
-        }
-    }
-    Ok(())
-}
-
-pub fn validate_training_config_for_target(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    if flux3::KERNELS.contains(&target.kernel.as_str()) {
-        flux3::validate(target, config)?;
-    }
-    validate_advertised_numeric_limits(target, config)?;
-    validate_advertised_optimizer_limit(target, config)?;
-    validate_training_config(config)?;
-    if target.kernel == "moss_image_lora" {
-        moss_training_seed(config.seed)?;
-        validate_moss_training_field_shapes(&config.advanced)?;
-    }
-    validate_advertised_advanced_choices(target, config)?;
-    if iris::is_iris_training_kernel(&target.kernel) {
-        iris::validate_iris_training_config(target, config)?;
-    }
-    validate_resolution_buckets_for_target(target, config)?;
-    validate_technique_support(target, config)?;
-    depth_anchoring::validate_support(target, config)?;
-    body_losses::validate_support(target, config)?;
-    face_losses::validate_support(target, config)?;
-    latent_perceptual::validate_support(target, config)?;
-    training_adapter::validate_support(target, config)?;
-    validate_subject_mask_loss_support(target, config)?;
-    let network_type = match config.advanced.get("networkType") {
-        None => "lora",
-        Some(Value::String(value)) if value.trim().is_empty() => "lora",
-        Some(Value::String(value)) => value.trim(),
-        Some(_) => {
-            return Err(TrainingPlanError::InvalidConfig(
-                "networkType must be a string.".to_owned(),
-            ));
-        }
-    };
-    if let Some(supported) = target.limits.get("networkTypes").and_then(Value::as_array) {
-        let admitted = supported.iter().any(|value| {
-            value
-                .as_str()
-                .is_some_and(|value| value.eq_ignore_ascii_case(network_type))
-        });
-        if !admitted {
-            let supported = supported
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(TrainingPlanError::InvalidConfig(format!(
-                "Training target '{}' does not support networkType '{network_type}'. Supported network types: {supported}.",
-                target.id
-            )));
-        }
-    }
-    if config_is_full_finetune(config) {
-        // Platform-effective API catalogs may publish stricter full-tune execution requirements.
-        // The core builtins retain MLX defaults; only the cloned Candle target carries this marker.
-        let requirements = target
-            .defaults
-            .advanced
-            .get("fullFinetuneConfig")
-            .and_then(Value::as_object);
-        if let Some(required_precision) = requirements
-            .and_then(|values| values.get("mixedPrecision"))
-            .and_then(Value::as_str)
-        {
-            let precision = config
-                .advanced
-                .get("mixedPrecision")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !precision.eq_ignore_ascii_case(required_precision) {
-                return Err(TrainingPlanError::InvalidConfig(format!(
-                    "{} full base fine-tuning requires mixedPrecision={required_precision}.",
-                    target.name
-                )));
-            }
-        }
-        if requirements
-            .and_then(|values| values.get("gradientCheckpointing"))
-            .and_then(Value::as_bool)
-            == Some(false)
-            && config
-                .advanced
-                .get("gradientCheckpointing")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            return Err(TrainingPlanError::InvalidConfig(format!(
-                "{} full base fine-tuning does not support gradient checkpointing.",
-                target.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Enforce every numeric capability currently advertised in a target's `limits`
-/// bag. Adding a new numeric limit without adding its request-field mapping is
-/// intentionally rejected: otherwise a provider could publish a bound that the
-/// shared request boundary silently ignores.
-fn validate_advertised_numeric_limits(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    for (field, advertised) in &target.limits {
-        if !contains_json_number(advertised) {
-            continue;
-        }
-        // A dataset-shape limit, not a request field: the edit-pair reference cap (sc-24161) is
-        // enforced against the dataset by `validate_dataset_shape_for_target`. It must still be a
-        // non-negative integer, so a malformed advertisement is refused rather than read as 0.
-        if field == MAX_REFERENCE_IMAGES_LIMIT {
-            if advertised
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .is_none()
-            {
-                return Err(invalid_advertised_limit(
-                    field,
-                    "the reference-image cap must be a non-negative integer",
-                ));
-            }
-            continue;
-        }
-        let values = advertised.as_array().ok_or_else(|| {
-            invalid_advertised_limit(field, "numeric limits must be an array of integer bounds")
-        })?;
-
-        match field.as_str() {
-            "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
-            // Legacy target limits intentionally describe integral alpha. MOSS has no
-            // `alpha` numeric range so its finite fractional alpha passes through its
-            // native f32 contract; another target must explicitly opt into fractions.
-            "alpha" => validate_advertised_numeric_range(
-                field,
-                values,
-                config.alpha.as_u64().ok_or_else(|| {
-                    TrainingPlanError::InvalidConfig(
-                        "alpha must be a whole number for this training target.".to_owned(),
-                    )
-                })?,
-            )?,
-            "steps" => validate_advertised_numeric_range(field, values, u64::from(config.steps))?,
-            "batchSize" => {
-                validate_advertised_numeric_range(field, values, u64::from(config.batch_size))?
-            }
-            "resolutions" => validate_advertised_numeric_choices(
-                field,
-                "resolution",
-                values,
-                u64::from(config.resolution),
-            )?,
-            // Preview images per cadence (`advanced.sampleCount`, default 4 — the worker's
-            // `DEFAULT_SAMPLE_COUNT`). A trainer that renders fewer advertises its cap here.
-            "sampleCount" => validate_advertised_numeric_range(
-                field,
-                values,
-                match config.advanced.get("sampleCount") {
-                    None | Some(Value::Null) => 4,
-                    Some(value) => value.as_u64().ok_or_else(|| {
-                        TrainingPlanError::InvalidConfig(
-                            "sampleCount must be a non-negative integer.".to_owned(),
-                        )
-                    })?,
-                },
-            )?,
-            _ => {
-                return Err(TrainingPlanError::TargetLimit(
-                    TrainingTargetLimitError::UnsupportedNumericLimit {
-                        field: field.clone(),
-                    },
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn contains_json_number(value: &Value) -> bool {
-    match value {
-        Value::Number(_) => true,
-        Value::Array(values) => values.iter().any(contains_json_number),
-        Value::Object(values) => values.values().any(contains_json_number),
-        Value::Null | Value::Bool(_) | Value::String(_) => false,
-    }
-}
-
-fn validate_advertised_numeric_range(
-    field: &str,
-    values: &[Value],
-    value: u64,
-) -> Result<(), TrainingPlanError> {
-    let bounds = numeric_limit_values(field, values)?;
-    let [minimum, maximum] = bounds.as_slice() else {
-        return Err(invalid_advertised_limit(
-            field,
-            "a numeric range must contain exactly two integer bounds",
-        ));
-    };
-    if minimum > maximum {
-        return Err(invalid_advertised_limit(
-            field,
-            "the minimum must not exceed the maximum",
-        ));
-    }
-    if value < *minimum {
-        return Err(TrainingPlanError::TargetLimit(
-            TrainingTargetLimitError::BelowMinimum {
-                field: field.to_owned(),
-                value,
-                minimum: *minimum,
-            },
-        ));
-    }
-    if value > *maximum {
-        return Err(TrainingPlanError::TargetLimit(
-            TrainingTargetLimitError::AboveMaximum {
-                field: field.to_owned(),
-                value,
-                maximum: *maximum,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_advertised_numeric_choices(
-    advertised_field: &str,
-    request_field: &str,
-    values: &[Value],
-    value: u64,
-) -> Result<(), TrainingPlanError> {
-    let allowed = numeric_limit_values(advertised_field, values)?;
-    if allowed.is_empty() {
-        return Err(invalid_advertised_limit(
-            advertised_field,
-            "a numeric choice list must not be empty",
-        ));
-    }
-    if !allowed.contains(&value) {
-        return Err(TrainingPlanError::TargetLimit(
-            TrainingTargetLimitError::UnsupportedNumericValue {
-                field: request_field.to_owned(),
-                value,
-                allowed,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn numeric_limit_values(field: &str, values: &[Value]) -> Result<Vec<u64>, TrainingPlanError> {
-    values
-        .iter()
-        .map(|value| {
-            value.as_u64().ok_or_else(|| {
-                invalid_advertised_limit(field, "numeric bounds must be non-negative integers")
-            })
-        })
-        .collect()
-}
-
-fn invalid_advertised_limit(field: &str, detail: &str) -> TrainingPlanError {
-    TrainingPlanError::TargetLimit(TrainingTargetLimitError::InvalidAdvertisedLimit {
-        field: field.to_owned(),
-        detail: detail.to_owned(),
-    })
-}
-
-fn validate_advertised_optimizer_limit(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    let Some(values) = target.limits.get("optimizers") else {
-        return Ok(());
-    };
-    let values = values.as_array().ok_or_else(|| {
-        invalid_advertised_limit("optimizers", "an optimizer choice list must be an array")
-    })?;
-    let allowed = values
-        .iter()
-        .map(|value| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                invalid_advertised_limit("optimizers", "optimizer choices must be strings")
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if allowed.is_empty() {
-        return Err(invalid_advertised_limit(
-            "optimizers",
-            "an optimizer choice list must not be empty",
-        ));
-    }
-    if !allowed.iter().any(|value| value == &config.optimizer) {
-        return Err(TrainingPlanError::TargetLimit(
-            TrainingTargetLimitError::UnsupportedValue {
-                field: "optimizer".to_owned(),
-                value: config.optimizer.clone(),
-                allowed,
-            },
-        ));
-    }
-    Ok(())
-}
-
-/// Enforce the advanced-bag choice lists a target advertises (`lrSchedulers`, `timestepTypes`,
-/// `timestepBiases`, `lossTypes`, `mixedPrecisions`) and a pinned-off `gradientCheckpointing`. A
-/// target that advertises a list is promising the Studio exactly those choices, so a request
-/// outside it is refused at submit rather than travelling to a trainer that would refuse it after
-/// load (or, worse, ignore it). Targets that advertise no list keep their established behaviour.
-fn validate_advertised_advanced_choices(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    for (limit, field) in [
-        ("lrSchedulers", "lrScheduler"),
-        ("timestepTypes", "timestepType"),
-        ("timestepBiases", "timestepBias"),
-        ("lossTypes", "lossType"),
-        ("mixedPrecisions", "mixedPrecision"),
-    ] {
-        let Some(advertised) = target.limits.get(limit) else {
-            continue;
-        };
-        let allowed = advertised
-            .as_array()
-            .and_then(|values| {
-                values
-                    .iter()
-                    .map(|value| value.as_str().map(str::to_owned))
-                    .collect::<Option<Vec<_>>>()
-            })
-            .filter(|values| !values.is_empty())
-            .ok_or_else(|| {
-                invalid_advertised_limit(limit, "a choice list must be non-empty strings")
-            })?;
-        let Some(requested) = config.advanced.get(field) else {
-            continue;
-        };
-        let requested = requested.as_str().ok_or_else(|| {
-            TrainingPlanError::InvalidConfig(format!("{field} must be a string."))
-        })?;
-        let normalized = requested.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            continue;
-        }
-        if !allowed
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(&normalized))
-        {
-            return Err(TrainingPlanError::TargetLimit(
-                TrainingTargetLimitError::UnsupportedValue {
-                    field: field.to_owned(),
-                    value: requested.to_owned(),
-                    allowed,
-                },
-            ));
-        }
-    }
-    if target.limits.get("gradientCheckpointing") == Some(&Value::Bool(false))
-        && config.advanced.get("gradientCheckpointing") == Some(&Value::Bool(true))
-    {
-        return Err(TrainingPlanError::InvalidConfig(format!(
-            "Training target '{}' does not implement gradient checkpointing.",
-            target.id
-        )));
-    }
-    Ok(())
-}
-
-/// Validate MOSS's JSON controls before submission or native request lowering.
-/// Missing controls retain the worker defaults; present values must match the native
-/// bool/string-array/i32 contract. The native options bag accepts only its deterministic
-/// posterior policy (an empty or absent bag also selects that policy).
-pub fn validate_moss_training_field_shapes(advanced: &JsonObject) -> Result<(), TrainingPlanError> {
-    let invalid = |field: &str, message: &str| TrainingPlanError::InvalidField {
-        field: field.to_owned(),
-        message: format!("MOSS {field} {message}"),
-    };
-    if let Some(options) = advanced.get("modelOptions") {
-        let options = options
-            .as_object()
-            .ok_or_else(|| invalid("modelOptions", "must be an object"))?;
-        if options
-            .iter()
-            .any(|(k, v)| k != "vae_posterior" || v.as_str() != Some("posterior_mean_v1"))
-        {
-            return Err(invalid(
-                "modelOptions",
-                "accepts only vae_posterior=posterior_mean_v1",
-            ));
-        }
-    }
-    if let Some(modules) = advanced.get("loraTargetModules") {
-        let modules = modules
-            .as_array()
-            .ok_or_else(|| invalid("loraTargetModules", "must be an array"))?;
-        if modules.iter().any(|module| !module.is_string()) {
-            return Err(invalid("loraTargetModules", "must contain only strings"));
-        }
-    }
-    if let Some(factor) = advanced.get("decomposeFactor") {
-        let factor = factor
-            .as_i64()
-            .ok_or_else(|| invalid("decomposeFactor", "must be an integer"))?;
-        if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
-            return Err(invalid("decomposeFactor", "must be -1 or a positive i32"));
-        }
-    }
-    for key in ["cacheLatents", "cacheTextEmbeddings"] {
-        if advanced.get(key).is_some_and(|value| !value.is_boolean()) {
-            return Err(invalid(key, "must be true or false"));
-        }
-    }
-    Ok(())
-}
-
-/// Checked MOSS literal seed lowering. Zero remains zero; negatives are not an
-/// implicit Auto request. Other training families retain their existing policies.
-pub fn moss_training_seed(seed: i64) -> Result<u64, TrainingPlanError> {
-    u64::try_from(seed).map_err(|_| TrainingPlanError::InvalidField {
-        field: "seed".to_owned(),
-        message: "MOSS seed must be a literal nonnegative whole number, including zero.".to_owned(),
-    })
-}
-
-/// Convert a product alpha JSON number into the native f32 contract without letting a
-/// mathematically positive f64 overflow to infinity or underflow to zero at the boundary.
-pub fn training_alpha_f32(alpha: &ContractNumber) -> Result<f32, TrainingPlanError> {
-    let value = alpha.as_f64().unwrap_or(f64::NAN);
-    if !(value.is_finite() && value > 0.0) {
-        return Err(TrainingPlanError::InvalidConfig(
-            "alpha must be a positive finite number.".to_owned(),
-        ));
-    }
-    let native = value as f32;
-    if !(native.is_finite() && native > 0.0) {
-        return Err(TrainingPlanError::InvalidConfig(
-            "alpha must be representable as a positive finite f32.".to_owned(),
-        ));
-    }
-    Ok(native)
-}
-
-fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    let positive = |value: u32, field: &str| {
-        if value == 0 {
-            Err(TrainingPlanError::InvalidConfig(format!(
-                "{field} must be at least 1."
-            )))
-        } else {
-            Ok(())
-        }
-    };
-    positive(config.rank, "rank")?;
-    training_alpha_f32(&config.alpha)?;
-    positive(config.steps, "steps")?;
-    positive(config.resolution, "resolution")?;
-    positive(config.batch_size, "batchSize")?;
-    positive(config.gradient_accumulation, "gradientAccumulation")?;
-    let learning_rate = config.learning_rate.as_f64().unwrap_or(f64::NAN);
-    if !(learning_rate.is_finite() && learning_rate > 0.0) {
-        return Err(TrainingPlanError::InvalidConfig(
-            "learningRate must be a positive finite number.".to_owned(),
-        ));
-    }
-    validate_lr_scheduler(config)?;
-    validate_weight_noise(config)?;
-    validate_gradient_noise(config)?;
-    parse_resolution_bucket_config(&config.advanced).map_err(|message| {
-        TrainingPlanError::InvalidField {
-            field: RESOLUTION_BUCKETS_KEY.to_owned(),
-            message,
-        }
-    })?;
-    depth_anchoring::validate(config)?;
-    body_losses::validate(config)?;
-    face_losses::validate(config)?;
-    latent_perceptual::validate(config)?;
-    validate_subject_mask_loss(config)?;
-    Ok(())
-}
-
-/// Which technique of `advanced` reads the per-image subject masks (sc-2124): `Some(field)` naming
-/// the field that turned it on — [`SUBJECT_MASK_LOSS_KEY`] for subject-masked loss, else
-/// `normalRestrictToSubject` for the subject-restricted normal loss (sc-24832) — or `None` when the
-/// run reads no mask. The API (which has missing masks generated before training) and the worker
-/// (which refuses a run still missing one) share this rule.
-pub fn subject_mask_consumer(
-    advanced: &JsonObject,
-) -> Result<Option<&'static str>, TrainingPlanError> {
-    if subject_mask_loss_weights(advanced)?.is_some() {
-        return Ok(Some(SUBJECT_MASK_LOSS_KEY));
-    }
-    let body = body_losses::body_loss_settings(advanced)?;
-    Ok((body.normal.is_some() && body.normal_restrict_to_subject)
-        .then_some(body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY))
-}
-
-/// The resolved subject-masked-loss weights `(background, subject)` of `config`'s `advanced` bag
-/// (epic 2123, sc-24828): `Ok(None)` when [`SUBJECT_MASK_LOSS_KEY`] is absent or `false`; else
-/// each weight (defaulted when absent) range-checked. Every failure is a
-/// [`TrainingPlanError::InvalidField`] naming the field. Shared by submit-time validation and the
-/// worker, so the two cannot disagree on defaults or bounds.
-pub fn subject_mask_loss_weights(
-    advanced: &JsonObject,
-) -> Result<Option<(f64, f64)>, TrainingPlanError> {
-    let field_error = |field: &str, message: String| TrainingPlanError::InvalidField {
-        field: field.to_owned(),
-        message,
-    };
-    let enabled = match technique_value(advanced, SUBJECT_MASK_LOSS_KEY) {
-        None => false,
-        Some(Value::Bool(on)) => *on,
-        Some(_) => {
-            return Err(field_error(
-                SUBJECT_MASK_LOSS_KEY,
-                format!("{SUBJECT_MASK_LOSS_KEY} must be true or false."),
-            ))
-        }
-    };
-    let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
-        let Some(value) = technique_value(advanced, key) else {
-            return Ok(default);
-        };
-        let weight = value
-            .as_f64()
-            .filter(|weight| weight.is_finite())
-            .ok_or_else(|| field_error(key, format!("{key} must be a number.")))?;
-        let in_range = if zero_ok {
-            (0.0..=SUBJECT_MASK_WEIGHT_MAX).contains(&weight)
-        } else {
-            weight > 0.0 && weight <= SUBJECT_MASK_WEIGHT_MAX
-        };
-        if !in_range {
-            let range = if zero_ok {
-                format!("between 0 and {SUBJECT_MASK_WEIGHT_MAX}")
-            } else {
-                format!("greater than 0 and at most {SUBJECT_MASK_WEIGHT_MAX}")
-            };
-            return Err(field_error(
-                key,
-                format!("{key} ({weight}) must be {range}."),
-            ));
-        }
-        Ok(weight)
-    };
-    // The weights are range-checked even while the toggle is off, so a stored out-of-range value
-    // never lies dormant until someone flips the switch.
-    let background = weight(
-        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
-        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
-        true,
-    )?;
-    let subject = weight(
-        SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
-        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
-        false,
-    )?;
-    Ok(enabled.then_some((background, subject)))
-}
-
-/// Refuses subject-masked loss on a target that does not advertise
-/// [`SUBJECT_MASK_LOSS_SUPPORT_LIMIT`] — a `subjectMaskLoss` field error at submit time instead of a
-/// refusal after the job is queued (for a control target, after its condition render). Runs after
-/// [`validate_subject_mask_loss`], so the keys are already well-formed here.
-fn validate_subject_mask_loss_support(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    if subject_mask_loss_weights(&config.advanced)?.is_some()
-        && !target_supports_subject_mask_loss(target)
-    {
-        return Err(TrainingPlanError::InvalidField {
-            field: SUBJECT_MASK_LOSS_KEY.to_owned(),
-            message: format!(
-                "{} does not support subject-masked loss ({SUBJECT_MASK_LOSS_KEY}).",
-                target.name
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Validates the subject-masked-loss keys (epic 2123 E6) — see [`subject_mask_loss_weights`].
-fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    subject_mask_loss_weights(&config.advanced).map(|_| ())
-}
-
-/// Target half of the `advanced.resolutionBuckets` validation. Legacy square rows retain the
-/// target's advertised-resolution menu; rectangular rows intentionally have no invented product
-/// maximum beyond the shared positive/u32/stride parser.
-fn validate_resolution_buckets_for_target(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    let buckets = parse_resolution_bucket_config(&config.advanced).map_err(|message| {
-        TrainingPlanError::InvalidField {
-            field: RESOLUTION_BUCKETS_KEY.to_owned(),
-            message,
-        }
-    })?;
-    let Some(buckets) = buckets else {
-        return Ok(());
-    };
-    // The target's trainer on this platform must declare buckets: reject before queueing instead of
-    // allowing a plan to reach native preflight and fail after the product has accepted it.
-    if !target_supports_resolution_buckets(target) {
-        return Err(TrainingPlanError::InvalidField {
-            field: RESOLUTION_BUCKETS_KEY.to_owned(),
-            message: format!(
-                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this platform.",
-                target.name
-            ),
-        });
-    }
-    let ResolutionBucketConfig::Legacy(buckets) = buckets else {
-        if target.kernel != "moss_image_lora" {
-            return Err(TrainingPlanError::InvalidField {
-                field: RESOLUTION_BUCKETS_KEY.to_owned(),
-                message: format!(
-                    "{} supports square resolution buckets only; width/height buckets require a MOSS training target.",
-                    target.name
-                ),
-            });
-        }
-        return Ok(());
-    };
-    let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    let allowed = numeric_limit_values("resolutions", allowed)?;
-    if let Some(bucket) = buckets
-        .iter()
-        .find(|bucket| !allowed.contains(&u64::from(bucket.resolution)))
-    {
-        let allowed = allowed
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(TrainingPlanError::InvalidField {
-            field: RESOLUTION_BUCKETS_KEY.to_owned(),
-            message: format!(
-                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: {allowed}.",
-                target.name, bucket.resolution
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Refuses a non-zero `advanced.weightNoiseSigma` / `gradientNoiseEta` on a target that does not
-/// advertise [`WEIGHT_NOISE_SUPPORT_LIMIT`] / [`GRADIENT_NOISE_SUPPORT_LIMIT`] — a field error at
-/// submit time instead of a refusal after the job is queued. Runs after [`validate_weight_noise`]
-/// and [`validate_gradient_noise`], so the values are already valid numbers here.
-fn validate_technique_support(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Result<(), TrainingPlanError> {
-    for (key, supported, technique) in [
-        (
-            WEIGHT_NOISE_SIGMA_KEY,
-            target_supports_weight_noise(target),
-            "weight noise",
-        ),
-        (
-            GRADIENT_NOISE_ETA_KEY,
-            target_supports_gradient_noise(target),
-            "gradient noise",
-        ),
-    ] {
-        let value = technique_value(&config.advanced, key)
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        if value > 0.0 && !supported {
-            return Err(TrainingPlanError::InvalidField {
-                field: key.to_owned(),
-                message: format!(
-                    "{} does not support {technique} ({key}) on this platform.",
-                    target.name
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a
-/// finite number in `0..=`[`WEIGHT_NOISE_SIGMA_MAX`], and a non-zero value cannot be combined with
-/// a full base fine-tune — weight noise perturbs adapter factors only (E5). Each failure is a
-/// [`TrainingPlanError::InvalidField`] naming the field.
-fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    let Some(value) = technique_value(&config.advanced, WEIGHT_NOISE_SIGMA_KEY) else {
-        return Ok(());
-    };
-    let field_error = |message: String| TrainingPlanError::InvalidField {
-        field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
-        message,
-    };
-    let sigma = value
-        .as_f64()
-        .filter(|sigma| sigma.is_finite())
-        .ok_or_else(|| field_error(format!("{WEIGHT_NOISE_SIGMA_KEY} must be a number.")))?;
-    if !(0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(&sigma) {
-        return Err(field_error(format!(
-            "{WEIGHT_NOISE_SIGMA_KEY} ({sigma}) must be between 0 and {WEIGHT_NOISE_SIGMA_MAX}."
-        )));
-    }
-    if sigma > 0.0 && config_is_full_finetune(config) {
-        return Err(field_error(format!(
-            "{WEIGHT_NOISE_SIGMA_KEY} perturbs adapter weights only and cannot be combined with \
-             networkType '{NETWORK_TYPE_FULL}'."
-        )));
-    }
-    Ok(())
-}
-
-/// Reads an optional finite number in `0..=max` from `advanced[key]` (absent ⇒ `None`), as a
-/// field-level [`TrainingPlanError::InvalidField`] on any other value.
-fn advanced_bounded_number(
-    config: &TrainingConfig,
-    key: &str,
-    max: f64,
-) -> Result<Option<f64>, TrainingPlanError> {
-    let Some(value) = technique_value(&config.advanced, key) else {
-        return Ok(None);
-    };
-    let field_error = |message: String| TrainingPlanError::InvalidField {
-        field: key.to_owned(),
-        message,
-    };
-    let number = value
-        .as_f64()
-        .filter(|number| number.is_finite())
-        .ok_or_else(|| field_error(format!("{key} must be a number.")))?;
-    if !(0.0..=max).contains(&number) {
-        return Err(field_error(format!(
-            "{key} ({number}) must be between 0 and {max}."
-        )));
-    }
-    Ok(Some(number))
-}
-
-/// Validates `advanced.gradientNoiseEta` / `gradientNoiseGamma` (epic 2123 gradient noise,
-/// sc-24827): each, when present, a finite number within its bound ([`GRADIENT_NOISE_ETA_MAX`],
-/// [`GRADIENT_NOISE_GAMMA_MAX`]); a non-zero eta cannot be combined with a full base fine-tune —
-/// the noise perturbs adapter gradients only (E5). Each failure names its field.
-fn validate_gradient_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    let eta = advanced_bounded_number(config, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX)?;
-    advanced_bounded_number(config, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX)?;
-    if eta.is_some_and(|eta| eta > 0.0) && config_is_full_finetune(config) {
-        return Err(TrainingPlanError::InvalidField {
-            field: GRADIENT_NOISE_ETA_KEY.to_owned(),
-            message: format!(
-                "{GRADIENT_NOISE_ETA_KEY} perturbs adapter gradients only and cannot be combined \
-                 with networkType '{NETWORK_TYPE_FULL}'."
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Validates the learning-rate scheduler knobs in `advanced`. The scheduler name
-/// must be one of [`SUPPORTED_LR_SCHEDULERS`] (so a non-constant choice is never
-/// silently ignored), and an optional `lrWarmupSteps` ramp must be a non-negative
-/// integer shorter than the run. Absent keys keep the constant-LR default.
-fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    if let Some(value) = config.advanced.get("lrScheduler") {
-        let name = value.as_str().ok_or_else(|| {
-            TrainingPlanError::InvalidConfig("lrScheduler must be a string.".to_owned())
-        })?;
-        let normalized = name.trim().to_lowercase();
-        if !SUPPORTED_LR_SCHEDULERS.contains(&normalized.as_str()) {
-            return Err(TrainingPlanError::InvalidConfig(format!(
-                "Unsupported lrScheduler '{name}'. Supported schedulers: {}.",
-                SUPPORTED_LR_SCHEDULERS.join(", ")
-            )));
-        }
-    }
-    if let Some(value) = config.advanced.get("lrWarmupSteps") {
-        let warmup = value
-            .as_u64()
-            .or_else(|| match value.as_f64() {
-                Some(number) if number.is_finite() && number >= 0.0 && number.fract() == 0.0 => {
-                    Some(number as u64)
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                TrainingPlanError::InvalidConfig(
-                    "lrWarmupSteps must be a non-negative integer.".to_owned(),
-                )
-            })?;
-        if warmup >= u64::from(config.steps) {
-            return Err(TrainingPlanError::InvalidConfig(format!(
-                "lrWarmupSteps ({warmup}) must be less than steps ({}).",
-                config.steps
             )));
         }
     }
@@ -5115,6 +3633,185 @@ fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
                  ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA \
                  (candle/CUDA). Research/evaluation use \
                  only under the Qwen RESEARCH licence."
+            )),
+        ),
+        ("recommendedFor", json!(["edit"])),
+        ("datasetKind", json!("editPairs")),
+    ] {
+        target.ui.insert(key.to_owned(), value);
+    }
+    target
+}
+
+/// The SceneWorks LoRA family a MiniMax-H3-Image adapter is labelled with — the generator's own
+/// family token, which its catalog entry's `loraCompatibility` admits and which `lora_family.rs`
+/// reads back off a trained adapter.
+pub const MINIMAX_H3_IMAGE_LORA_FAMILY: &str = crate::model_family::MINIMAX_H3_IMAGE;
+
+/// The licence MiniMax-H3-Image's weights — and so every adapter trained from them, a Model
+/// Derivative — are under. The API records it on the trained adapter's library entry.
+pub const MINIMAX_H3_IMAGE_LICENSE: &str = "MiniMax-H3-Image Community License Agreement";
+
+/// The pinned licence text (the same revision as the catalog entry's bf16 download).
+pub const MINIMAX_H3_IMAGE_LICENSE_URL: &str =
+    "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE";
+
+/// How many ordered reference images one MiniMax-H3-Image edit-pair training item may carry: the
+/// generator's own cap (`gen_core::h3_image::MAX_REFERENCES`), which is also the base model's
+/// `limits.maxReferenceAssets` and the engine trainer's `TrainerDescriptor::max_reference_images`
+/// — the contract tests pin the three together.
+pub const MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES: u32 = 16;
+
+/// The default — and largest offered — square training edge: H3-Image's native 4 MP canvas
+/// (`gen_core_train::h3_image::DEFAULT_TRAINING_RESOLUTION`, feature SW-F363 E20).
+pub const MINIMAX_H3_IMAGE_TRAINING_RESOLUTION: u32 = 2048;
+
+/// `advanced` key naming the DiT tier a MiniMax-H3-Image run trains over: `"bf16"`, `"q8"` or
+/// `"q4"`, or absent / `"auto"` for the densest installed tier (the rule an Image Studio render
+/// without a tier selection follows). An explicit tier is honoured or refused by name, never
+/// substituted.
+pub const MINIMAX_H3_IMAGE_BASE_TIER_KEY: &str = "baseTier";
+
+/// The tiers [`MINIMAX_H3_IMAGE_BASE_TIER_KEY`] may name (the catalog entry's tier variants).
+pub const MINIMAX_H3_IMAGE_BASE_TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+
+/// The explicit tier a MiniMax-H3-Image plan names, `Ok(None)` for absent / empty / `"auto"`, or the
+/// refusal for anything else.
+pub fn minimax_h3_image_base_tier(advanced: &JsonObject) -> Result<Option<&'static str>, String> {
+    sceneworks_options::training_validation::minimax_h3_image_base_tier(advanced)
+}
+
+/// Whether `kernel` is one of the two MiniMax-H3-Image training kernels.
+pub fn is_minimax_h3_image_training_kernel(kernel: &str) -> bool {
+    matches!(
+        kernel,
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora"
+    )
+}
+
+/// MiniMax-H3-Image text-to-image LoRA/LoKr training (SW-7103, feature SW-F363 E19/E20).
+///
+/// Trains over the installed DiT tier — the upstream bf16 checkpoint or a packed q8/q4 tier, frozen
+/// and used in its published form (a quantized frozen base by design, E20) — with MiniMax-H3's
+/// Qwen3-VL text encoder at the same tier. The worker resolves the tier the way an Image Studio
+/// render does: [`MINIMAX_H3_IMAGE_BASE_TIER_KEY`] when the plan names one, else the densest
+/// installed tier.
+///
+/// The `minimax_h3_image_lora` kernel maps to the engine trainer registered under the generator id,
+/// `minimax_h3_image` (`gen_core_train::h3_image::TRAINER_ID`), on MLX (SW-7097) and Candle
+/// (SW-7098). Fitting is by design: the DiT's blocks stream one at a time with checkpointing
+/// structural, and the trainer's own preflight — the train-step envelope priced from the staged
+/// tier's headers the same way inference admission prices a render — refuses a run the device
+/// cannot hold before any weight is read. So no training memory numbers are declared here.
+///
+/// Licensing: the base's MiniMax-H3-Image Community License binds derivatives, so
+/// `ui.requiresLicenseAcknowledgment` gates Start training and the API's real-run gate, and the
+/// trained adapter's library entry records `ui.license`.
+fn minimax_h3_image_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "minimax_h3_image_lora".to_owned(),
+        name: "MiniMax-H3-Image LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: MINIMAX_H3_IMAGE_LORA_FAMILY.to_owned(),
+        base_model: "minimax_h3_image".to_owned(),
+        // The bf16 tier is this snapshot's root; the worker re-resolves the installed tier (and the
+        // q8/q4 re-host) from the catalog rows at run time.
+        base_model_repo: Some("MiniMaxAI/MiniMax-H3-Image".to_owned()),
+        kernel: "minimax_h3_image_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: ContractNumber::from(16),
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 2000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: MINIMAX_H3_IMAGE_TRAINING_RESOLUTION,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                // The configuration the trainer's memory preflight admits by design (streamed
+                // blocks). Off asks for the whole DiT resident, which the preflight refuses unless
+                // the device holds it.
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "baseTier": "auto",
+                // The drawn noise level is quantized onto the six published sigmas the distilled
+                // heads were trained at (`gen_core_train::h3_image::training_step`).
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Previews render through the registered generator (fixed six steps, no guidance).
+                "sampleEvery": 500,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [1024, 1536, MINIMAX_H3_IMAGE_TRAINING_RESOLUTION],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both install as forward-time residuals on every tier (SW-7096).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"],
+            "baseTiers": ["auto", "bf16", "q8", "q4"],
+        })),
+        ui: object(json!({
+            "label": "MiniMax-H3-Image LoRA",
+            "description": "Train a text-to-image LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas over an installed tier (bf16, or a packed q8/q4 tier used frozen). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). The run is checked against this machine's memory before any weight is read. Governed by the MiniMax-H3-Image Community License.",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image",
+            "license": MINIMAX_H3_IMAGE_LICENSE,
+            "licenseUrl": MINIMAX_H3_IMAGE_LICENSE_URL,
+            "licenseNotice": "MiniMax-H3-Image is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026). An adapter you train from it is a Model Derivative and stays under that agreement: use it only within the Applicable Territory (worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States of America) and under its Acceptable Use Policy, which includes disclosing machine-generated content you publish; obtain MiniMax's prior written authorization before commercial use above 1 million US dollars of annualized revenue or for any Hosted Service to third parties; and display \"MiniMax-H3-Image\" in a commercial product that uses it. Section V.3 lets you use the model and its Outputs to train only MiniMax-H3-Image and its Model Derivatives, never another AI model.",
+            "requiresLicenseAcknowledgment": true
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// MiniMax-H3-Image edit-pair LoRA/LoKr training (SW-7103, E19): the same base, tier resolution,
+/// licence gate, family and network types as [`minimax_h3_image_lora_target`], trained on edit
+/// PAIRS — every dataset item is the edit TARGET (the item image), its INSTRUCTION (the caption)
+/// and 1..=16 ORDERED reference images (`TrainingDatasetItem::references`), presented to the model
+/// the way an Image Studio edit presents them.
+///
+/// The `minimax_h3_image_edit_lora` kernel maps to the SAME engine trainer, which trains edit mode
+/// when the items carry references and stamps `trainingMode=edit` on the adapter.
+fn minimax_h3_image_edit_lora_target() -> TrainingTarget {
+    let mut target = minimax_h3_image_lora_target();
+    target.id = "minimax_h3_image_edit_lora".to_owned();
+    target.name = "MiniMax-H3-Image Edit LoRA".to_owned();
+    target.kernel = "minimax_h3_image_edit_lora".to_owned();
+    target.limits.insert(
+        MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
+        json!(MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES),
+    );
+    for (key, value) in [
+        ("label", json!("MiniMax-H3-Image Edit LoRA")),
+        (
+            "description",
+            json!(format!(
+                "Train an edit LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas \
+                 over an installed tier. Each dataset item is an edit pair: the item image is the \
+                 edit target, its caption is the edit instruction (name the references as \
+                 <Picture 1>, <Picture 2> and so on), and it carries \
+                 1-{MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES} ordered reference images. Apple Silicon \
+                 (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Governed by the \
+                 MiniMax-H3-Image Community License."
             )),
         ),
         ("recommendedFor", json!(["edit"])),
@@ -5538,4 +4235,34 @@ mod model_contract_metadata_tests {
             "existing technique surface changed"
         );
     }
+}
+
+fn training_dataset_facts(
+    dataset: &TrainingDataset,
+) -> sceneworks_options::training_validation::TrainingDataset {
+    sceneworks_options::training_validation::TrainingDataset {
+        items: dataset.items.iter().map(training_item_facts).collect(),
+    }
+}
+fn training_item_facts(
+    item: &TrainingDatasetItem,
+) -> sceneworks_options::training_validation::TrainingDatasetItem {
+    sceneworks_options::training_validation::TrainingDatasetItem {
+        display_name: item.display_name.clone(),
+        caption: sceneworks_options::training_validation::TrainingCaption {
+            text: item.caption.text.clone(),
+        },
+        extra: item.extra.clone(),
+    }
+}
+
+/// Effective static catalog shared by submission and worker preflight.
+pub fn effective_training_targets_for_candle(candle: bool) -> TrainingTargetRegistry {
+    let mut registry = builtin_training_targets();
+    if candle {
+        for target in &mut registry.targets {
+            apply_candle_training_defaults(&target.kernel, &mut target.defaults);
+        }
+    }
+    registry
 }

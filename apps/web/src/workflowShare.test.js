@@ -553,6 +553,8 @@ function sharedAdvancedKeysFromTheContract() {
 // A plausible value per key, so one envelope can carry the whole table.
 function sampleValueFor(key) {
   switch (key) {
+    case "lowResStart":
+      return { version: 1, k: 4, scale: 0.5 };
     case "mossImageAdvanced":
       return { output: "images" };
     case "promptBatch":
@@ -570,6 +572,8 @@ function sampleValueFor(key) {
       return [{ steps: 4, guidance: 3.5, loras: [] }];
     case "structuredPrompt":
       return { intent: "a lighthouse" };
+    case "h3ImageSampler":
+      return { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 };
     case "veda":
       return {
         enabled: true,
@@ -687,6 +691,7 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "flux3_reference_ids",
       "imageGuidanceScale",
       "lightning",
+      "lowResStart",
       "ltxPipeline",
       "mossImageEditExecutionReport",
       "mossImageExecutionReport",

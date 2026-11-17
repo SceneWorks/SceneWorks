@@ -508,6 +508,7 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
             register_authority_import_worker(&state);
         }
         let mut payload = json!({"projectId":project.id,"sourceAssetId":"source_fixture",
+            "prompt":"describe the image", "question":"what is in the image?",
             "modelManifestEntry":forged,"modelManifestEntries":[forged],"baseModelManifestEntry":forged,"modelProvenance":{"forged":true}});
         if let Some(model) = model {
             payload["model"] = json!(model);

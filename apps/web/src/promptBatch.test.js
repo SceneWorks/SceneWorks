@@ -10,6 +10,7 @@ import {
   extractKeys,
   firstResolvedPrompt,
   iterateBatch,
+  leadingResolutionTemplate,
   linkedGroupIssues,
   missingKeys,
   parsePromptResolution,
@@ -17,6 +18,19 @@ import {
   joinPromptLines,
   splitPromptLines,
 } from "./promptBatch.js";
+
+it("checks only resolution choices instead of expanding unrelated prompt axes", () => {
+  const variables = [
+    { key: "size", values: ["512x512", "513x512"] },
+    ...["a", "b", "c", "d", "e", "f"].map((key) => ({ key, values: Array.from({ length: 10 }, (_, index) => String(index)) })),
+  ];
+  const template = "[{{size}}] {{a}} {{b}} {{c}} {{d}} {{e}} {{f}}";
+  expect(leadingResolutionTemplate(template)).toBe("[{{size}}]");
+  expect([...iterateBatch([leadingResolutionTemplate(template)], variables)].map(({ prompt }) => prompt))
+    .toEqual(["[512x512]", "[513x512]"]);
+  expect(leadingResolutionTemplate("scene {{a}} {{b}}")).toBe("prompt");
+  expect(leadingResolutionTemplate("{{size}} scene {{a}}")).toBe("{{size}}");
+});
 
 describe("joinPromptLines", () => {
   it("writes single-line prompts one per line, exactly as before", () => {

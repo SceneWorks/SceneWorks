@@ -12,11 +12,8 @@ const whole = {
   activeProject: { id: "p1" },
   promptless: false,
   prompt: "a dog running",
-  supportsMode: true,
   implementedMode: true,
   hasInputs: true,
-  requiresLtxIcLora: false,
-  hasLtxIcLora: false,
   replaceReady: true,
   modelName: "Wan",
   presetMissing: [],
@@ -47,44 +44,14 @@ describe("videoGenerateValidation", () => {
     expect(summarize(issues).ready).toBe(true);
   });
 
-  it("surfaces an unsupported mode, naming the model", () => {
-    const summary = summarize(videoGenerateValidation({ ...whole, supportsMode: false }));
-    expect(summary.surfaced).toHaveLength(1);
-    expect(summary.surfaced[0].kind).toBe("error");
-    expect(summary.surfaced[0].message).toBe("Wan does not support this mode.");
-  });
-
-  it("falls back to 'Selected model' when the model is unnamed", () => {
-    const summary = summarize(videoGenerateValidation({ ...whole, supportsMode: false, modelName: undefined }));
-    expect(summary.surfaced[0].message).toBe("Selected model does not support this mode.");
-  });
-
   it("surfaces an unimplemented entry point", () => {
     const summary = summarize(videoGenerateValidation({ ...whole, implementedMode: false }));
     expect(summary.surfaced[0].message).toContain("reserved for the next runtime slice");
   });
 
-  it("surfaces the LTX IC-LoRA requirement only when required and absent", () => {
-    expect(summarize(videoGenerateValidation({ ...whole, requiresLtxIcLora: true, hasLtxIcLora: false })).surfaced[0].message).toContain(
-      "selected IC-LoRA adapter",
-    );
-    // Required but present → no issue.
-    expect(summarize(videoGenerateValidation({ ...whole, requiresLtxIcLora: true, hasLtxIcLora: true })).ready).toBe(true);
-    // Not required → no issue even when absent.
-    expect(summarize(videoGenerateValidation({ ...whole, requiresLtxIcLora: false, hasLtxIcLora: false })).ready).toBe(true);
-  });
-
   it("surfaces the person-replacement worker gate", () => {
     const summary = summarize(videoGenerateValidation({ ...whole, replaceReady: false }));
     expect(summary.surfaced[0].message).toContain("No live GPU worker");
-  });
-
-  it("rejects a seventh ordered SCAIL-2 reference instead of silently trimming it", () => {
-    const summary = summarize(videoGenerateValidation({ ...whole, scail2ReferenceOverflow: true }));
-    expect(summary.ready).toBe(false);
-    expect(summary.surfaced.map((entry) => entry.message)).toContain(
-      "SCAIL-2 Animate Character supports at most 6 reference characters.",
-    );
   });
 
   it("surfaces an execution-tier refusal passed by the active backend lane", () => {
@@ -106,10 +73,10 @@ describe("videoGenerateValidation", () => {
 
   // Bidirectional: a broken value shows its reason; the unfilled field beside it stays
   // silent. This is the exact pairing the old blockedMessage/canSubmit split kept drifting.
-  it("shows the mode error without the unfilled-prompt hint beside it", () => {
-    const summary = summarize(videoGenerateValidation({ ...whole, prompt: "", supportsMode: false }));
+  it("shows the unimplemented entry point without the unfilled-prompt hint beside it", () => {
+    const summary = summarize(videoGenerateValidation({ ...whole, prompt: "", implementedMode: false }));
     expect(summary.surfaced).toHaveLength(1);
-    expect(summary.surfaced[0].message).toContain("does not support this mode");
+    expect(summary.surfaced[0].message).toContain("reserved for the next runtime slice");
     expect(summary.ready).toBe(false);
   });
 });

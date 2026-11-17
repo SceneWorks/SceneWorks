@@ -11,11 +11,11 @@ use super::INT8_CONVROT_TIER;
 #[cfg(target_os = "macos")]
 use crate::emit_event;
 use crate::quant_int;
+#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
 use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;
 use crate::Settings;
-use crate::Value;
 #[cfg(target_os = "macos")]
 use serde_json::json;
 #[cfg(native_lane)]
@@ -83,7 +83,7 @@ pub(super) fn resolve_quant_gated(
     if nvfp4_selected(request, nvfp4_host, tier_dir) {
         return (Some(Quant::Nvfp4), None);
     }
-    let raw = request.quant_bits().or_else(|| {
+    let raw = request.resolved_quant_bits().or_else(|| {
         request
             .model_manifest_entry
             .get("mlx")
@@ -119,7 +119,7 @@ pub(super) fn resolve_quant_gated(
 /// layout), alongside [`tier_quant_from_resolved_dir`].
 #[cfg(target_os = "macos")]
 pub(super) fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
-    match crate::payload::tier_for_bits(request.quant_bits(), "q8") {
+    match crate::payload::tier_for_bits(request.resolved_quant_bits(), "q8") {
         "bf16" => None,
         "q4" => Some(4),
         _ => Some(8),
@@ -161,11 +161,8 @@ pub(super) fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64
 /// 2. Else the **on-disk tier** the resolver landed on (sc-12090) — budget the tier that will load, not
 ///    one the user never installed. A `modelPath`/flat root has no recognizable basename ⇒ `None`.
 /// 3. Else the manifest/request key (`requested_tier_key`), whose own `nvfp4` arm is the sibling of (1).
-// Candle-lane only — NOT `any(macos, candle)` like `tier_key_from_resolved_dir`, because this fn calls
-// `crate::vram_gate`, which is itself `#[cfg(all(not(macos), backend-candle))]`. On the macOS/MLX build
-// `vram_gate` doesn't exist, so an `any(macos, ...)` gate here fails to compile (E0433). Its only caller,
-// `generate_candle_stream`, is candle-only too, so this loses nothing.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Candle tests retain the raw selector to compare against the resolved production helper below.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn gate_tier_key(
     convrot_resolved: bool,
     weights_dir: &Path,
@@ -178,6 +175,38 @@ pub(super) fn gate_tier_key(
     }
     tier_key_for_resolved_dir(manifest_entry, weights_dir)
         .unwrap_or_else(|| crate::vram_gate::requested_tier_key(advanced, manifest_entry, nvfp4))
+}
+
+/// Size an image attempt from the resolved tier or canonical typed request. The legacy raw
+/// selector remains test-only while existing fixture coverage is migrated.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn gate_tier_key_resolved(
+    convrot_resolved: bool,
+    weights_dir: &Path,
+    request: &ImageRequest,
+    nvfp4: bool,
+) -> &'static str {
+    if convrot_resolved {
+        return INT8_CONVROT_TIER;
+    }
+    if let Some(tier) = tier_key_for_resolved_dir(&request.model_manifest_entry, weights_dir) {
+        return tier;
+    }
+    if nvfp4 {
+        return crate::vram_gate::requested_tier_key(
+            &request.advanced,
+            &request.model_manifest_entry,
+            true,
+        );
+    }
+    let bits = request.resolved_quant_bits().or_else(|| {
+        request
+            .model_manifest_entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("quantize"))
+            .and_then(crate::payload::quant_int)
+    });
+    crate::payload::tier_for_bits(bits, "q8")
 }
 
 #[cfg(native_lane)]
@@ -233,10 +262,7 @@ pub(super) fn resolve_tier_dir(
         "q4" => 4,
         _ => 8, // q8
     };
-    let mut probe = request.clone();
-    probe
-        .advanced
-        .insert("mlxQuantize".to_owned(), Value::from(bits));
+    let probe = request.with_probe_quant_bits(bits);
     let dir = resolve_weights_dir(&probe, settings).ok().flatten()?;
     (tier_key_for_resolved_dir(&request.model_manifest_entry, &dir) == Some(tier_static_name(tier)))
         .then_some(dir)

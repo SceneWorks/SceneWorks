@@ -12,6 +12,21 @@ use crate::DEFAULT_MAX_LORA_URL_BYTES;
 use crate::DEFAULT_MAX_MODEL_URL_BYTES;
 use serde_json::json;
 
+fn bound_request(value: Value) -> ImageRequest {
+    let authored = value.as_object().expect("request object");
+    let mut effective = authored.clone();
+    if let Some(strength) = effective
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .and_then(|advanced| advanced.get_mut("strength"))
+    {
+        if let Some(number) = sceneworks_core::options::legacy_number(strength) {
+            *strength = json!(number);
+        }
+    }
+    ImageRequest::from_resolved(authored, &effective).expect("fixture options bind")
+}
+
 fn settings(data_dir: &Path) -> Settings {
     Settings {
         api_url: "http://127.0.0.1".to_owned(),
@@ -55,21 +70,17 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
         )
         .expect("source asset");
     let asset_id = asset["id"].as_str().expect("asset id");
-    let request = ImageRequest::from_payload(
-        json!({
-            "projectId": project.id,
-            "model": "kolors",
-            "mode": "edit_image",
-            "sourceAssetId": asset_id,
-            "fitMode": "stretch",
-            "advanced": {
-                "modelPath": weights,
-                "strength": "0.72"
-            }
-        })
-        .as_object()
-        .expect("request object"),
-    );
+    let request = bound_request(json!({
+        "projectId": project.id,
+        "model": "kolors",
+        "mode": "edit_image",
+        "sourceAssetId": asset_id,
+        "fitMode": "stretch",
+        "advanced": {
+            "modelPath": weights,
+            "strength": "0.72"
+        }
+    }));
 
     assert_eq!(
         resolve_candle_image_route(&request, &settings),
@@ -82,16 +93,12 @@ fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
     assert_eq!(source.pixels[0..3], [180, 40, 90]);
     assert!((strength - 0.72).abs() < f32::EPSILON);
 
-    let missing_source = ImageRequest::from_payload(
-        json!({
-            "projectId": project.id,
-            "model": "kolors",
-            "mode": "edit_image",
-            "advanced": { "modelPath": weights }
-        })
-        .as_object()
-        .expect("request object"),
-    );
+    let missing_source = bound_request(json!({
+        "projectId": project.id,
+        "model": "kolors",
+        "mode": "edit_image",
+        "advanced": { "modelPath": weights }
+    }));
     assert_ne!(
         resolve_candle_image_route(&missing_source, &settings),
         Some(CandleImageRoute::KolorsEdit)
@@ -110,17 +117,13 @@ fn kolors_ip_composites_refuse_before_provider_precedence() {
     let weights = data.path().join("models/kolors-test");
     std::fs::create_dir_all(&weights).expect("model path");
     let request = |advanced: Value| {
-        ImageRequest::from_payload(
-            json!({
-                "projectId": "project",
-                "model": "kolors",
-                "mode": "character_image",
-                "referenceAssetId": "identity-reference",
-                "advanced": advanced,
-            })
-            .as_object()
-            .expect("request object"),
-        )
+        bound_request(json!({
+            "projectId": "project",
+            "model": "kolors",
+            "mode": "character_image",
+            "referenceAssetId": "identity-reference",
+            "advanced": advanced,
+        }))
     };
     let ip_and_pid = request(json!({"modelPath": weights, "usePid": true}));
     assert_eq!(

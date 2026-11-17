@@ -6,6 +6,7 @@ use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
+#[cfg(test)]
 use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 use super::geometry::fit_engine_image;
@@ -13,15 +14,16 @@ use super::krea_imported::imported_dit_file;
 use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::pid::resolve_pid_weights;
-use super::render::generate_one_with_hires;
+use super::render::generate_one_with_hires_on_surface;
 use super::render::resolve_hires_fix_plan;
+use super::render::LaneRgbaSurface;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
 use super::sampling::normalize_sampling_knob;
-use super::sampling::read_advanced_guidance_method;
-use super::sampling::read_advanced_sampling_knobs;
-use super::sampling::resolve_advanced_or_manifest_f32;
-use super::sampling::resolve_advanced_or_manifest_u32;
+use super::sampling::read_resolved_image_guidance_method;
+use super::sampling::read_resolved_image_sampling_knobs;
+use super::sampling::resolved_option_or_manifest_f32;
+use super::sampling::resolved_option_or_manifest_u32;
 #[cfg(target_os = "macos")]
 use super::sdxl::SDXL_EDIT_STRENGTH;
 #[cfg(target_os = "macos")]
@@ -35,7 +37,6 @@ use super::ImageRequest;
 use super::LoadSpec;
 use super::PromptEnhance;
 use super::WeightsSource;
-use crate::advanced;
 use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::Path;
@@ -113,16 +114,22 @@ pub(super) fn resolve_imported_sdxl_pin(
         return Ok(None);
     }
     let Some(raw_path) = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .advanced_text("modelPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            request
+                .model_manifest_entry
+                .get("modelPath")
+                .and_then(crate::payload::trimmed_value_str)
+        })
         .or_else(|| {
             request
                 .model_manifest_entry
                 .get("paths")
                 .and_then(|paths| paths.get("model"))
+                .and_then(crate::payload::trimmed_value_str)
         })
-        .and_then(crate::payload::trimmed_value_str)
     else {
         return Ok(None);
     };
@@ -149,8 +156,27 @@ pub(super) fn resolve_imported_sdxl_pin(
         .transpose()
 }
 
+#[cfg(test)]
 pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
-    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced) {
+    sdxl_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
+}
+
+pub(super) fn sdxl_imported_request_shape_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    sdxl_imported_request_shape_available_with_pose_count(execution, execution.pose_source_count())
+}
+
+fn sdxl_imported_request_shape_available_with_pose_count(
+    request: &ImageRequest,
+    pose_count: usize,
+) -> bool {
+    if sceneworks_core::jobs_store::imported_control_intent_is_material_resolved(
+        request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved"),
+    ) {
         return false;
     }
     let operation = if request.mode == "edit_image" {
@@ -170,11 +196,13 @@ pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> b
         return false;
     }
     let has_phases = request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty());
-    if !pose_entries(request).is_empty()
+        .resolved_advanced
+        .as_ref()
+        .expect("image options must be resolved")
+        .phases
+        .as_ref()
+        .is_some_and(|phases| !phases.value.is_empty());
+    if pose_count > 0
         || !request.reference_asset_ids.is_empty()
         || request.character_id.is_some()
         || request.character_look_id.is_some()
@@ -250,8 +278,12 @@ fn resolve_imported_sdxl_conditioning(
             project_path,
         )?;
         let image = fit_engine_image(image, width, height, &request.fit_mode)?;
-        let strength =
-            advanced::f32_clamped(&request.advanced, "strength", SDXL_EDIT_STRENGTH, 0.0..=1.0);
+        let strength = super::sampling::resolved_f32_clamped(
+            request,
+            "strength",
+            SDXL_EDIT_STRENGTH,
+            0.0..=1.0,
+        );
         return Ok((
             vec![Conditioning::Reference {
                 image,
@@ -281,8 +313,8 @@ fn resolve_imported_sdxl_conditioning(
     let masked = non_empty(&request.mask_asset_id);
     let (src_w, src_h) = (source.width, source.height);
     let source = fit_engine_image(source, width, height, &request.fit_mode)?;
-    let strength = advanced::f32_clamped(
-        &request.advanced,
+    let strength = super::sampling::resolved_f32_clamped(
+        request,
         "strength",
         if masked || outpaint {
             SDXL_INPAINT_STRENGTH
@@ -336,11 +368,35 @@ fn resolve_imported_sdxl_conditioning(
     ))
 }
 
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn prepare_sdxl_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
-    if !sdxl_imported_request_shape_available(request) {
+    prepare_sdxl_imported_sources_with_shape(
+        request,
+        settings,
+        sdxl_imported_request_shape_available(request),
+    )
+}
+
+pub(super) fn prepare_sdxl_imported_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
+    prepare_sdxl_imported_sources_with_shape(
+        execution,
+        settings,
+        sdxl_imported_request_shape_available_resolved(execution),
+    )
+}
+
+fn prepare_sdxl_imported_sources_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    shape_available: bool,
+) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
+    if !shape_available {
         return Ok(None);
     }
     let Some(checkpoint) = resolve_imported_sdxl_pin(request, settings)? else {
@@ -726,14 +782,14 @@ pub(super) async fn generate_sdxl_imported_stream(
     let file = file_pin.loader_path().to_path_buf();
     let adapter_count = prepared_adapters.specs.len();
     let steps =
-        resolve_advanced_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
-    let guidance = resolve_advanced_or_manifest_f32(
+        resolved_option_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let guidance = resolved_option_or_manifest_f32(
         request,
         "guidanceScale",
         SDXL_IMPORTED_DEFAULT_GUIDANCE,
         0.0..=30.0,
     );
-    let (sampler, scheduler, scheduler_shift) = read_advanced_sampling_knobs(&request.advanced);
+    let (sampler, scheduler, scheduler_shift) = read_resolved_image_sampling_knobs(request);
     let operation = if request.mode == "edit_image" {
         gen_core::ImportedModelOperation::Edit
     } else {
@@ -767,7 +823,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         backend,
     );
     let guidance_method = normalize_sampling_knob(
-        read_advanced_guidance_method(&request.advanced),
+        read_resolved_image_guidance_method(request),
         &caps.supported_guidance_methods,
         "guidanceMethod",
         &request.model,
@@ -793,7 +849,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
-    let mut raw_settings = request.advanced.clone();
+    let mut raw_settings = request.effective_advanced_wire();
     raw_settings.insert("realModelInference".to_owned(), Value::Bool(true));
     raw_settings.insert("numInferenceSteps".to_owned(), json!(steps));
     raw_settings.insert("guidanceScale".to_owned(), json!(guidance));
@@ -852,14 +908,15 @@ pub(super) async fn generate_sdxl_imported_stream(
         "SDXL imported checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
                     if let Some(hires_fix) = hires_fix {
-                        let (out_width, out_height, pixels) = generate_one_with_hires(
+                        let execution_report = std::cell::RefCell::new(None);
+                        let (out_width, out_height, pixels) = generate_one_with_hires_on_surface(
                             model,
                             &prompt,
                             width,
@@ -886,9 +943,23 @@ pub(super) async fn generate_sdxl_imported_stream(
                             Some(hires_fix),
                             preview,
                             gen_core::PromptEnhancementSink::default(),
+                            &LaneRgbaSurface {
+                                execution_report: Some(&execution_report),
+                                ..Default::default()
+                            },
                             &cancel,
                             on_progress,
                         )?;
+                        let report = execution_report.take().ok_or_else(|| {
+                            WorkerError::Engine(
+                                "SDXL imported hires-fix produced no completed execution report"
+                                    .into(),
+                            )
+                        })?;
+                        let mut facts = crate::JsonObject::new();
+                        report.insert_image_facts(&mut facts)?;
+                        let _ =
+                            tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                         return Ok(Some((seed, out_width, out_height, pixels)));
                     }
                     let request = GenerationRequest {
@@ -910,20 +981,30 @@ pub(super) async fn generate_sdxl_imported_stream(
                         cancel: cancel.clone(),
                         ..Default::default()
                     };
-                    let output = model
-                        .generate(&request, &mut *on_progress)
+                    let completed = model
+                        .generate_with_execution_report(&request, &mut *on_progress)
                         .map_err(|error| {
                             WorkerError::Engine(format!(
                                 "SDXL imported checkpoint generation failed: {error}"
                             ))
                         })?;
-                    match output {
-                        GenerationOutput::Images(mut images) => {
+                    match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                             let image = images.pop().ok_or_else(|| {
                                 WorkerError::Engine(
                                     "SDXL imported checkpoint produced no image".to_owned(),
                                 )
                             })?;
+                            let mut facts = crate::JsonObject::new();
+                            facts.insert(
+                                "workerExecutionReport".into(),
+                                serde_json::to_value(completed.execution)
+                                    .map_err(WorkerError::Json)?,
+                            );
+                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
+                                index,
+                                facts,
+                            });
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

@@ -286,6 +286,46 @@ pub fn generate_with_scope_report_planned(
     )
 }
 
+/// [`generate_with_scope_report_planned`] through
+/// [`gen_core::Generator::generate_planned_with_execution_report`]: the same pre-load plan and admitted
+/// request scope, returning the provider's completed execution identity for this same attempt.
+pub fn generate_with_scope_execution_report_planned(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        on_progress,
+        |generator, request, scope, on_progress| {
+            generator.generate_planned_with_execution_report(request, plan, scope, on_progress)
+        },
+    )
+}
+
+/// Preserve the admitted request scope while returning the provider's completed
+/// execution identity with its generated output.
+pub fn generate_with_scope_execution_report(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        on_progress,
+        |generator, request, _, on_progress| {
+            generator.generate_with_execution_report(request, on_progress)
+        },
+    )
+}
+
 fn run_with_scope<T>(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,

@@ -1230,6 +1230,7 @@ pub(crate) async fn run_catalog_analysis_job(
     api: &crate::ApiClient,
     settings: &crate::Settings,
     job: &sceneworks_core::contracts::JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     use sceneworks_core::contracts::{JobStatus, ProgressStage, WorkerStatus};
 
@@ -1297,7 +1298,7 @@ pub(crate) async fn run_catalog_analysis_job(
     if analyzer_config.settings.structured_analysis_enabled {
         let person_detector = crate::person_jobs::require_detector_weights(settings)?;
         let face_weights_directory =
-            crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
+            crate::image_jobs::ensure_face_stack_dir(api, settings, job, portable_aux).await?;
         let (pose_detector, pose_model) = crate::pose_jobs::require_dwpose_weights(settings)?;
         structured_resources = Some(crate::catalog_analysis::ModelBackedCatalogAnalyzerPaths {
             person_detector,
@@ -1619,6 +1620,7 @@ pub(crate) async fn run_catalog_analysis_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,
     _job: &sceneworks_core::contracts::JobSnapshot,
+    _portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
         "Catalog semantic analysis needs the macOS MLX backend or the candle backend.".to_owned(),

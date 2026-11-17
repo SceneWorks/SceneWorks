@@ -1611,7 +1611,7 @@ fn observed_physical_identity(
 fn macos_volume_id(path: &Path) -> Result<String, ExternalLibraryError> {
     #[cfg(test)]
     TEST_MACOS_VOLUME_PROBES.with(|probes| probes.set(probes.get() + 1));
-    // SceneWorks forbids unsafe code in core. `diskutil -plist` is Apple's supported native volume
+    // SceneWorks denies unsafe code in core (one reviewed Windows exception, the stamp change time). `diskutil -plist` is Apple's supported native volume
     // identity surface and returns the persistent VolumeUUID for the exact existing path (unlike
     // st_dev, which is only a mount-session number). No nearest-parent fallback is permitted.
     let df = macos_command_output(

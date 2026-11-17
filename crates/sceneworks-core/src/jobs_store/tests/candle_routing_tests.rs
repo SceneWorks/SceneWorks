@@ -311,6 +311,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::MageEdit,
             CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
+            CandleImageLane::MinimaxH3ImageEdit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
@@ -1243,7 +1244,7 @@ fn sana_absent_reference_carrier_routes_plain_txt2img_to_candle() {
     // lands in that arm, and `null` is exactly how the API normalizes every unset optional asset
     // carrier before the job is stored. So the normal absent-carrier encoding was classified as a
     // malformed conditioning shape and the job never reached the txt2img lane. The gate now shares
-    // `has_nonempty_or_malformed_string` with `sana_has_unsupported_carrier`, which is the same fix
+    // `has_nonempty_or_malformed_string` with the Candle SANA carrier gate, which is the same fix
     // the MLX twin already carries (sc-19712 F-1) and the same convention the worker uses (a blank
     // asset id is treated as absent).
     for model in ["sana_1600m", "sana_sprint_1600m"] {
@@ -5804,7 +5805,7 @@ fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
 
 /// sc-25680: Iris-3B routes to the generic Candle txt2img lane for plain text-to-image and refuses
 /// EXACTLY the list the MLX arm refuses (`iris_routes_plain_text_to_image_only` in the MLX tests) —
-/// the candle gate delegates to `iris_mlx_eligible`, and this pins both the delegation and the claim.
+/// the candle gate delegates to the resolved-facts Iris predicate, and this pins the claim.
 #[test]
 fn iris_routes_to_candle_for_plain_text_to_image_only() {
     use crate::jobs_store::routing::gaps::classify_candle_image_gap;
@@ -6093,6 +6094,38 @@ fn flux3_publisher_tiers_require_the_worker_device_marker() {
     }
 }
 
+/// SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier needs BOTH the
+/// `prompt_refine` provider and the NVFP4 device marker, so neither a pre-Blackwell worker nor a
+/// Blackwell worker without the text provider claims it; every other tier (and every other refine
+/// task) needs only `prompt_refine`.
+#[test]
+fn an_nvfp4_prompt_expansion_requires_the_nvfp4_worker_marker() {
+    let refine = |payload: Value| {
+        let mut job = image_generate_job(payload);
+        job.job_type = JobType::PromptRefine;
+        job
+    };
+    let expand = |tier: &str| {
+        refine(json!({"task": "minimax_h3_image_expand", "prompt": "p", "peTier": tier}))
+    };
+    let plain = gpu_worker(&["gpu", "candle", "prompt_refine"]);
+    let blackwell = gpu_worker(&["gpu", "candle", "prompt_refine", "nvfp4"]);
+    // The NVFP4 marker comes from compute capability alone: a Blackwell worker without the
+    // linked text provider must not claim an expansion either.
+    let no_provider = gpu_worker(&["gpu", "candle", "nvfp4"]);
+    assert!(!worker_supports_job(&plain, &expand("nvfp4")));
+    assert!(!worker_supports_job(&no_provider, &expand("nvfp4")));
+    assert!(worker_supports_job(&blackwell, &expand("nvfp4")));
+    for tier in ["q4", "q8", "bf16"] {
+        assert!(worker_supports_job(&plain, &expand(tier)), "{tier}");
+    }
+    // `peTier` means nothing to another refine task.
+    assert!(worker_supports_job(
+        &plain,
+        &refine(json!({"task": "refine", "prompt": "p", "peTier": "nvfp4"}))
+    ));
+}
+
 /// sc-26235: one public request contract, two native lanes. Removing either the Candle catalog
 /// row or its family-specific refusal must fail this test.
 #[test]
@@ -6170,7 +6203,7 @@ fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carrier
 
 /// sc-24214: Supra2-IMG routes to the generic Candle txt2img lane for plain 256x256 text-to-image and
 /// refuses EXACTLY the list the MLX arm refuses (`supra2_routes_plain_text_to_image_only` in the MLX
-/// tests) — the candle gate delegates to `supra2_mlx_eligible`, and this pins both the delegation and
+/// tests) — the candle gate delegates to the resolved-facts Supra2 predicate, and this pins the delegation and
 /// the claim. Same engine id on both lanes, so the off-Mac worker claims the very request a Mac does.
 #[test]
 fn supra2_routes_to_candle_for_plain_text_to_image_only() {
@@ -6270,4 +6303,99 @@ fn supra2_routes_to_candle_for_plain_text_to_image_only() {
         ),
         None
     );
+}
+
+/// SW-7100 / SW-7101: a MiniMax-H3-Image job routes to the Candle worker — text-to-image (with a
+/// tier carrier and LoRAs) on the generic txt2img lane, an ordered-reference edit (1..=16) on
+/// `CandleImageLane::MinimaxH3ImageEdit` — and the Candle lane refuses exactly the carriers the
+/// MLX arm refuses, named by the MiniMax-H3-Image check when no generic check owns them.
+#[test]
+fn minimax_h3_image_routes_to_candle_for_text_to_image() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+    use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
+
+    assert!(CANDLE_ROUTED_MODELS.contains(&"minimax_h3_image"));
+    assert!(candle_family_serves_quant("minimax_h3_image"));
+    assert!(candle_family_serves_lora("minimax_h3_image"));
+    assert!(candle_family_serves_quant_lora("minimax_h3_image"));
+    let eligible =
+        |payload: Value| image_request_candle_eligible("minimax_h3_image", &object(payload));
+    let normalized = json!({
+        "model": "minimax_h3_image",
+        "mode": "text_to_image",
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "maskAssetId": null,
+        "loras": [],
+        "hiresFix": { "enabled": false }
+    });
+    assert!(eligible(normalized));
+    assert!(eligible(
+        json!({ "model": "minimax_h3_image", "advanced": { "quantTier": "q4" } })
+    ));
+    assert!(eligible(json!({
+        "model": "minimax_h3_image",
+        "loras": [{ "id": "l", "weight": 0.8 }],
+        "advanced": { "mlxQuantize": 8 }
+    })));
+    let candle = gpu_worker(CANDLE_CAPS);
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(json!({ "model": "minimax_h3_image", "prompt": "a lighthouse" }))
+    ));
+    // The edit: claimed by its own lane, one to sixteen ordered references, LoRAs included.
+    for count in [1usize, 2, 16] {
+        let ids: Vec<String> = (1..=count).map(|i| format!("ref{i}")).collect();
+        let payload = json!({
+            "model": "minimax_h3_image",
+            "mode": "edit_image",
+            "prompt": "<Picture 1> wearing the hat from <Picture 2>",
+            "referenceAssetIds": ids,
+            "loras": [{ "id": "l", "weight": 0.8 }],
+        });
+        for job in [
+            image_edit_job(payload.clone()),
+            image_generate_job(payload.clone()),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&job),
+                Some(CandleImageLane::MinimaxH3ImageEdit),
+                "{payload}"
+            );
+            assert!(worker_supports_job(&candle, &job), "{payload}");
+        }
+    }
+    for refused in [
+        json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": [""] }),
+        json!({ "controls": [{}] }),
+        json!({ "hiresFix": { "enabled": true } }),
+    ] {
+        let mut payload = refused.clone();
+        payload["model"] = json!("minimax_h3_image");
+        assert!(!eligible(payload.clone()), "candle must refuse {refused}");
+        assert!(
+            !image_request_mlx_eligible("minimax_h3_image", &object(payload.clone())),
+            "the MLX lane refuses {refused} too"
+        );
+        assert!(
+            !worker_supports_job(&candle, &image_generate_job(payload.clone())),
+            "the candle worker must not claim {refused}"
+        );
+        let reason = classify_candle_image_gap(&object(payload));
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{refused}: {reason:?}"
+        );
+    }
+    for h3_only in [
+        json!({ "model": "minimax_h3_image", "controls": [{}] }),
+        json!({ "model": "minimax_h3_image", "hiresFix": { "enabled": true } }),
+    ] {
+        assert_eq!(
+            candle_image_first_refusal("minimax_h3_image", &object(h3_only.clone())),
+            Some(CandleImageRefusal::MinimaxH3ImageSurface),
+            "{h3_only}"
+        );
+    }
 }
