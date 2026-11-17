@@ -102,3 +102,37 @@ fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
         })
     ));
 }
+
+/// Codex P2 on PR #3434: the Candle ControlNet / IP-Adapter / PuLID routes use the uncached
+/// blocking producer. When a progress or heartbeat POST failure makes the consumer abandon it, a
+/// later `ProcessPoisoned` reaches nobody — so the producer must latch the fault process-wide when
+/// it classifies it, with no consumer and no cache boundary involved.
+#[cfg(native_lane)]
+#[tokio::test]
+async fn an_abandoned_uncached_producer_latches_its_process_fault() {
+    const DETAIL: &str = "uncached producer device lost (abandoned consumer)";
+    let (cancel, rx, handle) = super::start_gen_stream(
+        "job-abandoned".to_owned(),
+        "fixture",
+        0,
+        || Ok(()),
+        |(), _tx, _cancel| {
+            Err(crate::generation_error(
+                "fixture generation failed",
+                gen_core::Error::ProcessPoisoned(DETAIL.to_owned()),
+            ))
+        },
+    );
+    // The consumer is gone: nobody reads events or inspects the producer's result.
+    drop(rx);
+    cancel.cancel();
+    let _ = handle.await;
+    assert!(
+        crate::error::test_latched_process_faults()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|detail| detail == DETAIL),
+        "the producer latched its typed fault without any consumer"
+    );
+}

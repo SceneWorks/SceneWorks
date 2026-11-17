@@ -21,6 +21,30 @@ fn mark_owner_process_poisoned() {
     OWNER_PROCESS_POISONED.with(|poisoned| poisoned.set(true));
 }
 
+/// Latch a typed provider fault process-wide at the moment it is classified, on the producer's own
+/// thread. The cache boundary latches its faults too, but an uncached `spawn_blocking` producer has
+/// no such boundary: when a progress/heartbeat POST failure made the consumer abandon it after the
+/// cancel grace, its later `ProcessPoisoned` reached nobody and the worker kept claiming jobs on the
+/// poisoned device. Latched here, the quarantine stands regardless of any consumer, and the idle
+/// worker loop adopts and recycles it. `observe_process_fault` keeps the first detail, so the cache
+/// boundary and `handle_job_failure` observing the same fault again are no-ops.
+fn latch_process_fault(detail: &str) {
+    #[cfg(not(test))]
+    crate::mlx_worker_recovery::global().observe_process_fault(detail);
+    // Tests never quarantine the shared test binary's production singleton; they read the latch.
+    #[cfg(test)]
+    test_latched_process_faults()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(detail.to_owned());
+}
+
+#[cfg(test)]
+pub(crate) fn test_latched_process_faults() -> &'static std::sync::Mutex<Vec<String>> {
+    static LATCHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    &LATCHED
+}
+
 #[derive(Debug)]
 pub enum WorkerError {
     Http(reqwest::Error),
@@ -150,6 +174,7 @@ pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> Wo
         // byte-for-byte so the owner and terminal paths can retire without string inference.
         gen_core::Error::ProcessPoisoned(detail) => {
             mark_owner_process_poisoned();
+            latch_process_fault(&detail);
             WorkerError::ProcessPoisoned(detail)
         }
         gen_core::Error::Unsupported(_) => {

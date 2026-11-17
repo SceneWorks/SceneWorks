@@ -1629,18 +1629,16 @@ pub(super) async fn generate_instantid_stream(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))
                 })?;
-                model
-                    .with_face(&scrfd, &arcface)
-                    .map_err(|error| crate::generation_error("InstantID face stack", error))?
+                let with_face = model.with_face(&scrfd, &arcface);
+                with_face.map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let model = {
                 let face_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
                 // `arcface_path` is staged in the same dir; `with_face(dir)` resolves it by name.
                 let _ = &arcface_path;
-                model
-                    .with_face(face_dir)
-                    .map_err(|error| crate::generation_error("InstantID face stack", error))?
+                let with_face = model.with_face(face_dir);
+                with_face.map_err(|error| crate::generation_error("InstantID face stack", error))?
             };
             // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371 mlx / sc-8373 candle):
             // the `sdxl` student InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some`
