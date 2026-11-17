@@ -21,6 +21,20 @@ export function safePostRenderCheck(value) {
   return POST_RENDER_CHECKS.has(firstLine) ? firstLine : 'unknown';
 }
 
+const REPLAY_REFUSALS = new Set([
+  'source_not_complete', 'receipt_missing', 'receipt_changed', 'composite_replay_unavailable',
+  'execution_unavailable', 'deterministic_replay_unavailable', 'replay_scope_changed',
+  'output_hashes_unavailable', 'runtime_revision_changed', 'replay_adapter_unavailable',
+  'unsupported_draw_mapping', 'seed_draw_binding_changed', 'missing_randomness',
+  'source_binding_missing', 'source_route_missing', 'source_route_changed',
+  'provider_route_changed', 'provider_route_unavailable', 'device_changed',
+  'device_unavailable', 'route_unavailable', 'source_unavailable', 'options_not_allowed',
+]);
+
+export function safeReplayRefusal(value) {
+  return REPLAY_REFUSALS.has(value) ? value : 'unknown';
+}
+
 export async function readDiagnosticJson(file) {
   let handle;
   try {
@@ -55,6 +69,9 @@ export function failureDiagnostic(evidence, resource) {
     resource: { status: 'unavailable' } };
   if (report.proof.stage === 'post_render_environment') {
     report.proof.check = safePostRenderCheck(evidence.failureCheck);
+  }
+  if (report.proof.stage === 'exact_action') {
+    report.proof.reason = safeReplayRefusal(evidence.failureReason);
   }
   if (resource?.schema_version !== 1 || resource.kind !== 'cuda-execution-resource-lease-v1'
       || resource.actor !== 'sdxl-exact-replay' || typeof resource.resource_completed !== 'boolean') return report;

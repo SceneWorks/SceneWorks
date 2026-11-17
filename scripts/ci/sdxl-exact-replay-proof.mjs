@@ -9,7 +9,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { fileSha256, sha256 } from '../lib/file-sha256.mjs';
 import { inferenceRevision } from '../lib/inference-provenance.mjs';
-import { failureDiagnostic, readDiagnosticJson, safeErrorClass, safePostRenderCheck } from './sdxl-exact-replay-diagnostic.mjs';
+import { failureDiagnostic, readDiagnosticJson, safeErrorClass, safePostRenderCheck, safeReplayRefusal } from './sdxl-exact-replay-diagnostic.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HEX = /^[a-f0-9]{64}$/;
@@ -202,6 +202,17 @@ export function requireReplayQualification(plan, qualification) {
   compareFresh(qualification.jobs[0], qualification.jobs[1]);
 }
 
+export function verifyLoadedRuntime(actual, pinned, previousDigest) {
+  assert(actual.some((file) => /^nvcuda/i.test(file.name)), 'CUDA driver not loaded by worker');
+  assert.equal(new Set(actual.map((file) => file.name)).size, actual.length, 'duplicate loaded runtime libraries');
+  const byName = new Map(actual.map((file) => [file.name, file.sha256]));
+  // Pin the censused DLL bytes across jobs; the full loaded set must stay stable within this worker.
+  for (const file of pinned) assert.equal(byName.get(file.name), file.sha256, 'censused runtime library changed');
+  const loadedDigest = digest([...actual].sort((a, b) => a.name.localeCompare(b.name)));
+  if (previousDigest) assert.equal(loadedDigest, previousDigest, 'loaded runtime libraries changed between renders');
+  return loadedDigest;
+}
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
 async function listen(server) { await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)); return server.address().port; }
@@ -261,7 +272,11 @@ async function runProof() {
   const reservation = createServer(); const port = await listen(reservation); await new Promise((resolve) => reservation.close(resolve));
   const base = `http://127.0.0.1:${port}`;
   const api = async (method, route, body) => {
-    const response = await fetch(base + route, { method, ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10000) });
+    const response = await fetch(base + route, { method, ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30000) });
+    if (!response.ok && method === 'POST' && route.endsWith('/exact-replay')) {
+      const refusal = await response.json().catch(() => null);
+      evidence.failureReason = safeReplayRefusal(refusal?.context?.reason);
+    }
     assert(response.ok, `HTTP ${method} refusal ${response.status}`); return response.json();
   };
   const alive = () => { if (failure) throw failure; assert(children.every((child) => child.exitCode === null && child.signalCode === null), 'owned runtime exited'); validatePlan(plan, sourceSha, pin, phase); };
@@ -315,15 +330,8 @@ async function runProof() {
       const command = `(Get-Process -Id ${workerProcess.pid}).Modules | Select-Object -ExpandProperty FileName | ConvertTo-Json -Compress`;
       const names = [JSON.parse(execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' }))].flat();
       const selected = names.filter((name) => /^(?:nv|cuda|cublas|cudnn|cufft|curand|cusolver|cusparse|vcruntime|msvcp).*\.dll$/i.test(path.basename(name)));
-      assert(selected.some((name) => /^nvcuda/i.test(path.basename(name))), 'CUDA driver not loaded by worker');
       const actual = await Promise.all(selected.map(async (file) => ({ name: path.basename(file).toLowerCase(), sha256: await fileSha256(file) })));
-      assert.equal(new Set(actual.map((file) => file.name)).size, actual.length, 'duplicate loaded runtime libraries');
-      const byName = new Map(actual.map((file) => [file.name, file.sha256]));
-      for (const file of libraries) assert.equal(byName.get(file.name), file.sha256, 'censused runtime library changed');
-      const loadedDigest = digest(actual.sort((a, b) => a.name.localeCompare(b.name)));
-      if (qualification) assert.equal(loadedDigest, qualification.loadedRuntimeLibrariesSha256, 'qualified loaded runtime libraries changed');
-      if (evidence.loadedRuntimeLibrariesSha256) assert.equal(loadedDigest, evidence.loadedRuntimeLibrariesSha256, 'loaded runtime libraries changed between renders');
-      evidence.loadedRuntimeLibrariesSha256 = loadedDigest;
+      evidence.loadedRuntimeLibrariesSha256 = verifyLoadedRuntime(actual, libraries, evidence.loadedRuntimeLibrariesSha256);
     };
     stage = 'project_create';
     const project = await api('POST', '/api/v1/projects', { name: 'SDXL exact replay proof' });

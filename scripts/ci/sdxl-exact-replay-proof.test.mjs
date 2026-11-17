@@ -8,8 +8,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch, validatePlan, verifyMembers,
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
-  finalizeEvidence, finalizeArtifacts } from './sdxl-exact-replay-proof.mjs';
-import { failureDiagnostic, safePostRenderCheck } from './sdxl-exact-replay-diagnostic.mjs';
+  finalizeEvidence, finalizeArtifacts, verifyLoadedRuntime } from './sdxl-exact-replay-proof.mjs';
+import { failureDiagnostic, safePostRenderCheck, safeReplayRefusal } from './sdxl-exact-replay-diagnostic.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 import { selectProofDevice, validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
@@ -197,6 +197,22 @@ test('failure summaries allow only fixed stages, error classes and bounded resou
   assert.equal(failureDiagnostic({ failureStage: 'post_render_environment', failureErrorClass: 'AssertionError',
     failureCheck: check }, resource).proof.check, check);
   assert.equal(failureDiagnostic({ failureStage: 'post_render_environment', failureCheck: privateText }, resource).proof.check, 'unknown');
+  assert.equal(safeReplayRefusal('unsupported_draw_mapping'), 'unsupported_draw_mapping');
+  assert.equal(safeReplayRefusal(privateText), 'unknown');
+  assert.equal(failureDiagnostic({ failureStage: 'exact_action', failureReason: 'unsupported_draw_mapping' }, resource).proof.reason,
+    'unsupported_draw_mapping');
+  assert.equal(failureDiagnostic({ failureStage: 'exact_action', failureReason: privateText }, resource).proof.reason, 'unknown');
+});
+test('loaded runtime pins required DLL bytes while allowing non-pinned module-set variation between runs', () => {
+  const pinned = [{ name: 'nvcuda.dll', sha256: hash('driver') }, { name: 'cublas64_12.dll', sha256: hash('blas') }];
+  const first = [...pinned, { name: 'nvapi64.dll', sha256: hash('optional') }];
+  const second = [...pinned];
+  const firstDigest = verifyLoadedRuntime(first, pinned);
+  assert.notEqual(verifyLoadedRuntime(second, pinned), firstDigest);
+  assert.throws(() => verifyLoadedRuntime(second, pinned, firstDigest), /changed between renders/);
+  assert.throws(() => verifyLoadedRuntime([pinned[0]], pinned), /censused runtime library changed/);
+  assert.throws(() => verifyLoadedRuntime([{ ...pinned[0], sha256: hash('changed') }, pinned[1]], pinned), /censused runtime library changed/);
+  assert.throws(() => verifyLoadedRuntime([pinned[0], pinned[0], pinned[1]], pinned), /duplicate loaded runtime libraries/);
 });
 test('finalize writes a public refusal after a guard timeout even without child evidence', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sdxl-finalize-'));

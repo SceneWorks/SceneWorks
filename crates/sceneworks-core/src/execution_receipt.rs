@@ -609,10 +609,8 @@ pub fn require_image_seed_binding(
     let base = payload.get("seed").and_then(Value::as_i64);
     let seeds = payload.get("seeds").and_then(Value::as_array);
     for (index, output) in receipt.outputs.iter().enumerate() {
-        let randomness = output
-            .execution
-            .as_ref()
-            .unwrap_or(&receipt.execution)
+        let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
+        let randomness = execution
             .pointer("/identity/randomness")
             .ok_or_else(|| ReplayUnavailable::new("missing_randomness", "execution.randomness"))?;
         let draws = randomness
@@ -621,18 +619,57 @@ pub fn require_image_seed_binding(
             .ok_or_else(|| {
                 ReplayUnavailable::new("unsupported_draw_mapping", "execution.randomness")
             })?;
+        let provider_index = if output.execution.is_some() { 0 } else { index };
+        let expected = base
+            .map(|seed| seed.wrapping_add(index as i64))
+            .or_else(|| seeds?.get(index)?.as_i64())
+            .and_then(|seed| u64::try_from(seed).ok());
+        // The qualified Candle SDXL route consumes the image seed twice: once
+        // for initial noise and once for the pipeline's own ordered stream.
+        // Its provider declaration only attests this single-output sequence.
+        if execution
+            .pointer("/identity/provider_id")
+            .and_then(Value::as_str)
+            == Some("sdxl")
+            && execution
+                .pointer("/identity/backend")
+                .and_then(Value::as_str)
+                == Some("candle")
+        {
+            if count != 1
+                || randomness.get("scheme").and_then(Value::as_str)
+                    != Some("candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32")
+                || draws.len() != 2
+            {
+                return Err(ReplayUnavailable::new("unsupported_draw_mapping", "execution.randomness"));
+            }
+            if expected.is_none()
+                || [
+                    ("image_initial_noise", &draws[0]),
+                    ("sdxl/pipeline", &draws[1]),
+                ]
+                .iter()
+                .any(|(purpose, draw)| {
+                    draw.get("output_index").and_then(Value::as_u64) != Some(0)
+                        || draw.get("purpose").and_then(Value::as_str) != Some(*purpose)
+                        || draw.get("seed").and_then(Value::as_u64) != expected
+                        || !draw.get("noise_sha256").is_some_and(Value::is_null)
+                })
+            {
+                return Err(ReplayUnavailable::new(
+                    "seed_draw_binding_changed",
+                    "execution.randomness",
+                ));
+            }
+            continue;
+        }
         if draws.len() != if output.execution.is_some() { 1 } else { count } {
             return Err(ReplayUnavailable::new(
                 "unsupported_draw_mapping",
                 "execution.randomness",
             ));
         }
-        let provider_index = if output.execution.is_some() { 0 } else { index };
         let draw = &draws[provider_index];
-        let expected = base
-            .map(|seed| seed.wrapping_add(index as i64))
-            .or_else(|| seeds?.get(index)?.as_i64())
-            .and_then(|seed| u64::try_from(seed).ok());
         if draw.get("output_index").and_then(Value::as_u64) != Some(provider_index as u64)
             || draw.get("seed").and_then(Value::as_u64) != expected
             || expected.is_none()
@@ -1279,6 +1316,65 @@ mod tests {
                 .unwrap_err()
                 .reason,
             "seed_draw_binding_changed"
+        );
+    }
+
+    #[test]
+    fn exact_sdxl_replay_requires_both_ordered_seed_draws() {
+        let input = worker_receipt();
+        let mut receipt = TrustedExecutionReceipt {
+            version: 1,
+            job_id: "job".into(),
+            job_type: "image_generate".into(),
+            worker_id: "worker".into(),
+            attempt_id: "f".repeat(64),
+            accepted_backend: "candle".into(),
+            accepted_device: "cuda:0".into(),
+            accepted_source_route: None,
+            inference_revision: "a".repeat(40),
+            accepted_binding_sha256: "b".repeat(64),
+            accepted_result_sha256: "c".repeat(64),
+            execution: input.execution,
+            outputs: input.outputs,
+            stages: Vec::new(),
+        };
+        receipt.execution["identity"]["provider_id"] = json!("sdxl");
+        receipt.execution["identity"]["randomness"] = json!({
+            "kind":"draws",
+            "scheme":"candle-ordered-provider-streams-v1:rand-0.9-StdRng-rand_distr-StandardNormal-f32",
+            "draws":[
+                {"output_index":0,"purpose":"image_initial_noise","seed":16402,"noise_sha256":null},
+                {"output_index":0,"purpose":"sdxl/pipeline","seed":16402,"noise_sha256":null}
+            ]
+        });
+        receipt.outputs.truncate(1);
+        let payload = json!({"seed":16402,"count":1});
+        assert!(require_image_seed_binding(&receipt, payload.as_object().unwrap()).is_ok());
+        receipt.execution["identity"]["randomness"]["draws"][1]["seed"] = json!(16403);
+        assert_eq!(
+            require_image_seed_binding(&receipt, payload.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "seed_draw_binding_changed"
+        );
+        receipt.execution["identity"]["randomness"]["draws"][1]["seed"] = json!(16402);
+        receipt.execution["identity"]["randomness"]["draws"][1]["purpose"] = json!("other");
+        assert_eq!(
+            require_image_seed_binding(&receipt, payload.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "seed_draw_binding_changed"
+        );
+        receipt.execution["identity"]["randomness"]["draws"][1]["purpose"] = json!("sdxl/pipeline");
+        receipt.execution["identity"]["randomness"]["draws"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert_eq!(
+            require_image_seed_binding(&receipt, payload.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "unsupported_draw_mapping"
         );
     }
 }
