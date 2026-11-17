@@ -1995,7 +1995,7 @@ pub(super) fn endpoint_vram_probe() -> Result<VramProbe, String> {
         ));
     }
     eprintln!(
-        "SDXL endpoint awaiting idle physical GPU{} UUID={expected}",
+        "SDXL endpoint awaiting an admissible (free, quiet) physical GPU{} UUID={expected}",
         smi.physical_id
     );
     let started = Instant::now();

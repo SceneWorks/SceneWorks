@@ -164,7 +164,7 @@ import {
   gpuComputeProcesses,
   nameContaminatingProcesses,
   contaminatedHostHalt,
-  CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, coTenantGpu, coTenantShift, sampleCardBaseline,
+  CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, CO_TENANT_SETTLE_MS, coTenantGpu, coTenantShift, sampleCardBaseline, settledCardBaseline,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -5920,10 +5920,12 @@ function stubContext({ root, workDir }, overrides = {}) {
 }
 
 test("co-tenant bracket: only a Candle capture on one numbered card is bracketed", () => {
-  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "1" }), "1");
-  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "GPU-abc" }), null);
-  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, {}), null);
-  assert.equal(coTenantGpu({ key: "z_image_turbo:q4:mlx" }, { CUDA_VISIBLE_DEVICES: "1" }), null);
+  const pci = { CUDA_DEVICE_ORDER: "PCI_BUS_ID" };
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { ...pci, CUDA_VISIBLE_DEVICES: "1" }), "1");
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { CUDA_VISIBLE_DEVICES: "1" }), null, "ordinal order unknown");
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, { ...pci, CUDA_VISIBLE_DEVICES: "GPU-abc" }), null);
+  assert.equal(coTenantGpu({ key: "minimax_h3_image:q4:candle" }, pci), null);
+  assert.equal(coTenantGpu({ key: "z_image_turbo:q4:mlx" }, { ...pci, CUDA_VISIBLE_DEVICES: "1" }), null);
 });
 
 test("co-tenant bracket: a resident model that holds still is fine; one that moves or wobbles is named", () => {
@@ -5933,15 +5935,40 @@ test("co-tenant bracket: a resident model that holds still is fine; one that mov
   assert.match(coTenantShift(window(31_000), window(31_000 + CO_TENANT_MAX_SHIFT_MIB + 1)), /baseline moved \+257 MiB/);
   assert.match(coTenantShift(window(31_000), window(20_000)), /baseline moved -11000 MiB/);
   assert.match(coTenantShift(window(1_000, 1_400), window(1_000)), /before window unstable/);
+  // An app that exits and another that starts at the same footprint are still named.
+  assert.match(coTenantShift({ ...window(31_000), compute: [24360] }, { ...window(31_000), compute: [9001] }), /pure-compute co-tenants changed \(24360 -> 9001\)/);
+  assert.equal(coTenantShift({ ...window(31_000), compute: [24360] }, { ...window(31_000), compute: [24360] }), null);
 });
 
 test("co-tenant bracket: samples the card's memory.used through nvidia-smi and refuses an unreadable value", async () => {
   const calls = [];
-  const runCommand = async (command, argv) => { calls.push([command, ...argv]); return { stdout: "2130\n" }; };
+  const pmon = "# gpu         pid   type     fb   ccpm    sm    mem\n    1      24360     C      -      -     -      -\n    1      11288   C+G      -      -     -      -\n    1          -     -      -      -     -      -\n";
+  const runCommand = async (command, argv, options) => {
+    calls.push([command, ...argv]); assert.equal(options.timeoutMs, 30_000, "a hung nvidia-smi cannot stall the walk");
+    return { stdout: argv[0] === "pmon" ? pmon : "2130\n" };
+  };
   const window = await sampleCardBaseline("1", { runCommand, sleep: async () => {} });
-  assert.deepEqual(window, { samples: [2130, 2130, 2130, 2130, 2130], min: 2130, max: 2130 });
+  assert.deepEqual(window, { samples: [2130, 2130, 2130, 2130, 2130], min: 2130, max: 2130, compute: [24360] });
   assert.deepEqual(calls[0], ["nvidia-smi", "-i", "1", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]);
+  assert.deepEqual(calls.at(-1), ["nvidia-smi", "pmon", "-i", "1", "-c", "1", "-s", "um"]);
   await assert.rejects(sampleCardBaseline("1", { runCommand: async () => ({ stdout: "[N/A]" }), sleep: async () => {} }), /unreadable memory\.used/);
+});
+
+test("co-tenant bracket: the after window waits for the exited adapter's memory to leave the counter, up to a bound", async () => {
+  const before = { samples: [2130], min: 2130, max: 2130 };
+  const readings = [20_000, 8_000, 2_140];
+  let now = 0;
+  const after = await settledCardBaseline("1", before, {
+    sample: async () => { const min = readings.shift(); return { samples: [min], min, max: min }; },
+    clock: () => now, sleep: async (ms) => { now += ms; },
+  });
+  assert.equal(after.min, 2_140);
+  now = 0;
+  const stuck = await settledCardBaseline("1", before, {
+    sample: async () => ({ samples: [9_000], min: 9_000, max: 9_000 }), clock: () => now, sleep: async (ms) => { now += ms; },
+  });
+  assert.equal(stuck.min, 9_000, "a co-tenant that stays up is reported, not waited on forever");
+  assert.ok(now >= CO_TENANT_SETTLE_MS);
 });
 
 async function bracketedCapture(windows) {
@@ -5954,6 +5981,8 @@ async function bracketedCapture(windows) {
   const sampled = [];
   const context = stubContext(checkout, {
     coTenantGpu: () => "1",
+    // The settle wait has its own test; here each attempt's after window is one sample.
+    settledCardBaseline: (gpu, _before, { sample, env }) => sample(gpu, { env }),
     sampleCardBaseline: async () => { const min = windows[sampled.length]; sampled.push(min); return { samples: [min], min, max: min }; },
   });
   return { result: await measureAnchor(row, context), context, sampled };

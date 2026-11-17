@@ -4582,25 +4582,51 @@ export function stderrTail(error, limit = INGEST_STDERR_TAIL_LINES) {
 export const CO_TENANT_WINDOW = Object.freeze({ samples: 5, intervalMs: 200 });
 export const CO_TENANT_MAX_SHIFT_MIB = 256;
 export const CO_TENANT_ATTEMPTS = 3;
+/** WDDM can keep charging an exited process's memory for a few seconds (MOSS allows 30 s). */
+export const CO_TENANT_SETTLE_MS = 30_000;
+const NVIDIA_SMI_TIMEOUT_MS = 30_000;
 
-/** The physical GPU a Candle capture renders on, or `null` when the walker cannot bracket it. */
+/**
+ * The physical GPU a Candle capture renders on, or `null` when the walker cannot bracket it. Only a
+ * PCI-bus-ordered single index names the same card to CUDA and to `nvidia-smi -i`.
+ */
 export function coTenantGpu(row, env) {
-  if (anchorParts(row.key).backend !== "candle") return null;
+  if (anchorParts(row.key).backend !== "candle" || env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID") return null;
   const device = String(env.CUDA_VISIBLE_DEVICES ?? "").trim();
   return /^\d+$/.test(device) ? device : null;
 }
 
-/** One baseline window of the card's device-level `memory.used` (MiB). */
+/**
+ * One baseline window of the card's device-level `memory.used` (MiB), plus the pure-compute ("C")
+ * processes `nvidia-smi pmon` reports on it -- a co-tenant that starts or exits across a capture is
+ * named even when its memory happens to return to the same level.
+ */
 export async function sampleCardBaseline(gpu, { env = process.env, runCommand = run, sleep = (ms) => new Promise((done) => setTimeout(done, ms)) } = {}) {
   const samples = [];
   for (let index = 0; index < CO_TENANT_WINDOW.samples; index += 1) {
     if (index) await sleep(CO_TENANT_WINDOW.intervalMs);
-    const { stdout } = await runCommand("nvidia-smi", ["-i", gpu, "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env });
+    const { stdout } = await runCommand("nvidia-smi", ["-i", gpu, "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
     const value = Number(String(stdout).trim());
     if (!Number.isInteger(value) || value < 0) throw new Error(`unreadable memory.used for GPU ${gpu}: ${String(stdout).trim()}`);
     samples.push(value);
   }
-  return { samples, min: Math.min(...samples), max: Math.max(...samples) };
+  const { stdout: pmon } = await runCommand("nvidia-smi", ["pmon", "-i", gpu, "-c", "1", "-s", "um"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+  const compute = String(pmon).split("\n").map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 3 && /^\d+$/.test(fields[1]) && fields[2] === "C").map((fields) => Number(fields[1]));
+  return { samples, min: Math.min(...samples), max: Math.max(...samples), compute: [...new Set(compute)].sort((a, b) => a - b) };
+}
+
+/**
+ * The after-capture window, re-taken until the exited adapter's memory has left the counter (its
+ * min is back within the limit of the before window) or `CO_TENANT_SETTLE_MS` runs out.
+ */
+export async function settledCardBaseline(gpu, before, { sample = sampleCardBaseline, env, clock = Date.now, sleep = (ms) => new Promise((done) => setTimeout(done, ms)) } = {}) {
+  const started = clock();
+  for (;;) {
+    const after = await sample(gpu, { env });
+    if (after.min - before.min <= CO_TENANT_MAX_SHIFT_MIB || clock() - started >= CO_TENANT_SETTLE_MS) return after;
+    await sleep(1_000);
+  }
 }
 
 /** Why the co-tenant baseline moved across a capture, or `null` when it held. */
@@ -4611,6 +4637,8 @@ export function coTenantShift(before, after, limit = CO_TENANT_MAX_SHIFT_MIB) {
   }
   const shift = after.min - before.min;
   if (Math.abs(shift) > limit) reasons.push(`baseline moved ${shift > 0 ? "+" : ""}${shift} MiB (${before.min} -> ${after.min} MiB, allowed ${limit})`);
+  const named = (list) => (list ?? []).join(",") || "none";
+  if (named(before.compute) !== named(after.compute)) reasons.push(`pure-compute co-tenants changed (${named(before.compute)} -> ${named(after.compute)})`);
   return reasons.length ? reasons.join("; ") : null;
 }
 
@@ -4800,7 +4828,7 @@ export async function measureAnchor(row, context) {
     }
     });
     if (cardGpu === null) break;
-    const after = await (context.sampleCardBaseline ?? sampleCardBaseline)(cardGpu, { env });
+    const after = await (context.settledCardBaseline ?? settledCardBaseline)(cardGpu, before, { sample: context.sampleCardBaseline ?? sampleCardBaseline, env });
     const shift = coTenantShift(before, after);
     log.write(`co-tenant bracket GPU ${cardGpu} attempt ${attempt}: before ${JSON.stringify(before.samples)} after ${JSON.stringify(after.samples)}${shift ? ` MOVED: ${shift}` : " held"}\n`);
     if (!shift) break;
