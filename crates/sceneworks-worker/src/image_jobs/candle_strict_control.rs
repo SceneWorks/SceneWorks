@@ -378,7 +378,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
             // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -469,17 +469,21 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 // strict-control lane produces the FINAL image directly (no face-restore pass). Clone
                 // paid ONLY when a scorer exists; a full-body / turned pose with no reliable frontal
                 // face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
+                let face_likeness = scorer
+                    .as_ref()
+                    .map(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
                 Ok(Some((
                     seed,
                     out.width,

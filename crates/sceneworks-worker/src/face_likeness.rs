@@ -303,10 +303,20 @@ enum StubFace {
     Face(f32),
     /// No detectable face ⇒ `Ok(None)` (the clean N/A funnel).
     NoFace,
+    /// A typed provider fault (SW-7171): the device is gone.
+    Poisoned,
+    /// An ordinary backend failure (SW-7171): scoring degrades to N/A.
+    Failed,
 }
 
 /// Counts every `largest_face` call so a test can prove the SOURCE is embedded exactly once across N
 /// generated-image scores (the explicit caching acceptance criterion), independent of weights.
+/// Stub pixel-0 values for the two failure outcomes (no other test uses them).
+#[cfg(all(test, native_lane))]
+const STUB_POISONED_PIXEL: u8 = 255;
+#[cfg(all(test, native_lane))]
+const STUB_FAILED_PIXEL: u8 = 254;
+
 #[cfg(all(test, native_lane))]
 struct StubFaceBackend {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -322,6 +332,8 @@ impl StubFaceBackend {
     fn classify(image: &Image) -> StubFace {
         match image.pixels.first().copied().unwrap_or(0) {
             0 => StubFace::NoFace,
+            STUB_POISONED_PIXEL => StubFace::Poisoned,
+            STUB_FAILED_PIXEL => StubFace::Failed,
             other => StubFace::Face(0.5 + f32::from(other) / 512.0),
         }
     }
@@ -370,10 +382,18 @@ impl FaceBackend {
             #[cfg(test)]
             FaceBackend::Stub(stub) => {
                 stub.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(match StubFaceBackend::classify(image) {
-                    StubFace::NoFace => None,
-                    StubFace::Face(det) => Some((det, StubFaceBackend::embedding(image))),
-                })
+                match StubFaceBackend::classify(image) {
+                    StubFace::NoFace => Ok(None),
+                    StubFace::Face(det) => Ok(Some((det, StubFaceBackend::embedding(image)))),
+                    StubFace::Poisoned => Err(crate::generation_error(
+                        "face detect",
+                        gen_core::Error::ProcessPoisoned("stub face device lost".into()),
+                    )),
+                    StubFace::Failed => Err(crate::generation_error(
+                        "face detect",
+                        gen_core::Error::Msg("stub face forward failed".into()),
+                    )),
+                }
             }
         }
     }
@@ -476,15 +496,18 @@ impl FaceLikenessScorer {
         Ok(score_against_source(source_normalized, generated))
     }
 
-    /// Score one generated image, turning a backend error into a logged `null` result — the
-    /// "scoring errors are non-fatal; never block a generation" acceptance criterion. Use this from a
-    /// generation post-pass; use [`score`](Self::score) when the caller wants to handle the error.
-    pub(crate) fn score_or_null(&self, generated: &Image) -> LikenessResult {
+    /// Score one generated image, turning an ordinary backend error into a logged `null` result —
+    /// the "scoring errors are non-fatal; never block a generation" acceptance criterion. A typed
+    /// `ProcessPoisoned` is the one exception (SW-7171): the device is gone, so it fails the job
+    /// with that fatal cause instead of letting the generation run on. Use this from a generation
+    /// post-pass; use [`score`](Self::score) when the caller wants to handle every error.
+    pub(crate) fn score_or_null(&self, generated: &Image) -> WorkerResult<LikenessResult> {
         match self.score(generated) {
-            Ok(result) => result,
+            Ok(result) => Ok(result),
+            Err(fatal @ crate::WorkerError::ProcessPoisoned(_)) => Err(fatal),
             Err(error) => {
                 tracing::warn!(error = %error, "face-likeness scoring failed; recording null");
-                LikenessResult::na(NoScoreReason::EmbeddingError)
+                Ok(LikenessResult::na(NoScoreReason::EmbeddingError))
             }
         }
     }
@@ -560,20 +583,37 @@ impl FaceLikenessScorer {
 /// weights bundle or a source image with no detectable face must NEVER abort the generation. Any
 /// error is logged and becomes `None` — the set still renders, the scores are simply absent (the field
 /// is omitted from each sidecar). A `None` here ⇒ pass `None` to [`score_generated_image`].
+///
+/// The one fatal case (SW-7171): a typed `ProcessPoisoned` from loading the face stack or embedding
+/// the source is returned as `Err` — the device is gone, so the job fails with that cause and no
+/// further pose or image starts.
 #[cfg(native_lane)]
 pub(crate) fn build_face_likeness_scorer(
     weights_dir: &std::path::Path,
     source: &Image,
-) -> Option<FaceLikenessScorer> {
-    match FaceLikenessScorer::load_for_weights_dir(weights_dir, source) {
-        Ok(scorer) => Some(scorer),
+) -> WorkerResult<Option<FaceLikenessScorer>> {
+    optional_scorer(FaceLikenessScorer::load_for_weights_dir(
+        weights_dir,
+        source,
+    ))
+}
+
+/// The non-fatal construction policy of [`build_face_likeness_scorer`], over an already-attempted
+/// construction: typed poison fails, every other error becomes a logged `None`.
+#[cfg(native_lane)]
+fn optional_scorer(
+    built: WorkerResult<FaceLikenessScorer>,
+) -> WorkerResult<Option<FaceLikenessScorer>> {
+    match built {
+        Ok(scorer) => Ok(Some(scorer)),
+        Err(fatal @ crate::WorkerError::ProcessPoisoned(_)) => Err(fatal),
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 "character-set face-likeness scorer construction failed; scores will be omitted \
                  (generation continues)"
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -585,17 +625,19 @@ pub(crate) fn build_face_likeness_scorer(
 /// sees (sc-4410). `None` scorer (no set, or a failed [`build_face_likeness_scorer`]) ⇒ `None` ⇒ the
 /// field is omitted entirely. Per-image scoring is non-fatal ([`score_or_null`]); a full-body / turned /
 /// profile pose with no reliable frontal face records an honest `detected: false` N/A block, never a
-/// misleading low number.
+/// misleading low number. A typed `ProcessPoisoned` is the exception and fails the job (SW-7171).
 #[cfg(native_lane)]
 pub(crate) fn score_generated_image(
     scorer: Option<&FaceLikenessScorer>,
     image: &Image,
     source_asset_id: Option<&str>,
-) -> Option<JsonObject> {
-    scorer.map(|scorer| {
-        let result = scorer.score_or_null(image);
-        face_likeness_fact(&result, source_asset_id)
-    })
+) -> WorkerResult<Option<JsonObject>> {
+    scorer
+        .map(|scorer| {
+            let result = scorer.score_or_null(image)?;
+            Ok(face_likeness_fact(&result, source_asset_id))
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -834,6 +876,74 @@ mod tests {
         use super::*;
         use std::sync::atomic::Ordering;
 
+        fn stub_backend() -> FaceBackend {
+            FaceBackend::Stub(StubFaceBackend {
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            })
+        }
+
+        /// SW-7171 AC1 (scoring): a typed `ProcessPoisoned` from face detection/embedding fails the
+        /// job with that cause through both optional-scoring seams instead of becoming an N/A score.
+        #[test]
+        fn poisoned_scoring_fails_with_the_fatal_cause() {
+            std::thread::spawn(|| {
+                let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
+                let fatal = scorer
+                    .score_or_null(&image(STUB_POISONED_PIXEL))
+                    .expect_err("poison is never an N/A score");
+                assert!(
+                    matches!(fatal, WorkerError::ProcessPoisoned(ref d) if d == "stub face device lost")
+                );
+                let fatal = score_generated_image(
+                    Some(&scorer),
+                    &image(STUB_POISONED_PIXEL),
+                    Some("char_src"),
+                )
+                .expect_err("the per-image post-pass propagates poison");
+                assert!(matches!(fatal, WorkerError::ProcessPoisoned(_)));
+            })
+            .join()
+            .expect("fault thread");
+        }
+
+        /// SW-7171 AC1 (construction): poison while embedding the source fails scorer construction.
+        #[test]
+        fn poisoned_scorer_construction_fails_with_the_fatal_cause() {
+            std::thread::spawn(|| {
+                let built = optional_scorer(FaceLikenessScorer::with_backend(
+                    stub_backend(),
+                    &image(STUB_POISONED_PIXEL),
+                ));
+                assert!(
+                    matches!(built, Err(WorkerError::ProcessPoisoned(ref d)) if d == "stub face device lost")
+                );
+            })
+            .join()
+            .expect("fault thread");
+        }
+
+        /// SW-7171 AC2: an ordinary scoring or construction failure still degrades to N/A / no scorer.
+        #[test]
+        fn ordinary_scoring_and_construction_failures_stay_non_fatal() {
+            let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let result = scorer
+                .score_or_null(&image(STUB_FAILED_PIXEL))
+                .expect("an ordinary failure is non-fatal");
+            assert_eq!(result.reason, Some(NoScoreReason::EmbeddingError));
+            let block = score_generated_image(Some(&scorer), &image(STUB_FAILED_PIXEL), Some("s"))
+                .expect("an ordinary failure is non-fatal")
+                .expect("a scorer present ⇒ a block built");
+            assert_eq!(block.get("detected"), Some(&Value::Bool(false)));
+            let built = optional_scorer(FaceLikenessScorer::with_backend(
+                stub_backend(),
+                &image(STUB_FAILED_PIXEL),
+            ));
+            assert!(
+                matches!(built, Ok(None)),
+                "construction failure ⇒ no scorer"
+            );
+        }
+
         #[test]
         fn typed_process_fault_leaves_face_backend_for_process_teardown() {
             let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
@@ -886,7 +996,7 @@ mod tests {
             // Score an 11-view-style set; every reliable-face view attaches a faceLikeness block.
             let angles = [200u8, 180, 160, 140, 120, 100, 90, 200, 180, 160, 140];
             for (i, px) in angles.iter().enumerate() {
-                let result = scorer.score_or_null(&image(*px));
+                let result = scorer.score_or_null(&image(*px)).unwrap();
                 assert!(result.detected, "angle {i} (px {px}) detected");
                 let mut raw = JsonObject::new();
                 attach_face_likeness(&mut raw, Some(&result), Some("char_src"));
@@ -918,7 +1028,7 @@ mod tests {
             // A profile / up / down view with no detectable frontal face must persist an honest
             // detected:false N/A block (score null + reason), NOT a misleading low number.
             let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
-            let result = scorer.score_or_null(&image(0)); // pixel 0 == 0 ⇒ no face
+            let result = scorer.score_or_null(&image(0)).unwrap(); // pixel 0 == 0 ⇒ no face
             assert!(!result.detected, "no-face angle ⇒ detected:false");
             assert!(
                 result.score.is_none(),
@@ -949,7 +1059,7 @@ mod tests {
             // to a `None` scorer ⇒ the field is omitted; see `omitted_when_scorer_absent`.)
             let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(0)); // no source face
             assert!(!scorer.has_source_face(), "no detectable source face");
-            let result = scorer.score_or_null(&image(200)); // a real face in the generation
+            let result = scorer.score_or_null(&image(200)).unwrap(); // a real face in the generation
             assert!(!result.detected, "no source ⇒ every angle N/A");
             assert_eq!(result.reason, Some(NoScoreReason::NoSourceFace));
         }
@@ -974,7 +1084,7 @@ mod tests {
             // A low-confidence detection (an extreme-but-detected angle below MIN_DET_SCORE) records an
             // honest low_confidence N/A, not a noisy number — exercises the stub's `1..=76` tier.
             let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
-            let result = scorer.score_or_null(&image(40)); // det_score 0.5+40/512 ≈ 0.578 < 0.65
+            let result = scorer.score_or_null(&image(40)).unwrap(); // det_score 0.5+40/512 ≈ 0.578 < 0.65
             assert!(!result.detected, "low-confidence angle ⇒ detected:false");
             assert!(result.score.is_none());
             assert_eq!(result.reason, Some(NoScoreReason::LowConfidence));
@@ -1011,6 +1121,7 @@ mod tests {
             let angles = [200u8, 180, 160, 140, 120, 100, 90, 200, 180, 160, 140];
             for px in angles {
                 let block = score_generated_image(Some(&scorer), &image(px), Some("char_src"))
+                    .unwrap()
                     .expect("a scorer present ⇒ a block built");
                 assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
                 assert_eq!(block.get("sourceAssetId"), Some(&json!("char_src")));
@@ -1029,6 +1140,7 @@ mod tests {
             // N/A block through the shared seam — never a low number, never a skipped asset.
             let (scorer, _calls) = stub_scorer(200);
             let block = score_generated_image(Some(&scorer), &image(0), Some("char_src"))
+                .unwrap()
                 .expect("a scorer present ⇒ a block (the N/A block) built");
             assert_eq!(
                 Value::Object(block),
@@ -1047,7 +1159,9 @@ mod tests {
             // No angle set / non-fatal construction failure ⇒ `None` scorer ⇒ `None` ⇒ the consumer
             // omits the field entirely (the same contract the producer relies on for non-angle paths).
             assert!(
-                score_generated_image(None, &image(200), Some("char_src")).is_none(),
+                score_generated_image(None, &image(200), Some("char_src"))
+                    .unwrap()
+                    .is_none(),
                 "None scorer ⇒ no block ⇒ field omitted"
             );
         }
@@ -1075,6 +1189,7 @@ mod tests {
             let poses = [200u8, 190, 180, 170, 160, 150];
             for px in poses {
                 let block = score_generated_image(Some(&scorer), &image(px), Some("char_src"))
+                    .unwrap()
                     .expect("a scorer present ⇒ a block built");
                 assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
                 assert_eq!(block.get("sourceAssetId"), Some(&json!("char_src")));
@@ -1099,6 +1214,7 @@ mod tests {
             // never a skipped pose asset.
             let (scorer, _calls) = stub_scorer(200);
             let block = score_generated_image(Some(&scorer), &image(0), Some("char_src"))
+                .unwrap()
                 .expect("a scorer present ⇒ the N/A block built");
             assert_eq!(
                 Value::Object(block),
@@ -1137,6 +1253,7 @@ mod tests {
             let generated = [200u8, 150, 120, 90, 80];
             for px in generated {
                 let block = score_generated_image(Some(&scorer), &image(px), Some("char_ref_1"))
+                    .unwrap()
                     .expect("a scorer present ⇒ a block built");
                 assert_eq!(block.get("detected"), Some(&Value::Bool(true)));
                 assert_eq!(
@@ -1164,8 +1281,8 @@ mod tests {
             let (scorer_a, _) = FaceLikenessScorer::with_stub_source(&image(200)); // reference A
             let (scorer_b, _) = FaceLikenessScorer::with_stub_source(&image(80)); // reference B (changed)
 
-            let a = scorer_a.score_or_null(&generated);
-            let b = scorer_b.score_or_null(&generated);
+            let a = scorer_a.score_or_null(&generated).unwrap();
+            let b = scorer_b.score_or_null(&generated).unwrap();
             let (sa, sb) = (a.score.expect("A scored"), b.score.expect("B scored"));
             assert!(
                 sa > sb,
@@ -1174,10 +1291,12 @@ mod tests {
             );
 
             // And the persisted block records WHICH reference each score was computed against.
-            let block_a =
-                score_generated_image(Some(&scorer_a), &generated, Some("ref_a")).expect("block A");
-            let block_b =
-                score_generated_image(Some(&scorer_b), &generated, Some("ref_b")).expect("block B");
+            let block_a = score_generated_image(Some(&scorer_a), &generated, Some("ref_a"))
+                .unwrap()
+                .expect("block A");
+            let block_b = score_generated_image(Some(&scorer_b), &generated, Some("ref_b"))
+                .unwrap()
+                .expect("block B");
             assert_eq!(block_a.get("sourceAssetId"), Some(&json!("ref_a")));
             assert_eq!(block_b.get("sourceAssetId"), Some(&json!("ref_b")));
         }
@@ -1189,6 +1308,7 @@ mod tests {
             // number. (pixel 0 ⇒ the stub's no-face funnel.)
             let (scorer, _calls) = stub_scorer(200);
             let block = score_generated_image(Some(&scorer), &image(0), Some("char_ref_1"))
+                .unwrap()
                 .expect("a scorer present ⇒ the N/A block built");
             assert_eq!(
                 Value::Object(block),
@@ -1210,12 +1330,14 @@ mod tests {
             // is the NoSourceFace N/A — the With-Character generation still renders, scores just absent.
             let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(0)); // no face in ref
             assert!(!scorer.has_source_face(), "no detectable reference face");
-            let result = scorer.score_or_null(&image(200));
+            let result = scorer.score_or_null(&image(200)).unwrap();
             assert!(!result.detected, "no reference face ⇒ every image N/A");
             assert_eq!(result.reason, Some(NoScoreReason::NoSourceFace));
             // And the producer's `None`-scorer path (a hard construction failure) omits the field.
             assert!(
-                score_generated_image(None, &image(200), Some("char_ref_1")).is_none(),
+                score_generated_image(None, &image(200), Some("char_ref_1"))
+                    .unwrap()
+                    .is_none(),
                 "a failed scorer construction ⇒ no block ⇒ field omitted (generation unaffected)"
             );
         }

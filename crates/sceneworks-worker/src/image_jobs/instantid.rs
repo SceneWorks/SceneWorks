@@ -1706,7 +1706,7 @@ pub(super) async fn generate_instantid_stream(
             #[cfg(native_lane)]
             let scorer: Option<crate::face_likeness::FaceLikenessScorer> = {
                 let face_weights_dir = scrfd_path.parent().unwrap_or(scrfd_path.as_path());
-                crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)
+                crate::face_likeness::build_face_likeness_scorer(face_weights_dir, &reference)?
             };
             #[cfg(not(native_lane))]
             let scorer: Option<()> = None;
@@ -2000,17 +2000,21 @@ pub(super) async fn generate_instantid_stream(
                     // scorer (a failed construction) ⇒ no block ⇒ the field is omitted. The Image build +
                     // pixel clone is paid ONLY when a scorer exists.
                     #[cfg(native_lane)]
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out.width,
-                                height: out.height,
-                                pixels: out.pixels.clone(),
-                            },
-                            Some(face_likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out.width,
+                                    height: out.height,
+                                    pixels: out.pixels.clone(),
+                                },
+                                Some(face_likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     #[cfg(not(native_lane))]
                     let face_likeness: Option<JsonObject> = {
                         let _ = (&scorer, &face_likeness_source_ref);

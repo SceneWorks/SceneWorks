@@ -540,7 +540,9 @@ pub(super) async fn generate_kolors_control_stream(
             // every pose (sc-4410). `None` ⇒ non-fatal staging/construction failure ⇒ scores omitted.
             let scorer = face_stack_dir
                 .as_ref()
-                .and_then(|dir| crate::face_likeness::build_face_likeness_scorer(dir, reference));
+                .map(|dir| crate::face_likeness::build_face_likeness_scorer(dir, reference))
+                .transpose()?
+                .flatten();
             drive_gen_items_scored(
                 tx.clone(),
                 poses,
@@ -588,17 +590,21 @@ pub(super) async fn generate_kolors_control_stream(
                     // Score this finished pose against the cached source embedding (sc-4410). Clone paid
                     // ONLY when a scorer exists; a full-body / turned pose with no reliable frontal face →
                     // honest detected:false N/A.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out_w,
-                                height: out_h,
-                                pixels: pixels.clone(),
-                            },
-                            Some(likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out_w,
+                                    height: out_h,
+                                    pixels: pixels.clone(),
+                                },
+                                Some(likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
                 },
             )

@@ -491,7 +491,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             // staging / construction failure ⇒ scores omitted.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -564,17 +564,21 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid
                     // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out.width,
-                                height: out.height,
-                                pixels: out.pixels.clone(),
-                            },
-                            Some(likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out.width,
+                                    height: out.height,
+                                    pixels: out.pixels.clone(),
+                                },
+                                Some(likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((
                         seed,
                         out.width,
