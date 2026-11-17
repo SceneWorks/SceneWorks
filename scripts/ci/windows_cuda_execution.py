@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -50,6 +51,71 @@ SHARED_MAX_UTILIZATION_SPREAD = 15
 SHARED_FOREIGN_COMPUTE_DEVICE_MAX_MIB = 8192
 # Where the driver does report per-process memory, any foreign compute process above this refuses.
 SHARED_FOREIGN_COMPUTE_PROCESS_MAX_MIB = 1024
+# A wait prints a line when it starts and then this often, so a long admission wait is never silent.
+WAIT_REPORT_INTERVAL_SECONDS = 60
+
+
+class WaitReporter:
+    """Prints each admission wait to the job log (stderr, flushed): start, every interval, end.
+
+    It only reports; it never changes what is admitted. `state` is the last wait seen, for a cancel.
+    Lines carry device index/UUID, memory and process identities only, never environment values.
+    """
+    def __init__(self, stream=None, interval=WAIT_REPORT_INTERVAL_SECONDS):
+        self.stream, self.interval = stream, interval
+        self.reset()
+
+    def reset(self):
+        self.wait, self.last_print, self.reported, self.state, self.seen = None, None, False, None, set()
+
+    def emit(self, event, fields):
+        try:
+            print("cuda-execution: " + json.dumps({"event": event, **fields}, default=str),
+                  file=self.stream or sys.stderr, flush=True)
+        except Exception:  # a closed or broken log stream must never change admission
+            pass
+
+    def waiting(self, wait, now, started, deadline, devices, detail=dict):
+        state = {"wait": wait, "elapsed_seconds": round(now - started, 1),
+                 "remaining_budget_seconds": round(max(0, deadline - now), 1),
+                 "devices": [{"index": row.get("index"), "uuid": row.get("uuid")} for row in devices]}
+        # A new kind of wait prints at once; after that one line per interval, whatever the kind.
+        changed = wait not in self.seen
+        if changed or now - self.last_print >= self.interval:
+            try:
+                state.update(detail())
+            except Exception as error:  # reporting must never break admission
+                state["detail_error"] = f"{type(error).__name__}: {error}"
+            self.emit("wait-start" if changed else "waiting", state)
+            self.wait, self.last_print, self.reported = wait, now, True
+            self.seen.add(wait)
+        elif self.state:
+            state = {**self.state, **{key: state[key] for key in ("elapsed_seconds", "remaining_budget_seconds")}}
+        self.state = state
+
+    def finished(self, scope, waited, devices=()):
+        if self.reported:
+            self.emit("wait-end", {"scope": scope, "wait_seconds": round(waited, 1),
+                                   "devices": [{"index": row.get("index"), "uuid": row.get("uuid")} for row in devices]})
+        self.reset()
+
+
+def blocking_detail(selected, processes, guard, out):
+    """What keeps each selected device from strict idleness, from the inventory already taken."""
+    xml_file = out / "uuid-admission-nvidia-smi.xml"
+    memory = process_memory_mib(xml_file.read_text(encoding="utf-8")) if xml_file.exists() else {}
+    rows = []
+    for device in selected:
+        if guard.idle(device, processes):
+            continue
+        rows.append({"index": device.get("index"), "uuid": device.get("uuid"),
+                     "used_mib": device.get("used_mib"), "total_mib": device.get("total_mib"),
+                     "utilization_percent": device.get("utilization_percent"),
+                     "processes": [{"pid": row[1], "name": row[2] if len(row) > 2 else "unknown",
+                                    "type": row[3] if len(row) > 3 else "unknown",
+                                    "used_mib": memory.get((row[0], row[1]))}
+                                   for row in processes if row[0].casefold() == device["uuid"].casefold()]})
+    return {"blocking": rows}
 
 
 class DeviceIdentity:
@@ -344,7 +410,9 @@ def release_all(handles, locker):
 
 def claim_uuids(uuids, guard, out, deadline, public, locker,
                 required_indices=None, phase_names=None, clock=time.monotonic, sleep=time.sleep,
-                admission_policy=STRICT_POLICY, min_free_mib=None):
+                admission_policy=STRICT_POLICY, min_free_mib=None, reporter=None):
+    reporter = reporter or WaitReporter()
+    reporter.reset()
     expected = sorted(uuids, key=str.casefold)
     if admission_policy == SHARED_DISPLAY_POLICY and min_free_mib is None:
         raise RuntimeError("shared-display admission needs --min-free-mib")
@@ -367,10 +435,12 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
                 raise RuntimeError("unrecognized physical GPU UUID")
             selected.append(device)
         if admission_policy == STRICT_POLICY and not all(guard.idle(device, processes) for device in selected):
+            reporter.waiting("idle", clock(), started, deadline, selected,
+                             lambda: blocking_detail(selected, processes, guard, out))
             sleep(min(1, max(0, deadline - clock())))
             continue
         handles = []
-        busy = False
+        busy = None
         directory = public / "SceneWorks" / "gpu-locks"
         directory.mkdir(parents=True, exist_ok=True)
         handle = None
@@ -385,7 +455,7 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
                     locker.locking(handle.fileno(), locker.LK_NBLCK, 1)
                 except OSError:
                     handle.close()
-                    busy = True
+                    busy = device
                     break
                 handles.append(handle)
         except BaseException:
@@ -393,12 +463,16 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
                 handle.close()
             release_all(handles, locker)
             raise
-        if busy:
+        if busy is not None:
             release_all(handles, locker)
+            reporter.waiting("lock", clock(), started, deadline, selected,
+                             lambda: {"held_lock": {"index": busy.get("index"), "uuid": busy.get("uuid"),
+                                                    "path": str(directory / f'{busy["uuid"]}.lock')}})
             sleep(min(1, max(0, deadline - clock())))
             continue
         try:
             if admission_policy == FUNCTIONAL_POLICY:
+                reporter.finished("gpu", clock() - started, selected)
                 return selected, handles, {}, clock() - started
             if admission_policy == SHARED_DISPLAY_POLICY:
                 baselines = {}
@@ -409,6 +483,7 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
                     if not admitted:
                         raise RuntimeError("shared display GPU not admitted: " + "; ".join(reasons))
                     baselines[device["uuid"]] = summary
+                reporter.finished("gpu", clock() - started, selected)
                 return selected, handles, baselines, clock() - started
             baselines = {}
             checked = []
@@ -417,9 +492,12 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
                 current, baseline = guard.sample_baseline(device, out, phase)
                 checked.append(current)
                 baselines[device["uuid"]] = baseline
+            reporter.finished("gpu", clock() - started, selected)
             return checked, handles, baselines, clock() - started
-        except RuntimeError:
+        except RuntimeError as error:
             release_all(handles, locker)
+            reporter.waiting("baseline", clock(), started, deadline, selected,
+                             lambda: {"reason": str(error)})
             sleep(min(1, max(0, deadline - clock())))
         except BaseException:
             release_all(handles, locker)
@@ -521,7 +599,9 @@ def service_identity(url):
     return {"url": url, "port": parsed.port}
 
 
-def claim_service(url, public, deadline, locker, clock=time.monotonic, sleep=time.sleep):
+def claim_service(url, public, deadline, locker, clock=time.monotonic, sleep=time.sleep, reporter=None):
+    reporter = reporter or WaitReporter()
+    reporter.reset()
     identity = service_identity(url)
     if not public.is_absolute():
         raise RuntimeError("PUBLIC must name the host-global absolute service namespace")
@@ -539,11 +619,14 @@ def claim_service(url, public, deadline, locker, clock=time.monotonic, sleep=tim
             locker.locking(handle.fileno(), locker.LK_NBLCK, 1)
         except OSError:
             handle.close()
+            reporter.waiting("service", clock(), started, deadline, (),
+                             lambda: {"port": identity["port"], "lock_path": str(file)})
             sleep(min(1, max(0, deadline - clock())))
             continue
         except BaseException:
             handle.close()
             raise
+        reporter.finished("service", clock() - started)
         return handle, {**identity, "lock_path": str(file), "wait_seconds": clock() - started}
     raise TimeoutError("host service port transaction wait exhausted the existing execution budget")
 
@@ -554,6 +637,46 @@ def release_transaction(gpu_handles, service_handle, locker):
     finally:
         if service_handle is not None:
             unlock(service_handle, locker)
+
+
+def cancel_handler(receipt, reporter):
+    """On a cancel signal, print the current wait and the partial receipt, then unwind once through
+    main's existing release/receipt path. Later signals, and any signal after `disarm()` (main calls it
+    as soon as its body exits), only print: they never interrupt lock release or the receipt."""
+    seen = []
+    def handle(signum, _frame):
+        partial = {key: value for key, value in receipt.items() if key != "argv"}
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        reporter.emit("cancel", {"signal": name, "wait": reporter.state, "partial_receipt": partial})
+        if not seen:
+            seen.append(signum)
+            raise KeyboardInterrupt(f"cancelled by signal {signum}")
+    handle.disarm = lambda: seen.append(None)
+    return handle
+
+
+def install_cancel_handler(handler, signals=signal):
+    """Install `handler` for SIGTERM/SIGINT/SIGBREAK (Actions cancel on Windows); return the previous ones."""
+    previous = {}
+    for name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        number = getattr(signals, name, None)
+        if number is not None:
+            try:
+                previous[number] = signals.signal(number, handler)
+            except (OSError, ValueError):
+                pass
+    return previous
+
+
+def restore_signal_handlers(previous, signals=signal):
+    for number, handler in previous.items():
+        try:
+            signals.signal(number, handler)
+        except (OSError, ValueError, TypeError):
+            pass
 
 
 def main():
@@ -599,13 +722,16 @@ def main():
     import msvcrt
     deadline = time.monotonic() + args.budget_minutes * 60
     receipt = resource_receipt(args.actor, command, args.admission_policy)
+    reporter = WaitReporter()
+    cancel = cancel_handler(receipt, reporter)
+    previous_handlers = install_cancel_handler(cancel)
     handles = []
     service_handle = None
     code = 1
     try:
         if args.service_url is not None:
             service_handle, receipt["service_transaction"] = claim_service(
-                args.service_url, Path(os.environ["PUBLIC"]), deadline, msvcrt)
+                args.service_url, Path(os.environ["PUBLIC"]), deadline, msvcrt, reporter=reporter)
         guard, windows = prepared_components(args.admission_policy)
         binding = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                   args.cuda_ordinals, args.probe_visible)
@@ -620,7 +746,7 @@ def main():
             guard, out, deadline, Path(os.environ["PUBLIC"]), msvcrt,
             required_indices={row["uuid"]: row["index"] for row in binding["devices"]}
                 if args.admission_policy == FUNCTIONAL_POLICY else None,
-            admission_policy=args.admission_policy, min_free_mib=args.min_free_mib)
+            admission_policy=args.admission_policy, min_free_mib=args.min_free_mib, reporter=reporter)
         receipt["lock_wait_seconds"] = waited
         if args.admission_policy == SHARED_DISPLAY_POLICY:
             receipt["shared_admission"] = baselines
@@ -635,12 +761,18 @@ def main():
             receipt["free_memory"] = require_free_memory(guard, devices, args.require_free_mib, deadline)
         # Legacy actors retain their original console/evidence streams; only the
         # fixed NVFP4 sealer opts into separate bounded collector-owned logs.
+        reporter.emit("launch", {"lock_wait_seconds": round(waited, 1),
+                                 "service_wait_seconds": round(receipt.get("service_transaction", {}).get("wait_seconds", 0), 1),
+                                 "remaining_budget_seconds": round(max(0, deadline - time.monotonic()), 1),
+                                 "devices": [{"index": row.get("index"), "uuid": row.get("uuid")} for row in devices]})
         result = execute_owned(command, out, deadline, windows.WindowsJob, environment, capture=False)
         receipt["child"] = result
         code = complete_resource(receipt, result, devices, guard, out, baselines, args.admission_policy)
     except BaseException as error:
+        cancel.disarm()
         receipt["error"] = f"{type(error).__name__}: {error}"
     finally:
+        cancel.disarm()  # from here a cancel only prints; release, receipt and summary always finish
         try:
             # Global order: service first, then exact GPU set; release in reverse.
             release_transaction(handles, service_handle, msvcrt)
@@ -654,6 +786,7 @@ def main():
                "resource_receipt": str(out / "resource-receipt.json")}
     summary.update({key: receipt[key] for key in ("error", "child") if key in receipt})
     print(json.dumps(summary), flush=True)
+    restore_signal_handlers(previous_handlers)
     return code if code != 0 or receipt["resource_completed"] else 1
 
 
