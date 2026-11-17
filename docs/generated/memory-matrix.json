@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2a0b54779c93f015b84d92468faa601ff15ad9bcf8fcf2a8442d437410e7bab1",
+    "sceneWorksRevision": "source-tree:390e2cf4db8bd7c6b6af9b9998eddb22f5053f3eff551d04fddf701ca195b60f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2866619508124fdc780a46d1859c46f5b44549921e749bc3cad1a21bab88d5ac"
+        "sha256": "70b49f3607667dd11700ffb57b41d6309b13c91936e010f3e4d7ac1ab5754063"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "c2e0cc7ddd2bcd4b43655a22810425a7e2916629c4dfc1c5fede272025cad0d9"
+        "sha256": "ccb7fc0f60084ccb74dfe1e4d4e014fd6e15282201130b08d214431f56efb4a4"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",

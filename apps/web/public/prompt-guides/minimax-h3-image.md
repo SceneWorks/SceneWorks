@@ -52,10 +52,6 @@ same fixed six steps and the same sampler as text-to-image.
 - SceneWorks has not yet run its own prompt-quality comparison for this model; the model card
   is the upstream reference for prompting advice.
 
-## Not available yet
-
-The Q8 and Q4 tiers are not published yet; bf16 is the only installable tier today.
-
 ## Licence
 
 MiniMax-H3-Image is governed by the MiniMax-H3-Image Community License Agreement, which you

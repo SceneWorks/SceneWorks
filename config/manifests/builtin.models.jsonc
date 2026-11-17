@@ -15485,7 +15485,7 @@
       "ui": {
         "label": "MiniMax-H3-Image Prompt Expander",
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16, Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe, and the bf16 tier is not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "recommendedFor": ["minimax_h3_image_prompt_expand"],
         "promptGuide": {
           "title": "MiniMax-H3-Image Prompt Guide",
