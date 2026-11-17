@@ -7,6 +7,20 @@ export function safeErrorClass(value) {
     .includes(value) ? value : value ? 'unknown' : null;
 }
 
+const POST_RENDER_CHECKS = new Set([
+  'selected source changed', 'member map cardinality changed', 'member map missing or duplicated',
+  'member escapes provisioned cache', 'duplicate physical member', 'selected member size changed',
+  'selected member bytes changed', 'pinned runtime library changed',
+  'CUDA driver not loaded by worker', 'duplicate loaded runtime libraries',
+  'censused runtime library changed', 'qualified loaded runtime libraries changed',
+  'loaded runtime libraries changed between renders', 'device/runtime changed after render',
+]);
+
+export function safePostRenderCheck(value) {
+  const firstLine = typeof value === 'string' ? value.split('\n', 1)[0] : '';
+  return POST_RENDER_CHECKS.has(firstLine) ? firstLine : 'unknown';
+}
+
 export async function readDiagnosticJson(file) {
   let handle;
   try {
@@ -39,6 +53,9 @@ export function failureDiagnostic(evidence, resource) {
     proof: evidence ? { status: 'available', stage: stages.includes(evidence.failureStage) ? evidence.failureStage : 'unknown',
       errorClass: safeErrorClass(evidence.failureErrorClass) } : { status: 'unavailable' },
     resource: { status: 'unavailable' } };
+  if (report.proof.stage === 'post_render_environment') {
+    report.proof.check = safePostRenderCheck(evidence.failureCheck);
+  }
   if (resource?.schema_version !== 1 || resource.kind !== 'cuda-execution-resource-lease-v1'
       || resource.actor !== 'sdxl-exact-replay' || typeof resource.resource_completed !== 'boolean') return report;
   const error = typeof resource.error === 'string' ? resource.error : '';

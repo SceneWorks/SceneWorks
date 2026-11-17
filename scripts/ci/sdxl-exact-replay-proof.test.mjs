@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { REQUEST, SCOPE, digest, sourceIdentity, parseDispatch, validateDispatch, validatePlan, verifyMembers,
   completedWitness, verifyQueuedPayload, verifyReplayCandidate, compareFresh, requireReplayQualification, verifyDeviceSelection,
   finalizeEvidence, finalizeArtifacts } from './sdxl-exact-replay-proof.mjs';
-import { failureDiagnostic } from './sdxl-exact-replay-diagnostic.mjs';
+import { failureDiagnostic, safePostRenderCheck } from './sdxl-exact-replay-diagnostic.mjs';
 import { validatePreparationDispatch } from './sdxl-exact-replay-prepare.mjs';
 import { validateBindingDispatch, mapSelectedFiles } from './sdxl-exact-replay-bind.mjs';
 import { selectProofDevice, validateCensusDispatch } from './sdxl-exact-replay-census.mjs';
@@ -191,6 +191,12 @@ test('failure summaries allow only fixed stages, error classes and bounded resou
   assert.equal(failureDiagnostic(null, { ...resource, child: { timeout: 'true' } }).resource.childTimeout, null);
   assert.equal(failureDiagnostic(null, { ...resource, error: `resource release failed: OSError: ${privateText}` }).resource.stage, 'resource-release');
   assert.deepEqual(failureDiagnostic(null, { ...resource, actor: 'other' }).resource, { status: 'unavailable' });
+  const check = 'qualified loaded runtime libraries changed';
+  assert.equal(safePostRenderCheck(`${check}\n\nprivate diff`), check);
+  assert.equal(safePostRenderCheck(privateText), 'unknown');
+  assert.equal(failureDiagnostic({ failureStage: 'post_render_environment', failureErrorClass: 'AssertionError',
+    failureCheck: check }, resource).proof.check, check);
+  assert.equal(failureDiagnostic({ failureStage: 'post_render_environment', failureCheck: privateText }, resource).proof.check, 'unknown');
 });
 test('finalize writes a public refusal after a guard timeout even without child evidence', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sdxl-finalize-'));

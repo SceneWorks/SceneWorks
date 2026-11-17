@@ -9,7 +9,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { fileSha256, sha256 } from '../lib/file-sha256.mjs';
 import { inferenceRevision } from '../lib/inference-provenance.mjs';
-import { failureDiagnostic, readDiagnosticJson, safeErrorClass } from './sdxl-exact-replay-diagnostic.mjs';
+import { failureDiagnostic, readDiagnosticJson, safeErrorClass, safePostRenderCheck } from './sdxl-exact-replay-diagnostic.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HEX = /^[a-f0-9]{64}$/;
@@ -373,6 +373,7 @@ async function runProof() {
     // The public artifact must never contain private cache paths, request bodies or runtime logs.
     evidence.failureStage = stage;
     evidence.failureErrorClass = safeErrorClass(error?.name);
+    if (stage === 'post_render_environment') evidence.failureCheck = safePostRenderCheck(error?.message);
     throw error;
   } finally {
     claimJob = null;
