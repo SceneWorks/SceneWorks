@@ -542,8 +542,13 @@ test("a `#[path]` override resolves the module to the file it names", { skip }, 
 function packagedStore() {
   const store = JSON.parse(readFileSync(path.join(root, "config/memory-anchors.json"), "utf8"));
   // sc-22738: the stamp walks anchors AND measured lower bounds — both carry a currency key keyed
-  // to their own measurement revision — so both kinds' corpora must be read here.
-  const stampable = [...store.anchors, ...(store.exceededBounds ?? [])];
+  // to their own measurement revision — so both kinds' corpora must be read here. SW-F363: so do
+  // the regime anchors (`stampAnchorStore` walks them too).
+  const stampable = [
+    ...store.anchors,
+    ...(store.regimeAnchors ?? []),
+    ...(store.exceededBounds ?? []),
+  ];
   const corpora = new Map();
   for (const anchor of stampable) {
     const cited = anchor.source.path;
@@ -594,6 +599,11 @@ test("every packaged anchor's key is the derivation at ITS OWN measurement revis
     "re-run: node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
   );
   assert.ok(store.exceededBounds.length > 0, "the packaged store carries a measured lower bound");
+  assert.deepEqual(
+    (stamped.regimeAnchors ?? []).map((anchor) => anchor.source),
+    (store.regimeAnchors ?? []).map((anchor) => anchor.source),
+    "re-run: node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
+  );
 
   // No UNATTESTED anchor reads current unless its own measurement revision derives the
   // pin's digest. Current and historical populations are both legitimate: the real-source
