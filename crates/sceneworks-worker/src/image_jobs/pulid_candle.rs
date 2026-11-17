@@ -672,6 +672,9 @@ pub(super) async fn generate_candle_pulid_stream(
                 })?,
                 None => model,
             };
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Build the per-job identity-likeness scorer ONCE here (on the blocking thread where the
             // `!Send` face stack is allowed), embedding the source identity face a single time and
             // reusing it across every output (sc-4411 caching AC). `None` ⇒ non-fatal staging /
@@ -685,8 +688,6 @@ pub(super) async fn generate_candle_pulid_stream(
             Ok((model, reference, plans, scorer, memory_context, requests))
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             drive_gen_items_scored(
                 tx.clone(),
                 work,

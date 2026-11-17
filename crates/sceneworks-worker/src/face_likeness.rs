@@ -922,6 +922,52 @@ mod tests {
             .expect("fault thread");
         }
 
+        /// Codex P1 on #3438: an uncached load closure guards its loaded model BEFORE the scorer
+        /// build, so a poisoned build's `?` forgets the model instead of running its destructor on
+        /// the poisoned device. An ordinary construction failure still leaves the model healthy.
+        #[test]
+        fn a_poisoned_scorer_build_forgets_the_already_loaded_model() {
+            struct Model(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for Model {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            // The production load-closure shape: load, guard, then build the scorer with `?`.
+            fn load_closure(
+                drops: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+                source_px: u8,
+            ) -> WorkerResult<(crate::DeviceOwned<Model>, Option<FaceLikenessScorer>)> {
+                let model = Model(std::sync::Arc::clone(drops));
+                let model = crate::DeviceOwned::new(model);
+                let scorer = optional_scorer(FaceLikenessScorer::with_backend(
+                    stub_backend(),
+                    &image(source_px),
+                ))?;
+                Ok((model, scorer))
+            }
+            std::thread::spawn(|| {
+                let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let healthy = load_closure(&drops, STUB_FAILED_PIXEL).expect("non-fatal");
+                assert!(healthy.1.is_none());
+                drop(healthy);
+                assert_eq!(
+                    drops.load(Ordering::SeqCst),
+                    1,
+                    "a healthy model drops normally"
+                );
+                let fatal = load_closure(&drops, STUB_POISONED_PIXEL);
+                assert!(matches!(fatal, Err(WorkerError::ProcessPoisoned(_))));
+                assert_eq!(
+                    drops.load(Ordering::SeqCst),
+                    1,
+                    "the poisoned exit forgets the loaded model"
+                );
+            })
+            .join()
+            .expect("load thread");
+        }
+
         /// SW-7171 AC2: an ordinary scoring or construction failure still degrades to N/A / no scorer.
         #[test]
         fn ordinary_scoring_and_construction_failures_stay_non_fatal() {

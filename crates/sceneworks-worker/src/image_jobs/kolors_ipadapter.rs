@@ -486,6 +486,9 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             };
             let model = IpAdapterKolors::load_with_memory_context(&paths, load_memory_context)
                 .map_err(|error| crate::generation_error("Kolors IP-Adapter load failed", error))?;
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
@@ -498,8 +501,6 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             Ok((model, reference, scorer))
         },
         move |(model, reference, scorer), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;

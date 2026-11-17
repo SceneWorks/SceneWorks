@@ -1692,6 +1692,9 @@ pub(super) async fn generate_instantid_stream(
             } else {
                 None
             };
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Identity-likeness scorer (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
             // With-Character): for EVERY InstantID character_image job — single identity (the plain
             // With-Character generation, sc-4411), an angle set, OR a pose set — embed the source
@@ -1713,8 +1716,6 @@ pub(super) async fn generate_instantid_stream(
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX

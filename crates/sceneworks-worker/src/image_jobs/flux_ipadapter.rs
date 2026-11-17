@@ -583,6 +583,9 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             };
             let model = loaded
                 .map_err(|error| crate::generation_error("FLUX IP-Adapter load failed", error))?;
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
@@ -595,8 +598,6 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             Ok((model, reference, plans, scorer, memory_context, requests))
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             // `IpAdapterFlux` renders through `&self` (the IP tokens live in a per-call injector, not on
             // the DiT), so — unlike the SDXL/Kolors lanes — the per-item closure needs no `mut model`.
             drive_gen_items_scored(

@@ -489,6 +489,9 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 })?,
                 None => model,
             };
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Per-job identity-likeness scorer built ONCE here (on the blocking thread where the `!Send`
             // face stack is allowed); source embedded once, reused across every output (sc-4411 caching
             // AC). `None` â‡’ non-fatal staging / construction failure â‡’ scores omitted.
@@ -501,8 +504,6 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             Ok((model, reference, scorer))
         },
         move |(model, reference, scorer), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             // `IpAdapterSdxl::generate` takes `&mut self` (it sets the IP image tokens on the UNet before
             // the denoise), so the per-item closure mutates `model`.
             let mut model = model;

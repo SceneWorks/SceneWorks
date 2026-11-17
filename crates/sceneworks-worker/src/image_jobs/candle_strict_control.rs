@@ -375,6 +375,9 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 None
             };
             let model = provider.load()?;
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Build the scorer once on the blocking thread (the `!Send` face stack lives here).
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
@@ -407,8 +410,6 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
         ),
               tx,
               cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
