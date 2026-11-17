@@ -17,13 +17,9 @@ graphs; it is not a claim that every checkout was the latest remote commit.
 - [`../BINARY_FIXTURE_INVENTORY.md`](../BINARY_FIXTURE_INVENTORY.md) — binary
   footprint, duplicates, and storage recommendation.
 
-Regenerate or verify the catalog snapshot from the SceneWorks root:
-
-```sh
-node scripts/rearchitecture/capture-catalog-baseline.mjs
-node scripts/rearchitecture/capture-catalog-baseline.mjs \
-  --check documents/rearchitecture/baseline/catalog-baseline.json
-```
+`catalog-baseline.json` is a historical record of the pre-migration catalog. Its
+capture script and the SW-7028 frozen-catalog web tests were retired on
+2026-11-17; nothing regenerates or enforces it.
 
 ## Imported inference scale
 

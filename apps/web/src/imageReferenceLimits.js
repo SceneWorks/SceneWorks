@@ -63,3 +63,24 @@ export function appendPromptToken(prompt, token) {
   const current = String(prompt ?? "").trimEnd();
   return current ? `${current} ${token}` : token;
 }
+
+// Insert `token` at the prompt's selection, replacing any selected text, and pad it with a single
+// space on either side where it would otherwise run into a word. Returns the new prompt and the
+// caret offset just after the token. Without a selection (the user never placed a caret in the
+// prompt) it falls back to appending, so the token still lands where the user can see it.
+export function insertPromptToken(prompt, token, selection) {
+  const text = String(prompt ?? "");
+  if (!selection || !Number.isInteger(selection.start)) {
+    const next = appendPromptToken(text, token);
+    return { prompt: next, caret: next.length };
+  }
+  const clamp = (offset) => Math.min(Math.max(offset, 0), text.length);
+  const start = clamp(selection.start);
+  const end = Number.isInteger(selection.end) ? Math.max(clamp(selection.end), start) : start;
+  const before = text.slice(0, start);
+  const after = text.slice(end);
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const trail = after && !/^\s/.test(after) ? " " : "";
+  const head = `${before}${lead}${token}`;
+  return { prompt: `${head}${trail}${after}`, caret: head.length };
+}
