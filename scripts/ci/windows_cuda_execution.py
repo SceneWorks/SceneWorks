@@ -53,8 +53,8 @@ class WaitReporter:
     It only reports; it never changes what is admitted. `state` is the last wait seen, for a cancel.
     Lines carry device index/UUID, memory and process identities only, never environment values.
     """
-    def __init__(self, stream=None, interval=WAIT_REPORT_INTERVAL_SECONDS):
-        self.stream, self.interval = stream, interval
+    def __init__(self, stream=None, interval=WAIT_REPORT_INTERVAL_SECONDS, private=False):
+        self.stream, self.interval, self.private = stream, interval, private
         self.reset()
 
     def reset(self):
@@ -62,6 +62,15 @@ class WaitReporter:
 
     def emit(self, event, fields):
         try:
+            if self.private:
+                # Private proof details remain in the on-disk receipt and sanitized
+                # evidence artifact; the public log only needs the stage and clock.
+                wait = fields.get("wait")
+                fields = {key: fields[key] for key in ("signal", "scope", "elapsed_seconds",
+                    "remaining_budget_seconds", "wait_seconds", "lock_wait_seconds",
+                    "service_wait_seconds") if key in fields}
+                if wait is not None:
+                    fields["wait"] = wait.get("wait") if isinstance(wait, dict) else wait
             print("cuda-execution: " + json.dumps({"event": event, **fields}, default=str),
                   file=self.stream or sys.stderr, flush=True)
         except Exception:  # a closed or broken log stream must never change admission
@@ -547,12 +556,14 @@ def cancel_handler(receipt, reporter):
     as soon as its body exits), only print: they never interrupt lock release or the receipt."""
     seen = []
     def handle(signum, _frame):
-        partial = {key: value for key, value in receipt.items() if key != "argv"}
         try:
             name = signal.Signals(signum).name
         except ValueError:
             name = str(signum)
-        reporter.emit("cancel", {"signal": name, "wait": reporter.state, "partial_receipt": partial})
+        fields = {"signal": name, "wait": reporter.state}
+        if receipt["actor"] != "sdxl-exact-replay":
+            fields["partial_receipt"] = {key: value for key, value in receipt.items() if key != "argv"}
+        reporter.emit("cancel", fields)
         if not seen:
             seen.append(signum)
             raise KeyboardInterrupt(f"cancelled by signal {signum}")
@@ -619,7 +630,7 @@ def main():
     import msvcrt
     deadline = time.monotonic() + args.budget_minutes * 60
     receipt = resource_receipt(args.actor, command)
-    reporter = WaitReporter()
+    reporter = WaitReporter(private=args.actor == "sdxl-exact-replay")
     cancel = cancel_handler(receipt, reporter)
     previous_handlers = install_cancel_handler(cancel)
     handles = []
@@ -670,10 +681,20 @@ def main():
             receipt["error"] = f"resource release failed: {type(error).__name__}: {error}"
             code = 1
         (out / "resource-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    # The job log must say WHY on its own: the receipt file sits outside any uploaded artifact.
+    # The SDXL proof uploads a sanitized failure report. Keep its private receipt
+    # path and raw error text out of the public job log.
     summary = {"resource_completed": receipt["resource_completed"], "model_inference_proof": False,
                "resource_receipt": str(out / "resource-receipt.json")}
-    summary.update({key: receipt[key] for key in ("error", "child") if key in receipt})
+    if args.actor == "sdxl-exact-replay":
+        summary.pop("resource_receipt")
+        if "error" in receipt:
+            error_class = receipt["error"].split(":", 1)[0]
+            summary["error_class"] = error_class if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_class) else "ResourceError"
+        if "child" in receipt:
+            summary["child_returncode"] = receipt["child"].get("returncode")
+            summary["child_timeout"] = receipt["child"].get("timeout")
+    else:
+        summary.update({key: receipt[key] for key in ("error", "child") if key in receipt})
     print(json.dumps(summary), flush=True)
     restore_signal_handlers(previous_handlers)
     return code if code != 0 or receipt["resource_completed"] else 1
