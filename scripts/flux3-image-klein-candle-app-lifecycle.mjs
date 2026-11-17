@@ -79,11 +79,28 @@ try {
   const driverProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class CudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); }'; if([CudaIdentity]::cuInit(0) -ne 0){throw "CUDA identity init failed"}; $n=0; if([CudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA visibility identity mismatch"}; $d=0; if([CudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal identity unavailable"}; $u=New-Object byte[] 16; if([CudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID unavailable"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12))`;
   const resolved = (await execFile('powershell.exe',['-NoProfile','-Command',driverProbe],{timeout:30000,windowsHide:true,env:{...process.env,CUDA_VISIBLE_DEVICES:'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'}})).stdout.trim();
   assert.equal(resolved.toLowerCase(),gpu[1].toLowerCase(),'masked logical CUDA0 UUID differs from physicalGPU1 before context creation');receipt.identity.masked_cuda0_uuid=resolved;
-  const baseline=await sample();receipt.gpu1_baseline_device_used_mib=baseline.memory;assert(baseline.util<=5&&baseline.memory<=2048,'GPU1 admission utilization/memory bound exceeded');
+  // Owner rule (no job requires an idle GPU): admit GPU1 on free memory plus a quiet, stable window, the
+  // same thresholds as scripts/ci/windows_cuda_execution.py. Other processes on the card, including a
+  // foreign pure-compute process holding a model, are recorded below and never refuse. A refusal is
+  // logged and retried (at most once a minute in the log) until GPU1_ADMISSION_WAIT_MS runs out.
+  const GPU1_MIN_FREE_MIB=16384,GPU1_MAX_SPREAD_MIB=256,GPU1_MAX_GROWTH_MIB=128,GPU1_MAX_UTIL=30,GPU1_MAX_UTIL_SPREAD=15,GPU1_ADMISSION_WAIT_MS=10*60_000;
+  const quietWindow=async()=>{const rows=[];for(let i=0;i<10;i++){if(i)await sleep(1000);const text=await smi(['-i','1','--query-gpu=memory.used,memory.total,utilization.gpu','--format=csv,noheader,nounits']);const [used,total,util]=text.split(',').map(x=>Number(x.trim()));assert(Number.isFinite(used)&&Number.isFinite(total)&&Number.isFinite(util),'GPU1 telemetry unavailable');rows.push({used,total,util});}
+    const used=rows.map(r=>r.used),util=rows.map(r=>r.util),free=rows.at(-1).total-rows.at(-1).used,reasons=[];
+    if(free<GPU1_MIN_FREE_MIB)reasons.push(`free ${free} MiB < required ${GPU1_MIN_FREE_MIB} MiB`);
+    if(Math.max(...used)-Math.min(...used)>GPU1_MAX_SPREAD_MIB)reasons.push(`memory.used unstable: spread ${Math.max(...used)-Math.min(...used)} MiB`);
+    if(used.at(-1)-used[0]>GPU1_MAX_GROWTH_MIB)reasons.push(`memory.used growing: +${used.at(-1)-used[0]} MiB`);
+    if(Math.max(...util)>GPU1_MAX_UTIL)reasons.push(`utilization ${Math.max(...util)}% > ${GPU1_MAX_UTIL}%`);
+    if(Math.max(...util)-Math.min(...util)>GPU1_MAX_UTIL_SPREAD)reasons.push(`utilization unstable: spread ${Math.max(...util)-Math.min(...util)} points`);
+    return {reasons,free,memory:Math.max(...used),util:Math.max(...util)};};
+  let baseline;const admissionStarted=Date.now();let lastLog=-Infinity;
+  for(;;){baseline=await quietWindow();if(!baseline.reasons.length)break;
+    if(Date.now()-lastLog>=60_000){lastLog=Date.now();console.log(`[sc-26235] GPU1 admission waiting ${Math.round((Date.now()-admissionStarted)/1000)}s: ${baseline.reasons.join('; ')}`);}
+    assert(Date.now()-admissionStarted<GPU1_ADMISSION_WAIT_MS,`GPU1 not admitted within ${GPU1_ADMISSION_WAIT_MS/60_000} min: ${baseline.reasons.join('; ')}`);await sleep(1000);}
+  await sample();receipt.gpu1_baseline_device_used_mib=baseline.memory;
   const gpuXml=await smi(['-i','1','-q','-x']);assert(gpuXml.includes('<processes>')&&gpuXml.includes(gpu[1]),'GPU1 process-type identity unavailable');
   const processTypes=[...gpuXml.matchAll(/<process_info>([\s\S]*?)<\/process_info>/g)].map(([,block])=>{const pid=Number(/<pid>([^<]+)<\/pid>/.exec(block)?.[1]);const type=/<type>([^<]+)<\/type>/.exec(block)?.[1]?.trim();assert(Number.isFinite(pid)&&pid>0&&['C','G','C+G'].includes(type),'GPU1 process-type record unavailable');return {pid,type};});
-  const ownPids=new Set([process.pid,...children.map(c=>c.pid)]);assert(!processTypes.some(p=>p.type==='C'&&!ownPids.has(p.pid)),'GPU1 has a foreign pure-compute process');
-  receipt.admission_guard={version:2,approved_correction:'WDDM graphics/C+G clients allowed; blanket compute-apps emptiness removed',gpu1_max_utilization_percent:5,gpu1_max_device_used_mib:2048,observed_utilization_percent:baseline.util,observed_device_used_mib:baseline.memory,foreign_pure_compute_count:0,runner_worker_count:0,observed_type_counts:Object.fromEntries(['C','G','C+G'].map(t=>[t,processTypes.filter(p=>p.type===t).length]))};
+  const ownPids=new Set([process.pid,...children.map(c=>c.pid)]);
+  receipt.admission_guard={version:3,approved_correction:'owner rule: free memory plus a stable window; resident co-tenants (graphics, C+G, foreign pure-compute) are recorded, never refused',gpu1_min_free_mib:GPU1_MIN_FREE_MIB,gpu1_max_spread_mib:GPU1_MAX_SPREAD_MIB,gpu1_max_growth_mib:GPU1_MAX_GROWTH_MIB,gpu1_max_utilization_percent:GPU1_MAX_UTIL,observed_free_mib:baseline.free,observed_utilization_percent:baseline.util,observed_device_used_mib:baseline.memory,foreign_pure_compute_count:processTypes.filter(p=>p.type==='C'&&!ownPids.has(p.pid)).length,runner_worker_count:0,observed_type_counts:Object.fromEntries(['C','G','C+G'].map(t=>[t,processTypes.filter(p=>p.type===t).length]))};
   await save();
   const started=Date.now();
   const apiEnv={...bindOwnedEnv(base,identity),SCENEWORKS_API_PORT:'17935',SCENEWORKS_RUST_WORKER_GPU_ID:'cpu'};

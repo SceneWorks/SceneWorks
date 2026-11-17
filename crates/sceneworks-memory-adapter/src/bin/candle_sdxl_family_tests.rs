@@ -41,7 +41,11 @@ fn sdxl_endpoint_idle_wait_accepts_counter_decay_and_resets_memory_stability() {
     let (idle, calls) = fake_sdxl_idle(&["2048,96000,0,0"]);
     assert_eq!(idle.unwrap(), vec![2048; 5]);
     assert_eq!(calls, 5);
-    let (decay, calls) = fake_sdxl_idle(&["2048,96000,1,1", "2048,96000,0,1", "2048,96000,0,0"]);
+    // A busy-but-quiet shared card (a resident model, light display work) is admitted.
+    let (shared, calls) = fake_sdxl_idle(&["31000,60000,12,9"]);
+    assert_eq!(shared.unwrap(), vec![31000; 5]);
+    assert_eq!(calls, 5);
+    let (decay, calls) = fake_sdxl_idle(&["2048,96000,95,1", "2048,96000,31,1", "2048,96000,30,0"]);
     assert_eq!(decay.unwrap(), vec![2048; 5]);
     assert_eq!(calls, 7);
     let (drift, calls) = fake_sdxl_idle(&["2048,96000,0,0", "2176,96000,0,0"]);
@@ -63,7 +67,8 @@ fn sdxl_endpoint_idle_wait_rejects_invalid_telemetry_and_times_out_with_samples(
         assert!(error.contains("invalid activity telemetry") && error.contains(invalid));
         assert_eq!(calls, 1);
     }
-    let unstable: Vec<_> = (0..150)
+    let polls = (SDXL_ADMISSION_WAIT.as_millis() / 200) as usize;
+    let unstable: Vec<_> = (0..polls)
         .map(|index| {
             if index % 2 == 0 {
                 "2048,96000,0,0"
@@ -72,11 +77,11 @@ fn sdxl_endpoint_idle_wait_rejects_invalid_telemetry_and_times_out_with_samples(
             }
         })
         .collect();
-    for rows in [vec!["2048,96000,1,1"], vec!["2048,15000,0,0"], unstable] {
+    for rows in [vec!["2048,96000,31,1"], vec!["2048,15000,0,0"], unstable] {
         let (result, calls) = fake_sdxl_idle(&rows);
         let error = result.unwrap_err();
-        assert!(error.contains("within 30s") && error.contains(rows[0]));
-        assert_eq!(calls, 150);
+        assert!(error.contains("within 600s") && error.contains(rows[rows.len() - 1]));
+        assert_eq!(calls, polls);
     }
     let clock = std::cell::Cell::new(Duration::ZERO);
     let calls = std::cell::Cell::new(0usize);
@@ -84,14 +89,14 @@ fn sdxl_endpoint_idle_wait_rejects_invalid_telemetry_and_times_out_with_samples(
         |_| {
             calls.set(calls.get() + 1);
             if calls.get() == 5 {
-                clock.set(Duration::from_secs(31));
+                clock.set(SDXL_ADMISSION_WAIT + Duration::from_secs(1));
             }
             Ok("2048,96000,0,0".to_owned())
         },
         || clock.get(),
         |duration| clock.set(clock.get() + duration),
     );
-    assert!(late.unwrap_err().contains("within 30s"));
+    assert!(late.unwrap_err().contains("within 600s"));
 }
 
 #[test]

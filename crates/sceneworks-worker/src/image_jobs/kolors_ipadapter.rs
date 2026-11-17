@@ -486,20 +486,21 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             };
             let model = IpAdapterKolors::load_with_memory_context(&paths, load_memory_context)
                 .map_err(|error| crate::generation_error("Kolors IP-Adapter load failed", error))?;
+            // Guard the loaded model BEFORE anything below can exit with `?` (a poisoned scorer build
+            // included): a classified fault then forgets it instead of running its destructor.
+            let model = crate::DeviceOwned::new(model);
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
             Ok((model, reference, scorer))
         },
         move |(model, reference, scorer), tx, cancel| {
-            // A typed fault classified mid-run must not let the model destructor touch the device.
-            let model = crate::DeviceOwned::new(model);
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
@@ -564,17 +565,21 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid
                     // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out.width,
-                                height: out.height,
-                                pixels: out.pixels.clone(),
-                            },
-                            Some(likeness_source_ref.as_str()),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out.width,
+                                    height: out.height,
+                                    pixels: out.pixels.clone(),
+                                },
+                                Some(likeness_source_ref.as_str()),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((
                         seed,
                         out.width,

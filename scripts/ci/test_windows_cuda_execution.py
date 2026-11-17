@@ -46,8 +46,8 @@ class CudaExecutionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="execution-unit-", dir=HERE)
         self.addCleanup(self.temp.cleanup)
         self.out = Path(self.temp.name)
-        self.one = dict(index=0, uuid="GPU-one", used_mib=100, utilization_percent=0)
-        self.two = dict(index=1, uuid="GPU-two", used_mib=100, utilization_percent=0)
+        self.one = dict(index=0, uuid="GPU-one", total_mib=97887, used_mib=100, utilization_percent=0)
+        self.two = dict(index=1, uuid="GPU-two", total_mib=97887, used_mib=100, utilization_percent=0)
         self.guard = Mock()
         self.guard.inventory.return_value = ([self.one, self.two], [])
         self.guard.idle.return_value = True
@@ -129,122 +129,100 @@ class CudaExecutionTests(unittest.TestCase):
         devices, handles, _, _ = shared.claim_uuids(["GPU-two", "GPU-one"], self.guard,
             self.out, 10, self.out, locks, clock=lambda:now[0], sleep=sleep)
         self.assertEqual([row["uuid"] for row in devices], ["GPU-one", "GPU-two"])
-        self.assertEqual(held_while_waiting, [0])
+        # The contention wait holds nothing; only the admission window then sleeps with both held.
+        self.assertEqual(held_while_waiting[0], 0)
+        self.assertEqual(set(held_while_waiting[1:]), {2})
         self.assertEqual(len(locks.held), 2)
         shared.release_all(handles, locks)
         self.assertEqual(locks.held, set())
 
 
-class FunctionalAdmissionTests(unittest.TestCase):
+ENVIRONMENT = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW_REF":
+    "SceneWorks/SceneWorks/.github/workflows/memory-catalog-campaign.yml@refs/heads/feature/test",
+    "SCENEWORKS_GPU_ID": "1", "CUDA_VISIBLE_DEVICES": "1", "NVIDIA_VISIBLE_DEVICES": "1",
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+
+class Locker:
+    LK_NBLCK, LK_UNLCK = 2, 0
+    def locking(self, *_): pass
+
+
+class AdmissionRuleTests(unittest.TestCase):
+    """One admission rule for every actor: no allow-list, no idle card, an optional GPU restriction."""
     setUp = CudaExecutionTests.setUp
-    probe = CudaExecutionTests.probe
-    environment = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW_REF":
-        "SceneWorks/SceneWorks/.github/workflows/memory-catalog-campaign.yml@refs/heads/feature/test",
-        "SCENEWORKS_GPU_ID": "1", "CUDA_VISIBLE_DEVICES": "1", "NVIDIA_VISIBLE_DEVICES": "1",
-        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+    environment = ENVIRONMENT
 
-    def require_policy(self, environment=None, actor="load-progress-acceptance", **selection):
-        shared.require_admission_policy(shared.FUNCTIONAL_POLICY, actor,
-            self.environment if environment is None else environment,
-            selection.get("physical_indices"), selection.get("cuda_ordinals", "0"), selection.get("probe_visible", "1"))
+    def test_the_wrapper_has_no_actor_allow_list_or_alternative_policy(self):
+        for name in ("STRICT_POLICY", "FUNCTIONAL_POLICY", "FUNCTIONAL_ACTORS", "SHARED_DISPLAY_POLICY",
+                     "SHARED_DISPLAY_ACTORS", "require_admission_policy", "require_free_memory"):
+            self.assertFalse(hasattr(shared, name), name)
+        self.assertEqual(shared.resource_receipt("any-actor", ["x"])["admission_policy"], shared.SHARED_POLICY)
+        self.assertNotIn("--admission-policy", inspect.getsource(shared.main))
+        self.assertNotIn("idle(", inspect.getsource(shared.claim_uuids))
+        self.assertNotIn("sample_baseline", inspect.getsource(shared))
+        self.assertNotIn("verify_idle", inspect.getsource(shared))
 
-    def test_functional_policy_is_explicit_actor_manual_workflow_and_fixed_gpu1_only(self):
-        self.require_policy()
-        direct = dict(self.environment, GITHUB_WORKFLOW_REF=
-            "SceneWorks/SceneWorks/.github/workflows/load-progress-acceptance.yml@refs/heads/main")
-        self.require_policy(direct)
-        for environment in [dict(self.environment, GITHUB_EVENT_NAME="push"),
-                dict(self.environment, GITHUB_WORKFLOW_REF="other"),
-                dict(self.environment, CUDA_DEVICE_ORDER="FASTEST_FIRST")]:
-            with self.assertRaises(RuntimeError): self.require_policy(environment)
-        for key in ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
-            for value in ("0", "", "0,1"):
-                with self.assertRaises(RuntimeError): self.require_policy(dict(self.environment, **{key: value}))
-        with self.assertRaises(RuntimeError): self.require_policy(actor="another-actor")
-        for selection in ({"physical_indices": "1"}, {"cuda_ordinals": "1"}, {"probe_visible": "0"}):
-            with self.assertRaises(RuntimeError): self.require_policy(**selection)
-        # Existing callers keep their strict policy and device semantics.
-        shared.require_admission_policy(shared.STRICT_POLICY, "legacy-actor", {}, "0", "all", None)
+    def test_every_actor_is_admitted_on_a_shared_card_with_a_loaded_foreign_model(self):
+        # The desktop app holds a 30 GiB model in a compute context on the display card.
+        self.two.update(used_mib=31000, utilization_percent=2)
+        self.guard.inventory.return_value = ([self.one, self.two], [["GPU-two", "57052", "SceneWorks.exe", "C"],
+                                                                    ["GPU-two", "768", "dwm.exe", "C+G"]])
+        for actor in ("memory-catalog-candle", "krea-anchor", "iris-two-card", "anything-new"):
+            receipt = shared.resource_receipt(actor, ["x"])
+            now = [0]
+            selected, handles, baselines, _ = shared.claim_uuids(["GPU-two"], self.guard, self.out, 60, self.out,
+                Locker(), clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+            shared.release_all(handles, Locker())
+            self.assertEqual(selected, [self.two])
+            self.assertEqual(baselines["GPU-two"]["free_mib"], 97887 - 31000)
+            self.assertIn(("57052", "SceneWorks.exe", "C"), baselines["GPU-two"]["co_tenants"])
+            self.assertEqual(receipt["admission_policy"], shared.SHARED_POLICY)
+        self.guard.idle.assert_not_called(); self.guard.sample_baseline.assert_not_called()
 
-    def test_the_qwen38_describer_is_admitted_only_from_its_own_manual_workflow_on_fixed_gpu1(self):
-        describer = dict(self.environment, GITHUB_WORKFLOW_REF=
-            "SceneWorks/SceneWorks/.github/workflows/qwen38-describer-validation.yml@refs/heads/feature/test")
-        self.require_policy(describer, actor="qwen38-describer")
-        # Each actor is paired with its own workflows: neither borrows the other's.
-        with self.assertRaises(RuntimeError): self.require_policy(actor="qwen38-describer")
-        with self.assertRaises(RuntimeError): self.require_policy(describer)
-        with self.assertRaises(RuntimeError): self.require_policy(describer, actor="another-actor")
-        # The same manual-dispatch and fixed-GPU1 conditions apply.
-        with self.assertRaises(RuntimeError):
-            self.require_policy(dict(describer, GITHUB_EVENT_NAME="push"), actor="qwen38-describer")
-        for key in ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
-            with self.assertRaises(RuntimeError):
-                self.require_policy(dict(describer, **{key: "0"}), actor="qwen38-describer")
-        for selection in ({"physical_indices": "1"}, {"cuda_ordinals": "1"}, {"probe_visible": "0"}):
-            with self.assertRaises(RuntimeError): self.require_policy(describer, actor="qwen38-describer", **selection)
-
-    def test_free_memory_is_read_per_held_card_and_refuses_a_card_with_too_little(self):
-        reading = Mock(return_value=SimpleNamespace(stdout="30000\n"))
-        identity = shared.DeviceIdentity("trusted-smi", reading)
-        held = [{"index": 1, "uuid": "GPU-two"}]
-        readings = shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
-        self.assertEqual(readings, [{"index": 1, "uuid": "GPU-two", "free_mib": 30000, "need_mib": 28000}])
-        self.assertEqual(reading.call_args.args[0], ["trusted-smi", "--query-gpu=memory.free",
-            "--format=csv,noheader,nounits", "-i", "1"])
-        with self.assertRaisesRegex(RuntimeError, "GPU 1 has 30000 MiB free; this run needs 40000 MiB"):
-            shared.require_free_memory(identity, held, 40000, time.monotonic() + 30)
-        for value in ("", "n/a", "1,2"):
-            reading.return_value.stdout = value
-            with self.assertRaises(RuntimeError):
-                shared.require_free_memory(identity, held, 28000, time.monotonic() + 30)
-
-    def test_functional_device_only_probe_and_exact_binding_refuse_gpu0_missing_or_wrong_uuid(self):
-        devices = Mock(return_value=SimpleNamespace(stdout="0, GPU-one\n1, GPU-two\n"))
-        identity = shared.DeviceIdentity("trusted-smi", devices)
-        for rows, accepted in [([{"ordinal": 0, "uuid": "GPU-two"}], True),
-                ([{"ordinal": 0, "uuid": "GPU-one"}], False),
-                ([{"ordinal": 0, "uuid": "GPU-missing"}], False), ([], False)]:
-            launch = Mock()
-            try:
-                binding = shared.resolve_binding(identity, self.out, time.monotonic()+30,
-                    self.environment, probe_visible="1", run=self.probe(rows))
-                shared.require_functional_binding(binding)
-            except RuntimeError:
-                self.assertFalse(accepted)
-            else:
-                self.assertTrue(accepted)
-                launch()
-            self.assertEqual(launch.call_count, int(accepted))
-        for value in ("0, GPU-one\n1, \n", "0, GPU-one\n1, GPU-one\n", ""):
-            devices.return_value.stdout = value
-            with self.assertRaises(RuntimeError): identity.inventory(self.out, "invalid", time.monotonic()+30)
-        self.assertTrue(all(call.args[0] == ["trusted-smi", "--query-gpu=index,uuid",
-            "--format=csv,noheader,nounits"] for call in devices.call_args_list))
-
-    def test_foreign_compute_permits_functional_but_default_strict_rejects_and_no_baseline_is_sampled(self):
-        vendor = shared.component("veda_cuda_guard.py", shared.GUARD_SHA)
-        self.two.update(used_mib=65000, utilization_percent=100)
-        self.guard.inventory.return_value = ([self.one, self.two], [["GPU-two", "57052", "foreign", "C"]])
-        self.guard.idle.side_effect = vendor.idle
-        self.guard.sample_baseline.side_effect = AssertionError("functional must not require benchmark baseline")
-        class Locker:
-            LK_NBLCK, LK_UNLCK = 2, 0
-            def locking(self, *_): pass
+    def test_the_default_free_memory_requirement_applies_when_the_job_names_none(self):
+        self.two.update(used_mib=97887 - shared.DEFAULT_MIN_FREE_MIB + 1)
         now = [0]
         with self.assertRaises(TimeoutError):
-            shared.claim_uuids(["GPU-two"], self.guard, self.out, 2, self.out, Locker(),
-                clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0]+seconds))
-        self.guard.idle.reset_mock()
-        selected, handles, baseline, _ = shared.claim_uuids(["GPU-two"], self.guard,
-            self.out, 10, self.out, Locker(), required_indices={"GPU-two": 1},
-            admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: 0)
-        self.assertEqual(selected, [self.two]); self.assertEqual(baseline, {})
-        self.guard.idle.assert_not_called(); self.guard.sample_baseline.assert_not_called()
-        self.assertFalse((self.out / "SceneWorks/gpu-locks/GPU-one.lock").exists())
-        shared.release_all(handles, Locker())
+            shared.claim_uuids(["GPU-two"], self.guard, self.out, 30, self.out, Locker(),
+                clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        for bad in (0, -1, None, 1 << 20):
+            with self.assertRaises(RuntimeError):
+                shared.claim_uuids(["GPU-two"], self.guard, self.out, 30, self.out, Locker(), min_free_mib=bad)
 
-    def test_functional_uuid_contention_budget_and_physical_recheck_remain_fail_closed(self):
-        class Locker:
+    def test_required_physical_index_refuses_any_other_bound_card(self):
+        def binding(*indices):
+            return {"devices": [{"index": index, "uuid": f"GPU-{index}"} for index in indices]}
+        shared.require_physical_index(binding(1), 1)
+        shared.require_physical_index(binding(0, 1), None)
+        for bad in (binding(0), binding(0, 1), binding()):
+            with self.assertRaisesRegex(RuntimeError, "not the required GPU 1"):
+                shared.require_physical_index(bad, 1)
+        # A probe mask that differs from the child's own mask would guard the wrong card.
+        shared.require_physical_index(binding(1), 1, {"CUDA_VISIBLE_DEVICES": "1"}, "1")
+        for environment in ({"CUDA_VISIBLE_DEVICES": "0"}, {}):
+            with self.assertRaisesRegex(RuntimeError, "differs from the job's CUDA_VISIBLE_DEVICES"):
+                shared.require_physical_index(binding(1), 1, environment, "1")
+
+    def test_a_transient_inventory_error_is_logged_and_retried_not_fatal(self):
+        import io
+        calls = {"n": 0}
+        def inventory(*_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("driver XML and CSV GPU identities differ")
+            return [self.one, self.two], []
+        self.guard.inventory.side_effect = inventory
+        stream = io.StringIO(); now = [0]
+        selected, handles, _, _ = shared.claim_uuids(["GPU-two"], self.guard, self.out, 60, self.out, Locker(),
+            clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            reporter=shared.WaitReporter(stream))
+        shared.release_all(handles, Locker())
+        self.assertEqual(selected, [self.two])
+        self.assertIn("driver XML and CSV GPU identities differ", stream.getvalue())
+
+    def test_uuid_contention_budget_and_index_recheck_remain_fail_closed(self):
+        class Busy:
             LK_NBLCK, LK_UNLCK = 2, 0
             def __init__(self, busy): self.busy = busy; self.held = set()
             def locking(self, fd, mode, _):
@@ -252,15 +230,15 @@ class FunctionalAdmissionTests(unittest.TestCase):
                     if self.busy: self.busy -= 1; raise OSError("same UUID is leased")
                     self.held.add(fd)
                 else: self.held.remove(fd)
-        for busy, deadline, succeeds in [(2, 5, True), (20, 2, False)]:
-            locker = Locker(busy); now = [0]
+        for busy, deadline, succeeds in [(2, 30, True), (40, 20, False)]:
+            locker = Busy(busy); now = [0]
             def claim():
                 return shared.claim_uuids(["GPU-two"], self.guard, self.out, deadline,
-                    self.out, locker, required_indices={"GPU-two": 1},
-                    admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: now[0],
+                    self.out, locker, required_indices={"GPU-two": 1}, clock=lambda: now[0],
                     sleep=lambda seconds: now.__setitem__(0, now[0]+seconds))
             if succeeds:
-                _, handles, _, waited = claim(); self.assertEqual(waited, 2)
+                _, handles, _, waited = claim()
+                self.assertEqual(waited, 2 + (shared.SHARED_WINDOW_SAMPLES - 1) * shared.SHARED_WINDOW_INTERVAL_SECONDS)
                 self.assertEqual(len(locker.held), 1); shared.release_all(handles, locker)
             else:
                 with self.assertRaises(TimeoutError): claim()
@@ -268,55 +246,61 @@ class FunctionalAdmissionTests(unittest.TestCase):
             self.assertEqual(locker.held, set())
         self.guard.inventory.return_value = ([dict(self.two, index=0)], [])
         with self.assertRaisesRegex(RuntimeError, "index/UUID binding changed"):
-            shared.claim_uuids(["GPU-two"], self.guard, self.out, 10, self.out, Locker(0),
-                required_indices={"GPU-two": 1}, admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: 0)
+            shared.claim_uuids(["GPU-two"], self.guard, self.out, 10, self.out, Busy(0),
+                required_indices={"GPU-two": 1}, clock=lambda: 0)
 
-    def test_functional_completion_requires_success_no_timeout_empty_owned_tree_and_never_claims_idle(self):
-        self.guard.verify_idle.side_effect = RuntimeError("foreign baseline changed")
+    def test_completion_requires_success_no_timeout_empty_owned_tree_and_never_claims_idle(self):
+        baselines = {"GPU-two": {"baseline_used_mib": 100}}
         for result, accepted in [({"returncode": 0, "timeout": False, "owned_tree_empty": True}, True),
                 ({"returncode": 3, "timeout": False, "owned_tree_empty": True}, False),
                 ({"returncode": None, "timeout": True, "owned_tree_empty": True}, False),
                 ({"returncode": 0, "timeout": False, "owned_tree_empty": False}, False)]:
-            receipt = shared.resource_receipt("load-progress-acceptance", ["original-actor"], shared.FUNCTIONAL_POLICY)
-            shared.complete_resource(receipt, result, [self.two], self.guard, self.out, {}, shared.FUNCTIONAL_POLICY)
+            receipt = shared.resource_receipt("load-progress-acceptance", ["original-actor"])
+            shared.complete_resource(receipt, result, [self.two], self.guard, self.out, baselines)
             self.assertEqual(receipt["resource_completed"], accepted)
-            for key in ("post_child_idle_verified", "isolated_device", "vram_measurement", "performance_measurement", "model_inference_proof"):
+            for key in ("post_child_idle_verified", "isolated_device", "model_inference_proof"):
                 self.assertIs(receipt[key], False)
             self.assertTrue(receipt["shared_device"])
+            self.assertEqual(receipt["post_child"]["devices"][0]["drift_mib"], 0)
+        # The post-child sample is a diagnostic: a failed inventory never changes the verdict.
+        self.guard.inventory.side_effect = RuntimeError("driver XML and CSV GPU identities differ")
+        receipt = shared.resource_receipt("x", ["x"])
+        shared.complete_resource(receipt, {"returncode": 0, "timeout": False, "owned_tree_empty": True},
+                                 [self.two], self.guard, self.out, baselines)
+        self.assertTrue(receipt["resource_completed"]); self.assertIn("error", receipt["post_child"])
         self.guard.verify_idle.assert_not_called()
-        with self.assertRaisesRegex(RuntimeError, "foreign baseline changed"):
-            shared.complete_resource({}, {"returncode": 0, "timeout": False}, [self.two],
-                self.guard, self.out, {"GPU-two": {}}, shared.STRICT_POLICY)
 
-    def test_main_validates_physical_one_before_and_after_lock_and_reports_only_owned_completion(self):
+    def test_main_validates_the_required_gpu_before_and_the_binding_after_the_lock(self):
         def binding(index=1, identifier="GPU-two"):
             return {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": index, "uuid": identifier}],
                     "mapping": [{"cuda_ordinal": 0, "uuid": identifier, "nvml_index": index}], "key": [(0, identifier)]}
         valid = binding()
         cases = [(valid, valid, True), (binding(index=0), valid, False),
-                 (binding(identifier=None), valid, False), (valid, binding(index=0), False),
                  (valid, binding(identifier="GPU-remapped"), False)]
         for attempt, (before, after, accepted) in enumerate(cases, 1):
             env = dict(self.environment, GITHUB_RUN_ID=str(attempt), GITHUB_RUN_ATTEMPT="1",
                        RUNNER_TEMP=str(self.out), PUBLIC=str(self.out))
             executor = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+            claim = Mock(return_value=([self.two], [], {"GPU-two": {"baseline_used_mib": 100}}, 0))
             with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
                  patch.object(shared.sys, "argv", ["wrapper", "--actor", "load-progress-acceptance",
-                     "--admission-policy", "functional-coexistence", "--budget-minutes", "1",
-                     "--cuda-ordinals", "0", "--probe-visible", "1", "--", "original-actor"]), \
+                     "--budget-minutes", "1", "--cuda-ordinals", "0", "--probe-visible", "1",
+                     "--require-physical-index", "1", "--min-free-mib", "28000", "--", "original-actor"]), \
                  patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
                  patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
                  patch.object(shared, "resolve_binding", side_effect=[before, after]), \
-                 patch.object(shared, "claim_uuids", return_value=([self.two], [], {}, 0)), \
+                 patch.object(shared, "claim_uuids", claim), \
                  patch.object(shared, "execute_owned", executor):
                 self.assertEqual(shared.main(), 0 if accepted else 1)
             receipt = json.loads((self.out / f"sceneworks-cuda-execution-{attempt}-1-load-progress-acceptance/resource-receipt.json").read_text())
             self.assertEqual(receipt["resource_completed"], accepted)
             self.assertEqual(executor.call_count, int(accepted))
             self.assertIs(receipt["post_child_idle_verified"], False)
-            self.assertIs(receipt["performance_measurement"], False)
-            if accepted:
-                self.assertEqual(receipt["binding_rechecked"]["devices"][0]["index"], 1)
+            if before["devices"][0]["index"] != 1:
+                claim.assert_not_called()  # refused before taking the lock
+            else:
+                self.assertEqual(claim.call_args.kwargs["min_free_mib"], 28000)
+                self.assertEqual(claim.call_args.kwargs["required_indices"], {"GPU-two": 1})
         self.guard.verify_idle.assert_not_called()
 
     def test_main_prints_its_own_failure_reason_and_child_exit_into_the_job_log(self):
@@ -375,12 +359,11 @@ def fake_smi_xml(gpu1_used, processes1, gpu0_used=50220, gpu0_processes=(("40052
 DISPLAY = [(str(pid), "C+G", "N/A") for pid in (768, 13284, 28124, 39752)]
 
 
-class SharedDisplayAdmissionTests(unittest.TestCase):
-    """Fake nvidia-smi output only: the shared-display policy for the Tier 2 A/B actor."""
-    environment = dict(FunctionalAdmissionTests.environment)
+class SharedWindowAdmissionTests(unittest.TestCase):
+    """Fake nvidia-smi output only: the one free-memory/stability window, for every actor."""
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="shared-display-", dir=HERE)
+        self.temp = tempfile.TemporaryDirectory(prefix="shared-window-", dir=HERE)
         self.addCleanup(self.temp.cleanup)
         self.out = Path(self.temp.name)
 
@@ -397,87 +380,69 @@ class SharedDisplayAdmissionTests(unittest.TestCase):
             processes = [["GPU-one", "40052", "p40052.exe", "C"]] + [["GPU-two", pid, f"p{pid}.exe", kind] for pid, kind, _ in processes1]
             return devices, processes
         guard.inventory.side_effect = inventory
-        guard.idle.side_effect = shared.component("veda_cuda_guard.py", shared.GUARD_SHA).idle
-        guard.sample_baseline.side_effect = AssertionError("shared-display never uses the strict benchmark baseline")
+        guard.idle.side_effect = AssertionError("admission never asks for an idle card")
+        guard.sample_baseline.side_effect = AssertionError("admission never uses the strict benchmark baseline")
         return guard
 
-    def claim(self, guard, deadline=60, policy=None, min_free_mib=75776):
-        class Locker:
-            LK_NBLCK, LK_UNLCK = 2, 0
-            def locking(self, *_): pass
+    def claim(self, guard, deadline=60, min_free_mib=75776):
         now = [0]
         result = shared.claim_uuids(["GPU-two"], guard, self.out, deadline, self.out, Locker(),
-            required_indices={"GPU-two": 1}, admission_policy=policy or shared.SHARED_DISPLAY_POLICY,
-            clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
-            min_free_mib=min_free_mib)
+            required_indices={"GPU-two": 1}, clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds), min_free_mib=min_free_mib)
         shared.release_all(result[1], Locker())
         return result
 
     def window(self):
         return json.loads((self.out / "claimed-device-1-shared-window.json").read_text())
 
-    def test_display_only_baseline_with_a_context_holder_is_admitted(self):
-        # Run 43287950598 at lease start: 5847 MiB used, 12% util, 25 display processes and one
+    def test_display_baseline_with_a_context_holder_is_admitted(self):
+        # Run 43287950598 at lease start: 5847 MiB used, 12% util, display processes and one
         # compute context (WDDM per-process memory N/A).
         guard = self.guard_for([5847] * 10, DISPLAY + [("40068", "C", "N/A")])
         selected, _, baselines, _ = self.claim(guard)
         self.assertEqual(selected[0]["uuid"], "GPU-two")
         summary = baselines["GPU-two"]
         self.assertEqual(summary["baseline_used_mib"], 5847); self.assertEqual(summary["free_mib"], 97887 - 5847)
-        self.assertFalse(summary["per_process_memory_reported"])
         self.assertTrue(self.window()["admitted"])
-        guard.sample_baseline.assert_not_called()
 
-    def test_large_foreign_compute_footprint_is_refused(self):
-        # Run 43287950598 at cancel: 21131 MiB used with a foreign compute process present.
+    def test_a_foreign_model_held_by_a_compute_process_is_admitted_when_the_job_fits(self):
+        # Run 43287950598 at cancel: 21131 MiB used with a foreign compute process present. The old
+        # shared-display rule refused this (> 8 GiB with a compute process); the job only needs free memory.
         guard = self.guard_for([21131] * 10, DISPLAY + [("40068", "C", "N/A")])
-        with self.assertRaisesRegex(TimeoutError, "shared display GPU never became quiet"):
-            self.claim(guard, deadline=30)
-        self.assertFalse(self.window()["admitted"])
-        self.assertTrue(any("foreign compute process present" in reason for reason in self.window()["reasons"]))
-        # Where the driver does report per-process memory, a 4 GiB foreign job refuses even when small overall.
-        guard = self.guard_for([6000] * 10, DISPLAY + [("777", "C", "4096 MiB")])
-        with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
-        self.assertTrue(any("pid 777 uses 4096 MiB" in reason for reason in self.window()["reasons"]))
+        _, _, baselines, _ = self.claim(guard)
+        self.assertEqual(baselines["GPU-two"]["free_mib"], 97887 - 21131)
+        self.assertIn(("40068", "p40068.exe", "C"), baselines["GPU-two"]["co_tenants"])
+        # Even where the driver reports a large per-process footprint, only free memory decides.
+        guard = self.guard_for([40000] * 10, DISPLAY + [("777", "C", "34000 MiB")])
+        self.claim(guard, min_free_mib=50000)
+        self.assertEqual(self.window()["reasons"], [])
 
-    def test_growing_or_unstable_usage_and_too_little_free_memory_are_refused(self):
+    def test_growing_or_unstable_usage_busy_device_and_too_little_free_memory_are_refused(self):
         # A foreign job that keeps growing or oscillating never settles, so every window refuses.
         for series, needle in [(lambda n: 6000 + 20 * n, "growing"),
                                (lambda n: 6000 + 600 * (n % 2), "unstable"),
-                               ([30000] * 10, "free")]:
+                               ([30000] * 10, "free 67887 MiB < required 75776 MiB")]:
             guard = self.guard_for(series, DISPLAY)
-            with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
+            with self.assertRaisesRegex(TimeoutError, "no admission within the budget"):
+                self.claim(guard, deadline=30)
             self.assertTrue(any(needle in reason for reason in self.window()["reasons"]), (needle, self.window()))
         guard = self.guard_for([5847] * 10, DISPLAY, utilization=45)
         with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
-
-    def test_strict_idle_is_unchanged_for_every_other_caller(self):
-        guard = self.guard_for([5847] * 10, DISPLAY)
-        with self.assertRaisesRegex(TimeoutError, "lock/idle wait"):
-            self.claim(guard, deadline=5, policy=shared.STRICT_POLICY, min_free_mib=None)
-        guard.sample_baseline.assert_not_called()  # never reached: strict refuses the display GPU first
-        shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "tier2-ab-cuda", self.environment, None, "0", None)
-        for actor, environment in [("load-progress-acceptance", self.environment), ("legacy-actor", self.environment),
-                                   ("tier2-ab-cuda", dict(self.environment, GITHUB_EVENT_NAME="push")),
-                                   ("tier2-ab-cuda", dict(self.environment, GITHUB_WORKFLOW_REF="SceneWorks/SceneWorks/.github/workflows/windows-candle.yml@x")),
-                                   ("tier2-ab-cuda", dict(self.environment, CUDA_VISIBLE_DEVICES="0"))]:
-            with self.assertRaises(RuntimeError): shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, actor, environment, None, "0", None)
-        with self.assertRaises(RuntimeError):
-            shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "tier2-ab-cuda", self.environment, "1", "0", None)
-        with self.assertRaisesRegex(RuntimeError, "needs --min-free-mib"):
-            self.claim(self.guard_for([5847] * 10, DISPLAY), min_free_mib=None)
+        self.assertTrue(any("utilization 45%" in reason for reason in self.window()["reasons"]))
 
     def test_receipt_identities_name_both_gpus_with_display_and_process_types(self):
         rows = shared.gpu_identities(fake_smi_xml(5847, DISPLAY + [("40068", "C", "N/A")]))
         self.assertEqual([(row["pci_bus_id"], row["uuid"], row["display_attached"]) for row in rows],
                          [("00000000:21:00.0", "GPU-one", "No"), ("00000000:C1:00.0", "GPU-two", "Yes")])
         self.assertEqual([p["type"] for p in rows[1]["processes"]].count("C+G"), 4)
-        self.assertEqual(shared.process_memory_mib(fake_smi_xml(1, [("9", "C", "300 MiB"), ("8", "C", "N/A")])),
-                         {("GPU-one", "40052"): None, ("GPU-two", "9"): 300, ("GPU-two", "8"): None})
-        receipt = shared.resource_receipt("tier2-ab-cuda", ["node"], shared.SHARED_DISPLAY_POLICY)
+        receipt = shared.resource_receipt("tier2-ab-cuda", ["node"])
         self.assertTrue(receipt["shared_device"]); self.assertIn("baseline", receipt["observation_note"])
-        shared.complete_resource(receipt, {"returncode": 0, "timeout": False, "owned_tree_empty": True}, [], Mock(), self.out, {}, shared.SHARED_DISPLAY_POLICY)
+        guard = self.guard_for([5847], DISPLAY)
+        shared.complete_resource(receipt, {"returncode": 0, "timeout": False, "owned_tree_empty": True},
+                                 [{"index": 1, "uuid": "GPU-two"}], guard, self.out,
+                                 {"GPU-two": {"baseline_used_mib": 5800}})
         self.assertTrue(receipt["resource_completed"]); self.assertIs(receipt["post_child_idle_verified"], False)
+        self.assertEqual(receipt["post_child"]["devices"][0]["drift_mib"], 47)
 
 
 class HostServiceTransactionTests(unittest.TestCase):
@@ -537,10 +502,9 @@ class HostServiceTransactionTests(unittest.TestCase):
     def test_service_before_gpu_and_reverse_release_order(self):
         service, _ = self.claim("http://127.0.0.1:17821")
         guard = Mock()
-        rows = [dict(index=0, uuid="GPU-a"), dict(index=1, uuid="GPU-b")]
+        rows = [dict(index=0, uuid="GPU-a", total_mib=97887, used_mib=100, utilization_percent=0),
+                dict(index=1, uuid="GPU-b", total_mib=97887, used_mib=100, utilization_percent=0)]
         guard.inventory.return_value = (rows, [])
-        guard.idle.return_value = True
-        guard.sample_baseline.side_effect = lambda device, out, phase: (device, {})
         _, handles, _, _ = shared.claim_uuids(["GPU-b", "GPU-a"], guard, self.out,
             10, self.out, self.locker, clock=self.clock, sleep=self.sleep)
         shared.release_transaction(handles, service, self.locker)
@@ -651,6 +615,182 @@ class SharedKernelTests(unittest.TestCase):
                       dict(good, **{shared.ACTIVE_KEY: "1"})]:
             with self.assertRaises(RuntimeError):
                 self.kernel.require_dispatch(wrong)
+
+
+class WaitReportingTests(unittest.TestCase):
+    """Every admission wait is visible in the job log; reporting never changes admission."""
+    setUp = CudaExecutionTests.setUp
+
+    def lines(self, stream):
+        prefix = "cuda-execution: "
+        return [json.loads(line[len(prefix):]) for line in stream.getvalue().splitlines() if line.startswith(prefix)]
+
+    def test_an_admission_wait_prints_the_refusal_reason_every_interval_then_reports_the_end(self):
+        import io
+        busy = dict(self.two, used_mib=65000, utilization_percent=100)
+        foreign = [["GPU-two", "57052", "python.exe", "C"]]
+        now = [0.0]
+        # A busy card for 150 s, then the foreign job exits and the device is quiet.
+        self.guard.inventory.side_effect = lambda *_: (
+            ([self.one, busy], foreign) if now[0] < 150 else ([self.one, self.two], []))
+        stream = io.StringIO()
+        devices, handles, _, waited = shared.claim_uuids(["GPU-two"], self.guard, self.out, 3600, self.out,
+            Locker(), clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            reporter=shared.WaitReporter(stream))
+        shared.release_all(handles, Locker())
+        self.assertEqual(devices, [self.two]); self.assertEqual(waited, 159)
+        lines = self.lines(stream)
+        self.assertEqual([line["event"] for line in lines], ["wait-start", "waiting", "waiting", "wait-end"])
+        self.assertEqual([line.get("elapsed_seconds") for line in lines[:3]], [9, 69, 129])
+        for line in lines[:3]:
+            self.assertEqual(line["wait"], "admission")
+            self.assertEqual(line["devices"], [{"index": 1, "uuid": "GPU-two"}])
+            refused = line["refused"]
+            self.assertEqual((refused["index"], refused["uuid"]), (1, "GPU-two"))
+            self.assertIn("utilization 100% > 30%", refused["reasons"])
+            self.assertEqual(refused["window"]["free_mib"], 97887 - 65000)
+        self.assertEqual(lines[3], {"event": "wait-end", "scope": "gpu", "wait_seconds": 159,
+                                    "devices": [{"index": 1, "uuid": "GPU-two"}]})
+
+    def test_uuid_lock_and_service_lock_waits_print_their_lines(self):
+        import io
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def __init__(self, busy): self.busy = busy
+            def locking(self, fd, mode, _):
+                if mode == self.LK_NBLCK and self.busy:
+                    self.busy -= 1; raise OSError("leased elsewhere")
+        now = [0.0]
+        clock, sleep = (lambda: now[0]), (lambda seconds: now.__setitem__(0, now[0] + seconds))
+        stream = io.StringIO()
+        reporter = shared.WaitReporter(stream)
+        service, info = shared.claim_service("http://127.0.0.1:17821", self.out, 600, Locker(70), clock, sleep,
+                                             reporter=reporter)
+        _, handles, _, waited = shared.claim_uuids(["GPU-two"], self.guard, self.out, 600, self.out, Locker(61),
+            clock=clock, sleep=sleep, reporter=reporter)
+        shared.release_transaction(handles, service, Locker(0))
+        window = (shared.SHARED_WINDOW_SAMPLES - 1) * shared.SHARED_WINDOW_INTERVAL_SECONDS
+        self.assertEqual((info["wait_seconds"], waited), (70, 61 + window))
+        lines = self.lines(stream)
+        self.assertEqual([(line["event"], line.get("wait") or line.get("scope")) for line in lines],
+            [("wait-start", "service"), ("waiting", "service"), ("wait-end", "service"),
+             ("wait-start", "lock"), ("waiting", "lock"), ("wait-end", "gpu")])
+        self.assertEqual(lines[0]["port"], 17821)
+        self.assertTrue(lines[0]["lock_path"].endswith("loopback-port-17821.lock"))
+        self.assertEqual(lines[1]["elapsed_seconds"], 60)
+        self.assertEqual(lines[3]["held_lock"]["uuid"], "GPU-two")
+        self.assertEqual(lines[3]["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertEqual(lines[4]["elapsed_seconds"], 60)
+
+    def test_main_prints_the_launch_line_and_a_cancel_prints_the_wait_and_partial_receipt(self):
+        import contextlib, io
+        env = {"GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.out), "PUBLIC": str(self.out)}
+        binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+        printed, logged = io.StringIO(), io.StringIO()
+        executor = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+        installed = []
+        with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+             patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                 "--cuda-ordinals", "0", "--", "bash", "run.sh"]), \
+             patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+             patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+             patch.object(shared, "resolve_binding", return_value=binding), \
+             patch.object(shared, "claim_uuids", return_value=([self.two], [], {"GPU-two": {}}, 12.34)), \
+             patch.object(shared, "complete_resource", return_value=0), \
+             patch.object(shared, "release_transaction"), \
+             patch.object(shared, "install_cancel_handler", side_effect=lambda handler: installed.append(handler) or {}), \
+             patch.object(shared, "execute_owned", executor), \
+             contextlib.redirect_stdout(printed), contextlib.redirect_stderr(logged):
+            shared.main()
+        launch = self.lines(logged)[-1]
+        self.assertEqual(launch["event"], "launch")
+        self.assertEqual(launch["lock_wait_seconds"], 12.3)
+        self.assertEqual(launch["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertEqual(executor.call_count, 1)
+
+        # A cancel mid-wait prints where it was and the receipt so far, then unwinds once.
+        stream = io.StringIO()
+        reporter = shared.WaitReporter(stream)
+        reporter.waiting("admission", 90, 0, 600, [self.two], lambda: {"refused": {}})
+        receipt = shared.resource_receipt("memory-catalog-candle", ["bash", "run.sh"])
+        receipt["binding"] = binding
+        handler = shared.cancel_handler(receipt, reporter)
+        with self.assertRaises(KeyboardInterrupt):
+            handler(shared.signal.SIGTERM, None)
+        handler(shared.signal.SIGINT, None)  # a second signal only prints; cleanup is not interrupted
+        cancel, again = self.lines(stream)[1:]
+        self.assertEqual((cancel["event"], cancel["signal"]), ("cancel", "SIGTERM"))
+        self.assertEqual(cancel["wait"]["wait"], "admission")
+        self.assertEqual(cancel["wait"]["elapsed_seconds"], 90)
+        self.assertEqual(cancel["partial_receipt"]["binding"]["devices"], [{"index": 1, "uuid": "GPU-two"}])
+        self.assertNotIn("argv", cancel["partial_receipt"])
+        self.assertEqual(again["signal"], "SIGINT")
+
+    def run_main(self, run_id, execute, release):
+        """Drive main with the real cancel handler captured; return (code, stdout, stderr, receipt)."""
+        import contextlib, io
+        env = {"GITHUB_RUN_ID": str(run_id), "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.out), "PUBLIC": str(self.out)}
+        binding = {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": 1, "uuid": "GPU-two"}], "key": [(0, "GPU-two")]}
+        printed, logged = io.StringIO(), io.StringIO()
+        self.installed, self.handles = [], [object()]
+        with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+             patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+                 "--cuda-ordinals", "0", "--", "bash", "run.sh"]), \
+             patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+             patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+             patch.object(shared, "resolve_binding", return_value=binding), \
+             patch.object(shared, "claim_uuids", return_value=([self.two], self.handles, {"GPU-two": {}}, 0)), \
+             patch.object(shared, "complete_resource", return_value=0), \
+             patch.object(shared, "release_transaction", release), \
+             patch.object(shared, "install_cancel_handler", side_effect=lambda handler: self.installed.append(handler) or {}), \
+             patch.object(shared, "execute_owned", execute), \
+             contextlib.redirect_stdout(printed), contextlib.redirect_stderr(logged):
+            code = shared.main()
+        receipt = json.loads((self.out / f"sceneworks-cuda-execution-{run_id}-1-memory-catalog-candle/resource-receipt.json").read_text())
+        return code, printed.getvalue(), logged.getvalue(), receipt
+
+    def test_a_cancel_during_the_child_releases_once_writes_the_receipt_and_ends_with_the_summary(self):
+        release = Mock()
+        execute = Mock(side_effect=lambda *_, **__: self.installed[0](shared.signal.SIGTERM, None))
+        code, printed, logged, receipt = self.run_main(81, execute, release)
+        self.assertEqual(code, 1)
+        release.assert_called_once()
+        self.assertIs(release.call_args.args[0], self.handles)
+        self.assertEqual(receipt["error"], "KeyboardInterrupt: cancelled by signal %d" % shared.signal.SIGTERM)
+        summary = json.loads(printed.strip().splitlines()[-1])
+        self.assertIs(summary["resource_completed"], False)
+        self.assertTrue(summary["error"].startswith("KeyboardInterrupt"))
+        self.assertIn('"event": "cancel"', logged)
+
+    def test_a_first_signal_during_cleanup_only_prints_and_never_interrupts_release_or_receipt(self):
+        released = []
+        def release(handles, service, locker):
+            self.installed[0](shared.signal.SIGTERM, None)  # Actions cancel lands mid-release
+            released.append(handles)
+        execute = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+        code, printed, logged, receipt = self.run_main(82, execute, release)
+        self.assertEqual(released, [self.handles])
+        self.assertNotIn("error", receipt)
+        self.assertEqual(json.loads(printed.strip().splitlines()[-1])["resource_receipt"].split("/")[-1], "resource-receipt.json")
+        self.assertIn('"event": "cancel"', logged)
+
+    def test_install_skips_missing_signals_tolerates_off_main_thread_and_restores(self):
+        calls = []
+        def fake_signal(number, handler):
+            calls.append((number, handler)); return f"previous-{number}"
+        posix = SimpleNamespace(SIGTERM=15, SIGINT=2, signal=fake_signal)  # no SIGBREAK off Windows
+        handler = object()
+        previous = shared.install_cancel_handler(handler, posix)
+        self.assertEqual(calls, [(15, handler), (2, handler)])
+        self.assertEqual(previous, {15: "previous-15", 2: "previous-2"})
+        calls.clear()
+        shared.restore_signal_handlers(previous, posix)
+        self.assertEqual(calls, [(15, "previous-15"), (2, "previous-2")])
+        def off_main_thread(number, handler):
+            raise ValueError("signal only works in main thread")
+        windows = SimpleNamespace(SIGTERM=15, SIGINT=2, SIGBREAK=21, signal=off_main_thread)
+        self.assertEqual(shared.install_cancel_handler(handler, windows), {})
+        shared.restore_signal_handlers({15: None}, windows)  # never raises
 
 
 if __name__ == "__main__":

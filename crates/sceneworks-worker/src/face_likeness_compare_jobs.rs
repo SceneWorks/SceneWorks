@@ -120,20 +120,20 @@ fn compare(
     source_ref: &str,
 ) -> WorkerResult<JsonObject> {
     let scorer = FaceLikenessScorer::load_for_compare(weights_dir, source)?;
-    Ok(compare_with_scorer(&scorer, candidate, source_ref))
+    compare_with_scorer(&scorer, candidate, source_ref)
 }
 
 /// Score the CANDIDATE against an already-constructed scorer and shape the standard result object. The
 /// JSON-producing half of [`compare`], factored out so the wiring tests exercise the exact same path
 /// over the weight-free stub scorer (no antelopev2 weights in CI). Non-fatal: a backend forward
-/// failure becomes a logged N/A via `score_or_null`, never an `Err`.
+/// failure becomes a logged N/A via `score_or_null`; only a typed `ProcessPoisoned` fails the job.
 #[cfg(native_lane)]
 fn compare_with_scorer(
     scorer: &FaceLikenessScorer,
     candidate: &Image,
     source_ref: &str,
-) -> JsonObject {
-    scorer.score_or_null(candidate).to_json(Some(source_ref))
+) -> WorkerResult<JsonObject> {
+    Ok(scorer.score_or_null(candidate)?.to_json(Some(source_ref)))
 }
 
 /// Run a `face_likeness_compare` job: load the SOURCE reference + CANDIDATE assets, score the
@@ -257,7 +257,7 @@ mod tests {
         // The compare's happy path: a candidate matching the SOURCE identity (same stub pixel) scores a
         // high cosine, detected:true, with the result attributed to the chosen reference asset id.
         let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
-        let result = compare_with_scorer(&scorer, &image(200), "ref_src_1");
+        let result = compare_with_scorer(&scorer, &image(200), "ref_src_1").unwrap();
         assert_eq!(result.get("detected"), Some(&Value::Bool(true)));
         assert_eq!(result.get("sourceRef"), Some(&json!("ref_src_1")));
         assert_eq!(
@@ -277,7 +277,7 @@ mod tests {
         // The honesty linchpin: a non-frontal / no-face CANDIDATE (stub pixel 0) is an explicit
         // detected:false / score:null N/A carrying a reason — NEVER a misleading low number.
         let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
-        let result = compare_with_scorer(&scorer, &image(0), "ref_src_1");
+        let result = compare_with_scorer(&scorer, &image(0), "ref_src_1").unwrap();
         assert_eq!(
             Value::Object(result),
             json!({
@@ -296,7 +296,7 @@ mod tests {
         // An extreme-but-detected candidate below the detection floor (stub pixel 40 ⇒ det_score ≈ 0.578
         // < 0.65) records an honest low_confidence N/A, not a noisy number.
         let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(200));
-        let result = compare_with_scorer(&scorer, &image(40), "ref_src_1");
+        let result = compare_with_scorer(&scorer, &image(40), "ref_src_1").unwrap();
         assert_eq!(result.get("detected"), Some(&Value::Bool(false)));
         assert_eq!(result.get("score"), Some(&Value::Null));
         assert_eq!(result.get("reason"), Some(&json!("low_confidence")));
@@ -308,7 +308,7 @@ mod tests {
         // error) whose every candidate compare is the honest NoSourceFace N/A — the compare never
         // crashes the worker, it just reports there is no comparable source identity.
         let (scorer, _calls) = FaceLikenessScorer::with_stub_source(&image(0));
-        let result = compare_with_scorer(&scorer, &image(200), "ref_src_1");
+        let result = compare_with_scorer(&scorer, &image(200), "ref_src_1").unwrap();
         assert_eq!(result.get("detected"), Some(&Value::Bool(false)));
         assert_eq!(result.get("reason"), Some(&json!("no_source_face")));
     }

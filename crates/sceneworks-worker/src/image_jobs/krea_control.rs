@@ -660,7 +660,7 @@ pub(super) async fn generate_krea_control_stream(
             // face stack lives here); the source identity is embedded once and reused across every pose.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -709,17 +709,21 @@ pub(super) async fn generate_krea_control_stream(
                     on_progress,
                     Some(&memory_evaluation),
                 )?;
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
+                let face_likeness = scorer
+                    .as_ref()
+                    .map(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
