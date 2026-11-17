@@ -165,6 +165,7 @@ import {
   nameContaminatingProcesses,
   contaminatedHostHalt,
   CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, CO_TENANT_SETTLE_MS, coTenantGpu, coTenantShift, sampleCardBaseline, settledCardBaseline,
+  coTenantActivity, monitorCoTenants, parsePmon,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -5971,7 +5972,7 @@ test("co-tenant bracket: the after window waits for the exited adapter's memory 
   assert.ok(now >= CO_TENANT_SETTLE_MS);
 });
 
-async function bracketedCapture(windows) {
+async function bracketedCapture(windows, activity = []) {
   const checkout = await stubCheckout();
   const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
   await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
@@ -5983,10 +5984,57 @@ async function bracketedCapture(windows) {
     coTenantGpu: () => "1",
     // The settle wait has its own test; here each attempt's after window is one sample.
     settledCardBaseline: (gpu, _before, { sample, env }) => sample(gpu, { env }),
+    monitorCoTenants: () => ({ stop: async () => activity.shift() ?? [] }),
     sampleCardBaseline: async () => { const min = windows[sampled.length]; sampled.push(min); return { samples: [min], min, max: min }; },
   });
   return { result: await measureAnchor(row, context), context, sampled };
 }
+
+const PMON = (rows) => "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa     fb   ccpm    command\n"
+  + "# Idx           #    C/G      %      %      %      %      %      %     MB     MB    name\n"
+  + rows.map((row) => `    1  ${row}`).join("\n") + "\n";
+
+test("co-tenant activity: pmon columns are read from its header, and an empty card has no rows", () => {
+  const rows = parsePmon(PMON(["24360     C      0      0      -      -      -      -      -      -    sceneworks-api.", "11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"]));
+  assert.deepEqual(rows[0], { pid: 24360, type: "C", sm: "0", mem: "0", command: "sceneworks-api." });
+  assert.equal(rows[1].sm, "12");
+  assert.deepEqual(parsePmon(PMON(["    -     -      -      -      -      -      -      -      -      -    -"])), []);
+  assert.equal(parsePmon("garbage"), null);
+});
+
+test("co-tenant activity: a resident model that sits idle is fine; activity, a newcomer or blind pmon refuses", () => {
+  const resident = [24360];
+  const at = (row) => coTenantActivity(parsePmon(PMON([row])), resident);
+  assert.deepEqual(at("24360     C      0      0      -      -      -      -      -      -    sceneworks-api."), []);
+  assert.deepEqual(at("31337     C     97     40      -      -      -      -      -      -    memory-candle-a"), [], "our own adapter is not a co-tenant");
+  assert.deepEqual(at("11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"), [], "desktop composition is not judged");
+  assert.match(at("24360     C     35      8      -      -      -      -      -      -    sceneworks-api.")[0], /co-tenant 24360 .* was active during the capture \(sm 35%, mem 8%\)/);
+  assert.match(at("24360     C      -      -      -      -      -      -      -      -    sceneworks-api.")[0], /activity unreadable/);
+  assert.match(at("9001     C      0      0      -      -      -      -      -      -    python.exe")[0], /compute process 9001 \(python\.exe\) appeared during the capture/);
+  assert.match(coTenantActivity(null, resident)[0], /unreadable/);
+});
+
+test("co-tenant activity: the monitor polls for the whole capture and reports what it saw once stopped", async () => {
+  let calls = 0;
+  const runCommand = async (_command, argv) => {
+    assert.equal(argv[0], "pmon");
+    calls += 1;
+    return { stdout: PMON([`24360     C      ${calls === 2 ? 50 : 0}      0      -      -      -      -      -      -    sceneworks-api.`]) };
+  };
+  const monitor = monitorCoTenants("1", [24360], { runCommand, pollMs: 1 });
+  while (calls < 4) await new Promise((done) => setTimeout(done, 2));
+  const reasons = await monitor.stop();
+  assert.equal(reasons.length, 1, "a transient seen once is remembered after it ends");
+  assert.match(reasons[0], /sm 50%/);
+});
+
+test("co-tenant bracket: activity during the capture discards the attempt even when the windows match", async () => {
+  const { result, context, sampled } = await bracketedCapture([31_000, 31_000, 31_000, 31_000], [["co-tenant 24360 (sceneworks-api.) was active during the capture (sm 35%, mem 8%)"], []]);
+  assert.equal(result.status, "committed", result.reason);
+  assert.equal(sampled.length, 4, "the active attempt was retried");
+  assert.equal(context.state.commits.length, 1);
+  assert.match(await readFile(result.log, "utf8"), /attempt 1: .*MOVED: co-tenant 24360 .*active during the capture[\s\S]*attempt 2: .* held/);
+});
 
 test("co-tenant bracket: a capture during which the co-tenant moved is discarded and retried, then committed", async () => {
   const { result, context, sampled } = await bracketedCapture([31_000, 40_000, 40_000, 40_010]);
