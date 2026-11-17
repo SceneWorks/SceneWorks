@@ -1,5 +1,5 @@
-// PAT-8 before-side capture. Inputs and observations are checked in separately. Never regenerate
-// the old observations from a candidate registry or derive the old population from candidate ids.
+// Mounts a real studio screen against a projected catalog (normally `currentCandidate()`) with a
+// recording AppContext, so tests can drive actual handlers and inspect what a screen submits.
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { vi } from "vitest";
@@ -17,61 +17,13 @@ import { SimpleAudioStudio } from "../../simple/SimpleAudioStudio.jsx";
 import { SimpleSheet, SimpleSheetOptions } from "../../simple/SimpleSheet.jsx";
 import { SimpleUiContext } from "../../simple/SimpleUiContext.js";
 import { createStudioStateStore, loadSnapshotIntoStore, snapshotFromStore } from "../../simple/useStudioState.js";
-import { AUDIO_MODES, VIDEO_MODES, audioModelServesMode } from "../../modelEligibility.js";
 
-const imageModes = ["text_to_image", "edit_image", "character_image"];
 const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-// The pinned capture predates typed option feedback. Keep its old surface and
-// submission assertions exact while separate mounted tests assert this new message.
+// Typed option feedback is asserted by its own mounted tests, not by the observation helper.
 const oldSurfaceHint = (node) => !node.textContent.includes("[shared request validation]");
 const screens = { image: ImageStudio, video: VideoStudio, audio: AudioStudio, vector: VectorStudio,
   document: DocumentStudio, training: TrainingStudio, character: CharacterStudio,
   simpleImage: SimpleImageStudio, simpleVideo: SimpleVideoStudio, simpleAudio: SimpleAudioStudio };
-export const keyFor = (row) => `${row.platform}/${row.studio}/${row.model}/${row.mode}`;
-
-export function population(catalog) {
-  const rows = [];
-  const add = (platform, studio, model, mode) => rows.push({ platform, studio, model, mode });
-  for (const platform of Object.keys(catalog.platforms)) {
-    for (const model of catalog.models) {
-      const capabilities = model.capabilities ?? [];
-      if (model.type === "image") {
-        add(platform, "character", model.id, "test");
-        for (const mode of imageModes.filter((mode) => capabilities.includes(mode) || mode === "edit_image" && capabilities.includes("image_edit"))) {
-          add(platform, "image", model.id, mode);
-          if (mode !== "character_image") add(platform, "simpleImage", model.id, mode);
-        }
-        if (capabilities.includes("interleave")) add(platform, "document", model.id, "interleave");
-        if (model.ui?.viewAngles?.length) add(platform, "character", model.id, "angles");
-        if (model.ui?.poseLibrary) add(platform, "character", model.id, "poses");
-      }
-      if (model.type === "video") for (const mode of VIDEO_MODES.filter((mode) => capabilities.includes(mode))) {
-        add(platform, "video", model.id, mode);
-        if (["text_to_video", "image_to_video"].includes(mode)) add(platform, "simpleVideo", model.id, mode);
-      }
-      if (model.type === "audio") {
-        for (const mode of AUDIO_MODES.filter((mode) => audioModelServesMode(model, mode))) { add(platform, "audio", model.id, mode); if (mode !== "voiceclone") add(platform, "simpleAudio", model.id, mode); }
-        if (model.audio?.supportsSymbolicSong) add(platform, "audio", model.id, "song_lab");
-      }
-      if (model.type === "vector") { for (const mode of capabilities) add(platform, "vector", model.id, mode); add(platform, "vector", model.id, "create_from_prompt"); }
-    }
-    for (const target of catalog.trainingTargets.targets) add(platform, "training", target.id, target.kernel);
-  }
-  return rows.sort((a, b) => keyFor(a).localeCompare(keyFor(b)));
-}
-
-export function unionPopulation(oldRows, candidateRows) {
-  return [...new Map([...oldRows, ...candidateRows].map((row) => [keyFor(row), row])).values()];
-}
-export function requireOldPopulation(oldCatalog, candidateCatalog, oldRows = population(oldCatalog)) {
-  const ids = new Set(candidateCatalog.models.map((model) => model.id));
-  const missing = oldCatalog.models.filter((model) => !ids.has(model.id)).map((model) => model.id);
-  if (missing.length) throw new Error(`Old public catalog models missing from candidate: ${missing.join(", ")}`);
-  const candidates = new Set(population(candidateCatalog).map(keyFor));
-  const missingRows = oldRows.map(keyFor).filter((key) => !candidates.has(key));
-  if (missingRows.length) throw new Error(`Old public surfaces missing from candidate: ${missingRows.join(", ")}`);
-}
-
 export const reference = { id: "baseline-image", projectId: "baseline-project", type: "image", displayName: "Reference image", status: {}, width: 1024, height: 1024,
   file: { path: "assets/reference.png", mimeType: "image/png" } };
 const clip = { ...reference, id: "baseline-video", type: "video", file: { path: "assets/reference.mp4", mimeType: "video/mp4", duration: 6, fps: 25, width: 1024, height: 1024 } };
@@ -224,9 +176,8 @@ export async function mount(catalog, row, saved = {}, overrides = {}) {
 export async function observe(catalog, row) {
   const mounted = await mount(catalog, row);
   const { persistenceKey, calls, close, getPersisted } = mounted;
-  // The frozen training catalog describes the target configuration form. The new run/history
-  // chooser is covered by TrainingStudio.history tests and must not renumber these old controls.
-  // If the form disappears, observe the whole screen so the original contract still fails.
+  // Observe the training target configuration form; the run/history chooser has its own
+  // TrainingStudio.history tests. If the form disappears, observe the whole screen.
   const container = row.studio === "training"
     ? mounted.container.querySelector(".training-config-panel") ?? mounted.container
     : mounted.container;
