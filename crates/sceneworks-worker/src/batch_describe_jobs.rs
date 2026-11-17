@@ -138,6 +138,18 @@ impl DescribeModel {
         }
     }
 
+    /// The speculative option this model's describe and condense requests carry. The Qwen3.8
+    /// 27B asks for `auto`: its native MTP head runs, and the engine's monitor demotes it to plain
+    /// decoding when it measures slower (on CUDA the q8 tier keeps it — t=0.4 + JSON 50.4 vs 39.4
+    /// tok/s plain — and the q4 tier drops it under the JSON constraint). `None` keeps the
+    /// backend's default for the other describers.
+    pub(crate) fn speculative(self) -> Option<gen_core::core_llm::Speculative> {
+        match self {
+            Self::Qwen38 => Some(gen_core::core_llm::Speculative::Auto),
+            Self::VisionCaptioner | Self::JoyCaption => None,
+        }
+    }
+
     /// The name a failure message gives this model.
     pub(crate) fn display_name(self) -> &'static str {
         match self {
@@ -1055,11 +1067,45 @@ pub(crate) struct VisionCaptionerDescriber {
     pub(crate) job_id: String,
 }
 
+/// One `describe_generation_stats` event per generation: what the decode cost and which path it
+/// ran (speculative proposer and acceptance, CUDA-graph replays), so a slow batch can be read from
+/// the worker log rather than guessed at.
+#[cfg(native_lane)]
+fn emit_generation_stats(job_id: &str, phase: &str, output: &gen_core::core_llm::TextLlmOutput) {
+    let timings = output.timings.as_ref();
+    let decode_seconds = timings.map(|t| t.decode.as_secs_f64());
+    let generated = output.usage.generated_tokens;
+    let decode = output.decode.as_ref();
+    crate::emit_event(
+        "describe_generation_stats",
+        json!({
+            "jobId": job_id,
+            "phase": phase,
+            "promptTokens": output.usage.prompt_tokens,
+            "generatedTokens": generated,
+            "prefillSeconds": timings.map(|t| t.prefill.as_secs_f64()),
+            "decodeSeconds": decode_seconds,
+            "decodeTokensPerSecond": decode_seconds
+                .filter(|seconds| *seconds > 0.0)
+                .map(|seconds| f64::from(generated) / seconds),
+            "proposer": decode.map(|d| format!("{:?}", d.proposer)),
+            "draftTokens": decode.and_then(|d| d.draft_tokens),
+            "proposedTokens": decode.map(|d| d.proposed_tokens),
+            "acceptedTokens": decode.map(|d| d.accepted_tokens),
+            "targetForwards": decode.map(|d| d.target_forwards),
+            "sampler": decode.map(|d| d.sampler.clone()),
+            "cudaGraphsReplayed": decode.map(|d| d.cuda_graphs.replayed),
+            "cudaGraphsEager": decode.map(|d| d.cuda_graphs.eager),
+            "fallbacks": decode.map(|d| d.fallbacks.clone()).unwrap_or_default(),
+        }),
+    );
+}
+
 /// The refine-cache load a Vision Captioner-class describer makes for `weights_dir`: its spec and
 /// requirements, which together are the cache key. Shared with the 27B's memory check so that
 /// check asks the cache about exactly the model the describe call loads.
 #[cfg(native_lane)]
-fn vision_describer_load(
+pub(crate) fn vision_describer_load(
     weights_dir: &Path,
 ) -> (
     gen_core::core_llm::LoadSpec,
@@ -1112,6 +1158,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
+        let speculative = self.model.speculative();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
@@ -1152,6 +1199,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     constraint,
                     cancel,
                     thinking,
+                    speculative,
                     kv_compression,
                     ..Default::default()
                 };
@@ -1170,6 +1218,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     |output| output.kv_cache.as_ref(),
                 )
                 .emit(&job_id);
+                if let Ok(output) = &generation {
+                    emit_generation_stats(&job_id, "describe", output);
+                }
                 Ok(generation
                     .map(|output| output.text)
                     .map_err(|error| format!("{name} generation failed: {error}")))
@@ -1191,6 +1242,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
+        let speculative = self.model.speculative();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
@@ -1208,6 +1260,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     constraint: None,
                     cancel,
                     thinking: ThinkingMode::Disabled,
+                    speculative,
                     kv_compression,
                     ..Default::default()
                 };
@@ -1225,6 +1278,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     |output| output.kv_cache.as_ref(),
                 )
                 .emit(&job_id);
+                if let Ok(output) = &generation {
+                    emit_generation_stats(&job_id, "condense", output);
+                }
                 Ok(generation
                     .map(|output| CondenseReply {
                         generated_tokens: output.usage.generated_tokens as usize,
