@@ -96,6 +96,18 @@ adapter version is a **De-distill adapter** dropdown in the Advanced panel
 (`v1` — stable, smaller; `v2` — experimental, heavier de-distill), so you can A/B
 the two on the same dataset.
 
+The MiniMax-H3-Image presets (character, style and edit) likewise select the
+`ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter` de-distill adapter
+(`trainingAdapterVersion` `v1`, its only version). H3-Image is a 6-step distilled
+model: trained on the bare weights a LoRA un-distills it (blurry, ghosted
+samples), while trained against base + adapter (strength 1.0) it learns the
+subject and keeps the model's own sharpness. The adapter is applied only while
+training; previews and the saved LoRA run without it. Each adapter is bound to
+its own base, so selecting the Z-Image adapter on an H3-Image target (or the
+reverse) is refused at submit. The adapter is a Model Derivative of
+MiniMax-H3-Image under the MiniMax-H3-Image Community License, so — like the base
+model — the Models screen asks you to accept that licence before downloading it.
+
 ## Network type — LoRA vs LoKr
 
 Most targets train a standard **LoRA** (a low-rank `B·A` update). The
@@ -206,6 +218,10 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > training and ships only your LoRA, which inference applies to the plain distilled
 > model. Watch the worker `training_lora_weight_norm` event: a growing `loraBNorm`
 > across checkpoints confirms the adapter is learning.
+>
+> MiniMax-H3-Image is distilled the same way (six fixed noise levels), and the
+> worker applies the Fizgig de-distill adapter to it before training for the same
+> reason.
 
 > **LTX-2.3 video LoRA:** the stable `ltx_mlx_lora` kernel trains an LTX-2.3
 > *video* LoRA from the same still-image dataset, using native MLX on Apple
