@@ -6759,6 +6759,51 @@
       "overallAllocatorEnvelopeBytes": 67080552448
     },
     {
+      "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
+        "sha256": "c33fb8db33f41a9f46066725834fd36685b3d94ff58152cc0b9c175df429e574",
+        "recordId": "imc-dbc52c47956bb3134827",
+        "calibrationFingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+        "loaderClosureDigest": "d4cee148667f1381889de16d13d64e6893aec81729385c0941cd9879c6622299"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 40109080576,
+        "denoise": 21184380928,
+        "decode": 2630877184
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 40109080576,
+        "denoise": 21184380928,
+        "decode": 2630877184
+      },
+      "overallAllocatorEnvelopeBytes": 40109080576
+    },
+    {
       "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -12984,17 +13029,6 @@
       "route": "ltx_2_3",
       "backend": "mlx",
       "tier": "default",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:minimax_h3_image:candle:q4",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "candle",
-      "tier": "q4",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

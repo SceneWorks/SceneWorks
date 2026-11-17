@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b3b895a88fd3f3a8824832b1cb81ca50814b796598323f1c517b8b00e1369801",
+    "sceneWorksRevision": "source-tree:ee05939ead44da35261b156e27358b7fe339fa3b5717152f1186cdd191af28f3",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "654dd251a6701ea4cced7f4d27528adc1b971d7c592a8190682d9a81432e2d81"
+        "sha256": "476837189faac0a02652024f28093588a49353e7d6eafe88d4a1103b002a09a4"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -93,7 +93,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "5d5d35ca8cd5978b1566845ce91f58b795ace2c1ff9565a644ca4534d68f5c51"
+        "sha256": "5f8983b070c62636fb951fb3740bd8beae1329eac0dc06b9c8011877ae600972"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -154,10 +154,10 @@
       "video": 11
     },
     "cells": 11150,
-    "publishedCells": 3992,
-    "elidedCells": 7158,
+    "publishedCells": 3996,
+    "elidedCells": 7154,
     "elidedByState": {
-      "Implemented": 1634,
+      "Implemented": 1630,
       "Missing": 5524
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -190,9 +190,9 @@
         "reason": "a utility-modality entry with its own engine memory-strategy contract (a composed, resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video matrix universe by modality, and anchored — planned, armed and closed over on both lanes"
       }
     ],
-    "anchors": 260,
-    "analyticOnlyCells": 129,
-    "anchoredCells": 3992,
+    "anchors": 261,
+    "analyticOnlyCells": 128,
+    "anchoredCells": 3996,
     "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -7934,6 +7934,24 @@
         "fps": null
       },
       "source": "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 4
+    },
+    {
+      "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+      "modelId": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "minimax_h3_image",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sw-f363-candle/minimax-h3-image-q4-candle-evidence.json",
       "current": true,
       "currencyAttestation": null,
       "cells": 4
@@ -16624,12 +16642,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 12,
-      "published": 4,
-      "elided": 8,
+      "published": 8,
+      "elided": 4,
       "implemented": 12,
       "states": {
-        "Anchored": 4,
-        "Implemented": 8
+        "Anchored": 8,
+        "Implemented": 4
       }
     },
     {
@@ -147684,6 +147702,214 @@
       }
     },
     {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:lora:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:lora:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
+      "id": "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:resident",
+      "modelId": "minimax_h3_image",
+      "resolvedRoute": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "2048x2048",
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 7095,
+      "owningModelStory": 7100,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#minimax_h3_image:candle:q4:base:base:minimax-h3-image-candle-estimated-ladder-2026-11-10-v2:imc-dbc52c47956bb3134827"
+          }
+        ]
+      }
+    },
+    {
       "id": "qwen_image_2_1_turbo:qwen_image_2_1_turbo:candle:bf16:edit_image:lora:bounded_decode",
       "modelId": "qwen_image_2_1_turbo",
       "resolvedRoute": "qwen_image_2_1_turbo",
@@ -253729,7 +253955,11 @@
       "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:lora:resident",
       "minimax_h3_image:minimax_h3_image:candle:bf16:edit_image:none:resident",
       "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:lora:resident",
-      "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:resident"
+      "minimax_h3_image:minimax_h3_image:candle:bf16:text_to_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:edit_image:none:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:lora:resident",
+      "minimax_h3_image:minimax_h3_image:candle:q4:text_to_image:none:resident"
     ],
     "moss_image_base": [],
     "moss_image_sft": [],
