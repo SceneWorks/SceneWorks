@@ -685,6 +685,8 @@ pub(super) async fn generate_candle_pulid_stream(
             Ok((model, reference, plans, scorer, memory_context, requests))
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             drive_gen_items_scored(
                 tx.clone(),
                 work,

@@ -595,6 +595,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             Ok((model, reference, plans, scorer, memory_context, requests))
         },
         move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             // `IpAdapterFlux` renders through `&self` (the IP tokens live in a per-call injector, not on
             // the DiT), so — unlike the SDXL/Kolors lanes — the per-item closure needs no `mut model`.
             drive_gen_items_scored(

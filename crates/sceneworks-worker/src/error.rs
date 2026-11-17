@@ -7,14 +7,70 @@ thread_local! {
     static OWNER_PROCESS_POISONED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(native_lane, test))]
 pub(crate) fn owner_process_poisoned() -> bool {
     OWNER_PROCESS_POISONED.with(std::cell::Cell::get)
 }
 
-#[cfg(native_lane)]
+/// The one gate for worker-side device work that is not the job itself: cleanup, cache release,
+/// eviction drops and scope teardown. False while unwinding, once this thread classified a typed
+/// provider fault, or once the process is quarantined for one (latched on any thread). Every
+/// device-touching destructor or release the worker owns checks it; when it is false the object is
+/// forgotten instead and OS process retirement releases it.
 pub(crate) fn owner_device_cleanup_allowed() -> bool {
-    !std::thread::panicking() && !owner_process_poisoned()
+    if std::thread::panicking() || owner_process_poisoned() {
+        return false;
+    }
+    #[cfg(not(test))]
+    if !crate::mlx_worker_recovery::global().can_claim() {
+        return false;
+    }
+    true
+}
+
+/// A device-owning value (a loaded model) whose drop goes through [`release_or_forget`]. An
+/// uncached producer holds its model in one so a typed fault classified mid-run never lets the
+/// model's destructor touch the poisoned device on the way out.
+pub(crate) struct DeviceOwned<T>(Option<T>);
+
+impl<T> DeviceOwned<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(Some(value))
+    }
+}
+
+impl<T> std::ops::Deref for DeviceOwned<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0
+            .as_ref()
+            .expect("device-owned value is present until drop")
+    }
+}
+
+impl<T> std::ops::DerefMut for DeviceOwned<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0
+            .as_mut()
+            .expect("device-owned value is present until drop")
+    }
+}
+
+impl<T> Drop for DeviceOwned<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            release_or_forget(value);
+        }
+    }
+}
+
+/// Drop `value` when device cleanup is still allowed, otherwise forget it (see
+/// [`owner_device_cleanup_allowed`]).
+pub(crate) fn release_or_forget<T>(value: T) {
+    if owner_device_cleanup_allowed() {
+        drop(value);
+    } else {
+        std::mem::forget(value);
+    }
 }
 
 fn mark_owner_process_poisoned() {
@@ -208,15 +264,95 @@ pub(crate) fn process_fault<T>(result: &WorkerResult<T>) -> Option<WorkerError> 
 /// A provider error type that can carry a typed `ProcessPoisoned` and bridges it 1:1 into
 /// [`gen_core::Error`]. Exactly the three provider error contracts with that variant implement it,
 /// so [`generation_error`] / [`provider_error`] cannot be applied to an error that never carries it.
-pub(crate) trait ProviderError: Into<gen_core::Error> + std::fmt::Display {}
+pub(crate) trait ProviderError: Into<gen_core::Error> + std::fmt::Display {
+    fn is_process_poisoned(&self) -> bool;
+}
 
-impl ProviderError for gen_core::Error {}
+impl ProviderError for gen_core::Error {
+    fn is_process_poisoned(&self) -> bool {
+        matches!(self, Self::ProcessPoisoned(_))
+    }
+}
 
 #[cfg(target_os = "macos")]
-impl ProviderError for runtime_macos::media::Error {}
+impl ProviderError for runtime_macos::media::Error {
+    fn is_process_poisoned(&self) -> bool {
+        matches!(self, Self::ProcessPoisoned(_))
+    }
+}
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-impl ProviderError for runtime_cuda::media::CandleError {}
+impl ProviderError for runtime_cuda::media::CandleError {
+    fn is_process_poisoned(&self) -> bool {
+        matches!(self, Self::ProcessPoisoned(_))
+    }
+}
+
+/// THE precedence rule for a provider result and the result of its cleanup (a scope `finish`, a
+/// teardown): a typed `ProcessPoisoned` on either side wins over every other outcome; otherwise the
+/// primary error wins; otherwise the cleanup error fails an otherwise successful run.
+pub(crate) fn combine_provider_outcomes<T, E: ProviderError>(
+    primary: Result<T, E>,
+    cleanup: Result<(), E>,
+) -> Result<T, E> {
+    match (primary, cleanup) {
+        (Err(primary), _) if primary.is_process_poisoned() => Err(primary),
+        (_, Err(cleanup)) if cleanup.is_process_poisoned() => Err(cleanup),
+        (Err(primary), _) => Err(primary),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
+/// [`combine_provider_outcomes`] for worker results: a `ProcessPoisoned` on either side wins;
+/// two ordinary failures are merged by `both` (each site keeps its existing message shape).
+pub(crate) fn combine_outcomes<T>(
+    primary: WorkerResult<T>,
+    cleanup: WorkerResult<()>,
+    both: impl FnOnce(WorkerError, WorkerError) -> WorkerError,
+) -> WorkerResult<T> {
+    match (primary, cleanup) {
+        (Err(primary @ WorkerError::ProcessPoisoned(_)), _) => Err(primary),
+        (_, Err(cleanup @ WorkerError::ProcessPoisoned(_))) => Err(cleanup),
+        (Err(primary), Err(cleanup)) => Err(both(primary, cleanup)),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
+/// [`finish_scope`] on a path that is already leaving with its own outcome (a cancel or an
+/// ordinary failure): an ordinary cleanup error must not mask that outcome, but a typed
+/// `ProcessPoisoned` from the finish outranks it and is classified (and latched) here.
+pub(crate) fn finish_scope_after_failure<S, E: ProviderError>(
+    scope: S,
+    finish: impl FnOnce(&mut S) -> Result<(), E>,
+    context: &str,
+) -> WorkerResult<()> {
+    match finish_scope(scope, finish) {
+        Err(error) if error.is_process_poisoned() => Err(generation_error(context, error)),
+        _ => Ok(()),
+    }
+}
+
+/// Run a provider scope's terminal `finish` and dispose of the scope under the one rule: when the
+/// finish reports a typed `ProcessPoisoned`, or device cleanup is otherwise no longer allowed, the
+/// scope is forgotten rather than dropped — its destructor may submit more device work.
+pub(crate) fn finish_scope<S, E: ProviderError>(
+    mut scope: S,
+    finish: impl FnOnce(&mut S) -> Result<(), E>,
+) -> Result<(), E> {
+    let finished = finish(&mut scope);
+    if finished
+        .as_ref()
+        .is_err_and(ProviderError::is_process_poisoned)
+    {
+        std::mem::forget(scope);
+    } else {
+        release_or_forget(scope);
+    }
+    finished
+}
 
 /// Map a provider failure on a device path onto the worker's error classes. `E` is any provider
 /// error that bridges into [`gen_core::Error`] (`gen_core::Error` itself, `mlx_gen::Error`,
@@ -274,6 +410,129 @@ pub type WorkerResult<T> = Result<T, WorkerError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn poisoned(detail: &str) -> gen_core::Error {
+        gen_core::Error::ProcessPoisoned(detail.into())
+    }
+
+    /// The one precedence rule: poison on either side wins over every other outcome; otherwise the
+    /// primary error, then the cleanup error.
+    #[test]
+    fn a_poisoned_result_wins_every_combination() {
+        let ordinary = || gen_core::Error::Unsupported("ordinary".into());
+        let poison_cleanup = combine_provider_outcomes(Ok::<u8, _>(1), Err(poisoned("cleanup")));
+        assert!(
+            matches!(poison_cleanup, Err(gen_core::Error::ProcessPoisoned(ref d)) if d == "cleanup")
+        );
+        let poison_over_cancel = combine_provider_outcomes::<u8, _>(
+            Err(gen_core::Error::Canceled),
+            Err(poisoned("cleanup")),
+        );
+        assert!(matches!(
+            poison_over_cancel,
+            Err(gen_core::Error::ProcessPoisoned(_))
+        ));
+        let poison_over_error =
+            combine_provider_outcomes::<u8, _>(Err(ordinary()), Err(poisoned("cleanup")));
+        assert!(matches!(
+            poison_over_error,
+            Err(gen_core::Error::ProcessPoisoned(_))
+        ));
+        let primary_poison =
+            combine_provider_outcomes::<u8, _>(Err(poisoned("primary")), Err(ordinary()));
+        assert!(
+            matches!(primary_poison, Err(gen_core::Error::ProcessPoisoned(ref d)) if d == "primary")
+        );
+        let primary_error =
+            combine_provider_outcomes::<u8, _>(Err(ordinary()), Err(gen_core::Error::Canceled));
+        assert!(matches!(
+            primary_error,
+            Err(gen_core::Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            combine_provider_outcomes(Ok::<u8, _>(1), Err(ordinary())),
+            Err(gen_core::Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            combine_provider_outcomes(Ok::<u8, gen_core::Error>(1), Ok(())),
+            Ok(1)
+        ));
+
+        let merged = combine_outcomes::<u8>(
+            Err(WorkerError::Engine("primary".into())),
+            Err(WorkerError::Engine("index".into())),
+            |a, b| WorkerError::Engine(format!("{a}; {b}")),
+        );
+        assert!(
+            matches!(merged, Err(WorkerError::Engine(ref d)) if d.contains("primary") && d.contains("index"))
+        );
+        let poison_cleanup = combine_outcomes::<u8>(
+            Err(WorkerError::Engine("primary".into())),
+            Err(WorkerError::ProcessPoisoned("cleanup".into())),
+            |_, _| unreachable!("poison is never merged away"),
+        );
+        assert!(
+            matches!(poison_cleanup, Err(WorkerError::ProcessPoisoned(ref d)) if d == "cleanup")
+        );
+        let poison_primary = combine_outcomes::<u8>(
+            Err(WorkerError::ProcessPoisoned("primary".into())),
+            Err(WorkerError::Engine("index".into())),
+            |_, _| unreachable!("poison is never merged away"),
+        );
+        assert!(
+            matches!(poison_primary, Err(WorkerError::ProcessPoisoned(ref d)) if d == "primary")
+        );
+    }
+
+    struct DropCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A scope whose finish reports poison is forgotten; an ordinary one is dropped. A device-owned
+    /// value is dropped normally and forgotten once this thread classified a typed fault.
+    #[test]
+    fn poisoned_scopes_and_device_owners_are_forgotten_not_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        std::thread::spawn(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            drop(DeviceOwned::new(DropCount(Arc::clone(&drops))));
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "a healthy owner drops");
+            let drops = Arc::new(AtomicUsize::new(0));
+            let finished = finish_scope(DropCount(Arc::clone(&drops)), |_| {
+                Err::<(), _>(gen_core::Error::Unsupported("ordinary".into()))
+            });
+            assert!(finished.is_err());
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "an ordinary finish drops the scope");
+            let finished =
+                finish_scope(DropCount(Arc::clone(&drops)), |_| Err::<(), _>(poisoned("finish")));
+            assert!(matches!(finished, Err(gen_core::Error::ProcessPoisoned(_))));
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "a poisoned finish forgets the scope");
+            assert!(
+                finish_scope_after_failure(DropCount(Arc::clone(&drops)), |_| {
+                    Err::<(), _>(gen_core::Error::Unsupported("ordinary".into()))
+                }, "cleanup")
+                .is_ok(),
+                "an ordinary cleanup error never masks the outcome being reported"
+            );
+            assert!(matches!(
+                finish_scope_after_failure(DropCount(Arc::clone(&drops)), |_| Err::<(), _>(poisoned("late")), "cleanup"),
+                Err(WorkerError::ProcessPoisoned(ref d)) if d == "late"
+            ));
+            assert_eq!(drops.load(Ordering::SeqCst), 2);
+
+            let before = drops.load(Ordering::SeqCst);
+            // The `finish_scope_after_failure` above classified a typed fault on this thread.
+            assert!(owner_process_poisoned());
+            drop(DeviceOwned::new(DropCount(Arc::clone(&drops))));
+            assert_eq!(drops.load(Ordering::SeqCst), before, "a poisoned owner is forgotten");
+        })
+        .join()
+        .expect("fault thread");
+    }
 
     // Literal typed errors only: no runtime, source lookup, model or device work.
     #[test]

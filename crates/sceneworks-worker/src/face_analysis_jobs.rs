@@ -76,7 +76,8 @@ enum CatalogFaceBackend {
 /// Loaded SCRFD stack reused across every record in one catalog-analysis pass.
 #[cfg(native_lane)]
 pub(crate) struct CatalogFaceDetector {
-    backend: CatalogFaceBackend,
+    // Dropped through the device-cleanup gate: never freed against a poisoned device.
+    backend: crate::DeviceOwned<CatalogFaceBackend>,
 }
 
 #[cfg(native_lane)]
@@ -95,7 +96,7 @@ impl CatalogFaceDetector {
             let analysis = FaceAnalysis::load(&scrfd, &arcface)
                 .map_err(|error| crate::generation_error("face stack load", error))?;
             Ok(Self {
-                backend: CatalogFaceBackend::Mlx(analysis),
+                backend: crate::DeviceOwned::new(CatalogFaceBackend::Mlx(analysis)),
             })
         }
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -103,7 +104,7 @@ impl CatalogFaceDetector {
             let analysis = runtime_cuda::providers::face::load(weights_dir)
                 .map_err(|error| crate::generation_error("face stack load", error))?;
             Ok(Self {
-                backend: CatalogFaceBackend::Candle(Box::new(analysis)),
+                backend: crate::DeviceOwned::new(CatalogFaceBackend::Candle(Box::new(analysis))),
             })
         }
     }
@@ -113,7 +114,7 @@ impl CatalogFaceDetector {
         image_path: &Path,
     ) -> WorkerResult<(u32, u32, Vec<CatalogFaceDetection>)> {
         let image = load_face_image(image_path)?;
-        let detections = match &self.backend {
+        let detections = match &*self.backend {
             #[cfg(target_os = "macos")]
             CatalogFaceBackend::Mlx(analysis) => {
                 let (height, width) = (image.height as usize, image.width as usize);
@@ -226,6 +227,8 @@ fn analyze_faces(
     .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
     let analysis = FaceAnalysis::load(&scrfd, &arcface)
         .map_err(|error| crate::generation_error("face stack load", error))?;
+    // A typed fault classified mid-run must not let this destructor touch the device.
+    let analysis = crate::DeviceOwned::new(analysis);
     embed_largest_faces(
         &items,
         |image| largest_face_mlx(&analysis, image),
@@ -245,9 +248,11 @@ fn analyze_faces(
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
     let analysis = runtime_cuda::providers::face::load(&weights_dir)
         .map_err(|error| crate::generation_error("face stack load", error))?;
+    // A typed fault classified mid-run must not let this destructor touch the device.
+    let analysis = crate::DeviceOwned::new(analysis);
     embed_largest_faces(
         &items,
-        |image| largest_face_candle(&analysis, image),
+        |image| largest_face_candle(&*analysis, image),
         &cancel,
         &tx,
     )

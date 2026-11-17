@@ -1187,6 +1187,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,

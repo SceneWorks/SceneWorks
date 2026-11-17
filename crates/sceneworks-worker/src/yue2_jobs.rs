@@ -1156,6 +1156,8 @@ async fn generate(
             crate::yue2_transcription::require_unloaded(live_at_load)?;
             let generator = load_generator(contract::MODEL_ID, &load)
                 .map_err(|error| classify("YuE2 model load failed", error))?;
+            // A typed fault classified mid-run must not let this destructor touch the device.
+            let generator = crate::DeviceOwned::new(generator);
             if cancel.is_cancelled() {
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }

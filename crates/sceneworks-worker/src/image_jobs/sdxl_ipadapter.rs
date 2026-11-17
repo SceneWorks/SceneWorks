@@ -501,6 +501,8 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             Ok((model, reference, scorer))
         },
         move |(model, reference, scorer), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             // `IpAdapterSdxl::generate` takes `&mut self` (it sets the IP image tokens on the UNet before
             // the denoise), so the per-item closure mutates `model`.
             let mut model = model;

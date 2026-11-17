@@ -720,6 +720,8 @@ pub(super) async fn generate_sdxl_control_stream(
                 .map_err(|error| crate::generation_error("SDXL pose-control load failed", error))
         },
         move |generator, tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let generator = crate::DeviceOwned::new(generator);
             drive_gen_items(
                 tx.clone(),
                 poses,

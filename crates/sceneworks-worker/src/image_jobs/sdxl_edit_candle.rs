@@ -430,6 +430,8 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             Ok((model, gen_source, gen_mask))
         },
         move |(model, source, mask), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             drive_gen_items(
                 tx.clone(),
                 work,

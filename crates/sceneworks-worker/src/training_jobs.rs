@@ -959,12 +959,11 @@ pub(crate) fn finish_prepared_input_operation<T>(
     operation: WorkerResult<T>,
     prepared_inputs: PreparedTrainingInputs,
 ) -> WorkerResult<T> {
-    match (operation, prepared_inputs.close()) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(cleanup)) => Err(cleanup),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup)) => Err(training_error_with_prepared_cleanup(error, cleanup)),
-    }
+    crate::combine_outcomes(
+        operation,
+        prepared_inputs.close(),
+        training_error_with_prepared_cleanup,
+    )
 }
 
 /// A fully mapped, weights-free training request. Both dry-run and real execution obtain this from
@@ -3568,9 +3567,12 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
             observe_request(&request);
             let spec = load_inputs.load_spec(engine_id, &request.config.train_dtype);
             let operation = (|| {
-                let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
-                    crate::generation_error(&format!("{engine_id} trainer load failed"), error)
-                })?;
+                // A typed fault classified mid-run must not let the trainer's destructor touch the
+                // poisoned device when this closure drops it.
+                let mut trainer =
+                    crate::DeviceOwned::new(load_trainer(engine_id, &spec).map_err(|error| {
+                        crate::generation_error(&format!("{engine_id} trainer load failed"), error)
+                    })?);
                 trainer
                     .validate(&request)
                     .map_err(|error| trainer_validate_error(engine_id, error))?;

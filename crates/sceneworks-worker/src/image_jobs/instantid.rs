@@ -1713,6 +1713,8 @@ pub(super) async fn generate_instantid_stream(
             Ok((model, reference, restore_embedding, scorer))
         },
         move |(model, reference, restore_embedding, scorer), tx, cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let facts_tx = tx.clone();
             // The candle `generate*` / `restore_face` take `&mut self` (each call sets the face IP
             // tokens on the UNet before the denoise), so the per-item closure mutates `model`; the MLX
@@ -1762,7 +1764,7 @@ pub(super) async fn generate_instantid_stream(
                     // for. `begin_memory_request` re-checks the route/composition and the request's
                     // own geometry + PiD route against the admitted context, so a request that
                     // crossed its admission fails here rather than allocating.
-                    let mut scope = model
+                    let scope = model
                         .begin_memory_request(&memory_context, &memory_identity, &req, memory_route)
                         .map_err(|error| {
                             crate::provider_error(error, |error| {
@@ -1815,14 +1817,24 @@ pub(super) async fn generate_instantid_stream(
                             ));
                         }
                         Err(_) if cancel.is_cancelled() => {
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| scope.finish(gen_core::MemoryRunOutcome::Canceled),
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Ok(None);
                         }
                         Err(error) => {
                             let message = format!("InstantID generation failed: {error}");
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                message: message.clone(),
-                            });
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| {
+                                    scope.finish(gen_core::MemoryRunOutcome::Error {
+                                        message: message.clone(),
+                                    })
+                                },
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Err(WorkerError::Engine(message));
                         }
                     };
@@ -1831,9 +1843,15 @@ pub(super) async fn generate_instantid_stream(
                             images.remove(0)
                         }
                         _ => {
-                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                message: "InstantID returned an incomplete image".into(),
-                            });
+                            crate::finish_scope_after_failure(
+                                scope,
+                                |scope| {
+                                    scope.finish(gen_core::MemoryRunOutcome::Error {
+                                        message: "InstantID returned an incomplete image".into(),
+                                    })
+                                },
+                                "InstantID memory scope cleanup failed",
+                            )?;
                             return Err(WorkerError::Engine(
                                 "InstantID returned an incomplete image".into(),
                             ));
@@ -1883,14 +1901,24 @@ pub(super) async fn generate_instantid_stream(
                                 ));
                             }
                             Err(_) if cancel.is_cancelled() => {
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| scope.finish(gen_core::MemoryRunOutcome::Canceled),
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Ok(None);
                             }
                             Err(error) => {
                                 let message = format!("InstantID face-restore failed: {error}");
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
-                                    message: message.clone(),
-                                });
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| {
+                                        scope.finish(gen_core::MemoryRunOutcome::Error {
+                                            message: message.clone(),
+                                        })
+                                    },
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Err(WorkerError::InvalidPayload(message));
                             }
                         };
@@ -1899,10 +1927,16 @@ pub(super) async fn generate_instantid_stream(
                                 images.remove(0)
                             }
                             _ => {
-                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                crate::finish_scope_after_failure(
+                                    scope,
+                                    |scope| {
+                                        scope.finish(gen_core::MemoryRunOutcome::Error {
                                     message: "InstantID face-restore returned an incomplete image"
                                         .into(),
-                                });
+                                })
+                                    },
+                                    "InstantID memory scope cleanup failed",
+                                )?;
                                 return Err(WorkerError::Engine(
                                     "InstantID face-restore returned an incomplete image".into(),
                                 ));
@@ -1925,12 +1959,12 @@ pub(super) async fn generate_instantid_stream(
                     // (synchronize + release the request-local allocations) and drop it, so the next
                     // item begins from a released state. A cleanup failure fails the job — it means
                     // the release the admission promised did not happen.
-                    scope
-                        .finish(gen_core::MemoryRunOutcome::Complete)
-                        .map_err(|error| {
-                            crate::generation_error("InstantID memory scope cleanup failed", error)
-                        })?;
-                    drop(scope);
+                    crate::finish_scope(scope, |scope| {
+                        scope.finish(gen_core::MemoryRunOutcome::Complete)
+                    })
+                    .map_err(|error| {
+                        crate::generation_error("InstantID memory scope cleanup failed", error)
+                    })?;
                     let execution = if execution_stages.is_empty() {
                         base_execution
                     } else {

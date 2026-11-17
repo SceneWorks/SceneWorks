@@ -407,6 +407,8 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
         ),
               tx,
               cancel| {
+            // A typed fault classified mid-run must not let the model destructor touch the device.
+            let model = crate::DeviceOwned::new(model);
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();

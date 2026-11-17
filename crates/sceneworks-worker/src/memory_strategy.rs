@@ -389,17 +389,19 @@ fn run_with_scope<T>(
     }
     if let Some(scope_ref) = scope.as_mut() {
         if let Err(error) = scope_ref.configure_request(request) {
+            let scope = scope.take().expect("scope present");
             if matches!(error, gen_core::Error::ProcessPoisoned(_)) {
                 // The provider has declared this process unsafe. Even Drop may submit backend
                 // work, so leave the scope to OS process retirement and keep its first error.
-                std::mem::forget(scope.take());
+                std::mem::forget(scope);
                 return Err(error);
             }
             let message = error.to_string();
-            let _ = scope_ref.finish(gen_core::MemoryRunOutcome::Error {
-                message: message.clone(),
+            let finished = crate::finish_scope(scope, |scope| {
+                scope.finish(gen_core::MemoryRunOutcome::Error { message })
             });
-            return Err(error);
+            // A poisoned finish outranks the configuration error it was cleaning up after.
+            return crate::combine_provider_outcomes(Err(error), finished);
         }
         // `configure_request` REPLACED `request.memory` (with `None` on a Resident selection), so
         // every execution domain planned above is gone — the admitted prefix-KV-cache selection
@@ -440,7 +442,7 @@ fn run_with_scope<T>(
         std::mem::forget(scope.take());
         return result;
     }
-    if let Some(scope) = scope.as_mut() {
+    if let Some(scope) = scope.take() {
         let outcome = match &result {
             Ok(_) => gen_core::MemoryRunOutcome::Complete,
             Err(gen_core::Error::Canceled) => gen_core::MemoryRunOutcome::Canceled,
@@ -448,11 +450,10 @@ fn run_with_scope<T>(
                 message: error.to_string(),
             },
         };
-        if let Err(finish_error) = scope.finish(outcome) {
-            if result.is_ok() {
-                return Err(finish_error);
-            }
-        }
+        // A poisoned finish outranks every earlier outcome (a completed or canceled run included)
+        // and its scope is forgotten, never dropped.
+        let finished = crate::finish_scope(scope, |scope| scope.finish(outcome));
+        return crate::combine_provider_outcomes(result, finished);
     }
     result
 }
@@ -2356,6 +2357,7 @@ mod tests {
     struct MockScope {
         record: Arc<Mutex<LifecycleRecord>>,
         configure_fails: bool,
+        finish_poisons: bool,
     }
 
     impl Drop for MockScope {
@@ -2414,6 +2416,11 @@ mod tests {
 
         fn finish(&mut self, outcome: MemoryRunOutcome) -> gen_core::Result<()> {
             self.record.lock().unwrap().finish_calls.push(outcome);
+            if self.finish_poisons {
+                return Err(gen_core::Error::ProcessPoisoned(
+                    "finish device fault".into(),
+                ));
+            }
             Ok(())
         }
     }
@@ -2424,6 +2431,7 @@ mod tests {
         record: Arc<Mutex<LifecycleRecord>>,
         generate: MockGenerate,
         configure_fails: bool,
+        finish_poisons: bool,
     }
 
     impl MockGenerator {
@@ -2444,6 +2452,7 @@ mod tests {
                 record: Default::default(),
                 generate,
                 configure_fails,
+                finish_poisons: false,
             }
         }
     }
@@ -2464,6 +2473,7 @@ mod tests {
             Ok(Some(Box::new(MockScope {
                 record: Arc::clone(&self.record),
                 configure_fails: self.configure_fails,
+                finish_poisons: self.finish_poisons,
             })))
         }
 
@@ -2614,6 +2624,45 @@ mod tests {
             vec![(true, MemoryPhase::Denoise), (false, MemoryPhase::Denoise)]
         );
         assert_eq!(record.finish_calls, vec![MemoryRunOutcome::Complete]);
+    }
+
+    /// Codex P1 (round 5) on PR #3434: a poisoned `finish` outranks every earlier outcome — a
+    /// completed, canceled or ordinarily failed run, or a configuration failure — and the scope is
+    /// forgotten, never dropped (its destructor may submit more device work).
+    #[test]
+    fn a_poisoned_finish_outranks_every_outcome_and_forgets_the_scope() {
+        for (generate, configure_fails, expected_finish) in [
+            (MockGenerate::Complete, false, MemoryRunOutcome::Complete),
+            (MockGenerate::Canceled, false, MemoryRunOutcome::Canceled),
+            (
+                MockGenerate::Error,
+                false,
+                MemoryRunOutcome::Error {
+                    message: "unsupported: render failed".into(),
+                },
+            ),
+            (
+                MockGenerate::Complete,
+                true,
+                MemoryRunOutcome::Error {
+                    message: "unsupported: configure failed".into(),
+                },
+            ),
+        ] {
+            let mut generator = MockGenerator::new(generate, configure_fails);
+            generator.finish_poisons = true;
+            let mut request = gen_core::GenerationRequest::default();
+            let error =
+                generate_with_scope(&generator, &mut request, Some(&run_context()), &mut |_| {})
+                    .expect_err("a poisoned finish fails the run");
+            assert!(
+                matches!(error, gen_core::Error::ProcessPoisoned(ref detail) if detail == "finish device fault"),
+                "{error:?}"
+            );
+            let record = generator.record.lock().unwrap();
+            assert_eq!(record.finish_calls, vec![expected_finish]);
+            assert_eq!(record.drop_calls, 0, "a poisoned scope is forgotten");
+        }
     }
 
     #[test]

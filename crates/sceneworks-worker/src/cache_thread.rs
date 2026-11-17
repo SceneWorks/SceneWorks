@@ -215,7 +215,19 @@ where
     /// Drop the resident model so the next job reloads from scratch. Returns the evicted key (for the
     /// idle-eviction log), or `None` when nothing was resident.
     pub(crate) fn evict(&mut self) -> Option<K> {
-        self.entry.take().map(|entry| entry.key)
+        self.entry.take().map(|Entry { key, model }| {
+            crate::release_or_forget(model);
+            key
+        })
+    }
+
+    /// Drop the resident entry (if any) under the device-cleanup gate: once a typed fault was
+    /// classified on this thread or the process is quarantined, a model destructor may submit to a
+    /// poisoned device, so the entry is forgotten instead.
+    fn discard_entry(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            crate::release_or_forget(entry);
+        }
     }
 
     /// The resident model, if any (read-only; the YuE2 admission reads what it would free).
@@ -290,7 +302,7 @@ where
             CacheAccess::Warm
         } else {
             cold_admission(self.entry.as_ref().map(|entry| (&entry.key, &entry.model)))?;
-            self.entry = None;
+            self.discard_entry();
             if self.evict_before_load {
                 release_backend_cache_after_evict();
             }
@@ -334,7 +346,7 @@ where
             // driver. Admission therefore samples the real post-evict budget, without guessing at
             // reclaimable bytes. A rejection deliberately leaves the single slot cold.
             cancel_check()?;
-            self.entry = None;
+            self.discard_entry();
             if self.evict_before_load {
                 release_backend_cache_after_evict();
             }
@@ -347,7 +359,7 @@ where
             // that orphaned result into a warm resident: drop it locally, release any backend
             // cache made reclaimable by the drop, and leave the single slot cold.
             if let Err(error) = cancel_check() {
-                drop(model);
+                crate::release_or_forget(model);
                 release_backend_cache_after_evict();
                 return Err(error);
             }
@@ -362,11 +374,9 @@ where
         // with a cold model's installation, remove that newly loaded resident; a canceled warm
         // request must not evict the useful model it found.
         if let Err(error) = cancel_check() {
-            if access == CacheAccess::Cold {
-                if let Some(entry) = self.entry.take() {
-                    drop(entry);
-                    release_backend_cache_after_evict();
-                }
+            if access == CacheAccess::Cold && self.entry.is_some() {
+                self.discard_entry();
+                release_backend_cache_after_evict();
             }
             return Err(error);
         }
@@ -489,9 +499,10 @@ pub(crate) fn run_cache_worker_with_panic_policy<K, M>(
                 release_backend_cache_after_evict();
             }
         }
-        if cache.poisoned {
-            // A backend destructor may itself submit to the poisoned device. Abandon this process's
-            // resident object; OS process retirement releases it without another GPU operation.
+        if cache.poisoned || !crate::owner_device_cleanup_allowed() {
+            // A backend destructor may itself submit to the poisoned device — this owner's, or one
+            // another thread already quarantined the process for. Abandon this process's resident
+            // object; OS process retirement releases it without another GPU operation.
             std::mem::forget(cache);
             break;
         }
@@ -745,7 +756,10 @@ pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn release_backend_cache_after_evict() {
-    mlx_rs::memory::clear_cache();
+    // No allocator call against a device a typed fault has poisoned.
+    if crate::owner_device_cleanup_allowed() {
+        mlx_rs::memory::clear_cache();
+    }
 }
 
 /// Off-Mac (candle/CUDA) this is intentionally a no-op (epic 10765, sc-10766). candle's CUDA backend
@@ -775,6 +789,42 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Eviction is device work: once a typed fault was classified on the owner thread, the evicted
+    /// model and any cold-miss replacement are forgotten instead of dropped.
+    #[test]
+    fn eviction_after_a_classified_fault_forgets_the_resident_model() {
+        thread::spawn(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mut cache = CacheThread::<u32, DropProbe>::new(false);
+            let loaded = Arc::clone(&drops);
+            cache
+                .with_model(1, move || Ok(DropProbe(loaded)), |_| Ok(()), "missing")
+                .unwrap();
+            let loaded = Arc::clone(&drops);
+            cache
+                .with_model(2, move || Ok(DropProbe(loaded)), |_| Ok(()), "missing")
+                .unwrap();
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "a healthy cold miss drops the old model"
+            );
+
+            let _ = crate::classify_engine_error(
+                "generation failed",
+                gen_core::Error::ProcessPoisoned("owner device lost".into()),
+            );
+            assert_eq!(cache.evict(), Some(2));
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "a poisoned owner forgets on evict"
+            );
+        })
+        .join()
+        .expect("owner thread");
     }
 
     const TEST_SEAM_MESSAGES: SeamMessages = SeamMessages {

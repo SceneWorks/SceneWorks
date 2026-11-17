@@ -41,7 +41,11 @@ const CLEAR_INTERVAL_EVENTS: u32 = 16;
 /// Metal, and every test of this module injects its own clear through [`DecodeCacheBound::new`].
 #[cfg(all(target_os = "macos", not(test)))]
 fn clear_mlx_buffer_cache() {
-    mlx_rs::memory::clear_cache();
+    // The terminal clear runs from `Drop`, including after a decode that failed with a typed
+    // fault: never touch a poisoned device.
+    if crate::owner_device_cleanup_allowed() {
+        mlx_rs::memory::clear_cache();
+    }
 }
 
 /// Off-Mac (and under test) there is no MLX allocator to bound, so the whole policy is inert and the

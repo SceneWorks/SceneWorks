@@ -56,7 +56,9 @@ const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
 
 #[cfg(all(target_os = "macos", not(test)))]
 fn capture_backend_committed_bytes() -> WorkerResult<u64> {
-    mlx_rs::memory::clear_cache();
+    if crate::owner_device_cleanup_allowed() {
+        mlx_rs::memory::clear_cache();
+    }
     Ok(mlx_rs::memory::get_active_memory() as u64)
 }
 

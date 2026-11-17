@@ -401,13 +401,13 @@ fn reconcile_semantics_blocking(
         catalog_id,
         metadata.as_ref().ok().map(|_| cancel),
     );
-    match (metadata, index) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+    // A poisoned result on either side outranks the other; two ordinary failures are reported
+    // together as before.
+    crate::combine_outcomes(metadata, index, |primary, index| {
+        WorkerError::Engine(format!(
             "{primary}; embedding index reconciliation also failed: {index}"
-        ))),
-    }
+        ))
+    })
 }
 
 fn reconcile_semantic_records(
@@ -1106,13 +1106,13 @@ fn finish_with_index_reconciliation<T>(
     catalog_id: &str,
 ) -> WorkerResult<T> {
     let index = rebuild_embedding_index_streaming(registry, catalog_id, None);
-    match (primary, index) {
-        (Ok(counts), Ok(())) => Ok(counts),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(primary), Err(index)) => Err(WorkerError::Engine(format!(
+    // A poisoned result on either side outranks the other; two ordinary failures are reported
+    // together as before.
+    crate::combine_outcomes(primary, index, |primary, index| {
+        WorkerError::Engine(format!(
             "{primary}; embedding index reconciliation also failed: {index}"
-        ))),
-    }
+        ))
+    })
 }
 
 fn persist_embedding_failure(
