@@ -30,6 +30,7 @@ use super::AdapterSpec;
 use super::CancelFlag;
 use super::Conditioning;
 use super::ControlKind;
+#[cfg(test)]
 use super::GenerationOutput;
 use super::GenerationRequest;
 use super::Generator;
@@ -50,6 +51,7 @@ use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+use gen_core::generator::ExecutionIdentity;
 use serde_json::json;
 // ---------------------------------------------------------------------------
 // FLUX.1-dev strict-control Fun-Controlnet-Union (macOS, sc-8244; engine E2 sc-8239):
@@ -236,35 +238,23 @@ fn flux1_control_request(
 }
 
 /// Render one FLUX.1-dev strict-control image from the request [`flux1_control_request`] built and
-/// the render plan compiled for it before load (SW-6936), inside the admitted memory scope.
+/// the render plan compiled for it before load (SW-6936), inside the admitted memory scope. Returns
+/// the image with the provider's execution identity for this same attempt.
 pub(super) fn flux1_control_generate_one(
     generator: &dyn Generator,
     mut request: GenerationRequest,
     plan: &gen_core::RenderPlan,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let report = crate::memory_strategy::generate_with_scope_report_planned(
+) -> WorkerResult<(Image, ExecutionIdentity)> {
+    super::render::generate_planned_single_image(
         generator,
         &mut request,
         plan,
         memory_evaluation.map(|evaluation| &evaluation.context),
+        "FLUX.1-dev control",
         on_progress,
     )
-    .map_err(|error| {
-        WorkerError::Engine(format!("FLUX.1-dev control generation failed: {error}"))
-    })?;
-    match report.output {
-        Some(GenerationOutput::Images(mut images)) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::Engine("FLUX.1-dev control generator produced no image".to_owned())
-            })?;
-            Ok((image.width, image.height, image.pixels))
-        }
-        _ => Err(WorkerError::Engine(
-            "FLUX.1-dev control generator returned non-image output".to_owned(),
-        )),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -387,7 +377,8 @@ pub(super) fn flux1_control_render_for_test(
         spec,
         &request,
     )?;
-    flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})
+    let (image, _) = flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})?;
+    Ok((image.width, image.height, image.pixels))
 }
 
 /// Real FLUX.1-dev strict-control generation: one image per pose, each conditioned on the requested
@@ -641,10 +632,11 @@ pub(super) async fn generate_flux1_dev_control_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let report_tx = tx.clone();
             drive_gen_items_scored(
                 tx,
                 planned_poses,
-                move |_index, (conditioning, render_plan), preview, on_progress| {
+                move |index, (conditioning, render_plan), preview, on_progress| {
                     let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                         generator,
                         &memory_plan,
@@ -671,13 +663,17 @@ pub(super) async fn generate_flux1_dev_control_stream(
                         preview,
                         &cancel,
                     );
-                    let (out_w, out_h, pixels) = flux1_control_generate_one(
+                    let (image, execution) = flux1_control_generate_one(
                         generator,
                         request,
                         &render_plan,
                         Some(&memory_evaluation),
                         on_progress,
                     )?;
+                    if !super::render::send_execution_report(&report_tx, index, execution)? {
+                        return Ok(None);
+                    }
+                    let (out_w, out_h, pixels) = (image.width, image.height, image.pixels);
                     // Score this finished pose against the cached source embedding (sc-4410). The strict-
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
                     // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose

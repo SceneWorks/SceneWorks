@@ -23,7 +23,6 @@ use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
 use super::uses_standard_tier_layout;
 use super::CancelFlag;
 use super::Conditioning;
-use super::GenerationOutput;
 use super::GenerationRequest;
 use super::IdentityWeights;
 use super::Image;
@@ -640,10 +639,11 @@ pub(super) async fn generate_pulid_flux_stream(
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             let planned = seeds.into_iter().zip(render_plans);
+            let report_tx = tx.clone();
             drive_gen_items_scored(
                 tx,
                 planned,
-                move |_index, (seed, render_plan), preview, on_progress| {
+                move |index, (seed, render_plan), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -662,55 +662,43 @@ pub(super) async fn generate_pulid_flux_stream(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let mut req =
                         pulid_request(seed, Some(memory_evaluation.memory), preview, &cancel);
-                    let output = match crate::memory_strategy::generate_with_scope_report_planned(
+                    let (image, execution) = match super::render::generate_planned_single_image(
                         generator,
                         &mut req,
                         &render_plan,
                         Some(&memory_evaluation.context),
+                        "PuLID-FLUX",
                         on_progress,
                     ) {
-                        Ok(report) => report.output.ok_or_else(|| {
-                            WorkerError::Engine("PuLID-FLUX produced no output".to_owned())
-                        })?,
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "PuLID-FLUX generation failed: {error}"
-                            )))
-                        }
+                        Err(error) => return Err(error),
                     };
-                    match output {
-                        GenerationOutput::Images(mut images) => {
-                            let image = images.pop().ok_or_else(|| {
-                                WorkerError::Engine("PuLID-FLUX produced no image".to_owned())
-                            })?;
-                            // Score this finished image against the cached source embedding (sc-4411). The
-                            // Image build + pixel clone is paid ONLY when a scorer exists; a non-frontal /
-                            // no-face result records an honest detected:false N/A, `None` scorer ⇒ field
-                            // omitted.
-                            let face_likeness = scorer.as_ref().and_then(|scorer| {
-                                crate::face_likeness::score_generated_image(
-                                    Some(scorer),
-                                    &Image {
-                                        width: image.width,
-                                        height: image.height,
-                                        pixels: image.pixels.clone(),
-                                    },
-                                    Some(likeness_source_ref.as_str()),
-                                )
-                            });
-                            Ok(Some((
-                                seed,
-                                image.width,
-                                image.height,
-                                image.pixels,
-                                face_likeness,
-                            )))
-                        }
-                        _ => Err(WorkerError::Engine(
-                            "PuLID-FLUX returned non-image output".to_owned(),
-                        )),
+                    if !super::render::send_execution_report(&report_tx, index, execution)? {
+                        return Ok(None);
                     }
+                    // Score this finished image against the cached source embedding (sc-4411). The
+                    // Image build + pixel clone is paid ONLY when a scorer exists; a non-frontal /
+                    // no-face result records an honest detected:false N/A, `None` scorer ⇒ field
+                    // omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: image.width,
+                                height: image.height,
+                                pixels: image.pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((
+                        seed,
+                        image.width,
+                        image.height,
+                        image.pixels,
+                        face_likeness,
+                    )))
                 },
             )
         },

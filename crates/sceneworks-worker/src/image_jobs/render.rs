@@ -684,6 +684,52 @@ pub(super) fn compile_hires_render_plans(
     }
 }
 
+/// Render one image of a bespoke MLX FLUX.1 lane (ControlNet, PuLID) from its pre-load plan inside
+/// the admitted request scope, returning that image with the provider's same-attempt execution
+/// identity. A missing or extra image is an engine error, so an identity never attaches to the
+/// wrong output.
+#[cfg(target_os = "macos")]
+pub(super) fn generate_planned_single_image(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    context: Option<&gen_core::MemoryRunContext>,
+    lane: &str,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(Image, ExecutionIdentity)> {
+    let completed = crate::memory_strategy::generate_with_scope_execution_report_planned(
+        generator,
+        request,
+        plan,
+        context,
+        on_progress,
+    )
+    .map_err(|error| WorkerError::Engine(format!("{lane} generation failed: {error}")))?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+            Ok((images.remove(0), completed.execution))
+        }
+        _ => Err(WorkerError::Engine(format!(
+            "{lane} did not complete exactly one RGB image"
+        ))),
+    }
+}
+
+/// Publish one output's completed execution report as its `workerExecutionReport` image fact, the
+/// receipt slot `consume_gen_events` merges into that image. `false` means the consumer is gone.
+#[cfg(target_os = "macos")]
+pub(super) fn send_execution_report(
+    tx: &tokio::sync::mpsc::Sender<super::stream::GenEvent>,
+    index: usize,
+    execution: ExecutionIdentity,
+) -> WorkerResult<bool> {
+    let mut facts = crate::JsonObject::new();
+    WorkerExecutionReport::Provider(execution).insert_image_facts(&mut facts)?;
+    Ok(tx
+        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts })
+        .is_ok())
+}
+
 /// The refinement pass's reference must be exactly the image its plan declared it consumes.
 pub(super) fn check_produced_reference(
     plan: &gen_core::RenderPlan,
@@ -1313,8 +1359,9 @@ mod process_fault_tests {
         );
     }
 
-    /// A planned provider whose only render entry is the planned execution-report entry.
-    struct PlannedReporter(gen_core::ModelDescriptor);
+    /// A planned provider whose only render entry is the planned execution-report entry; it returns
+    /// `.1` images.
+    struct PlannedReporter(gen_core::ModelDescriptor, usize);
 
     impl Generator for PlannedReporter {
         fn descriptor(&self) -> &gen_core::ModelDescriptor {
@@ -1349,11 +1396,15 @@ mod process_fault_tests {
             _on_progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
             gen_core::generator::CompletedGeneration::new(
-                gen_core::GenerationReport::from_output(GenerationOutput::Images(vec![Image {
-                    width: request.width,
-                    height: request.height,
-                    pixels: vec![0; (request.width * request.height * 3) as usize],
-                }])),
+                gen_core::GenerationReport::from_output(GenerationOutput::Images(
+                    (0..self.1)
+                        .map(|_| Image {
+                            width: request.width,
+                            height: request.height,
+                            pixels: vec![0; (request.width * request.height * 3) as usize],
+                        })
+                        .collect(),
+                )),
                 ExecutionIdentity::Unavailable {
                     reason: ExecutionUnavailable {
                         code: "planned-attempt".into(),
@@ -1368,7 +1419,7 @@ mod process_fault_tests {
 
     #[test]
     fn planned_render_publishes_the_planned_attempts_execution_report() {
-        let generator = PlannedReporter(FaultGenerator::new(false).descriptor);
+        let generator = PlannedReporter(FaultGenerator::new(false).descriptor, 1);
         let request = gen_core::GenerationRequest {
             prompt: "a fox".into(),
             width: 64,
@@ -1430,6 +1481,111 @@ mod process_fault_tests {
         assert_eq!(images.len(), 1);
         let report = serde_json::to_value(sink.take().expect("planned execution report")).unwrap();
         assert_eq!(report["reason"]["code"], "planned-attempt");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_plan(
+        generator: &dyn Generator,
+        request: &GenerationRequest,
+    ) -> gen_core::RenderPlan {
+        gen_core::RenderPlan::base_image(
+            generator.descriptor(),
+            request,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.0],
+                executed_steps: 1,
+                capture_sigma: 0.0,
+            },
+        )
+        .expect("weights-free plan")
+    }
+
+    /// The MLX FLUX.1 ControlNet and PuLID lanes render through the planned report entry and
+    /// publish its identity as that output's `workerExecutionReport` image fact.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_publish_the_planned_attempts_report_as_an_image_fact() {
+        let generator = PlannedReporter(FaultGenerator::new(false).descriptor, 1);
+        let request = || gen_core::GenerationRequest {
+            prompt: "a fox".into(),
+            width: 64,
+            height: 64,
+            count: 1,
+            seed: Some(7),
+            steps: Some(1),
+            ..Default::default()
+        };
+        let plan = fixture_plan(&generator, &request());
+
+        // ControlNet: the lane's own render function.
+        let (image, execution) = super::super::flux1_control::flux1_control_generate_one(
+            &generator,
+            request(),
+            &plan,
+            None,
+            &mut |_| {},
+        )
+        .expect("planned control render");
+        assert_eq!((image.width, image.height), (64, 64));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        assert!(send_execution_report(&tx, 3, execution).unwrap());
+
+        // PuLID: the shared planned single-image render it calls.
+        let (_, execution) = generate_planned_single_image(
+            &generator,
+            &mut request(),
+            &plan,
+            None,
+            "PuLID-FLUX",
+            &mut |_| {},
+        )
+        .expect("planned PuLID render");
+        assert!(send_execution_report(&tx, 4, execution).unwrap());
+
+        for expected in [3, 4] {
+            match rx.try_recv().expect("image fact") {
+                super::super::stream::GenEvent::ImageFacts { index, facts } => {
+                    assert_eq!(index, expected);
+                    assert_eq!(
+                        facts["workerExecutionReport"]["reason"]["code"],
+                        "planned-attempt"
+                    );
+                }
+                _ => panic!("expected an ImageFacts event"),
+            }
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_refuse_a_missing_or_extra_image() {
+        for count in [0, 2] {
+            let generator = PlannedReporter(FaultGenerator::new(false).descriptor, count);
+            let mut request = gen_core::GenerationRequest {
+                prompt: "a fox".into(),
+                width: 64,
+                height: 64,
+                count: 1,
+                seed: Some(7),
+                steps: Some(1),
+                ..Default::default()
+            };
+            let plan = fixture_plan(&generator, &request);
+            assert!(generate_planned_single_image(
+                &generator,
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .is_err());
+        }
     }
 }
 
