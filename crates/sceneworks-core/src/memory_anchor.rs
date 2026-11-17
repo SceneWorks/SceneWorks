@@ -1472,6 +1472,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sw-f363-q8/minimax-h3-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sw-f363-q8/minimax-h3-image-q8-mlx-evidence.json"),
+    ),
+    (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
         include_str!("../../../docs/generated/krea-candle-five-rung-sc-11045.json"),
     ),

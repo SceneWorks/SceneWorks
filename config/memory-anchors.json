@@ -6714,6 +6714,52 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "minimax_h3_image:mlx:q8:base:base:minimax-h3-image-mlx-v1:imc-94104a22ab25bba46f2d",
+      "modelId": "minimax_h3_image",
+      "modelFamily": "minimax-h3-image",
+      "route": "minimax_h3_image",
+      "provider": "minimax_h3_image",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f363-q8/minimax-h3-image-q8-mlx-evidence.json",
+        "sha256": "a8a1bc6f18855184e8e242b29be53c04d94cad438c3092152921fef779d731a8",
+        "recordId": "imc-94104a22ab25bba46f2d",
+        "calibrationFingerprint": "minimax-h3-image-mlx-v1",
+        "loaderClosureDigest": "d1b2810121c4436e5799f938861c9f58c8e3dc1ff8665bab3122680ef76f6150"
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 27148944140,
+        "denoise": 22899279512,
+        "decode": 2056801520
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 28936060460,
+        "denoise": 22899279512,
+        "decode": 2056899824
+      },
+      "overallAllocatorEnvelopeBytes": 28936060460,
+      "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "qwen_image:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-42edaceeb6d5f29dc2ce",
       "modelId": "qwen_image",
       "modelFamily": "qwen-image",
@@ -12994,17 +13040,6 @@
       "route": "minimax_h3_image",
       "backend": "mlx",
       "tier": "q4",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:minimax_h3_image:mlx:q8",
-      "modelId": "minimax_h3_image",
-      "modelFamily": "minimax-h3-image",
-      "route": "minimax_h3_image",
-      "backend": "mlx",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
