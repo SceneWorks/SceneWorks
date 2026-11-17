@@ -630,11 +630,19 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                     };
                     let completed = match generated {
                         Ok(completed) => completed,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
+                            return Err(super::render::generation_error(
+                                "FLUX IP-Adapter generation failed",
+                                error,
+                            ));
+                        }
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "FLUX IP-Adapter generation failed: {error}"
-                            )));
+                            return Err(super::render::generation_error(
+                                "FLUX IP-Adapter generation failed",
+                                error,
+                            ));
                         }
                     };
                     let out = match completed.generation.output {

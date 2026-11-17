@@ -490,9 +490,7 @@ impl CandleStrictControl for Flux1StrictControl {
             None => model.generate_with_execution_report(&req, control, plan, on_progress),
         }
         .map_err(|error| {
-            WorkerError::Engine(format!(
-                "FLUX.1-dev strict-control generation failed: {error}"
-            ))
+            super::render::generation_error("FLUX.1-dev strict-control generation failed", error)
         })?;
         completed_control_image(completed)
     }

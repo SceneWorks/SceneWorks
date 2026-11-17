@@ -392,12 +392,7 @@ fn render_request_on_surface(
             ),
         }
     }
-    .map_err(|error| match error {
-        gen_core::Error::ProcessPoisoned(_) => {
-            crate::classify_engine_error("generation failed", error)
-        }
-        other => WorkerError::Engine(format!("generation failed: {other}")),
-    })?;
+    .map_err(|error| generation_error("generation failed", error))?;
     if let Some(sink) = surface.execution_report {
         *sink.borrow_mut() = Some(WorkerExecutionReport::Provider(report.execution));
     }
@@ -525,6 +520,18 @@ pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
     "flux1_dev_control",
     "pulid_flux",
 ];
+
+/// Map a provider's generation failure onto the worker's error classes. A poisoned process keeps its
+/// typed recovery class through [`crate::classify_engine_error`], which also marks owner cleanup
+/// unsafe on this thread; every other failure is an engine error under `context`. Every planned
+/// render path (generic, bespoke MLX FLUX.1, Candle control / IP-Adapter / PuLID) maps through
+/// here so none erases the fatal class before the cache boundary.
+pub(super) fn generation_error(context: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::ProcessPoisoned(_) => crate::classify_engine_error(context, error),
+        other => WorkerError::Engine(format!("{context}: {other}")),
+    }
+}
 
 /// Map a provider's pre-load plan refusal onto the worker's error classes: an invalid request is a
 /// payload error the user can act on, cancellation stays cancellation, and a poisoned process keeps its
@@ -704,7 +711,7 @@ pub(super) fn generate_planned_single_image(
         context,
         on_progress,
     )
-    .map_err(|error| WorkerError::Engine(format!("{lane} generation failed: {error}")))?;
+    .map_err(|error| generation_error(&format!("{lane} generation failed"), error))?;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
             Ok((images.remove(0), completed.execution))
@@ -1586,6 +1593,82 @@ mod process_fault_tests {
             )
             .is_err());
         }
+    }
+
+    /// Codex P1 on PR #3434: the bespoke MLX FLUX.1 ControlNet / PuLID planned render must keep a
+    /// provider's `ProcessPoisoned` class and mark owner cleanup unsafe, exactly as the generic
+    /// planned path does, instead of erasing it into an engine error.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_conditional_lanes_preserve_typed_provider_poison_and_mark_cleanup_unsafe() {
+        std::thread::spawn(|| {
+            let mut request = gen_core::GenerationRequest {
+                prompt: "a fox".into(),
+                width: 64,
+                height: 64,
+                count: 1,
+                seed: Some(7),
+                steps: Some(1),
+                ..Default::default()
+            };
+            let poison = FaultGenerator::new(true);
+            let plan = fixture_plan(&poison, &request);
+            let ordinary = generate_planned_single_image(
+                &FaultGenerator::new(false),
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .expect_err("ordinary refusal");
+            assert!(
+                matches!(ordinary, WorkerError::Engine(ref detail) if detail == "PuLID-FLUX generation failed: unsupported: ordinary refusal"),
+                "{ordinary:?}"
+            );
+            assert!(!crate::error::owner_process_poisoned());
+            let fatal = generate_planned_single_image(
+                &poison,
+                &mut request,
+                &plan,
+                None,
+                "PuLID-FLUX",
+                &mut |_| {},
+            )
+            .expect_err("provider fault must fail render");
+            assert!(
+                matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "first provider device fault"),
+                "{fatal:?}"
+            );
+            assert!(crate::error::owner_process_poisoned());
+        })
+        .join()
+        .expect("fault thread");
+    }
+
+    /// The shared mapping every Candle planned lane (strict control, IP-Adapter, PuLID) uses keeps
+    /// the fatal class and marks owner cleanup unsafe; ordinary failures stay engine errors.
+    #[test]
+    fn generation_error_preserves_process_poison_for_every_planned_lane() {
+        std::thread::spawn(|| {
+            let ordinary = generation_error(
+                "FLUX IP-Adapter generation failed",
+                gen_core::Error::Unsupported("ordinary refusal".into()),
+            );
+            assert!(
+                matches!(ordinary, WorkerError::Engine(ref detail) if detail == "FLUX IP-Adapter generation failed: unsupported: ordinary refusal"),
+                "{ordinary:?}"
+            );
+            assert!(!crate::error::owner_process_poisoned());
+            let fatal = generation_error(
+                "FLUX IP-Adapter generation failed",
+                gen_core::Error::ProcessPoisoned("device lost".into()),
+            );
+            assert!(matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "device lost"));
+            assert!(crate::error::owner_process_poisoned());
+        })
+        .join()
+        .expect("fault thread");
     }
 }
 

@@ -660,6 +660,29 @@ async fn handle_job_failure(
     message: &'static str,
     error: WorkerError,
 ) {
+    handle_job_failure_with(
+        mlx_worker_recovery::global(),
+        api,
+        settings,
+        job,
+        shutdown,
+        message,
+        error,
+    )
+    .await;
+}
+
+/// [`handle_job_failure`] against an injected recovery state, so lifecycle tests can model a
+/// poisoned process without quarantining the test binary's production singleton.
+async fn handle_job_failure_with(
+    recovery: &mlx_worker_recovery::MlxWorkerRecovery,
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    shutdown: &gen_core::CancelFlag,
+    message: &'static str,
+    error: WorkerError,
+) {
     let replay_active = EXACT_REPLAY_EXPECTED
         .try_with(|expected| expected.is_some())
         .unwrap_or(false);
@@ -682,22 +705,49 @@ async fn handle_job_failure(
     } else {
         None
     };
+    // Classify a fatal process fault before any terminal write, exact replay included: a
+    // quarantined process recycles only after its active job's failure is persisted.
+    let original_detail = error.to_string();
+    let recovery_detail = match &error {
+        WorkerError::Canceled(_) | WorkerError::Validation(_) => None,
+        WorkerError::ProcessPoisoned(_) => Some(recovery.observe_process_fault(&original_detail)),
+        _ if settings.gpu_id == "mlx" => recovery.observe(&original_detail),
+        _ => None,
+    };
+    if let Some(detail) = &recovery_detail {
+        emit_event_value(
+            Level::ERROR,
+            json!({
+                "event": if matches!(error, WorkerError::ProcessPoisoned(_)) {
+                    "native_owner_executor_worker_poisoned"
+                } else {
+                    "mlx_h3_i2v_worker_poisoned"
+                },
+                "workerId": settings.worker_id,
+                "gpuId": settings.gpu_id,
+                "jobId": job.id,
+                "originalError": original_detail,
+                "jobError": detail,
+            }),
+        );
+    }
     if let Some(reason) = replay_reason {
         let result = json!({"replayUnavailable": reason}).as_object().cloned();
-        let _ = update_job(
-            api,
-            &job.id,
-            progress_payload(
-                JobStatus::Failed,
-                ProgressStage::Failed,
-                1.0,
-                "Exact replay unavailable.",
-                Some("The recorded execution cannot be replayed exactly.".into()),
-                result,
-                None,
-            ),
-        )
-        .await;
+        let payload = progress_payload(
+            JobStatus::Failed,
+            ProgressStage::Failed,
+            1.0,
+            "Exact replay unavailable.",
+            Some("The recorded execution cannot be replayed exactly.".into()),
+            result,
+            None,
+        );
+        if recovery_detail.is_some() {
+            persist_poisoned_terminal_failure(recovery, api, settings, job, shutdown, payload)
+                .await;
+        } else {
+            let _ = update_job(api, &job.id, payload).await;
+        }
         tracing::error!(event = "exact_replay_unavailable", jobId = %job.id, reason = %reason.reason, cause = %error);
         return;
     }
@@ -721,91 +771,27 @@ async fn handle_job_failure(
             let _ = update_job(api, &job.id, payload).await;
         }
         error => {
-            let owner_process_fault = matches!(error, WorkerError::ProcessPoisoned(_));
             // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
             // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
             // already annotates the lanes that route through it (the reported krea_2_turbo path),
             // but ~35 other load seams build `WorkerError::Engine` directly — a host driver
             // problem hits all of them identically. Annotating here catches every one, and is a
             // no-op when the guidance is already present.
-            let original_detail = error.to_string();
-            let recovery_detail = if owner_process_fault {
-                Some(mlx_worker_recovery::global().observe_process_fault(&original_detail))
-            } else if settings.gpu_id == "mlx" {
-                mlx_worker_recovery::global().observe(&original_detail)
-            } else {
-                None
-            };
-            if let Some(detail) = &recovery_detail {
-                emit_event_value(
-                    Level::ERROR,
-                    json!({
-                        "event": if owner_process_fault {
-                            "native_owner_executor_worker_poisoned"
-                        } else {
-                            "mlx_h3_i2v_worker_poisoned"
-                        },
-                        "workerId": settings.worker_id,
-                        "gpuId": settings.gpu_id,
-                        "jobId": job.id,
-                        "originalError": original_detail,
-                        "jobError": detail,
-                    }),
-                );
-            }
             let poisoned = recovery_detail.is_some();
             let detail =
                 recovery_detail.unwrap_or_else(|| annotate_cuda_driver_failure(&original_detail));
             if poisoned {
-                // A clean child exit is not an abnormal death, so the supervisor deliberately
-                // will not invent a second terminal attribution for it. Persist the original
-                // timeout before arming that exit. Transport/API failures keep this process
-                // quarantined and retry without claiming; shutdown cancellation stops the
-                // retry and leaves the loop's no-claim backstop armed.
-                let mut attempt = 0_u32;
-                let _ = mlx_worker_recovery::persist_terminal_failure_with(
-                    mlx_worker_recovery::global(),
-                    || {
-                        attempt = attempt.saturating_add(1);
-                        let post_attempt = attempt;
-                        let detail = detail.clone();
-                        let job_id = job.id.clone();
-                        let shutdown = shutdown.clone();
-                        async move {
-                            let Err(terminal_error) =
-                                fail_job(api, &job_id, message, Some(detail)).await
-                            else {
-                                return mlx_worker_recovery::TerminalPersistenceAttempt::Persisted;
-                            };
-                            emit_event_value(
-                                Level::ERROR,
-                                json!({
-                                    "event": "mlx_h3_i2v_terminal_failure_retry",
-                                    "workerId": settings.worker_id,
-                                    "gpuId": settings.gpu_id,
-                                    "jobId": &job_id,
-                                    "attempt": post_attempt,
-                                    "error": terminal_error.to_string(),
-                                }),
-                            );
-                            if shutdown.is_cancelled() {
-                                return mlx_worker_recovery::TerminalPersistenceAttempt::Stop;
-                            }
-                            let _ = heartbeat_with_reason(
-                                api,
-                                settings,
-                                WorkerStatus::Unhealthy,
-                                Some(&job_id),
-                                mlx_worker_recovery::global().quarantine_reason(),
-                            )
-                            .await;
-                            tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1)))
-                                .await;
-                            mlx_worker_recovery::TerminalPersistenceAttempt::Retry
-                        }
-                    },
-                )
-                .await;
+                let payload = progress_payload(
+                    JobStatus::Failed,
+                    ProgressStage::Failed,
+                    1.0,
+                    message,
+                    Some(detail),
+                    None,
+                    None,
+                );
+                persist_poisoned_terminal_failure(recovery, api, settings, job, shutdown, payload)
+                    .await;
             } else {
                 let _ = fail_job(api, &job.id, message, Some(detail)).await;
             }
@@ -817,6 +803,60 @@ async fn handle_job_failure(
             );
         }
     }
+}
+
+/// Persist a poisoned process's terminal job write, then arm its recycle.
+///
+/// A clean child exit is not an abnormal death, so the supervisor deliberately will not invent a
+/// second terminal attribution for it. Persist the original failure before arming that exit.
+/// Transport/API failures keep this process quarantined and retry without claiming; shutdown
+/// cancellation stops the retry and leaves the loop's no-claim backstop armed.
+async fn persist_poisoned_terminal_failure(
+    recovery: &mlx_worker_recovery::MlxWorkerRecovery,
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    shutdown: &gen_core::CancelFlag,
+    payload: ProgressRequest,
+) {
+    let mut attempt = 0_u32;
+    let _ = mlx_worker_recovery::persist_terminal_failure_with(recovery, || {
+        attempt = attempt.saturating_add(1);
+        let post_attempt = attempt;
+        let payload = payload.clone();
+        let job_id = job.id.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            let Err(terminal_error) = update_job(api, &job_id, payload).await else {
+                return mlx_worker_recovery::TerminalPersistenceAttempt::Persisted;
+            };
+            emit_event_value(
+                Level::ERROR,
+                json!({
+                    "event": "mlx_h3_i2v_terminal_failure_retry",
+                    "workerId": settings.worker_id,
+                    "gpuId": settings.gpu_id,
+                    "jobId": &job_id,
+                    "attempt": post_attempt,
+                    "error": terminal_error.to_string(),
+                }),
+            );
+            if shutdown.is_cancelled() {
+                return mlx_worker_recovery::TerminalPersistenceAttempt::Stop;
+            }
+            let _ = heartbeat_with_reason(
+                api,
+                settings,
+                WorkerStatus::Unhealthy,
+                Some(&job_id),
+                recovery.quarantine_reason(),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
+            mlx_worker_recovery::TerminalPersistenceAttempt::Retry
+        }
+    })
+    .await;
 }
 
 /// The static admission gate runs before source/device checks and every tolerant job parser.
@@ -1051,4 +1091,69 @@ fn shared_source_utility_fields_resolve_without_generation_requirements() {
             Err(WorkerError::Validation(_))
         ));
     }
+}
+
+/// Codex P1 on PR #3434: a cached generator that reports `ProcessPoisoned` during an exact-replay
+/// job must still persist the replay-unavailable terminal failure AND arm the one recycle. Before
+/// the fix the replay branch returned before fatal-fault handling, so the process stayed
+/// quarantined forever with `begin_recycle()` never returning a request.
+#[cfg(test)]
+#[tokio::test]
+async fn poisoned_exact_replay_persists_replay_failure_and_arms_recycle() {
+    let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+    let mut settings = crate::tests::test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(json!({
+        "id": "job-replay-poisoned", "type": "image_generate", "status": "running",
+        "projectId": null, "projectName": null, "payload": {}, "result": {},
+        "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+        "progress": 0.5, "stage": "running", "message": "running", "error": null,
+        "etaSeconds": null, "elapsedSeconds": null, "attempts": 1, "sourceJobId": null,
+        "duplicateOfJobId": null, "cancelRequested": false,
+        "createdAt": "2026-11-17T00:00:00Z", "updatedAt": "2026-11-17T00:00:00Z",
+        "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+    }))
+    .expect("job snapshot deserializes");
+    let expected: sceneworks_core::execution_receipt::TrustedExecutionReceipt =
+        serde_json::from_value(json!({
+            "version": 1, "jobId": "job-replay-poisoned", "jobType": "image_generate",
+            "workerId": "test-worker", "attemptId": "attempt", "acceptedBackend": "mlx",
+            "acceptedDevice": "mlx", "acceptedSourceRoute": null, "inferenceRevision": "rev",
+            "acceptedBindingSha256": "binding", "acceptedResultSha256": "result",
+            "execution": {}, "outputs": []
+        }))
+        .expect("receipt deserializes");
+    let recovery = mlx_worker_recovery::MlxWorkerRecovery::new();
+    let shutdown = gen_core::CancelFlag::new();
+
+    crate::progress::with_exact_replay_expected(
+        Some(expected),
+        handle_job_failure_with(
+            &recovery,
+            &api,
+            &settings,
+            &job,
+            &shutdown,
+            "Image generation failed.",
+            WorkerError::ProcessPoisoned("owner device lost".into()),
+        ),
+    )
+    .await;
+
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(posts.len(), 1, "exactly one terminal write: {posts:?}");
+    assert_eq!(posts[0]["status"], "failed");
+    assert_eq!(
+        posts[0]["result"]["replayUnavailable"]["reason"], "execution_failed",
+        "the replay-unavailable result is kept"
+    );
+    assert!(
+        !recovery.can_claim(),
+        "a poisoned process never claims again"
+    );
+    let recycle = recovery
+        .begin_recycle()
+        .expect("the persisted terminal failure arms the recycle");
+    assert_eq!(recycle.process_fault.as_deref(), Some("owner device lost"));
 }
