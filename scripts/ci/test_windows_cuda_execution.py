@@ -198,6 +198,28 @@ class AdmissionRuleTests(unittest.TestCase):
         for bad in (binding(0), binding(0, 1), binding()):
             with self.assertRaisesRegex(RuntimeError, "not the required GPU 1"):
                 shared.require_physical_index(bad, 1)
+        # A probe mask that differs from the child's own mask would guard the wrong card.
+        shared.require_physical_index(binding(1), 1, {"CUDA_VISIBLE_DEVICES": "1"}, "1")
+        for environment in ({"CUDA_VISIBLE_DEVICES": "0"}, {}):
+            with self.assertRaisesRegex(RuntimeError, "differs from the job's CUDA_VISIBLE_DEVICES"):
+                shared.require_physical_index(binding(1), 1, environment, "1")
+
+    def test_a_transient_inventory_error_is_logged_and_retried_not_fatal(self):
+        import io
+        calls = {"n": 0}
+        def inventory(*_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("driver XML and CSV GPU identities differ")
+            return [self.one, self.two], []
+        self.guard.inventory.side_effect = inventory
+        stream = io.StringIO(); now = [0]
+        selected, handles, _, _ = shared.claim_uuids(["GPU-two"], self.guard, self.out, 60, self.out, Locker(),
+            clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            reporter=shared.WaitReporter(stream))
+        shared.release_all(handles, Locker())
+        self.assertEqual(selected, [self.two])
+        self.assertIn("driver XML and CSV GPU identities differ", stream.getvalue())
 
     def test_uuid_contention_budget_and_index_recheck_remain_fail_closed(self):
         class Busy:

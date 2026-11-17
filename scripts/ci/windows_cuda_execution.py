@@ -114,10 +114,17 @@ class DeviceIdentity:
         return devices, []
 
 
-def require_physical_index(binding, index):
-    """Refuse unless every bound device is physical GPU `index` (the workflow's GPU restriction)."""
+def require_physical_index(binding, index, environment=None, probe_visible=None):
+    """Refuse unless every bound device is physical GPU `index` (the workflow's GPU restriction).
+
+    A `--probe-visible` binding is probed with that mask, but the child inherits the job's own
+    CUDA_VISIBLE_DEVICES, so the two must agree or the lock would guard a card the child never uses.
+    """
     if index is None:
         return
+    if probe_visible is not None and (environment or {}).get("CUDA_VISIBLE_DEVICES") != probe_visible:
+        raise RuntimeError(f"--probe-visible {probe_visible} differs from the job's CUDA_VISIBLE_DEVICES; "
+                           "the child would not run on the card this lock guards")
     found = [row.get("index") for row in binding.get("devices", [])]
     if not found or any(value != index for value in found):
         raise RuntimeError(f"bound CUDA device(s) are physical GPU {found}, not the required GPU {index}; "
@@ -329,7 +336,13 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
         raise RuntimeError("PUBLIC must name the host-global absolute lock namespace")
     started = clock()
     while clock() < deadline:
-        devices, processes = guard.inventory(out, "uuid-admission", deadline)
+        try:
+            devices, _ = guard.inventory(out, "uuid-admission", deadline)
+        except RuntimeError as error:  # a transient driver inventory error: log it and retry
+            reporter.waiting("admission", clock(), started, deadline, [],
+                             lambda: {"refused": {"reasons": [str(error)]}})
+            sleep(min(1, max(0, deadline - clock())))
+            continue
         selected = []
         for identifier in expected:
             matches = [row for row in devices if row["uuid"].casefold() == identifier.casefold()]
@@ -618,7 +631,7 @@ def main():
         binding = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                   args.cuda_ordinals, args.probe_visible)
         receipt["binding"] = binding
-        require_physical_index(binding, args.require_physical_index)
+        require_physical_index(binding, args.require_physical_index, environment, args.probe_visible)
         xml_file = out / "binding-nvidia-smi.xml"
         if xml_file.exists():
             receipt["gpu_identities"] = gpu_identities(xml_file.read_text(encoding="utf-8"))
