@@ -808,7 +808,16 @@ async fn run(case: &str) {
     #[cfg(target_os = "macos")]
     if case.starts_with("sensenova_") {
         assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
-        assert_eq!(std::env::var("RUNNER_NAME").as_deref(), Ok("nax-macos-2"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("self-hosted")
+        );
+        let runner = if std::env::var("LOAD_PROGRESS_MAC_GO").as_deref() == Ok("true") {
+            "nax-macos"
+        } else {
+            "nax-macos-2"
+        };
+        assert_eq!(std::env::var("RUNNER_NAME").as_deref(), Ok(runner));
     } else {
         assert_eq!(
             std::env::var("LOAD_PROGRESS_MAC_GO").as_deref(),

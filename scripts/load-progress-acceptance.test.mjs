@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm, mkdir, realpath, symlink, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { admission, NATIVE_TEST_STACK_BYTES, nativeTestEnvironment, freshOutput, outsideCheckout, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
+import { admission, NATIVE_TEST_STACK_BYTES, nativeTestEnvironment, freshOutput, outsideCheckout, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, needsPublicProvision, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -304,11 +304,17 @@ test('native libtest matches the production worker stack despite ambient overrid
   assert.match(controller,/libtestStackBytes:NATIVE_TEST_STACK_BYTES/);
 });
 
-test('SenseNova execution uses a secondary Actions Mac or the guarded GPU1 lane', async () => {
-  const mac = {...env, LOAD_PROGRESS_CASE:'sensenova_q4', LOAD_PROGRESS_MAC_GO:'false', GITHUB_ACTIONS:'true', RUNNER_NAME:'nax-macos-2'};
+test('SenseNova execution uses the selected self-hosted Actions Mac or the guarded GPU1 lane', async () => {
+  const mac = {...env, LOAD_PROGRESS_CASE:'sensenova_q4', LOAD_PROGRESS_MAC_GO:'false', GITHUB_ACTIONS:'true', RUNNER_ENVIRONMENT:'self-hosted', RUNNER_NAME:'nax-macos-2'};
   assert.equal(admission(mac, 'darwin'), 'tests::load_progress_acceptance::sensenova');
-  for (const change of [{RUNNER_NAME:'nax-macos'}, {GITHUB_ACTIONS:'false'}, {RUNNER_NAME:'nax-macos', LOAD_PROGRESS_MAC_GO:'true'}]) {
-    assert.throws(() => admission({...mac, ...change}, 'darwin'), /secondary/);
+  const primary = {...mac, RUNNER_NAME:'nax-macos', LOAD_PROGRESS_MAC_GO:'true'};
+  assert.equal(admission(primary, 'darwin'), 'tests::load_progress_acceptance::sensenova');
+  for (const runner of [mac, primary]) {
+    assert.throws(() => admission({...runner, RUNNER_ENVIRONMENT:'github-hosted'}, 'darwin'), /self-hosted/);
+    assert.throws(() => admission({...runner, GITHUB_ACTIONS:'false'}, 'darwin'), /self-hosted/);
+  }
+  for (const change of [{RUNNER_NAME:'nax-macos'}, {LOAD_PROGRESS_MAC_GO:'true'}]) {
+    assert.throws(() => admission({...mac, ...change}, 'darwin'), /selected self-hosted/);
   }
   assert.throws(() => admission({...mac, LOAD_PROGRESS_CASE:'image_mlx'}, 'darwin'), /explicit.*go/);
   const input = {profile:'load-progress-acceptance',ref:env.LOAD_PROGRESS_SOURCE_SHA,inference_sha:env.LOAD_PROGRESS_INFERENCE_SHA,backend:'mlx',moss_options_json:JSON.stringify({case:'sensenova_q4',hf_hub_cache:'/frozen/hub',build_only:false})};
@@ -317,7 +323,7 @@ test('SenseNova execution uses a secondary Actions Mac or the guarded GPU1 lane'
   assert.equal(admission(cuda,'win32'),'tests::load_progress_acceptance::sensenova');
   assert.throws(() => admission({...cuda,CUDA_VISIBLE_DEVICES:'0'},'win32'),/required/);
   const workflow = await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
-  assert.match(workflow,/startsWith\(inputs.case, 'sensenova_'\) && fromJSON\('\["self-hosted","macOS","ARM64","rw-llm"\]'/);
+  assert.match(workflow,/startsWith\(inputs.case, 'sensenova_'\) && !inputs.mac_go && fromJSON\('\["self-hosted","macOS","ARM64","rw-llm"\]'/);
   const rust = await readFile(new URL('../apps/rust-api/src/tests/load_progress_acceptance.rs',import.meta.url),'utf8');
   assert.match(rust,/#\[ignore = "SW-7189 [^"]+"\]\s*async fn sensenova\(\)/);
 });
@@ -353,5 +359,17 @@ test('SenseNova cache preflight inventories only the selected backend and immuta
     assert.equal(bf16.presentFiles,0);
   } finally {
     await rm(hub,{recursive:true,force:true});
+  }
+});
+
+test('only missing public tiers in an execution can enter Hub provisioning', () => {
+  for (const name of ['sensenova_q4', 'sensenova_q8']) {
+    assert.equal(needsPublicProvision(name, {missing:['weights']}, {}), true);
+    assert.equal(needsPublicProvision(name, {missing:[]}, {}), false);
+    assert.equal(needsPublicProvision(name, {missing:['weights']}, {buildOnly:true}), false);
+    assert.equal(needsPublicProvision(name, {missing:['weights']}, {checkOnly:true}), false);
+  }
+  for (const name of ['sensenova_bf16', 'sensenova_bf16_product', 'image_cuda']) {
+    assert.equal(needsPublicProvision(name, {missing:['weights']}, {}), false);
   }
 });

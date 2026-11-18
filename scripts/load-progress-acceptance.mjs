@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, appendFile, mkdir, open, stat, realpath } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, mkdtemp, open, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripJsoncComments } from './lib/jsonc.mjs';
@@ -56,7 +56,9 @@ export function admission(env, platform = process.platform, { execute = true } =
   }
   if (platform === 'darwin') {
     if (execute && senseNovaCases.includes(env.LOAD_PROGRESS_CASE)) {
-      assert(env.GITHUB_ACTIONS === 'true' && env.RUNNER_NAME === 'nax-macos-2', 'SenseNova MLX execution requires the secondary rw-llm Actions runner');
+      const runner = env.LOAD_PROGRESS_MAC_GO === 'true' ? 'nax-macos' : 'nax-macos-2';
+      assert(env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'self-hosted' && env.RUNNER_NAME === runner,
+        `SenseNova MLX execution requires the selected self-hosted Actions runner ${runner}`);
     } else if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
     assert(!['image_cuda','cuda_all'].includes(env.LOAD_PROGRESS_CASE), 'CUDA case needs Windows');
   } else {
@@ -143,6 +145,27 @@ export async function cacheInventory(hub, selectedCase, manifest = null, platfor
   const files=[...rows.values()];
   return {model,tier,hub,requiredFiles:files.length,presentFiles:files.filter(f=>f.present).length,totalPresentBytes:files.reduce((sum,f)=>sum+(f.bytes??0),0),missing:files.filter(f=>!f.present),files};
 }
+export function needsPublicProvision(caseName, cache, {buildOnly, checkOnly}) {
+  return !buildOnly && !checkOnly && ['sensenova_q4','sensenova_q8'].includes(caseName) && cache.missing.length > 0;
+}
+
+async function provisionQuant(cache, evidence, env) {
+  const plan = path.join(evidence, 'provision-plan.json');
+  const {repo, revision} = cache.files[0];
+  assert(cache.files.every(row => row.repo === repo && row.revision === revision));
+  await writeFile(plan, JSON.stringify({repo, revision, files:cache.files.map(row => row.file)}));
+  assert(env.RUNNER_TEMP && path.isAbsolute(env.RUNNER_TEMP), 'job-local runner temp required for provisioning');
+  const venv = await mkdtemp(path.join(env.RUNNER_TEMP, 'sensenova-provision-'));
+  const windows = process.platform === 'win32';
+  const python = path.join(venv, windows ? 'Scripts/python.exe' : 'bin/python');
+  const opts = {cwd:root, env:{...env, HF_HUB_OFFLINE:'0', HF_HUB_DISABLE_IMPLICIT_TOKEN:'1',
+    HF_HUB_DISABLE_TELEMETRY:'1', HF_HUB_DISABLE_PROGRESS_BARS:'1'}, windowsHide:true};
+  await execFile(windows ? 'python' : 'python3', ['-m','venv',venv], opts);
+  await execFile(python, ['-m','pip','install','--disable-pip-version-check','--no-input','-r','.github/requirements-hf.txt'], opts);
+  await execFile(python, ['-I','-B','scripts/ci/sensenova_product_provision.py',plan,
+    path.join(evidence,'provision-receipt.json')], opts);
+}
+
 export function childEnvironment(env, state, evidence, platform = process.platform) {
   const child = { ...env };
   if(env.LOAD_PROGRESS_CASE==='ort_cpu') Object.assign(child,{SCENEWORKS_GPU_ID:'cpu',CUDA_VISIBLE_DEVICES:'',NVIDIA_VISIBLE_DEVICES:''});
@@ -228,6 +251,11 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     if (checkOnly && !senseNovaCases.includes(env.LOAD_PROGRESS_CASE)) { receipt.status='checked-no-model-execution'; return receipt; }
     if (!buildOnly && !cpu) {
       receipt.cache=await cacheInventory(env.HF_HUB_CACHE,env.LOAD_PROGRESS_CASE); await persist();
+      if (needsPublicProvision(env.LOAD_PROGRESS_CASE, receipt.cache, {buildOnly, checkOnly})) {
+        await provisionQuant(receipt.cache, evidence, childEnv);
+        receipt.cache = await cacheInventory(env.HF_HUB_CACHE, env.LOAD_PROGRESS_CASE);
+        await persist();
+      }
       assert.equal(receipt.cache.missing.length,0,'provision missing frozen model files before acceptance; see controller.json');
     }
     if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
@@ -316,7 +344,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu|sensenova_q4|sensenova_q8|sensenova_bf16|sensenova_bf16_product, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. SenseNova MLX uses the secondary rw-llm Actions runner; other MLX cases require LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU1. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
+    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu|sensenova_q4|sensenova_q8|sensenova_bf16|sensenova_bf16_product, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. SenseNova MLX uses the secondary rw-llm Actions runner unless an explicit dev Mac go selects the primary; other MLX cases require LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU1. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
   } else if (process.argv.includes('--workflow-preflight')) {
     try {
       const prepared = workflowEnvironment(process.env);

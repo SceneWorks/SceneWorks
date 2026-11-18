@@ -76,6 +76,9 @@ pub(super) async fn publisher_metadata(
         .iter()
         .filter(|row| {
             row["variant"] == tier
+                && row["platforms"]
+                    .as_array()
+                    .is_none_or(|platforms| platforms.iter().any(|os| os == std::env::consts::OS))
                 && row["pendingArtifact"] != true
                 && row["revision"] != "0000000000000000000000000000000000000000"
         })
