@@ -1573,20 +1573,16 @@ fn a_reformatted_library_with_a_redownloaded_subset_is_recoverable_by_confirmed_
     // The plan the operator confirms names exactly what will need re-downloading, writing nothing.
     let closures_before = store.validated_closures().unwrap();
     let plan = store.validate_replacement(&library).unwrap();
-    assert_eq!(
-        plan,
-        LibraryReplacementPlan {
-            retained_repositories: vec!["owner/one".to_owned()],
-            demoted_repositories: vec!["owner/three".to_owned(), "owner/two".to_owned()],
-        }
-    );
+    assert_eq!(plan.retained_repositories, ["owner/one"]);
+    assert_eq!(plan.demoted_repositories, ["owner/three", "owner/two"]);
     assert_eq!(store.load().unwrap(), binding_before);
     assert_eq!(store.validated_closures().unwrap(), closures_before);
 
     let receipt_one = receipt_bytes(&data, "owner/one");
     let receipt_three = receipt_bytes(&data, "owner/three");
-    let (binding, applied) = store.replace_binding(&library).unwrap();
+    let (binding, applied) = store.replace_binding_approved(&library, &plan).unwrap();
     assert_eq!(applied, plan);
+    assert_eq!(binding.physical_identity, plan.library_identity);
     assert_eq!(
         binding.canonical_path,
         std::fs::canonicalize(&library).unwrap()
@@ -1742,13 +1738,8 @@ fn a_completed_download_into_the_reformatted_library_rebinds_it() {
         .rebind_after_completed_download(&library, &one)
         .unwrap()
         .expect("the completed download re-binds the reformatted library");
-    assert_eq!(
-        plan,
-        LibraryReplacementPlan {
-            retained_repositories: vec!["owner/one".to_owned()],
-            demoted_repositories: vec!["owner/three".to_owned(), "owner/two".to_owned()],
-        }
-    );
+    assert_eq!(plan.retained_repositories, ["owner/one"]);
+    assert_eq!(plan.demoted_repositories, ["owner/three", "owner/two"]);
     let after = store.load().unwrap().unwrap();
     assert_ne!(Some(after.clone()), before);
     assert_eq!(
@@ -1859,4 +1850,48 @@ fn a_completed_download_leaves_an_unbound_or_matching_library_alone() {
         None
     );
     assert_eq!(store.load().unwrap(), bound);
+}
+
+/// The confirmation is a snapshot: if the library changes while it is open (here, another model is
+/// wiped), adopting under the approved plan refuses with the NEW plan and writes nothing, so the
+/// operator re-confirms instead of authorising a demotion they were never shown.
+#[test]
+fn a_replacement_refuses_when_the_library_changed_since_it_was_approved() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    seed_snapshot(&library, "owner/two", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let closures_before = store.validated_closures().unwrap();
+    let approved = store.validate_replacement(&library).unwrap();
+    assert_eq!(approved.demoted_repositories, ["owner/three"]);
+
+    std::fs::remove_dir_all(library.join("models--owner--two")).unwrap();
+    let changed = match store
+        .replace_binding_approved(&library, &approved)
+        .unwrap_err()
+    {
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::ReplacementPlanChanged {
+            plan,
+        }) => plan,
+        other => panic!("expected a changed-plan refusal, got {other:?}"),
+    };
+    assert_eq!(changed.demoted_repositories, ["owner/three", "owner/two"]);
+    assert_eq!(store.load().unwrap(), before);
+    assert_eq!(store.validated_closures().unwrap(), closures_before);
+    assert_eq!(
+        store
+            .validate_replacement_approved(&library, &approved)
+            .unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::ReplacementPlanChanged {
+            plan: changed.clone(),
+        })
+    );
+
+    // Re-confirming the plan actually shown now succeeds.
+    let (_, applied) = store.replace_binding_approved(&library, &changed).unwrap();
+    assert_eq!(applied, changed);
 }

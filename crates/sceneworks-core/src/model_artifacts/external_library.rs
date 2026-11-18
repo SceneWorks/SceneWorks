@@ -536,7 +536,24 @@ impl ExternalLibraryBindingStore {
         let _lock = self
             .lock_exclusive()
             .map_err(LibraryRelocationError::Failed)?;
-        self.replace_binding_unlocked(library_root)
+        self.replace_binding_unlocked(library_root, None)
+    }
+
+    /// [`Self::replace_binding`], only if the plan computed under the exclusive lock is EXACTLY
+    /// the one the operator approved — the same models kept, the same models demoted, on the same
+    /// physical directory. If the library changed while the confirmation was open (the drive was
+    /// swapped again, a download landed), it refuses with
+    /// [`LibraryRelocationRejection::ReplacementPlanChanged`] carrying the new plan, so the
+    /// operator re-confirms instead of authorising a replacement they were never shown.
+    pub fn replace_binding_approved(
+        &self,
+        library_root: &Path,
+        approved: &LibraryReplacementPlan,
+    ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(LibraryRelocationError::Failed)?;
+        self.replace_binding_unlocked(library_root, Some(approved))
     }
 
     /// A SceneWorks download of `downloaded` into `library_root` just completed. If the binding
@@ -576,14 +593,14 @@ impl ExternalLibraryBindingStore {
         if validate_requirements_at_root(&canonical, downloaded).is_err() {
             return Ok(None);
         }
-        let (_, plan) =
-            self.replace_binding_unlocked(library_root)
-                .map_err(|error| match error {
-                    LibraryRelocationError::Failed(error) => error,
-                    LibraryRelocationError::Rejected(rejection) => {
-                        ExternalLibraryError(format!("library re-bind refused: {rejection:?}"))
-                    }
-                })?;
+        let (_, plan) = self
+            .replace_binding_unlocked(library_root, None)
+            .map_err(|error| match error {
+                LibraryRelocationError::Failed(error) => error,
+                LibraryRelocationError::Rejected(rejection) => {
+                    ExternalLibraryError(format!("library re-bind refused: {rejection:?}"))
+                }
+            })?;
         self.remember_validated_closure_unlocked(downloaded)?;
         Ok(Some(plan))
     }
@@ -591,8 +608,9 @@ impl ExternalLibraryBindingStore {
     fn replace_binding_unlocked(
         &self,
         library_root: &Path,
+        approved: Option<&LibraryReplacementPlan>,
     ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
-        let checked = self.check_replacement_unlocked(library_root)?;
+        let checked = self.check_replacement_unlocked(library_root, approved)?;
         let binding = ExternalLibraryBinding {
             schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
             configured_path: absolute_lexical(library_root)
@@ -620,13 +638,26 @@ impl ExternalLibraryBindingStore {
         library_root: &Path,
     ) -> Result<LibraryReplacementPlan, LibraryRelocationError> {
         let _lock = self.lock_shared().map_err(LibraryRelocationError::Failed)?;
-        self.check_replacement_unlocked(library_root)
+        self.check_replacement_unlocked(library_root, None)
+            .map(|checked| checked.plan)
+    }
+
+    /// [`Self::validate_replacement`] that also refuses, with the new plan, when it no longer
+    /// matches `approved` — so a client learns of the change before either durable write.
+    pub fn validate_replacement_approved(
+        &self,
+        library_root: &Path,
+        approved: &LibraryReplacementPlan,
+    ) -> Result<LibraryReplacementPlan, LibraryRelocationError> {
+        let _lock = self.lock_shared().map_err(LibraryRelocationError::Failed)?;
+        self.check_replacement_unlocked(library_root, Some(approved))
             .map(|checked| checked.plan)
     }
 
     fn check_replacement_unlocked(
         &self,
         library_root: &Path,
+        approved: Option<&LibraryReplacementPlan>,
     ) -> Result<CheckedReplacement, LibraryRelocationError> {
         let canonical_before = canonical_library_directory(library_root)?;
         let identity_before = physical_identity(&canonical_before).map_err(|error| {
@@ -695,13 +726,20 @@ impl ExternalLibraryBindingStore {
                 "external model library changed while it was being validated".to_owned(),
             )));
         }
+        let plan = LibraryReplacementPlan {
+            library_identity: identity_before.clone(),
+            retained_repositories: retained.into_iter().collect(),
+            demoted_repositories: demoted,
+        };
+        if approved.is_some_and(|approved| approved != &plan) {
+            return Err(LibraryRelocationError::Rejected(
+                LibraryRelocationRejection::ReplacementPlanChanged { plan },
+            ));
+        }
         Ok(CheckedReplacement {
             canonical: canonical_before,
             identity: identity_before,
-            plan: LibraryReplacementPlan {
-                retained_repositories: retained.into_iter().collect(),
-                demoted_repositories: demoted,
-            },
+            plan,
             ledger_closure_count,
             retained_ledger_closures,
         })
@@ -1136,6 +1174,9 @@ pub enum LibraryRelocationRejection {
     HubDirectoryExpected,
     /// The volume's durable physical identity could not be read, so no binding can be written.
     IdentityUnavailable { detail: String },
+    /// A confirmed replacement no longer matches the plan the operator approved: the library
+    /// changed while the confirmation was open. Carries the current plan to confirm instead.
+    ReplacementPlanChanged { plan: LibraryReplacementPlan },
 }
 
 /// Relocation failures split into "the operator can fix this by choosing differently"
@@ -1160,9 +1201,12 @@ impl std::fmt::Display for LibraryRelocationError {
 /// and what it demotes, by primary repository. The desktop prompt renders `demoted_repositories` as
 /// "these models will need re-downloading" BEFORE the operator confirms, so the swap is never
 /// silent.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LibraryReplacementPlan {
+    /// The physical directory the plan was computed on. Part of what the operator approves: the
+    /// same lists on a different volume are a different replacement.
+    pub library_identity: ExternalLibraryPhysicalIdentity,
     /// Recorded models the chosen library fully carries; they stay installed.
     pub retained_repositories: Vec<String>,
     /// Recorded models the chosen library does not carry; they become not-installed.

@@ -64,21 +64,29 @@ export function fetchModelLibraryStatus(token, options) {
 // `acceptMissingModels` is the CONFIRMED replacement: the library was wiped or replaced and only
 // some models are on it now. Its dry run answers with the `replacement` plan the prompt shows (which
 // models will need re-downloading) instead of refusing; it is never sent without that confirmation.
-export function validateModelLibrary(token, path, { acceptMissingModels = false } = {}) {
+//
+// `approvedReplacement` is the plan the user confirmed, echoed back verbatim. The server refuses
+// with `replacement_plan_changed` (and the current plan) when the library no longer matches it.
+export function validateModelLibrary(token, path, options = {}) {
   return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
-    body: JSON.stringify(
-      acceptMissingModels ? { path, dryRun: true, acceptMissingModels } : { path, dryRun: true },
-    ),
+    body: JSON.stringify({ path, dryRun: true, ...replacementFields(options) }),
   });
+}
+
+function replacementFields({ acceptMissingModels = false, approvedReplacement = null } = {}) {
+  if (!acceptMissingModels) return {};
+  return approvedReplacement
+    ? { acceptMissingModels, approvedReplacement }
+    : { acceptMissingModels };
 }
 
 // Adopt a different library root: the API re-binds the durable identity. It never downloads and
 // never rewrites install receipts.
-export function relocateModelLibrary(token, path, { acceptMissingModels = false } = {}) {
+export function relocateModelLibrary(token, path, options = {}) {
   return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
-    body: JSON.stringify(acceptMissingModels ? { path, acceptMissingModels } : { path }),
+    body: JSON.stringify({ path, ...replacementFields(options) }),
   });
 }
 
@@ -89,6 +97,26 @@ export function isMissingInstalledModelsRejection(error) {
     error?.code === MODEL_LIBRARY_RELOCATION_REJECTED_CODE &&
     error?.context?.reason === "missing_installed_models"
   );
+}
+
+// The library changed while the confirmation was open: the approved plan no longer holds.
+function changedReplacementPlan(error) {
+  return error?.code === MODEL_LIBRARY_RELOCATION_REJECTED_CODE &&
+    error?.context?.reason === "replacement_plan_changed"
+    ? (error.context.plan ?? null)
+    : null;
+}
+
+// The confirmation's view of a server plan. `plan` is kept verbatim: it is what gets approved.
+function replacementState(path, response, plan) {
+  return {
+    path,
+    libraryRoot: response?.libraryRoot ?? null,
+    demotedRepositories: plan?.demotedRepositories ?? [],
+    retainedRepositories: plan?.retainedRepositories ?? [],
+    restartRequired: response?.restartRequired !== false,
+    plan,
+  };
 }
 
 // The one place that reacts to an unavailable model library, registered by the app shell. Module
@@ -367,13 +395,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
               status: "confirmingReplacement",
               hint: "",
               error: "",
-              replacement: {
-                path,
-                libraryRoot: plan.libraryRoot ?? null,
-                demotedRepositories: plan.replacement.demotedRepositories ?? [],
-                retainedRepositories: plan.replacement.retainedRepositories ?? [],
-                restartRequired: plan.restartRequired !== false,
-              },
+              replacement: replacementState(path, plan, plan.replacement),
             });
             return null;
           }
@@ -392,20 +414,37 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     // relocation, under the confirmed judgement.
     async confirmReplacement() {
       if (state.status !== "confirmingReplacement" || !state.replacement) return null;
-      const { path } = state.replacement;
+      const shown = state.replacement;
       const action = takePending();
       retryAction = action;
       const attempt = ++epoch;
       emit({ status: "relocating", hint: "", error: "" });
       let target = null;
       try {
-        target = await adoptModelLibrary({ validate, adopt, persist }, path, {
+        // The approved plan travels with BOTH the dry run and the adopt: the server re-checks it
+        // under its lock, so a library that changed since it was shown is never adopted unseen.
+        target = await adoptModelLibrary({ validate, adopt, persist }, shown.path, {
           acceptMissingModels: true,
+          approvedReplacement: shown.plan,
         });
       } catch (error) {
         if (attempt !== epoch) return null;
         retryAction = null;
         pending = action;
+        const changed = changedReplacementPlan(error);
+        if (changed) {
+          emit({
+            status: "confirmingReplacement",
+            error: "",
+            hint: "This library changed while you were deciding. Review the updated list.",
+            replacement: replacementState(
+              shown.path,
+              { libraryRoot: shown.libraryRoot, restartRequired: shown.restartRequired },
+              changed,
+            ),
+          });
+          return null;
+        }
         emit({ status: "blocked", hint: "", error: error.message, replacement: null });
         return null;
       }

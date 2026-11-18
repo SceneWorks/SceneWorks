@@ -435,13 +435,7 @@ export function App() {
         // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
         // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
         // changed, so the previous location genuinely is still in use.
-        //
-        // Also nothing to persist when the server says the adopted root IS the library this
-        // process already reads (a reformatted or replaced drive re-bound in place): the shell's
-        // copy of the location is already right, and rewriting it would only add a failure point.
-        if (!isDesktopShell || !target?.hfHome || target.restartRequired === false) {
-          return () => {};
-        }
+        if (!isDesktopShell || !target?.hfHome) return () => {};
         let before = null;
         try {
           before = await tauriInvoke("get_storage_setup");
@@ -456,6 +450,11 @@ export function App() {
             "The current model library location could not be read, so nothing was changed.",
           );
         }
+        // Already persisted (a reformatted or replaced drive re-bound in place): nothing to write.
+        // Compared against the shell's PERSISTED location, never the running API's: after an
+        // unapplied relocation ("Later") the two differ, and re-adopting the running library
+        // must still put the persisted copy back.
+        if (before?.hfHome === target.hfHome) return () => {};
         await tauriInvoke("set_model_library", { path: target.hfHome });
         return () => tauriInvoke("set_model_library", { path: previous });
       },
@@ -486,6 +485,9 @@ export function App() {
   // process already reads is in effect now (the gate resumed the blocked action), so there is no
   // restart to disclose, only which models now need downloading again. Any other location applies
   // after a restart, as before.
+  // `refreshModels` comes from `useModelsAndLoras` further down; a ref lets the adoption handler
+  // reach it without reordering the hooks.
+  const refreshModelsRef = useRef(null);
   const settleModelLibraryAdoption = useCallback(
     (adopted) => {
       if (!adopted) return;
@@ -494,6 +496,10 @@ export function App() {
         ? ` ${demoted.length} ${demoted.length === 1 ? "model is" : "models are"} no longer on it and must be downloaded again: ${demoted.join(", ")}.`
         : "";
       if (adopted.restartRequired === false) {
+        // In effect now: the server rebuilt its catalog, so the client's copy must follow, or a
+        // demoted model keeps its stale "Ready" row and the re-download the notice asks for is
+        // unreachable until a reload.
+        refreshModelsRef.current?.().catch(() => {});
         pushNotice(
           "general",
           `SceneWorks is using the model library at ${adopted.libraryRoot ?? adopted.hfHome} again.${redownload}`,
@@ -868,6 +874,9 @@ export function App() {
     setJobs,
     setActiveView,
   });
+  useEffect(() => {
+    refreshModelsRef.current = refreshModels;
+  }, [refreshModels]);
 
   const { setPersonTracks, refreshPersonTracks, context: personTracksContext } = usePersonTracks({
     token,

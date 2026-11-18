@@ -880,23 +880,59 @@ async fn a_reformatted_library_is_adopted_in_place_only_after_a_confirmed_replac
     assert_eq!(body["adopted"], false);
     assert_eq!(body["restartRequired"], false);
     assert_eq!(
-        body["replacement"],
-        json!({
-            "retainedRepositories": ["owner/model"],
-            "demotedRepositories": ["owner/other"],
-        })
+        body["replacement"]["retainedRepositories"],
+        json!(["owner/model"])
+    );
+    assert_eq!(
+        body["replacement"]["demotedRepositories"],
+        json!(["owner/other"])
     );
     assert_eq!(
         store.load().expect("binding reads"),
         before,
         "a dry run writes nothing"
     );
+    let approved = body["replacement"].clone();
 
+    // A confirmed adopt must name the plan that was shown, and a stale plan is refused with the
+    // current one so the dialog can re-confirm.
     let (status, body) = request_with_peer(
         app.clone(),
         "POST",
         "/api/v1/model-library/relocate",
         json!({ "path": hub.to_string_lossy(), "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let mut stale = approved.clone();
+    stale["demotedRepositories"] = json!([]);
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({
+            "path": hub.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": stale,
+        }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "replacement_plan_changed");
+    assert_eq!(body["context"]["plan"], approved);
+    assert_eq!(store.load().expect("binding reads"), before);
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({
+            "path": hub.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": approved,
+        }),
         LOCAL_PEER,
     )
     .await;
@@ -948,11 +984,24 @@ async fn an_emptied_configured_library_offers_replacement_but_an_unrelated_folde
         json!(["owner/model", "owner/other"])
     );
 
+    let (status, plan) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": home.to_string_lossy(), "dryRun": true, "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
     let (status, body) = request_with_peer(
         app.clone(),
         "POST",
         "/api/v1/model-library/relocate",
-        json!({ "path": home.to_string_lossy(), "acceptMissingModels": true }),
+        json!({
+            "path": home.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": plan["replacement"],
+        }),
         LOCAL_PEER,
     )
     .await;

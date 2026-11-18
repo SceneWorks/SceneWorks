@@ -188,7 +188,9 @@ function ReplacementConfirmation({ state, onBack, onConfirm }) {
           This is a different location, so SceneWorks applies it after a restart.
         </p>
       ) : null}
-      <p aria-live="polite" className="model-library-status" role="status" />
+      <p aria-live="polite" className="model-library-status" role="status">
+        {state.hint || ""}
+      </p>
       <div className="discard-confirm-actions">
         <button onClick={onBack} type="button">
           Back

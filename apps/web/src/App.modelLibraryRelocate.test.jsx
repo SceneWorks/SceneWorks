@@ -60,8 +60,6 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
   let imageJobPosts;
   let relocateRequests;
   let runningJobs;
-  let relocateResponder;
-  let unavailableBody;
 
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,8 +71,6 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     imageJobPosts = [];
     relocateRequests = [];
     runningJobs = [];
-    relocateResponder = null;
-    unavailableBody = UNAVAILABLE_BODY;
     invoke.mockReset();
     // The real command always answers with `hfHomeDefault` even before a library is configured,
     // so the fixture has to as well: the persist step refuses outright without a previous location.
@@ -127,13 +123,12 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
           );
         }
         if (path.endsWith("/model-library/relocate")) {
-          const body = JSON.parse(options.body);
-          relocateRequests.push(body);
-          return Promise.resolve(relocateResponder ? relocateResponder(body) : response(RELOCATED));
+          relocateRequests.push(JSON.parse(options.body));
+          return Promise.resolve(response(RELOCATED));
         }
         if (path.endsWith("/image/jobs") && method === "POST") {
           imageJobPosts.push(JSON.parse(options.body));
-          return Promise.resolve(errorResponse(503, unavailableBody));
+          return Promise.resolve(errorResponse(503, UNAVAILABLE_BODY));
         }
         return Promise.resolve(response([]));
       }),
@@ -388,8 +383,15 @@ describe("App model library replacement after a reformat", () => {
   let root;
   let imageJobPosts;
   let relocateRequests;
+  let modelFetches;
+  let persistedHome;
 
   const HUB = "/Volumes/Models/hf/hub";
+  const PLAN = {
+    libraryIdentity: { volumeId: "windows-volume:2", directoryId: 7 },
+    retainedRepositories: ["z-image/turbo"],
+    demotedRepositories: ["owner/wiped"],
+  };
   const MISMATCHED_BODY = {
     ...UNAVAILABLE_BODY,
     context: { ...UNAVAILABLE_BODY.context, libraryPresent: true },
@@ -404,10 +406,12 @@ describe("App model library replacement after a reformat", () => {
     window.localStorage.clear();
     imageJobPosts = [];
     relocateRequests = [];
+    modelFetches = 0;
+    persistedHome = "/Volumes/Models/hf";
     invoke.mockReset();
     invoke.mockImplementation((command) => {
       if (command === "get_storage_setup") {
-        return Promise.resolve({ setupCompleted: true, hfHome: "/Volumes/Models/hf" });
+        return Promise.resolve({ setupCompleted: true, hfHome: persistedHome });
       }
       return Promise.resolve(null);
     });
@@ -431,7 +435,10 @@ describe("App model library replacement after a reformat", () => {
             response({ embedWorkflowInImages: true, workflowEmbedNoticeSeen: true }),
           );
         }
-        if (path.endsWith("/models")) return Promise.resolve(response([MODEL]));
+        if (path.endsWith("/models")) {
+          modelFetches += 1;
+          return Promise.resolve(response([MODEL]));
+        }
         if (path.endsWith("/jobs") && method === "GET") return Promise.resolve(response([]));
         if (path.endsWith("/model-library")) {
           return Promise.resolve(
@@ -456,10 +463,7 @@ describe("App model library replacement after a reformat", () => {
               hfHome: "/Volumes/Models/hf",
               adopted: !body.dryRun,
               restartRequired: false,
-              replacement: {
-                retainedRepositories: ["z-image/turbo"],
-                demotedRepositories: ["owner/wiped"],
-              },
+              replacement: PLAN,
             }),
           );
         }
@@ -488,7 +492,7 @@ describe("App model library replacement after a reformat", () => {
       .find((item) => item.textContent === label);
   }
 
-  it("confirms the models to re-download, then re-binds in place and resumes the generation", async () => {
+  async function submitAndUseCurrentLibrary() {
     root = createRoot(container);
     await act(async () => root.render(<App />));
     await settle();
@@ -506,6 +510,10 @@ describe("App model library replacement after a reformat", () => {
 
     await act(async () => button("Use the library at this location").click());
     await settle();
+  }
+
+  it("confirms the models to re-download, then re-binds in place and resumes the generation", async () => {
+    await submitAndUseCurrentLibrary();
 
     // The strict check was refused, so the write-free plan was fetched and put in front of the
     // user. Nothing has been re-bound yet.
@@ -522,9 +530,10 @@ describe("App model library replacement after a reformat", () => {
     await act(async () => button("Use this library").click());
     await settle();
 
+    // The approved plan is echoed with both the dry run and the adopt.
     expect(relocateRequests.slice(2)).toEqual([
-      { path: HUB, dryRun: true, acceptMissingModels: true },
-      { path: HUB, acceptMissingModels: true },
+      { path: HUB, dryRun: true, acceptMissingModels: true, approvedReplacement: PLAN },
+      { path: HUB, acceptMissingModels: true, approvedReplacement: PLAN },
     ]);
     // Same location: the shell's copy is already right and nothing needs a restart.
     expect(invoke.mock.calls.filter(([command]) => command === "set_model_library")).toEqual([]);
@@ -532,5 +541,27 @@ describe("App model library replacement after a reformat", () => {
     expect(document.body.textContent).toContain("must be downloaded again: owner/wiped");
     // The blocked generation was resubmitted exactly once against the re-bound library.
     expect(imageJobPosts).toHaveLength(2);
+  });
+
+  // The server rebuilt its catalog; the client's copy must follow, or a demoted model keeps its
+  // stale "Ready" row and the re-download the notice asks for is unreachable until a reload.
+  it("refetches the model catalog after an in-place re-bind", async () => {
+    await submitAndUseCurrentLibrary();
+    const before = modelFetches;
+    await act(async () => button("Use this library").click());
+    await settle();
+    expect(modelFetches).toBeGreaterThan(before);
+  });
+
+  // "Same library as the running API" is not "same as the persisted setting": after a relocation
+  // the user deferred with "Later", the shell persists a different home. Re-binding the running
+  // library in place must put the persisted copy back, or the next launch reads the other one.
+  it("restores the persisted location when it differs from the re-bound library", async () => {
+    persistedHome = "/Volumes/Other/hf";
+    await submitAndUseCurrentLibrary();
+    await act(async () => button("Use this library").click());
+    await settle();
+    expect(invoke).toHaveBeenCalledWith("set_model_library", { path: "/Volumes/Models/hf" });
+    expect(button("Restart now")).toBeUndefined();
   });
 });

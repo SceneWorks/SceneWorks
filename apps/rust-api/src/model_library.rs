@@ -86,6 +86,13 @@ pub(crate) struct RelocateModelLibraryRequest {
     /// flag) exactly which models will need re-downloading.
     #[serde(default)]
     pub accept_missing_models: bool,
+    /// The plan the operator approved: echoed back from the `acceptMissingModels` dry run the
+    /// confirmation showed. REQUIRED to adopt a confirmed replacement, and compared under the
+    /// ledger lock, so a library that changed while the dialog was open is refused with
+    /// `replacement_plan_changed` (carrying the new plan) instead of silently demoting models the
+    /// operator was never shown.
+    #[serde(default)]
+    pub approved_replacement: Option<LibraryReplacementPlan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,10 +140,18 @@ pub(crate) async fn relocate_model_library(
     }
     let dry_run = request.dry_run;
     let accept_missing = request.accept_missing_models;
+    let approved = request.approved_replacement;
     let data_dir = state.settings.data_dir.clone();
     let configured = configured_library(&state);
     let response = tokio::task::spawn_blocking(move || {
-        relocate_blocking(&data_dir, &configured, &picked, dry_run, accept_missing)
+        relocate_blocking(
+            &data_dir,
+            &configured,
+            &picked,
+            dry_run,
+            accept_missing,
+            approved,
+        )
     })
     .await
     .map_err(|error| {
@@ -161,6 +176,7 @@ fn relocate_blocking(
     picked: &str,
     dry_run: bool,
     accept_missing: bool,
+    approved: Option<LibraryReplacementPlan>,
 ) -> Result<RelocateModelLibraryResponse, ApiError> {
     let store = ExternalLibraryBindingStore::new(data_dir).map_err(|error| {
         relocation_failed("model library binding ledger is unavailable", &error)
@@ -200,13 +216,20 @@ fn relocate_blocking(
     let restart_required = !same_library(&target.library_root, configured);
     if accept_missing && !fresh {
         // The confirmed replacement. The dry run returns the plan the dialog shows; the adopt
-        // applies exactly that judgement under the ledger's exclusive lock.
-        let plan = if dry_run {
-            store.validate_replacement(&target.library_root)
-        } else {
-            store
-                .replace_binding(&target.library_root)
-                .map(|(_, plan)| plan)
+        // applies it only if, under the ledger's exclusive lock, it is still exactly that plan.
+        let plan = match (dry_run, &approved) {
+            (true, None) => store.validate_replacement(&target.library_root),
+            (true, Some(approved)) => {
+                store.validate_replacement_approved(&target.library_root, approved)
+            }
+            (false, Some(approved)) => store
+                .replace_binding_approved(&target.library_root, approved)
+                .map(|(_, plan)| plan),
+            (false, None) => {
+                return Err(ApiError::bad_request(
+                    "Confirm which models will need re-downloading before using this library.",
+                ))
+            }
         }
         .map_err(relocation_error_to_api_error)?;
         return Ok(RelocateModelLibraryResponse {
@@ -346,6 +369,11 @@ fn rejection_to_api_error(rejection: LibraryRelocationRejection) -> ApiError {
         LibraryRelocationRejection::IdentityUnavailable { .. } => {
             "That volume's identity could not be read, so SceneWorks cannot bind it. Choose a \
              library on a mounted local or external disk."
+                .to_owned()
+        }
+        LibraryRelocationRejection::ReplacementPlanChanged { .. } => {
+            "That library changed while you were deciding. Review the updated list of models that \
+             will need re-downloading."
                 .to_owned()
         }
     };

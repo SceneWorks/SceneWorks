@@ -499,7 +499,11 @@ describe("model library gate — confirmed replacement", () => {
     await gate.relocate("/Volumes/Models/hf/hub");
 
     await expect(gate.confirmReplacement()).resolves.toBe(plan);
-    expect(adopt).toHaveBeenCalledWith("/Volumes/Models/hf/hub", { acceptMissingModels: true });
+    // The approved plan travels with the adopt, so the server can refuse a library that changed.
+    expect(adopt).toHaveBeenCalledWith("/Volumes/Models/hf/hub", {
+      acceptMissingModels: true,
+      approvedReplacement: plan.replacement,
+    });
     expect(gate.getState()).toMatchObject({ status: "idle", replacement: null });
     // The library this process reads is bound again, so the action runs now — once.
     expect(action).toHaveBeenCalledTimes(1);
@@ -550,5 +554,46 @@ describe("model library gate — confirmed replacement", () => {
       status: "blocked",
       error: "That folder does not contain a SceneWorks model library.",
     });
+  });
+
+  it("asks again, with the new list, when the library changed since it was shown", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { gate, validate, persist, adopt } = replacementGate();
+    gate.block(unavailableError({ libraryPresent: true }).context, action);
+    await gate.relocate("/Volumes/Models/hf/hub");
+    const changed = {
+      libraryIdentity: { volumeId: "windows-volume:2", directoryId: 9 },
+      retainedRepositories: [],
+      demotedRepositories: ["owner/one", "owner/two"],
+    };
+    validate.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("That library changed while you were deciding."), {
+        code: MODEL_LIBRARY_RELOCATION_REJECTED_CODE,
+        context: { reason: "replacement_plan_changed", plan: changed },
+      });
+    });
+
+    await expect(gate.confirmReplacement()).resolves.toBeNull();
+    expect(gate.getState()).toMatchObject({
+      status: "confirmingReplacement",
+      hint: "This library changed while you were deciding. Review the updated list.",
+      replacement: {
+        demotedRepositories: ["owner/one", "owner/two"],
+        retainedRepositories: [],
+        plan: changed,
+      },
+    });
+    expect(persist).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+
+    // Confirming the list actually shown now approves THAT plan.
+    validate.mockImplementationOnce(async () => ({ restartRequired: false, replacement: changed }));
+    await gate.confirmReplacement();
+    expect(adopt).toHaveBeenCalledWith("/Volumes/Models/hf/hub", {
+      acceptMissingModels: true,
+      approvedReplacement: changed,
+    });
+    expect(action).toHaveBeenCalledTimes(1);
   });
 });
