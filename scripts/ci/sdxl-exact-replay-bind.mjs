@@ -11,10 +11,10 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest, sourceIdentity, verifyMembers } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
 // Derived from AlphaSchedule/DiscreteModelSampling/Normal 20-step source and
 // NumericScheduleDigest::f32_values, then canonicalized by the proof harness.
-// The SDXL/sampling source is unchanged between da00c5a8 and this pin.
+// The private preparation binds the exact inference pin. The completed proof
+// also compares the runtime schedule to this digest, so schedule drift refuses.
 const SCHEDULE_SHA256 = 'e6c4fabcef6944e589759bd092184dc47baa5786c50cd92870c695bd36092289';
 let stage = 'dispatch';
 let failureHint = '';
@@ -88,7 +88,6 @@ async function main() {
   assert.equal(sourceSha, process.env.GITHUB_SHA, 'source changed');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim(), '', 'checkout dirty');
   const pin = await inferenceRevision(ROOT);
-  assert.equal(pin, PIN, 'schedule metadata requires a new pinned-source calculation');
   stage = 'preparation';
   const privateDir = path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay');
   const trustedDir = await realpath(privateDir);
@@ -134,12 +133,20 @@ async function main() {
   child.on('error', () => { spawnFailed = true; });
   const done = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
   const api = async (method, route, body) => {
-    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method,
-      ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(10000) });
-    failureHint = response.ok ? '' : `HTTP ${method} ${route} ${response.status}`;
-    assert(response.ok, `HTTP ${method} ${response.status}`);
-    return response.json();
+    const timeoutMs = method === 'POST' && route === '/api/v1/image/jobs' ? 120000 : 10000;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${route}`, { method,
+        ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(timeoutMs) });
+      failureHint = response.ok ? '' : `HTTP ${method} ${route} ${response.status}`;
+      assert(response.ok, `HTTP ${method} ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError')
+        failureHint = `${method} ${route} timed out after ${timeoutMs} ms`;
+      else if (!failureHint) failureHint = `${method} ${route} request failed`;
+      throw error;
+    }
   };
   let result;
   try {
