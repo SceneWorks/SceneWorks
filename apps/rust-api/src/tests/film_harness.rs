@@ -1098,6 +1098,11 @@ impl WorkerScript {
     }
 }
 
+/// Controller poll cadence and fake-worker idle back-off for these in-process tests. Every
+/// simulated job waits up to one of each, and the crash sweeps restart the whole run ~55 times,
+/// so the cadence dominates the suite's wall clock (250 ms / 200 ms made the film_harness tests
+/// ~1000 s of single-threaded CPU-idle waiting). Nothing here asserts on the cadence itself.
+pub(crate) const TEST_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const WORKER_ID: &str = "fake-mlx-worker";
 const HOST_MEMORY_MB: u64 = 128 * 1024;
 
@@ -1194,7 +1199,7 @@ fn spawn_fake_worker(
             .await;
             assert_eq!(status, axum::http::StatusCode::OK, "{claim}");
             let Some(job) = claim.get("job").filter(|job| !job.is_null()).cloned() else {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(TEST_POLL_INTERVAL).await;
                 continue;
             };
             let job_id = job["id"].as_str().expect("job id").to_owned();
@@ -2368,7 +2373,7 @@ impl Harness {
             project_id: None,
             shot_ids: shots.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
             out_dir: self.out_dir(),
-            poll_interval: Duration::from_millis(250),
+            poll_interval: TEST_POLL_INTERVAL,
             export: true,
             require_installed: false,
         }
@@ -2383,7 +2388,7 @@ impl Harness {
     pub(crate) fn resume_options(&self) -> ResumeOptions {
         ResumeOptions {
             out_dir: self.out_dir(),
-            poll_interval: Duration::from_millis(250),
+            poll_interval: TEST_POLL_INTERVAL,
             export: true,
             require_installed: false,
             control: RunControl::new(),
@@ -6996,7 +7001,7 @@ async fn the_assembled_sequence_carries_three_independently_controlled_sound_bus
         &film_harness::EditOptions {
             run_record_path: harness.temp_dir.path().join("run-out/run.json"),
             export: false,
-            poll_interval: Duration::from_millis(250),
+            poll_interval: TEST_POLL_INTERVAL,
         },
         film_harness::TimelineEdit::Reorder {
             shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
@@ -7127,7 +7132,7 @@ async fn trimming_reordering_and_replacing_a_take_keep_links_and_retime_the_sequ
     let edit_options = film_harness::EditOptions {
         run_record_path: harness.temp_dir.path().join("run-out/run.json"),
         export: false,
-        poll_interval: Duration::from_millis(250),
+        poll_interval: TEST_POLL_INTERVAL,
     };
 
     // 1. TRIM. SH010 keeps only 1.0..3.0 of its take, and SH020 slides up to meet it.
@@ -7383,7 +7388,7 @@ async fn a_trim_past_the_end_of_the_take_is_clamped_to_the_takes_real_length() {
     let edit_options = film_harness::EditOptions {
         run_record_path: harness.temp_dir.path().join("run-out/run.json"),
         export: false,
-        poll_interval: Duration::from_millis(250),
+        poll_interval: TEST_POLL_INTERVAL,
     };
     let trimmed = film_harness::edit_timeline(
         &harness.transport,
@@ -7539,7 +7544,7 @@ async fn a_relayout_keeps_an_editor_placed_clip_the_harness_never_put_there() {
         &film_harness::EditOptions {
             run_record_path: harness.temp_dir.path().join("run-out/run.json"),
             export: false,
-            poll_interval: Duration::from_millis(250),
+            poll_interval: TEST_POLL_INTERVAL,
         },
         film_harness::TimelineEdit::Reorder {
             shot_ids: vec!["SH020".to_owned(), "SH010".to_owned()],
@@ -7681,7 +7686,7 @@ async fn swapping_onto_an_existing_take_moves_the_shots_selected_attempt() {
         &film_harness::EditOptions {
             run_record_path: harness.temp_dir.path().join("run-out/run.json"),
             export: false,
-            poll_interval: Duration::from_millis(250),
+            poll_interval: TEST_POLL_INTERVAL,
         },
         film_harness::TimelineEdit::SwapTake {
             shot_id: "SH010".to_owned(),

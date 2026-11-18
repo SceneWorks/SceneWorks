@@ -260,6 +260,15 @@ pub(crate) async fn run_model_download_job(
         },
     )
     .await?;
+    rebind_library_after_download(
+        &settings.data_dir,
+        &repo_dir,
+        repo,
+        &job.payload,
+        &snapshot_revision,
+        &resolved_files,
+    )
+    .await;
 
     if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
         return Ok(());
@@ -317,6 +326,71 @@ pub(crate) async fn run_model_download_job(
         "Model download completed in the Hugging Face cache.",
     )
     .await
+}
+
+/// A completed download into the configured library re-binds it when the binding records the
+/// same location on a different physical volume — the reformatted / replaced drive the user is
+/// re-downloading into. Without this, every model (including the one just downloaded) stayed
+/// blocked as "on a different model library", because downloads only wrote receipts and nothing
+/// but the first bind or an explicit relocation ever updated the binding.
+///
+/// Best effort: the download itself succeeded and its receipt is durable, so a failure here is
+/// logged and the explicit "Use the library at this location" recovery remains available.
+async fn rebind_library_after_download(
+    data_dir: &Path,
+    repo_dir: &Path,
+    repo: &str,
+    payload: &JsonObject,
+    snapshot_revision: &str,
+    resolved_files: &[String],
+) {
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalArtifactRequirement, ExternalLibraryBindingStore,
+    };
+    let Some(library_root) = repo_dir.parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let requirement = ExternalArtifactRequirement {
+        repository: repo.to_owned(),
+        revision: Some(snapshot_revision.to_owned()),
+        variant: payload
+            .get("variant")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default")
+            .to_owned(),
+        files: resolved_files.iter().map(PathBuf::from).collect(),
+        is_primary: true,
+    };
+    let data_dir = data_dir.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ExternalLibraryBindingStore::new(&data_dir)?
+            .rebind_after_completed_download(&library_root, std::slice::from_ref(&requirement))
+    })
+    .await;
+    match outcome {
+        Ok(Ok(Some(plan))) => tracing::info!(
+            event = "model_library_rebound_after_download",
+            repo,
+            retained = plan.retained_repositories.len(),
+            demoted = ?plan.demoted_repositories,
+            "re-bound the model library to the volume a completed download wrote to"
+        ),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::warn!(
+            event = "model_library_rebind_after_download_failed",
+            repo,
+            %error,
+            "a completed download could not re-bind the model library"
+        ),
+        Err(error) => tracing::warn!(
+            event = "model_library_rebind_after_download_failed",
+            repo,
+            %error,
+            "a completed download could not re-bind the model library"
+        ),
+    }
 }
 
 /// The declared `files` patterns that matched ZERO files in `snapshot` (sc-12283).
@@ -567,4 +641,73 @@ pub(crate) async fn run_lora_download_job(
         "LoRA download completed in the Hugging Face cache.",
     )
     .await
+}
+
+#[cfg(test)]
+mod download_library_rebind_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::external_library::{
+        probe_model_source_library, ExternalArtifactRequirement, ExternalLibraryBindingStore,
+    };
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn seed(hub: &Path, repo: &str) -> PathBuf {
+        let repo_dir = hub.join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(repo).unwrap()
+        ));
+        let snapshot = repo_dir.join("snapshots").join(REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        repo_dir
+    }
+
+    fn requirement(repo: &str) -> ExternalArtifactRequirement {
+        ExternalArtifactRequirement {
+            repository: repo.to_owned(),
+            revision: Some(REVISION.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        }
+    }
+
+    /// The field failure: the bound drive was reformatted and the user re-downloads a model into
+    /// the same location. The completed download re-binds the library, so the library probes
+    /// available again instead of every model staying blocked as "on a different model library".
+    #[tokio::test]
+    async fn a_completed_download_rebinds_a_reformatted_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let hub = temp.path().join("hf").join("hub");
+        seed(&hub, "owner/kept");
+        seed(&hub, "owner/wiped");
+        let store = ExternalLibraryBindingStore::new(&data).unwrap();
+        for repo in ["owner/kept", "owner/wiped"] {
+            store
+                .bind_or_probe_validated(&hub, &[requirement(repo)])
+                .unwrap();
+        }
+        std::fs::rename(&hub, temp.path().join("hf").join("pre-format")).unwrap();
+        std::fs::create_dir_all(&hub).unwrap();
+        assert!(!probe_model_source_library(&data, &hub).available);
+
+        let repo_dir = seed(&hub, "owner/kept");
+        let payload = JsonObject::new();
+        rebind_library_after_download(
+            &data,
+            &repo_dir,
+            "owner/kept",
+            &payload,
+            REVISION,
+            &["model.safetensors".to_owned()],
+        )
+        .await;
+
+        assert!(probe_model_source_library(&data, &hub).available);
+        let closures = store.validated_closures().unwrap();
+        assert!(closures.contains(&vec![requirement("owner/kept")]));
+        assert!(!closures.contains(&vec![requirement("owner/wiped")]));
+    }
 }

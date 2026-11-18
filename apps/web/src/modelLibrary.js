@@ -60,20 +60,63 @@ export function fetchModelLibraryStatus(token, options) {
 
 // Check a candidate library root without writing anything, anywhere. Every ordinary refusal — the
 // wrong folder, a library missing installed models — lands here, BEFORE either durable write.
-export function validateModelLibrary(token, path) {
+//
+// `acceptMissingModels` is the CONFIRMED replacement: the library was wiped or replaced and only
+// some models are on it now. Its dry run answers with the `replacement` plan the prompt shows (which
+// models will need re-downloading) instead of refusing; it is never sent without that confirmation.
+//
+// `approvedReplacement` is the plan the user confirmed, echoed back verbatim. The server refuses
+// with `replacement_plan_changed` (and the current plan) when the library no longer matches it.
+export function validateModelLibrary(token, path, options = {}) {
   return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
-    body: JSON.stringify({ path, dryRun: true }),
+    body: JSON.stringify({ path, dryRun: true, ...replacementFields(options) }),
   });
+}
+
+function replacementFields({ acceptMissingModels = false, approvedReplacement = null } = {}) {
+  if (!acceptMissingModels) return {};
+  return approvedReplacement
+    ? { acceptMissingModels, approvedReplacement }
+    : { acceptMissingModels };
 }
 
 // Adopt a different library root: the API re-binds the durable identity. It never downloads and
 // never rewrites install receipts.
-export function relocateModelLibrary(token, path) {
+export function relocateModelLibrary(token, path, options = {}) {
   return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, ...replacementFields(options) }),
   });
+}
+
+// The strict refusal a confirmed replacement can answer: the chosen library lacks models this
+// installation recorded. Read from the typed `reason`, never the message.
+export function isMissingInstalledModelsRejection(error) {
+  return (
+    error?.code === MODEL_LIBRARY_RELOCATION_REJECTED_CODE &&
+    error?.context?.reason === "missing_installed_models"
+  );
+}
+
+// The library changed while the confirmation was open: the approved plan no longer holds.
+function changedReplacementPlan(error) {
+  return error?.code === MODEL_LIBRARY_RELOCATION_REJECTED_CODE &&
+    error?.context?.reason === "replacement_plan_changed"
+    ? (error.context.plan ?? null)
+    : null;
+}
+
+// The confirmation's view of a server plan. `plan` is kept verbatim: it is what gets approved.
+function replacementState(path, response, plan) {
+  return {
+    path,
+    libraryRoot: response?.libraryRoot ?? null,
+    demotedRepositories: plan?.demotedRepositories ?? [],
+    retainedRepositories: plan?.retainedRepositories ?? [],
+    restartRequired: response?.restartRequired !== false,
+    plan,
+  };
 }
 
 // The one place that reacts to an unavailable model library, registered by the app shell. Module
@@ -130,6 +173,7 @@ const IDLE = Object.freeze({
   hint: "",
   error: "",
   relocated: null,
+  replacement: null,
 });
 
 // Adopt a different model library root — the ONE relocation sequence, shared by the blocked-action
@@ -146,14 +190,26 @@ const IDLE = Object.freeze({
 // refusal happens before either, then `persist`, then `adopt`, and if `adopt` fails the persist is
 // undone. Resolves to the adopted target; rejects with an Error whose message says what actually
 // happened (and nothing else — a raw transport/filesystem message never reaches the user alone).
-export async function adoptModelLibrary({ validate, adopt, persist } = {}, path) {
+//
+// `options` (`{ acceptMissingModels }`) is forwarded to BOTH `validate` and `adopt`, so a confirmed
+// replacement is validated and adopted under the same judgement.
+export async function adoptModelLibrary({ validate, adopt, persist } = {}, path, options) {
   // 1. Validate. Nothing is written, so a refusal here leaves everything as it was and the user
-  //    simply picks again.
+  //    simply picks again. The typed `code`/`context` ride along so the gate can recognise a
+  //    refusal the user may answer with a confirmed replacement.
   let target = null;
   try {
-    target = (await validate?.(path)) ?? { hfHome: path, libraryRoot: path };
+    target =
+      (await (options ? validate?.(path, options) : validate?.(path))) ?? {
+        hfHome: path,
+        libraryRoot: path,
+      };
   } catch (error) {
-    throw new Error(error?.message || "That library could not be used.");
+    const refusal = new Error(error?.message || "That library could not be used.");
+    refusal.code = error?.code;
+    refusal.context = error?.context;
+    refusal.stage = "validate";
+    throw refusal;
   }
 
   // 2. Persist the client's copy, then 3. re-bind the server's. If the re-bind fails, undo the
@@ -168,7 +224,7 @@ export async function adoptModelLibrary({ validate, adopt, persist } = {}, path)
       undoPersist = (await persist(target)) ?? null;
       persisted = true;
     }
-    await adopt?.(path);
+    await (options ? adopt?.(path, options) : adopt?.(path));
   } catch (error) {
     let restored = true;
     if (persisted) {
@@ -220,6 +276,28 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     const action = pending;
     pending = null;
     return action;
+  }
+
+  // A relocation was adopted. When it re-bound the library this process ALREADY reads (a wiped or
+  // replaced drive at the same location — `restartRequired: false`), it is in effect now, so the
+  // blocked action resumes exactly once, like a successful retry. Otherwise the new location only
+  // applies after a restart, and resuming would just be refused again: the action is dropped,
+  // the same guarantee cancel gives.
+  function settleAdopted(action, target) {
+    retryAction = null;
+    emit({ ...IDLE, relocated: target });
+    if (target?.restartRequired === false) {
+      // The resumed action owns its own failure surface (a demoted model is refused like any
+      // not-installed one); the relocation itself succeeded either way.
+      return Promise.resolve()
+        .then(() => action?.())
+        .then(
+          () => target,
+          () => target,
+        );
+    }
+    action?.onAbandon?.();
+    return target;
   }
 
   return {
@@ -299,16 +377,86 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
         // A refusal (validate) or a failed write (persist/adopt, already undone where possible)
         // leaves the blocked action intact and reports what happened; the user simply picks again.
         if (attempt !== epoch) return null;
+        // The library is missing models this installation recorded — the drive was wiped or
+        // replaced and only some were re-downloaded. Ask for the plan (a write-free dry run) and
+        // put it in front of the user: adopting it is their call, never automatic.
+        if (error?.stage === "validate" && isMissingInstalledModelsRejection(error)) {
+          let plan = null;
+          try {
+            plan = await validate?.(path, { acceptMissingModels: true });
+          } catch {
+            plan = null;
+          }
+          if (attempt !== epoch) return null;
+          if (plan?.replacement) {
+            retryAction = null;
+            pending = action;
+            emit({
+              status: "confirmingReplacement",
+              hint: "",
+              error: "",
+              replacement: replacementState(path, plan, plan.replacement),
+            });
+            return null;
+          }
+        }
         retryAction = null;
         pending = action;
         emit({ status: "blocked", hint: "", error: error.message });
         return null;
       }
       if (attempt !== epoch) return null;
-      retryAction = null;
-      action?.onAbandon?.();
-      emit({ ...IDLE, relocated: target });
-      return target;
+      return settleAdopted(action, target);
+    },
+
+    // The user confirmed adopting a library that lacks some recorded models: re-bind it, demoting
+    // those models to not-installed. The same validate → persist → adopt ordering and undo as any
+    // relocation, under the confirmed judgement.
+    async confirmReplacement() {
+      if (state.status !== "confirmingReplacement" || !state.replacement) return null;
+      const shown = state.replacement;
+      const action = takePending();
+      retryAction = action;
+      const attempt = ++epoch;
+      emit({ status: "relocating", hint: "", error: "" });
+      let target = null;
+      try {
+        // The approved plan travels with BOTH the dry run and the adopt: the server re-checks it
+        // under its lock, so a library that changed since it was shown is never adopted unseen.
+        target = await adoptModelLibrary({ validate, adopt, persist }, shown.path, {
+          acceptMissingModels: true,
+          approvedReplacement: shown.plan,
+        });
+      } catch (error) {
+        if (attempt !== epoch) return null;
+        retryAction = null;
+        pending = action;
+        const changed = changedReplacementPlan(error);
+        if (changed) {
+          emit({
+            status: "confirmingReplacement",
+            error: "",
+            hint: "This library changed while you were deciding. Review the updated list.",
+            replacement: replacementState(
+              shown.path,
+              { libraryRoot: shown.libraryRoot, restartRequired: shown.restartRequired },
+              changed,
+            ),
+          });
+          return null;
+        }
+        emit({ status: "blocked", hint: "", error: error.message, replacement: null });
+        return null;
+      }
+      if (attempt !== epoch) return null;
+      return settleAdopted(action, target);
+    },
+
+    // "Back" from the confirmation: nothing was written, the blocked action is still pending, and
+    // the user can retry, pick another folder, or cancel.
+    cancelReplacement() {
+      if (state.status !== "confirmingReplacement") return;
+      emit({ status: "blocked", hint: "", error: "", replacement: null });
     },
 
     // Abandon the blocked action outright. Nothing is queued, nothing partial is left behind, and

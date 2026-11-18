@@ -26,7 +26,7 @@ fn edit_options(harness: &Harness, export: bool) -> EditOptions {
     EditOptions {
         run_record_path: harness.out_dir().join("run.json"),
         export,
-        poll_interval: Duration::from_millis(250),
+        poll_interval: super::film_harness::TEST_POLL_INTERVAL,
     }
 }
 
