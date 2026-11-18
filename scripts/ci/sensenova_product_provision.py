@@ -59,6 +59,6 @@ if __name__ == "__main__":
     from huggingface_hub import HfApi, hf_hub_download
 
     plan, receipt = map(Path, sys.argv[1:])
-    result = provision(json.loads(plan.read_text()), Path(os.environ["HF_HUB_CACHE"]),
+    result = provision(json.loads(plan.read_text(encoding="utf-8")), Path(os.environ["HF_HUB_CACHE"]),
                        HfApi(endpoint=ENDPOINT, token=False), hf_hub_download)
-    receipt.write_text(json.dumps(result, indent=2) + "\n")
+    receipt.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
