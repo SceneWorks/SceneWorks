@@ -121,7 +121,17 @@ import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeL
 import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
-import { h3ImageSamplerDefaults, h3ImageSamplerFromRecipe, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
+import {
+  h3ImageSamplerDefaults,
+  h3ImageSamplerFromRecipe,
+  pagDefaults,
+  pagFromRecipe,
+  resolveCfgInterval,
+  resolveH3ImageSampler,
+  resolvePag,
+  supportsH3ImageSampler,
+  supportsPag,
+} from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
@@ -572,6 +582,8 @@ export function ImageStudio() {
   const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
   // SW-7106: MiniMax-H3-Image's sampler (Euler default, or LCM with its noise-scale ramp + clip).
   const [h3ImageSampler, setH3ImageSampler] = useState(() => ({ ...h3ImageSamplerDefaults(), ...saved.h3ImageSampler }));
+  // SW-7181: Perturbed-Attention Guidance (PAG) controls, capability-gated per selectedModel.pag.
+  const [pag, setPag] = useState(() => ({ ...pagDefaults(), ...saved.pag }));
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -1567,6 +1579,11 @@ export function ImageStudio() {
     model: selectedModel,
     options: h3ImageSampler,
   });
+  const pagCapability = supportsPag(selectedModel) ? selectedModel.pag : null;
+  const { block: outgoingPag, error: pagError } = resolvePag({
+    model: selectedModel,
+    options: pag,
+  });
   const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
     ? captionOverflow
     : "default";
@@ -1636,6 +1653,7 @@ export function ImageStudio() {
     setCfgInterval("");
     setCaptionOverflow("default");
     setH3ImageSampler(h3ImageSamplerDefaults());
+    setPag(pagDefaults());
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
@@ -1960,6 +1978,7 @@ export function ImageStudio() {
   setCfgInterval,
   setCaptionOverflow,
   setH3ImageSampler,
+  setPag,
   setBatchMode,
   setBatchPromptsText,
   setGuidanceMethod,
@@ -2219,6 +2238,7 @@ export function ImageStudio() {
       // SW-7106: restore the saved MiniMax-H3-Image sampler (absent or Euler ⇒ Euler).
       // The preset machinery applies through a functional update (to snapshot the prior value).
       ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
+      ["pag", (update) => setPag((current) => pagFromRecipe(typeof update === "function" ? update(current) : update))],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2285,6 +2305,7 @@ export function ImageStudio() {
       ...(showH3ImageSampler ? {
         h3ImageSampler: outgoingH3ImageSampler ?? { sampler: "lcm", sNoise: Number(h3ImageSampler.sNoise), sNoiseEnd: Number(h3ImageSampler.sNoiseEnd), noiseClipStd: Number(h3ImageSampler.noiseClipStd) },
       } : {}),
+      ...(outgoingPag ? { pag: outgoingPag } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2374,6 +2395,7 @@ export function ImageStudio() {
     cfgInterval,
     captionOverflow,
     h3ImageSampler,
+    pag,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2422,6 +2444,7 @@ export function ImageStudio() {
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
     if (cfgIntervalError) return cfgIntervalError;
     if (h3ImageSamplerError) return h3ImageSamplerError;
+    if (pagError) return pagError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
     if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
@@ -2638,6 +2661,7 @@ export function ImageStudio() {
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
       h3ImageSampler: outgoingH3ImageSampler,
+      pag: outgoingPag,
       stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -3609,6 +3633,10 @@ export function ImageStudio() {
             h3ImageSampler={h3ImageSampler}
             setH3ImageSampler={setH3ImageSampler}
             h3ImageSamplerError={h3ImageSamplerError}
+            pagCapability={pagCapability}
+            pag={pag}
+            setPag={setPag}
+            pagError={pagError}
             supportsTextStyle={supportsTextStyle}
             textStyleGainConfig={textStyleGainConfig}
             setTextStyleGain={setTextStyleGain}

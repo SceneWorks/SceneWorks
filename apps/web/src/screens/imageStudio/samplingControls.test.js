@@ -4,9 +4,13 @@ import {
   H3_IMAGE_LCM_FIELDS,
   h3ImageSamplerDefaults,
   h3ImageSamplerFromRecipe,
+  pagDefaults,
+  pagFromRecipe,
   promptBatchSize,
   resolveCfgInterval,
   resolveH3ImageSampler,
+  resolvePag,
+  supportsPag,
 } from "./samplingControls.js";
 
 // sc-25681: Image Studio's Iris-only sampling controls.
@@ -136,5 +140,112 @@ describe("MiniMax-H3-Image sampler", () => {
       expect(h3ImageSamplerFromRecipe(recorded)).toEqual({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
     }
     expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerFromRecipe(undefined) }).block).toEqual({ sampler: "euler" });
+  });
+});
+
+// SW-7181: Capability-driven Perturbed-Attention Guidance (PAG) helpers.
+describe("PAG sampling controls", () => {
+  const pagModel = {
+    id: "krea_2_raw",
+    pag: {
+      numBlocks: 28,
+      blockDomain: "single_stream_blocks",
+      defaultLayers: [14],
+      defaultStart: 0.1,
+      defaultStop: 0.75,
+      recommendedScale: 1.5,
+      maxScale: 15,
+    },
+  };
+
+  it("gates capability solely on model.pag.numBlocks > 0", () => {
+    expect(supportsPag(pagModel)).toBe(true);
+    expect(supportsPag({ id: "sdxl" })).toBe(false);
+    expect(supportsPag({ id: "bad", pag: { numBlocks: 0 } })).toBe(false);
+    expect(supportsPag(null)).toBe(false);
+  });
+
+  it("omits advanced.pag when unsupported, blank, or zero", () => {
+    expect(resolvePag({ model: { id: "sdxl" }, options: { scale: "1.5" } })).toEqual({ block: null, error: null });
+    for (const scale of ["", "   ", null, undefined, 0, "0", "0.0"]) {
+      expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale } })).toEqual({
+        block: null,
+        error: null,
+      });
+    }
+  });
+
+  it("emits clean blocks with optional overrides omitted when blank or zero adaptiveScale", () => {
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5" } })).toEqual({
+      block: { scale: 1.5 },
+      error: null,
+    });
+    expect(
+      resolvePag({
+        model: pagModel,
+        options: { scale: "2", layers: "0, 14 27", start: "0", stop: "0.9", adaptiveScale: "0.25" },
+      }),
+    ).toEqual({
+      block: { scale: 2, layers: [0, 14, 27], start: 0, stop: 0.9, adaptiveScale: 0.25 },
+      error: null,
+    });
+    expect(
+      resolvePag({
+        model: pagModel,
+        options: { scale: "2", layers: "", start: "", stop: "", adaptiveScale: "0" },
+      }),
+    ).toEqual({
+      block: { scale: 2 },
+      error: null,
+    });
+  });
+
+  it("refuses out-of-range scales, invalid/duplicate layers, and inverted or out-of-bounds windows", () => {
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "-0.1" } }).error).toContain("between 0 and 15");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "15.5" } }).error).toContain("between 0 and 15");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "abc" } }).error).toContain("between 0 and 15");
+
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", layers: "28" } }).error).toContain("0 and 27");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", layers: "-1" } }).error).toContain("integers");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", layers: "1.5" } }).error).toContain("integers");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", layers: "4, 4" } }).error).toContain("duplicated");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", layers: ", ," } }).error).toContain("integers");
+
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", start: "-0.1" } }).error).toContain("between 0 and 1");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", stop: "1.1" } }).error).toContain("between 0 and 1");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", start: "0.8", stop: "0.2" } }).error).toContain("≤ stop");
+    // Single-bound override compared against model defaults (defaultStart=0.1, defaultStop=0.75).
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", start: "0.8" } }).error).toContain("≤ stop (0.75)");
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", stop: "0.05" } }).error).toContain("≤ stop (0.05)");
+
+    expect(resolvePag({ model: pagModel, options: { ...pagDefaults(), scale: "1.5", adaptiveScale: "-0.1" } }).error).toContain("0 or greater");
+  });
+
+  it("rehydrates recorded PAG blocks cleanly without reading execution reports", () => {
+    expect(pagFromRecipe(undefined)).toEqual(pagDefaults());
+    expect(pagFromRecipe(null)).toEqual(pagDefaults());
+    expect(pagFromRecipe({ scale: 0, layers: [14] })).toEqual(pagDefaults());
+    expect(
+      pagFromRecipe({
+        scale: Math.fround(1.5),
+        layers: [2, 5],
+        start: 0,
+        stop: Math.fround(0.75),
+        adaptive_scale: Math.fround(0.3),
+      }),
+    ).toEqual({
+      scale: "1.5",
+      layers: "2, 5",
+      start: "0",
+      stop: "0.75",
+      adaptiveScale: "0.3",
+    });
+    expect(pagFromRecipe({ scale: 1.2, adaptiveScale: 0 })).toEqual({
+      scale: "1.2",
+      layers: "",
+      start: "",
+      stop: "",
+      adaptiveScale: "",
+    });
   });
 });
