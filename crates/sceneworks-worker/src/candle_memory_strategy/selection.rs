@@ -91,8 +91,7 @@ pub(crate) fn bind_ideogram_cache_execution(
 /// request, and it is added rung-for-rung (`execution_planner::plan_prefix_kv_cache`): the shed
 /// ladder picks the rung exactly as before, and the cache is taken only when that rung also fits it.
 /// `None` is exactly [`evaluate_shared_image`].
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn evaluate_shared_image_priced(
     engine_id: &'static str,
     model_id: &str,
@@ -191,8 +190,7 @@ pub(crate) fn evaluate_shared_image_priced_and_pag(
 }
 
 /// Reference-aware admission; facts originate only in the owned-asset resolver.
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn evaluate_shared_image_priced_with_resources(
     engine_id: &'static str,
     model_id: &str,

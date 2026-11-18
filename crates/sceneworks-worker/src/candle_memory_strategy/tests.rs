@@ -4000,6 +4000,7 @@ fn reference_workspace_is_charged_before_candle_fit_and_none_matches_the_legacy_
             None,
             resources,
             bytes,
+            0,
             None,
         )
     };

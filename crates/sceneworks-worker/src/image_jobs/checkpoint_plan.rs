@@ -3,6 +3,7 @@ use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 use super::krea_imported::imported_model_quant;
 use super::krea_imported::resolve_krea_imported_base_tier;
+#[cfg(target_os = "macos")]
 use super::krea_imported::KREA_IMPORTED_DEFAULT_STEPS;
 use super::krea_multiphase::request_has_multiphase;
 use super::mage_finetuned::resolve_mage_finetuned_components;
