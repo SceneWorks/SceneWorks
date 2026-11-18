@@ -342,6 +342,11 @@ pub(crate) fn build_request(
 
 /// Read and verify the prompt files of `prompt_root`.
 pub(crate) fn load_prompt_files(prompt_root: &Path) -> WorkerResult<pe::PromptFiles> {
+    #[cfg(test)]
+    if let Some(digest) = tests::PINNED_MANIFEST_OVERRIDE.with(|pin| pin.borrow().clone()) {
+        return pe::PromptFiles::load_with_manifest_digest(prompt_root, &digest)
+            .map_err(WorkerError::InvalidPayload);
+    }
     pe::PromptFiles::load_verified(prompt_root).map_err(WorkerError::InvalidPayload)
 }
 
@@ -395,6 +400,30 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    thread_local! {
+        /// The manifest digest [`load_prompt_files`] verifies against on THIS test thread in
+        /// place of the pinned upstream one, so a job-level test can run on a synthetic prompt
+        /// tree (no MiniMax prompt text is vendored). Unset, the pinned digest applies.
+        pub(super) static PINNED_MANIFEST_OVERRIDE: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Sets [`PINNED_MANIFEST_OVERRIDE`] for its lifetime and clears it on drop.
+    struct ManifestOverride;
+
+    impl ManifestOverride {
+        fn set(digest: String) -> Self {
+            PINNED_MANIFEST_OVERRIDE.with(|pin| *pin.borrow_mut() = Some(digest));
+            Self
+        }
+    }
+
+    impl Drop for ManifestOverride {
+        fn drop(&mut self) {
+            PINNED_MANIFEST_OVERRIDE.with(|pin| *pin.borrow_mut() = None);
+        }
+    }
 
     const PE_REPO: &str = "MiniMaxAI/MiniMax-H3-Image-PE";
     const PE_REVISION: &str = "35603d4b63949afa12cb098227fffefedf081afa";
@@ -682,6 +711,98 @@ mod tests {
             };
             assert_eq!(*log.lock().unwrap(), expected, "{access:?}");
         }
+    }
+
+    /// SW-7166: the expansion JOB — not only the helper above — stages the cached image
+    /// generator out before its cold expander load. The job runs against a local stub API and a
+    /// weightless local expander snapshot (prompt files only), so the load itself fails after the
+    /// eviction point; no model runs. Holds the crate's env lock, as every test touching the
+    /// process-wide generator cache does.
+    #[cfg(native_lane)]
+    #[test]
+    fn an_expansion_job_stages_the_cached_generator_out_before_its_cold_load() {
+        use crate::generator_cache::{global_generator_resident, load_stub_into_global_cache};
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let _env = crate::test_env::env_lock();
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().canonicalize().unwrap();
+        let _cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data.clone(),
+            data.join("hub"),
+        );
+        let local = data.join("local-pe");
+        std::fs::create_dir_all(&local).unwrap();
+        let digest = synthetic_prompt_tree(&local);
+        let resident_weights = data.join("resident-generator");
+        std::fs::create_dir_all(&resident_weights).unwrap();
+
+        let job_value = json!({
+            "id": "job_h3_expand_stage_out", "type": "prompt_refine", "status": "running",
+            "payload": {
+                "task": sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK,
+                "prompt": "a lighthouse",
+                "modelId": sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID,
+                "model": local.to_string_lossy(),
+                "modelManifestEntry": shipped_entry(),
+            },
+            "result": {}, "requestedGpu": "auto", "workerId": "w", "progress": 0,
+            "stage": "running", "message": "", "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-11-17T00:00:00Z", "updatedAt": "2026-11-17T00:00:00Z"
+        });
+        let job: crate::JobSnapshot = serde_json::from_value(job_value.clone()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // The job's own task runs on this thread (the current-thread runtime above).
+        let _pin = ManifestOverride::set(digest);
+        let (evicted, result) = runtime.block_on(async move {
+            let reply = job_value.clone();
+            let app = Router::new()
+                .route(
+                    "/api/v1/workers/:worker/heartbeat",
+                    post(|| async { Json(json!({})) }),
+                )
+                .route(
+                    "/api/v1/jobs/:job",
+                    get({
+                        let reply = reply.clone();
+                        move || async move { Json(reply) }
+                    }),
+                )
+                .route(
+                    "/api/v1/jobs/:job/progress",
+                    post(move || async move { Json(reply) }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut settings = crate::test_env::offline_settings();
+            settings.api_url = format!("http://{address}");
+            settings.worker_id = "w".into();
+            settings.data_dir = data.clone();
+            let api = crate::ApiClient::new(&settings);
+
+            load_stub_into_global_cache(&resident_weights)
+                .await
+                .unwrap();
+            assert!(
+                global_generator_resident().await.is_some(),
+                "the generator is resident"
+            );
+            let result =
+                crate::prompt_refine_jobs::run_prompt_refine_job(&api, &settings, &job).await;
+            server.abort();
+            (global_generator_resident().await.is_none(), result)
+        });
+        assert!(result.is_err(), "a weightless expander cannot load");
+        assert!(
+            evicted,
+            "the expansion job evicted the generator before its cold load ({result:?})"
+        );
     }
 
     #[test]

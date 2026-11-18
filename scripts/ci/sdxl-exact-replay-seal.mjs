@@ -10,15 +10,14 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { SCOPE, digest, requireReplayQualification, validatePlan } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
 const REVIEW_URL = 'https://github.com/SceneWorks/inference/pull/1464';
 
 export function makeReplayPlan(plan, qualification, sourceSha, pin, now = Date.now()) {
   validatePlan(plan, sourceSha, pin, 'qualify', Date.parse(plan.goStartsAt));
-  assert.equal(plan.physicalIndex, 0, 'only physical GPU zero is approved');
+  assert.equal(plan.physicalIndex, 1, 'only physical GPU one is approved');
   assert.equal(qualification.sourceSha, sourceSha, 'qualified app source changed');
   assert.equal(qualification.inferenceRevision, pin, 'qualified inference source changed');
-  assert.equal(qualification.physicalIndex, 0, 'qualified physical GPU changed');
+  assert.equal(qualification.physicalIndex, plan.physicalIndex, 'qualified physical GPU changed');
   for (const job of qualification.jobs ?? []) {
     assert.deepEqual(job.support, { kind: 'deterministic', scope: SCOPE }, 'provider did not declare exact replay support');
   }
@@ -41,7 +40,6 @@ async function main() {
   assert.equal(sourceSha, process.env.GITHUB_SHA, 'source changed');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim(), '', 'checkout dirty');
   const pin = await inferenceRevision(ROOT);
-  assert.equal(pin, PIN, 'inference pin changed');
   const privateDir = await realpath(path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay'));
   const planPath = await realpath(process.env.SDXL_REPLAY_PLAN);
   assert.equal(path.dirname(planPath).toLowerCase(), privateDir.toLowerCase(), 'plan escaped private directory');

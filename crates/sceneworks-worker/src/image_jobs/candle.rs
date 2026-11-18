@@ -902,6 +902,15 @@ async fn generate_candle_registry_stream_using(
             model = %request.model,
         );
     }
+    // Read the resident provider's retained warm set BEFORE the device: the cache query may wait
+    // behind a render, and a later free reading can only show more of that set released.
+    let retained_gb = match crate::generator_cache::cached_generator_retained_bytes().await {
+        Ok(bytes) => bytes.map_or(0.0, |bytes| bytes as f64 / crate::fit_gate::BYTES_PER_GIB),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the resident generator's warm set; crediting none");
+            0.0
+        }
+    };
     let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
     // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
@@ -911,7 +920,14 @@ async fn generate_candle_registry_stream_using(
     // component free keeps it pooled in-process. So budget against `free + reclaimable` (capped to total),
     // else a warm/swap re-gate falsely rejects a load that will actually fit (the "even with sequential
     // residency" 2nd-run reject a resident bf16 tier hits on the next generation).
-    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+    //
+    // A resident provider's warm set (MiniMax-H3 image or video on CUDA,
+    // `Generator::retained_weight_bytes`) is credited the same way: a different-key load evicts it,
+    // and a warm hit's provider keeps it only after checking that its own warm estimate fits. Credit
+    // the larger of the two, since both describe the resident occupant.
+    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id).max(
+        crate::vram_gate::retained_credit_gb(raw_budget, retained_gb),
+    );
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
     // sc-22664: the shared ladder's operational reserve is derived from the RAW probe, never from
@@ -2617,7 +2633,7 @@ async fn generate_candle_registry_stream_using(
             }
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -2774,17 +2790,21 @@ async fn generate_candle_registry_stream_using(
                         initial,
                         |retry_seed| render(retry_seed, on_progress),
                     )?;
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out_w,
-                                height: out_h,
-                                pixels: pixels.clone(),
-                            },
-                            likeness_source_ref.as_deref(),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out_w,
+                                    height: out_h,
+                                    pixels: pixels.clone(),
+                                },
+                                likeness_source_ref.as_deref(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     // The image's provenance facts (sc-25681): engine warnings, and each adapter's
                     // identity joined with the engine's own applied/skipped report.
                     let mut facts = lane_controls::image_facts(

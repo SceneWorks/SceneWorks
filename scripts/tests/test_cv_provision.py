@@ -140,16 +140,15 @@ class ProvisionContracts(unittest.TestCase):
                 helper.main()
         selected = captured[0]
         self.assertEqual(selected.actor, "cv-provider-validation")
-        self.assertEqual(selected.admission_policy, helper.STRICT_POLICY)
+        self.assertFalse(hasattr(selected, "admission_policy"))  # one admission rule for every actor
+        self.assertEqual(selected.min_free_mib, helper.DEFAULT_MIN_FREE_MIB)
+        self.assertEqual(selected.require_physical_index, 1)
         self.assertEqual(selected.budget_minutes, 170)
         self.assertEqual((selected.physical_indices, selected.cuda_ordinals, selected.probe_visible), (None, "0", "1"))
         self.assertEqual(selected.command, ["--", "node", "scripts/cv-provider-validation.mjs"])
         env = dict(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_WORKFLOW_REF="SceneWorks/SceneWorks/.github/workflows/nax-kernel-validation.yml@refs/heads/proof",
                    SCENEWORKS_GPU_ID="1", CUDA_VISIBLE_DEVICES="1", NVIDIA_VISIBLE_DEVICES="1", CUDA_DEVICE_ORDER="PCI_BUS_ID")
         helper.require_outermost(env)
-        helper.require_admission_policy(selected.admission_policy, selected.actor, env, selected.physical_indices, selected.cuda_ordinals, selected.probe_visible)
-        with self.assertRaisesRegex(RuntimeError, "restricted to load-progress"):
-            helper.require_admission_policy(helper.FUNCTIONAL_POLICY, selected.actor, env, None, "0", "1")
         with self.assertRaises(RuntimeError):
             helper.require_outermost({**env, helper.ACTIVE_KEY: "123"})
         self.assertIn('if "%CV_BUILD_ONLY%"=="true" (node scripts/cv-provider-validation.mjs)', workflow)

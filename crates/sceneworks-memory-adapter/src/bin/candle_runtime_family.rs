@@ -2,10 +2,12 @@
 use super::*;
 
 pub(super) fn certifying_wddm_idle_config() -> StableIdleConfig {
-    // GPU 1's otherwise-idle WDDM graphics residency measured 1.6 GB in run 33188922159. The
-    // pinned testkit's stable-idle proof is deliberately stricter than a raised one-shot ceiling:
-    // it repeats the samples, bounds drift, and rejects any pure-compute process before allowing
-    // the device-level delta capture.
+    // Five samples 200 ms apart must agree within 64 MiB before the lowest becomes the delta
+    // baseline. The GPU need not be idle (owner rule): the pinned testkit records resident
+    // co-tenants (desktop graphics, an app holding a loaded model) instead of refusing them, and
+    // the 2.0 GB figure is recorded only. The walker brackets each capture with a before/after
+    // card baseline and retries one during which a co-tenant moved
+    // (`scripts/measure-memory-catalog.mjs`, `coTenantShift`).
     StableIdleConfig::new(2.0, 5, 64, 200)
 }
 
@@ -2023,7 +2025,7 @@ pub(super) fn endpoint_vram_probe() -> Result<VramProbe, String> {
         ));
     }
     eprintln!(
-        "SDXL endpoint awaiting idle physical GPU{} UUID={expected}",
+        "SDXL endpoint awaiting an admissible (free, quiet) physical GPU{} UUID={expected}",
         smi.physical_id
     );
     let started = Instant::now();

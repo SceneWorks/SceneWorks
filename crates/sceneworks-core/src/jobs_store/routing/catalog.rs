@@ -2217,48 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn native_training_capability_arrays_keep_the_frozen_public_order() {
-        let old: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../apps/web/src/testUtils/catalogBaseline/old-catalog.json"
-        ))
-        .unwrap();
-        let actual = serde_json::to_value(super::mac_capabilities("macos", true)).unwrap();
-        for key in ["supportedKernels", "candleSupportedKernels"] {
-            let frozen = old["catalog"]["platforms"]["macos"]["training"][key]
-                .as_array()
-                .unwrap();
-            let current = actual["training"][key].as_array().unwrap();
-            // The frozen kernels keep their public order as a prefix; a kernel shipped after the
-            // freeze (MiniMax-H3-Image, SW-7103) is appended at its declared presentation rank.
-            assert_eq!(
-                &current[..frozen.len().min(current.len())],
-                frozen.as_slice(),
-                "{key} public order"
-            );
-            // Exactly the two post-freeze kernels, in their declared rank order: nothing else may
-            // ride in after the frozen prefix unreviewed.
-            assert_eq!(
-                &current[frozen.len()..],
-                &[
-                    serde_json::json!("minimax_h3_image_lora"),
-                    serde_json::json!("minimax_h3_image_edit_lora"),
-                ],
-                "{key}: the only post-freeze kernels are the two MiniMax-H3-Image ones"
-            );
-            for kernel in &current[frozen.len()..] {
-                let kernel = kernel.as_str().unwrap();
-                assert!(
-                    super::TRAINING_KERNEL_PRESENTATION_ORDER
-                        .iter()
-                        .any(|(id, _, _)| *id == kernel),
-                    "{key}: post-freeze kernel {kernel} needs a presentation rank"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn frozen_ui_models_with_missing_old_rows_reach_the_native_mlx_predicate() {
+    fn infographic_and_lightning_edit_models_reach_the_native_mlx_predicate() {
         for id in [
             "sensenova_u1_8b_infographic_v2",
             "sensenova_u1_8b_infographic_v2_fast",

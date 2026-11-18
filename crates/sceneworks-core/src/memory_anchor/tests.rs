@@ -1802,6 +1802,7 @@ fn candle_record_anchor(raw: &str) -> MemoryAnchor {
         // The retained corpus this fixture replays predates the structural-exemption fact and
         // carries no structurally-exempt cell, so every replayed row keeps the staged-only law.
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 
@@ -4115,6 +4116,7 @@ fn axis_free_video_anchor() -> MemoryAnchor {
         ),
         component_bytes: None,
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 
@@ -5132,7 +5134,9 @@ fn a_doctored_phase_allocator_or_empty_underived_reason_is_rejected() {
 #[test]
 fn regime_anchors_are_filed_apart_named_unique_and_bound_to_their_record() {
     let packaged = store().clone();
-    let serialized = serde_json::to_value(&packaged).unwrap();
+    let mut no_regimes = packaged.clone();
+    no_regimes.regime_anchors.clear();
+    let serialized = serde_json::to_value(&no_regimes).unwrap();
     assert!(serialized.get("regimeAnchors").is_none());
     let load =
         |store: &MemoryAnchorStore| load_memory_anchors(&serde_json::to_string(store).unwrap());
@@ -5196,4 +5200,270 @@ fn a_regime_rows_stop_binds_nothing_and_is_bound_to_its_entry() {
     }];
     let error = load_memory_anchors(&serde_json::to_string(&store).unwrap()).unwrap_err();
     assert!(error.contains("identity disagrees"), "{error}");
+}
+
+/// SW-F363: on an always-staging MLX engine (`enginesThatAlwaysStage.mlx`, bound to the descriptor's
+/// `unconditionally_engages_staged_residency`) the packaged STAGED eager unbounded anchor is the
+/// widest composition the engine runs, so the MLX entry points price the STAGED regime from it —
+/// exactly the candle law's staged split — and never a co-resident composition.
+///
+/// *Mutations this kills:* deriving the staged anchor at the resident regime; subtracting the
+/// whole resident set from a staged anchor's phases; accepting a staged anchor on a lane that can
+/// execute co-resident; accepting a resident anchor on an always-staging lane.
+#[test]
+fn an_always_staging_mlx_anchor_prices_the_staged_composition_and_only_it() {
+    let request = AnchorMlxImageDeriveRequest {
+        width: 2048,
+        height: 2048,
+    };
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("minimax_h3_image", AnchorBackend::Mlx, tier)
+            .unwrap_or_else(|| panic!("the minimax_h3_image {tier} MLX anchor is packaged"));
+        assert!(anchor.staged_residency_unconditional, "{tier}");
+        assert!(anchor.measured_regime.staged, "{tier}");
+        assert!(anchor.underived_reason.is_none(), "{tier}");
+        let derived = anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .unwrap_or_else(|| panic!("{tier}: the staged anchor derives"));
+        assert_eq!(
+            Some(derived),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::staged()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}: priced at the staged regime"
+        );
+        assert_ne!(
+            Some(derived),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}: never the co-resident regime"
+        );
+        // Each phase subtracts only its own component at the anchor's geometry.
+        let at_anchor = anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: anchor.geometry.width,
+                height: anchor.geometry.height,
+            },
+            components,
+        );
+        assert_eq!(
+            at_anchor,
+            [
+                Some(anchor.phase_active_peak_bytes.conditioning - 1),
+                Some(anchor.phase_active_peak_bytes.denoise - 1),
+                Some(anchor.phase_active_peak_bytes.decode - 1),
+            ],
+            "{tier}"
+        );
+
+        // A staged anchor on a lane that CAN execute co-resident must not price it.
+        let mut coresident_lane = anchor.clone();
+        coresident_lane.staged_residency_unconditional = false;
+        assert!(coresident_lane
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_none());
+        assert_eq!(
+            coresident_lane.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        // A resident anchor on an always-staging lane claims a render that cannot happen.
+        let mut impossible = anchor.clone();
+        impossible.measured_regime.staged = false;
+        assert!(impossible
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_none());
+        assert_eq!(
+            impossible.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        // ...and the loader refuses the flag on a row that is not a staged MLX render.
+        let mut candle = anchor.clone();
+        candle.backend = AnchorBackend::Candle;
+        assert!(validate_anchor(&candle)
+            .unwrap_err()
+            .contains("always-staging"));
+        assert!(validate_anchor(&impossible)
+            .unwrap_err()
+            .contains("always-staging"));
+    }
+}
+
+/// SW-F363: a non-staging MLX image lane is unchanged — the packaged `qwen_image_2_1` anchors carry
+/// no always-staging flag and still price the RESIDENT regime, subtracting the whole resident set
+/// from every phase.
+#[test]
+fn a_non_staging_mlx_anchor_keeps_the_resident_law() {
+    let request = AnchorMlxImageDeriveRequest {
+        width: 1536,
+        height: 1536,
+    };
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("qwen_image_2_1", AnchorBackend::Mlx, tier)
+            .unwrap_or_else(|| panic!("the qwen_image_2_1 {tier} MLX anchor is packaged"));
+        assert!(!anchor.staged_residency_unconditional, "{tier}");
+        assert!(!anchor.measured_regime.staged, "{tier}");
+        assert_eq!(
+            anchor.derive_mlx_image_phase_peaks(request, components),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}"
+        );
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_some());
+        let at_anchor = anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: anchor.geometry.width,
+                height: anchor.geometry.height,
+            },
+            components,
+        );
+        assert_eq!(
+            at_anchor,
+            [
+                Some(anchor.phase_active_peak_bytes.conditioning - 3),
+                Some(anchor.phase_active_peak_bytes.denoise - 3),
+                Some(anchor.phase_active_peak_bytes.decode - 3),
+            ],
+            "{tier}"
+        );
+    }
+}
+
+/// PR #3441 review: MiniMax-H3-Image renders an output below the ~4 MP default minimum generation
+/// area on an upscaled canvas (`gen_core::h3_image::generation_canvas`) and resizes back, so the
+/// law scales by CANVAS on both sides. The packaged 1024² captures ran on a 2048² canvas: a 1024²
+/// and a 2048² request price exactly the capture (no scaling), and the native 4096² preset scales
+/// from the 2048² canvas (×4 linear, ×16 quadratic denoise growth) — on MLX and on Candle.
+#[test]
+fn minimax_h3_image_anchors_scale_by_the_inference_canvas_not_the_output() {
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    assert_eq!(
+        inference_canvas("minimax_h3_image", 1024, 1024),
+        (2048, 2048)
+    );
+    assert_eq!(
+        inference_canvas("minimax_h3_image", 2048, 2048),
+        (2048, 2048)
+    );
+    assert_eq!(
+        inference_canvas("minimax_h3_image", 4096, 4096),
+        (4096, 4096)
+    );
+    let mlx = |w, h| AnchorMlxImageDeriveRequest {
+        width: w,
+        height: h,
+    };
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("minimax_h3_image", AnchorBackend::Mlx, tier)
+            .expect("the packaged minimax_h3_image MLX anchor");
+        assert_eq!(
+            (anchor.geometry.width, anchor.geometry.height),
+            (1024, 1024)
+        );
+        let capture = anchor.derive_mlx_image_activation_residues(mlx(1024, 1024), components);
+        let [Some(cond), Some(den), Some(dec)] = capture else {
+            panic!("{tier}: the capture prices itself");
+        };
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(mlx(2048, 2048), components),
+            capture,
+            "{tier}: a 2048² request runs the capture's own 2048² canvas"
+        );
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(mlx(4096, 4096), components),
+            [Some(cond), Some(den * 16), Some(dec * 4)],
+            "{tier}: the 16 MP preset scales from the 2048² canvas"
+        );
+        assert_eq!(
+            anchor.derive_mlx_image_phase_peaks(mlx(2048, 2048), components),
+            anchor.derive_mlx_image_phase_peaks(mlx(1024, 1024), components),
+            "{tier}"
+        );
+    }
+    for tier in ["bf16", "q8", "q4"] {
+        let anchor = store()
+            .image_anchor_for("minimax_h3_image", AnchorBackend::Candle, tier)
+            .expect("the packaged minimax_h3_image Candle anchor");
+        let candle = |w, h| {
+            anchor.derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
+                    width: w,
+                    height: h,
+                    staged_residency: true,
+                },
+                components,
+            )
+        };
+        let capture = candle(1024, 1024).expect("the Candle capture prices itself");
+        assert_eq!(candle(2048, 2048), Some(capture), "{tier}");
+        let preset = candle(4096, 4096).expect("the 16 MP preset prices");
+        assert!(preset.denoise > capture.denoise, "{tier}");
+        assert_eq!(
+            Some(preset),
+            anchor.derive_phase_peaks(
+                &ImageDeriveRequest::new(4096, 4096, RequestRegime::staged()),
+                components,
+                ArchitectureFacts::default(),
+            ),
+            "{tier}"
+        );
+    }
+}
+
+/// Every other provider keeps scaling by its output: the canvas is the output itself, so the
+/// packaged 2048² `qwen_image_2_1` MLX anchor still scales ×4/×16 to a 4096² request.
+#[test]
+fn other_providers_still_scale_by_the_output_size() {
+    let components = ComponentBytes {
+        conditioning: 1,
+        transformer: 1,
+        decoder: 1,
+    };
+    assert_eq!(inference_canvas("qwen_image_2_1", 1024, 1024), (1024, 1024));
+    let anchor = store()
+        .image_anchor_for("qwen_image_2_1", AnchorBackend::Mlx, "q4")
+        .expect("the packaged qwen_image_2_1 q4 MLX anchor");
+    assert_eq!(
+        (anchor.geometry.width, anchor.geometry.height),
+        (2048, 2048)
+    );
+    let at = |w, h| {
+        anchor.derive_mlx_image_activation_residues(
+            AnchorMlxImageDeriveRequest {
+                width: w,
+                height: h,
+            },
+            components,
+        )
+    };
+    let [Some(cond), Some(den), Some(dec)] = at(2048, 2048) else {
+        panic!("the capture prices itself");
+    };
+    assert_eq!(at(4096, 4096), [Some(cond), Some(den * 16), Some(dec * 4)]);
 }

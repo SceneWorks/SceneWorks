@@ -136,3 +136,60 @@ async fn an_abandoned_uncached_producer_latches_its_process_fault() {
         "the producer latched its typed fault without any consumer"
     );
 }
+
+/// SW-7171: once a typed fault is latched — here classified and then swallowed by the item closure,
+/// as the old non-fatal scoring seam did — the multi-item driver starts no further pose or image and
+/// fails the job with that fatal cause.
+#[test]
+fn a_latched_fault_stops_the_driver_before_the_next_item() {
+    std::thread::spawn(|| {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut started = 0_usize;
+        let result = super::drive_gen_items_scored(tx, [1_u8, 2, 3], |_, _, _, _| {
+            started += 1;
+            let _swallowed = crate::classify_engine_error(
+                "face detect",
+                gen_core::Error::ProcessPoisoned("driver device lost".into()),
+            );
+            Ok(Some((0, 1, 1, vec![0; 3], None)))
+        });
+        assert!(
+            matches!(result, Err(crate::WorkerError::ProcessPoisoned(ref d)) if d == "driver device lost"),
+            "{result:?}"
+        );
+        assert_eq!(started, 1, "no further item starts after the fault");
+    })
+    .join()
+    .expect("driver thread");
+}
+
+/// SW-7171 AC1 end to end at the driver: a poisoned face score inside a pose fails the set with
+/// the fatal cause and the next pose never starts.
+#[cfg(native_lane)]
+#[test]
+fn a_poisoned_face_score_fails_the_set_and_starts_no_further_pose() {
+    std::thread::spawn(|| {
+        let image = |px: u8| gen_core::Image {
+            width: 1,
+            height: 1,
+            pixels: vec![px; 3],
+        };
+        let (scorer, _calls) =
+            crate::face_likeness::FaceLikenessScorer::with_stub_source(&image(200));
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut started = 0_usize;
+        let result = super::drive_gen_items_scored(tx, [255_u8, 200], |_, px, _, _| {
+            started += 1;
+            let face_likeness =
+                crate::face_likeness::score_generated_image(Some(&scorer), &image(px), Some("s"))?;
+            Ok(Some((0, 1, 1, vec![px; 3], face_likeness)))
+        });
+        assert!(
+            matches!(result, Err(crate::WorkerError::ProcessPoisoned(_))),
+            "{result:?}"
+        );
+        assert_eq!(started, 1);
+    })
+    .join()
+    .expect("driver thread");
+}

@@ -422,7 +422,7 @@ pub(super) async fn generate_zimage_control_stream(
             // every pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -470,17 +470,21 @@ pub(super) async fn generate_zimage_control_stream(
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
                     // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
                     // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out_w,
-                                height: out_h,
-                                pixels: pixels.clone(),
-                            },
-                            likeness_source_ref.as_deref(),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out_w,
+                                    height: out_h,
+                                    pixels: pixels.clone(),
+                                },
+                                likeness_source_ref.as_deref(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
@@ -706,7 +710,7 @@ pub(super) async fn generate_zimage_base_control_stream(
             // every pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -756,17 +760,21 @@ pub(super) async fn generate_zimage_base_control_stream(
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
                     // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
                     // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: out_w,
-                                height: out_h,
-                                pixels: pixels.clone(),
-                            },
-                            likeness_source_ref.as_deref(),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: out_w,
+                                    height: out_h,
+                                    pixels: pixels.clone(),
+                                },
+                                likeness_source_ref.as_deref(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
                 },
             )

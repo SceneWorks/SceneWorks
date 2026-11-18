@@ -21,11 +21,11 @@ weights and the prompt files directly from the upstream
 MiniMaxAI/MiniMax-H3-Image-PE repository; those files are not re-hosted. At
 run time SceneWorks reads the system and task prompts from that download and
 checks each against the repository's own prompt/manifest.json before using it.
-The bf16, Q8 and Q4 tiers are planned as converted copies of the weights at
-SceneWorks/minimax-h3-image-pe and are not published yet. Once published, those
-converted files are modified files within the meaning of Section III.2, which
-requires them to carry a prominent notice stating that they were modified; that
-notice belongs on the re-hosted repository. The converted tiers never contain
+The Q8 and Q4 tiers are converted copies of the weights published at
+SceneWorks/minimax-h3-image-pe; the bf16 tier is planned there and is not
+published yet. The converted files are modified files within the meaning of
+Section III.2, which requires them to carry a prominent notice stating that
+they were modified; that notice belongs on the re-hosted repository. The converted tiers never contain
 the prompt files.
 
 These terms of the Agreement bind every user directly, not only SceneWorks:

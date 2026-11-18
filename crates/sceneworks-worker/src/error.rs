@@ -5,6 +5,24 @@ thread_local! {
     // A typed provider fault is terminal for this owner thread. Destructors below the
     // cache owner's return path must not submit another command to the failed device.
     static OWNER_PROCESS_POISONED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // The first typed fault detail classified on this thread, for a driver that must stop.
+    static OWNER_FAULT_DETAIL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The typed process fault this process has latched, if any: the first one classified on this
+/// thread, else the process-wide quarantine's. A multi-item driver checks it before starting the
+/// next item, so a fault a callee swallowed (or one latched on another thread) never lets more
+/// GPU work start (SW-7171). Its callers are the native-lane image drivers.
+#[cfg(native_lane)]
+pub(crate) fn latched_process_fault() -> Option<String> {
+    if let Some(detail) = OWNER_FAULT_DETAIL.with(|detail| detail.borrow().clone()) {
+        return Some(detail);
+    }
+    #[cfg(not(test))]
+    if let Some(detail) = crate::mlx_worker_recovery::global().process_fault_detail() {
+        return Some(detail);
+    }
+    None
 }
 
 pub(crate) fn owner_process_poisoned() -> bool {
@@ -230,6 +248,9 @@ pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> Wo
         // byte-for-byte so the owner and terminal paths can retire without string inference.
         gen_core::Error::ProcessPoisoned(detail) => {
             mark_owner_process_poisoned();
+            OWNER_FAULT_DETAIL.with(|first| {
+                first.borrow_mut().get_or_insert_with(|| detail.clone());
+            });
             latch_process_fault(&detail);
             WorkerError::ProcessPoisoned(detail)
         }

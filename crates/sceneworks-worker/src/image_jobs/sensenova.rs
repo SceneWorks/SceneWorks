@@ -299,7 +299,7 @@ pub(super) async fn generate_sensenova_edit_stream(
             // face stack lives here); source embedded once, reused across every angle (sc-4409).
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some(source)) => {
-                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)?
                 }
                 _ => None,
             };
@@ -333,17 +333,21 @@ pub(super) async fn generate_sensenova_edit_stream(
                     // scorer exists (a character_image generation) — a plain `edit_image` job has no
                     // scorer, so this is a no-op with no clone. Profile / up / down → honest
                     // detected:false N/A; `None` scorer ⇒ field omitted.
-                    let face_likeness = scorer.as_ref().and_then(|scorer| {
-                        crate::face_likeness::score_generated_image(
-                            Some(scorer),
-                            &Image {
-                                width: w,
-                                height: h,
-                                pixels: pixels.clone(),
-                            },
-                            likeness_source_ref.as_deref(),
-                        )
-                    });
+                    let face_likeness = scorer
+                        .as_ref()
+                        .map(|scorer| {
+                            crate::face_likeness::score_generated_image(
+                                Some(scorer),
+                                &Image {
+                                    width: w,
+                                    height: h,
+                                    pixels: pixels.clone(),
+                                },
+                                likeness_source_ref.as_deref(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     Ok(Some((seed, w, h, pixels, face_likeness)))
                 },
             )

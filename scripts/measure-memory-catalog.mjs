@@ -4570,6 +4570,146 @@ export function stderrTail(error, limit = INGEST_STDERR_TAIL_LINES) {
   return text.split("\n").slice(-limit).join("\n");
 }
 
+/**
+ * Owner rule (no job requires an idle GPU): a Candle CUDA capture may share its card with a resident
+ * co-tenant -- the desktop app holding a loaded model, say. The engine's in-process probe measures
+ * peak - stable baseline, which is this capture's own footprint only while the co-tenant stays
+ * put. So the walker brackets every capture: a baseline window of the card BEFORE the adapter starts
+ * and another AFTER it exits (neither includes our process). If the co-tenant moved in between, the
+ * peak may hold someone else's allocation: the attempt is discarded and retried, and after
+ * `CO_TENANT_ATTEMPTS` moved attempts the cell is refused rather than committed with a bad number.
+ */
+export const CO_TENANT_WINDOW = Object.freeze({ samples: 5, intervalMs: 200 });
+export const CO_TENANT_MAX_SHIFT_MIB = 256;
+export const CO_TENANT_ATTEMPTS = 3;
+/** WDDM can keep charging an exited process's memory for a few seconds (MOSS allows 30 s). */
+export const CO_TENANT_SETTLE_MS = 30_000;
+const NVIDIA_SMI_TIMEOUT_MS = 30_000;
+
+/**
+ * The physical GPU a Candle capture renders on, or `null` when the walker cannot bracket it. Only a
+ * PCI-bus-ordered single index names the same card to CUDA and to `nvidia-smi -i`.
+ */
+export function coTenantGpu(row, env) {
+  if (anchorParts(row.key).backend !== "candle" || env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID") return null;
+  const device = String(env.CUDA_VISIBLE_DEVICES ?? "").trim();
+  return /^\d+$/.test(device) ? device : null;
+}
+
+/**
+ * One baseline window of the card's device-level `memory.used` (MiB), plus the pure-compute ("C")
+ * processes `nvidia-smi pmon` reports on it -- a co-tenant that starts or exits across a capture is
+ * named even when its memory happens to return to the same level.
+ */
+export async function sampleCardBaseline(gpu, { env = process.env, runCommand = run, sleep = (ms) => new Promise((done) => setTimeout(done, ms)) } = {}) {
+  const samples = [];
+  for (let index = 0; index < CO_TENANT_WINDOW.samples; index += 1) {
+    if (index) await sleep(CO_TENANT_WINDOW.intervalMs);
+    const { stdout } = await runCommand("nvidia-smi", ["-i", gpu, "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+    const value = Number(String(stdout).trim());
+    if (!Number.isInteger(value) || value < 0) throw new Error(`unreadable memory.used for GPU ${gpu}: ${String(stdout).trim()}`);
+    samples.push(value);
+  }
+  const { stdout: pmon } = await runCommand("nvidia-smi", ["pmon", "-i", gpu, "-c", "1", "-s", "um"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+  const compute = String(pmon).split("\n").map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 3 && /^\d+$/.test(fields[1]) && fields[2] === "C").map((fields) => Number(fields[1]));
+  return { samples, min: Math.min(...samples), max: Math.max(...samples), compute: [...new Set(compute)].sort((a, b) => a - b) };
+}
+
+/**
+ * The after-capture window, re-taken until the exited adapter's memory has left the counter (its
+ * min is back within the limit of the before window) or `CO_TENANT_SETTLE_MS` runs out.
+ */
+export async function settledCardBaseline(gpu, before, { sample = sampleCardBaseline, env, clock = Date.now, sleep = (ms) => new Promise((done) => setTimeout(done, ms)) } = {}) {
+  const started = clock();
+  for (;;) {
+    const after = await sample(gpu, { env });
+    if (after.min - before.min <= CO_TENANT_MAX_SHIFT_MIB || clock() - started >= CO_TENANT_SETTLE_MS) return after;
+    await sleep(1_000);
+  }
+}
+
+/** How often the walker reads per-process GPU activity while a Candle capture runs. */
+export const CO_TENANT_POLL_MS = 2_000;
+/** The adapter's own process as `nvidia-smi pmon` truncates its command name. */
+const ADAPTER_COMMAND_PREFIX = "memory-cand";
+
+/** Rows of `nvidia-smi pmon -s um`, columns located by the `# gpu pid type ...` header. */
+export function parsePmon(text) {
+  const lines = String(text).split("\n").map((line) => line.trim()).filter(Boolean);
+  const header = lines.find((line) => /^#\s*gpu\b/.test(line));
+  if (!header) return null;
+  const columns = header.replace(/^#\s*/, "").split(/\s+/);
+  const at = (name) => columns.indexOf(name);
+  if (at("pid") < 0 || at("type") < 0 || at("sm") < 0 || at("mem") < 0) return null;
+  return lines.filter((line) => !line.startsWith("#")).map((line) => line.split(/\s+/))
+    .filter((fields) => /^\d+$/.test(fields[at("pid")] ?? ""))
+    .map((fields) => ({
+      pid: Number(fields[at("pid")]), type: fields[at("type")], sm: fields[at("sm")], mem: fields[at("mem")],
+      command: at("command") >= 0 ? fields.slice(at("command")).join(" ") : "",
+    }));
+}
+
+/**
+ * Codex review (PR #3435): equal before/after windows cannot certify a capture -- a resident
+ * co-tenant can allocate and free VRAM in the middle of it, and the device-wide peak then holds its
+ * memory. So while the capture runs, every pure-compute ("C") process other than our adapter must be
+ * one that was already resident and must show NO activity (`sm` and `mem` both 0). A new compute
+ * process, any activity, or activity pmon cannot report ("-") means the peak cannot be attributed to
+ * the adapter: the attempt is discarded and retried. Graphics/C+G desktop clients are not judged.
+ */
+export function coTenantActivity(rows, resident) {
+  if (rows === null) return ["nvidia-smi pmon output unreadable; the peak cannot be attributed to the adapter"];
+  const reasons = [];
+  for (const row of rows) {
+    if (row.type !== "C" || row.command.startsWith(ADAPTER_COMMAND_PREFIX)) continue;
+    if (!resident.includes(row.pid)) {
+      reasons.push(`compute process ${row.pid} (${row.command || "unnamed"}) appeared during the capture`);
+      continue;
+    }
+    const sm = Number(row.sm), mem = Number(row.mem);
+    if (!Number.isFinite(sm) || !Number.isFinite(mem)) {
+      reasons.push(`co-tenant ${row.pid} activity unreadable (sm ${row.sm}, mem ${row.mem}); the peak cannot be attributed`);
+    } else if (sm > 0 || mem > 0) {
+      reasons.push(`co-tenant ${row.pid} (${row.command || "unnamed"}) was active during the capture (sm ${sm}%, mem ${mem}%)`);
+    }
+  }
+  return reasons;
+}
+
+/** Poll per-process activity for the whole capture; `stop()` returns the distinct reasons seen. */
+export function monitorCoTenants(gpu, resident, { env = process.env, runCommand = run, pollMs = CO_TENANT_POLL_MS } = {}) {
+  const reasons = new Set();
+  let running = true;
+  let wake = null;
+  const loop = (async () => {
+    while (running) {
+      try {
+        const { stdout } = await runCommand("nvidia-smi", ["pmon", "-i", gpu, "-c", "1", "-s", "um"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+        for (const reason of coTenantActivity(parsePmon(stdout), resident)) reasons.add(reason);
+      } catch (error) {
+        reasons.add(`nvidia-smi pmon failed during the capture: ${error.message}`);
+      }
+      if (!running) break;
+      await new Promise((done) => { wake = done; setTimeout(done, pollMs); });
+    }
+  })();
+  return { stop: async () => { running = false; wake?.(); await loop; return [...reasons]; } };
+}
+
+/** Why the co-tenant baseline moved across a capture, or `null` when it held. */
+export function coTenantShift(before, after, limit = CO_TENANT_MAX_SHIFT_MIB) {
+  const reasons = [];
+  for (const [name, window] of [["before", before], ["after", after]]) {
+    if (window.max - window.min > limit) reasons.push(`${name} window unstable (${window.min}-${window.max} MiB)`);
+  }
+  const shift = after.min - before.min;
+  if (Math.abs(shift) > limit) reasons.push(`baseline moved ${shift > 0 ? "+" : ""}${shift} MiB (${before.min} -> ${after.min} MiB, allowed ${limit})`);
+  const named = (list) => (list ?? []).join(",") || "none";
+  if (named(before.compute) !== named(after.compute)) reasons.push(`pure-compute co-tenants changed (${named(before.compute)} -> ${named(after.compute)})`);
+  return reasons.length ? reasons.join("; ") : null;
+}
+
 export async function measureAnchor(row, context) {
   // `platform` decides ONLY whether this capture runs under the footprint guard (`guardsCapture`),
   // and defaults to the host's. It is overridable for the same reason `guardsCapture` takes the
@@ -4732,7 +4872,14 @@ export async function measureAnchor(row, context) {
   // behind the guard's deadline; everywhere else it is the only thing that can end a wedge. See
   // `probeTimeoutMs` for the run it was written for.
   const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
+  const cardGpu = (context.coTenantGpu ?? coTenantGpu)(row, env);
+  let coTenantRefusal = null;
   try {
+    for (let attempt = 1; ; attempt += 1) {
+    const before = cardGpu === null ? null : await (context.sampleCardBaseline ?? sampleCardBaseline)(cardGpu, { env });
+    const monitor = cardGpu === null ? null : (context.monitorCoTenants ?? monitorCoTenants)(cardGpu, before.compute ?? [], { env });
+    let activity = [];
+    try {
     await withMetalExecutionLease(budgetMinutes * 60, async () => {
     if (guarded) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
@@ -4751,6 +4898,20 @@ export async function measureAnchor(row, context) {
       await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
     });
+    } finally {
+      // Stopped on every path, so a failed capture never leaves the poller running.
+      if (monitor) activity = await monitor.stop();
+    }
+    if (cardGpu === null) break;
+    const after = await (context.settledCardBaseline ?? settledCardBaseline)(cardGpu, before, { sample: context.sampleCardBaseline ?? sampleCardBaseline, env });
+    const shift = [coTenantShift(before, after), ...activity].filter(Boolean).join("; ") || null;
+    log.write(`co-tenant bracket GPU ${cardGpu} attempt ${attempt}: before ${JSON.stringify(before.samples)} after ${JSON.stringify(after.samples)}${shift ? ` MOVED: ${shift}` : " held"}\n`);
+    if (!shift) break;
+    process.stdout.write(`--- ${row.key}: co-tenant changed the card during attempt ${attempt}/${CO_TENANT_ATTEMPTS} (${shift})${attempt < CO_TENANT_ATTEMPTS ? "; discarding it and retrying" : ""}\n`);
+    if (attempt >= CO_TENANT_ATTEMPTS) { coTenantRefusal = shift; break; }
+    await rm(captureOutput, { force: true });
+    if (row.sourceCapture) await rm(rawLogDir, { recursive: true, force: true });
+    }
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
@@ -4900,6 +5061,9 @@ export async function measureAnchor(row, context) {
     });
   }
 
+  if (coTenantRefusal) {
+    return finish("capture_failed", `co-tenant changed the card in all ${CO_TENANT_ATTEMPTS} attempts, so the peak would be contaminated: ${coTenantRefusal}`.slice(0, FAILURE_REASON_LIMIT));
+  }
   // 2. check the raw bundle before touching the tree.
   const sourceRoot = row.sourceCapture ? ["--source-root", rawLogDir] : [];
   try {

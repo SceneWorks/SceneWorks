@@ -1444,12 +1444,16 @@ function assertSdxlEndpointProbeGuards(adapter) {
   assert.match(probe, /if uuid != expected/);
   assert.doesNotMatch(probe, /pure_compute|assert_idle|assert_stable_idle/, "unused contexts remain part of the measured baseline");
   const idle = body("wait_for_sdxl_idle");
-  assert.match(idle, /let timeout = Duration::from_secs\(30\)/);
+  // Owner rule: a shared card is admitted on free memory, stability and utilization <= 30 %, waited
+  // for up to 10 min, never on an idle (0 %) card.
+  assert.match(idle, /let timeout = SDXL_ADMISSION_WAIT;/);
+  assert.match(adapter, /const SDXL_ADMISSION_WAIT: Duration = Duration::from_secs\(600\);/);
+  assert.match(adapter, /const SDXL_MAX_UTILIZATION_PERCENT: u64 = 30;/);
   assert.match(idle, /while elapsed\(\) < timeout/);
   assert.match(idle, /saturating_sub\(elapsed\(\)\)[\s\S]*?\.min\(Duration::from_secs\(5\)\)/);
   assert.match(idle, /parse::<u64>\(\)/);
   assert.match(idle, /values\.len\(\) != 4[\s\S]*?values\[2\] > 100[\s\S]*?values\[3\] > 100/);
-  assert.match(idle, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
+  assert.match(idle, /values\[1\] < 16 \* 1024 \|\| values\[2\] > SDXL_MAX_UTILIZATION_PERCENT/);
   assert.match(idle, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
   assert.match(idle, /used\.clear\(\)/);
   assert.match(idle, /used\.len\(\) == 5 && elapsed\(\) <= timeout/);
@@ -1475,11 +1479,10 @@ test("manual SDXL probe exception rejects missing activity, headroom, stability 
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assertSdxlEndpointProbeGuards(adapter);
   for (const [owner, from, to] of [
-    ["wait_for_sdxl_idle", "Duration::from_secs(30)", "Duration::from_secs(31)"],
+    ["wait_for_sdxl_idle", "let timeout = SDXL_ADMISSION_WAIT;", "let timeout = Duration::MAX;"],
     ["wait_for_sdxl_idle", "while elapsed() < timeout", "while true"],
     ["wait_for_sdxl_idle", "values[1] < 16 * 1024", "values[1] < 1"],
-    ["wait_for_sdxl_idle", "values[2] != 0", "values[2] > 100"],
-    ["wait_for_sdxl_idle", "values[3] != 0", "values[3] > 100"],
+    ["wait_for_sdxl_idle", "values[2] > SDXL_MAX_UTILIZATION_PERCENT", "values[2] > 100"],
     ["wait_for_sdxl_idle", "used.len() == 5", "used.len() == 1"],
     ["wait_for_sdxl_idle", "elapsed() <= timeout", "true"],
     ["endpoint_vram_probe", 'sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],

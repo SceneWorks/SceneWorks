@@ -279,6 +279,15 @@ fn send_scored_generated_image(
     .is_ok()
 }
 
+/// Stop a multi-item driver once a typed process fault is latched (SW-7171): no further item may
+/// start GPU work, and the job fails with that fatal cause even if the fault was swallowed below.
+fn stop_on_process_fault() -> WorkerResult<()> {
+    match crate::latched_process_fault() {
+        Some(detail) => Err(WorkerError::ProcessPoisoned(detail)),
+        None => Ok(()),
+    }
+}
+
 pub(super) fn drive_gen_items<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
@@ -294,12 +303,14 @@ where
     ) -> WorkerResult<Option<GeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        stop_on_process_fault()?;
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
             break;
         };
+        stop_on_process_fault()?;
         if !send_generated_image(&tx, index, image) {
             break;
         }
@@ -333,6 +344,7 @@ where
     ) -> WorkerResult<Option<GeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        stop_on_process_fault()?;
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
@@ -345,6 +357,7 @@ where
         else {
             break;
         };
+        stop_on_process_fault()?;
         if !send_generated_image(&tx, index, image) {
             break;
         }
@@ -377,12 +390,14 @@ where
     ) -> WorkerResult<Option<ScoredGeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        stop_on_process_fault()?;
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
             break;
         };
+        stop_on_process_fault()?;
         if !send_scored_generated_image(&tx, index, image) {
             break;
         }
@@ -409,6 +424,7 @@ where
     ) -> WorkerResult<Option<ScoredGeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
+        stop_on_process_fault()?;
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
@@ -421,6 +437,7 @@ where
         else {
             break;
         };
+        stop_on_process_fault()?;
         if !send_scored_generated_image(&tx, index, image) {
             break;
         }
@@ -459,6 +476,7 @@ where
             let _ = tx.blocking_send(GenEvent::ImageFacts { index, facts });
         }
         let image = (seed.wrapping_add(index as i64), width, height, pixels);
+        stop_on_process_fault()?;
         if !send_generated_image(&tx, index, image) {
             break;
         }

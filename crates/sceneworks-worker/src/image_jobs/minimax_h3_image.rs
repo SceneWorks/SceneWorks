@@ -169,21 +169,30 @@ fn snapshot_names(snapshot: &Path, repo: &str, revision: &str) -> bool {
 }
 
 /// The tier this request was admitted with, read the way admission reads it
-/// (`requested_runtime_variant`): a named `advanced.quantTier` first, then the `advanced.mlxQuantize`
-/// bit count (`<= 0` or `>= 9` ⇒ bf16, `1..=4` ⇒ q4, `5..=8` ⇒ q8), else — the key absent — the tier
-/// the worker's portable guard verified and froze (`advanced.__portableBoundTier`). `None` only when
-/// none of them names a tier, which leaves the densest installed tier.
+/// (`requested_runtime_variant`): the job's top-level `variant` first, then a named
+/// `advanced.quantTier`, then the `advanced.mlxQuantize` bit count (`<= 0` or `>= 9` ⇒ bf16,
+/// `1..=4` ⇒ q4, `5..=8` ⇒ q8), else — the key absent — the tier the worker's portable guard
+/// verified and froze (`advanced.__portableBoundTier`). `None` only when none of them names a
+/// tier, which leaves the densest installed tier.
 fn explicit_tier(request: &ImageRequest) -> WorkerResult<Option<&'static str>> {
-    explicit_tier_in(&request.advanced)
+    explicit_tier_in(request.variant.as_deref(), &request.advanced)
 }
 
-/// [`explicit_tier`] over a request's `advanced` object.
-fn explicit_tier_in(advanced: &JsonObject) -> WorkerResult<Option<&'static str>> {
+/// [`explicit_tier`] over a job's top-level `variant` and its `advanced` object.
+fn explicit_tier_in(
+    variant: Option<&str>,
+    advanced: &JsonObject,
+) -> WorkerResult<Option<&'static str>> {
     use sceneworks_core::payload_util::QuantSelection;
-    if let Some(name) = sceneworks_core::image_request::authored_quant_tier(advanced)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
+    let named = [
+        variant,
+        sceneworks_core::image_request::authored_quant_tier(advanced),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|name| !name.is_empty());
+    if let Some(name) = named {
         return TIERS
             .into_iter()
             .find(|tier| tier.eq_ignore_ascii_case(name))
@@ -243,7 +252,8 @@ pub(crate) fn render_tier_dir(
         .get("advanced")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    resolve_tier_dir(entry, data_dir, explicit_tier_in(advanced)?)
+    let variant = payload.get("variant").and_then(Value::as_str);
+    resolve_tier_dir(entry, data_dir, explicit_tier_in(variant, advanced)?)
 }
 
 /// [`resolve_weights_dir`] for a caller that already knows the explicit tier (or `None`): an
@@ -705,6 +715,83 @@ mod tests {
             resolve_weights_dir(&request(&entry, json!({"mlxQuantize": 4})), &settings).is_err()
         );
     }
+    /// SW-7166: the loader ranks tier selections the way admission does
+    /// (`requested_runtime_variant`): the job's top-level `variant` above `advanced.quantTier`
+    /// above `advanced.mlxQuantize`. Only q8 is installed, so a selection that resolves q8 loads
+    /// and one that names q4 is refused by name — never substituted. Both loader entry points
+    /// (the render's `ImageRequest` and the API's payload probe) agree with admission.
+    #[test]
+    fn a_top_level_variant_outranks_the_advanced_tier_selection_as_admission_ranks_it() {
+        use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
+        let temporary = tempfile::tempdir().unwrap();
+        let (data, _guard) = isolated_cache(temporary.path());
+        let settings = settings(&data);
+        let entry = shipped_entry();
+        let rehost_rev = published_rehost_revision(&entry);
+        let rehost = snapshot(
+            &settings.data_dir,
+            "SceneWorks/minimax-h3-image-mlx",
+            &rehost_rev,
+        );
+        touch(rehost.join("q8/transformer_diffusers/config.json"));
+        let payload = |top: Value| {
+            let mut payload = json!({
+                "projectId": "p", "model": MODEL_ID, "prompt": "a lighthouse",
+                "modelManifestEntry": entry,
+            });
+            for (key, value) in top.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            payload.as_object().unwrap().clone()
+        };
+        let cases = [
+            // variant over mlxQuantize: admitted q4, so the installed q8 must not load.
+            (
+                json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+                "q4",
+            ),
+            // variant over quantTier, case-folded as admission folds it.
+            (
+                json!({"variant": " Q8 ", "advanced": {"quantTier": "q4"}}),
+                "q8",
+            ),
+            // A blank variant is absent: quantTier decides.
+            (
+                json!({"variant": "  ", "advanced": {"quantTier": "q4"}}),
+                "q4",
+            ),
+        ];
+        for (top, admitted) in cases {
+            let payload = payload(top.clone());
+            assert_eq!(
+                requested_runtime_variant(&payload).as_deref(),
+                Some(admitted),
+                "{top}"
+            );
+            let from_request =
+                resolve_weights_dir(&ImageRequest::from_payload(&payload), &settings);
+            let from_payload = render_tier_dir(&payload, &settings.data_dir);
+            for resolved in [from_request, from_payload] {
+                if admitted == "q8" {
+                    assert_eq!(resolved.unwrap(), Some(rehost.join("q8")), "{top}");
+                } else {
+                    assert!(
+                        matches!(&resolved, Err(WorkerError::InvalidPayload(message))
+                            if message.contains("q4") && message.contains("not installed")),
+                        "{top}: {resolved:?}"
+                    );
+                }
+            }
+        }
+        // A variant H3-Image does not ship is refused by name, not ignored.
+        let unknown = payload(json!({"variant": "fp8", "advanced": {"mlxQuantize": 8}}));
+        let refused = resolve_weights_dir(&ImageRequest::from_payload(&unknown), &settings);
+        assert!(
+            matches!(&refused, Err(WorkerError::InvalidPayload(message)) if message.contains("fp8")),
+            "{refused:?}"
+        );
+    }
+
     /// SW-7103: the trainer's load spec is the render's for the same tier — the upstream root, the
     /// tier's staged DiT and same-tier text encoder, the tier's quant — chosen by the plan's
     /// `baseTier` (or the densest installed tier), and refused by name when nothing (or not the

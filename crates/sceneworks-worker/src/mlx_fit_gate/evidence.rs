@@ -679,11 +679,24 @@ pub(super) fn mlx_image_anchor_activation_residue(
     use sceneworks_core::memory_anchor::ImageDeriveRequest;
 
     let anchor = mlx_image_anchor_match(contract, plan, mode_key, overlay, geometry)?;
+    // SW-F363: an always-staging engine runs every request staged, so its staged anchor prices the
+    // staged composition; a staged anchor never prices a co-resident one where that can execute.
+    let mut engaged = engaged.to_vec();
+    match (
+        anchor.measured_regime.staged,
+        anchor.staged_residency_unconditional,
+    ) {
+        (true, true) if !engaged.contains(&MemoryStrategy::StagedResidency) => {
+            engaged.push(MemoryStrategy::StagedResidency);
+        }
+        (true, false) | (false, true) => return None,
+        _ => {}
+    }
     let residues = anchor.derive_phase_activation_residues(
         &ImageDeriveRequest::new(
             geometry.width,
             geometry.height,
-            request_regime(engaged, parameters),
+            request_regime(&engaged, parameters),
         ),
         crate::video_admission::anchor_component_bytes(contract.asset_facts),
         facts,

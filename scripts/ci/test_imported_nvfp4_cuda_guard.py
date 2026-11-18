@@ -47,16 +47,16 @@ class FixedCudaOwnershipTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="resource-unit-", dir=HERE)
         self.addCleanup(self.temp.cleanup)
         self.out = Path(self.temp.name)
-        self.device = dict(index=1, uuid="GPU-one", used_mib=100, utilization_percent=0)
-        self.owner = dict(index=0, uuid="GPU-owner", used_mib=100, utilization_percent=0)
-        self.baseline = dict(uuid="GPU-one", reserved_baseline_mib=100, process_identities=[])
+        self.device = dict(index=1, uuid="GPU-one", total_mib=97887, used_mib=100, utilization_percent=0)
+        self.owner = dict(index=0, uuid="GPU-owner", total_mib=97887, used_mib=100, utilization_percent=0)
         self.guard = Mock()
         self.guard.inventory.return_value = ([self.owner, self.device], [])
-        self.guard.idle.return_value = True
-        self.guard.sample_baseline.return_value = (self.device, self.baseline)
+        self.guard.idle.side_effect = AssertionError("admission never asks for an idle card")
+        self.guard.sample_baseline.side_effect = AssertionError("admission never uses the strict baseline")
         self.clock = Clock()
+        self.window = (adapter.shared.SHARED_WINDOW_SAMPLES - 1) * adapter.shared.SHARED_WINDOW_INTERVAL_SECONDS
 
-    def claim(self, locker, deadline=10):
+    def claim(self, locker, deadline=60):
         return adapter.claim_fixed(self.guard, self.out, deadline, self.out, locker,
                                    self.clock.now, self.clock.sleep)
 
@@ -76,35 +76,37 @@ class FixedCudaOwnershipTests(unittest.TestCase):
         self.assertEqual(locker.calls, [(locker.LK_NBLCK, 1)])
         self.assertEqual((self.out / "SceneWorks/gpu-locks/GPU-one.lock").read_bytes(), b"0")
         self.assertFalse((self.out / "SceneWorks/gpu-locks/GPU-owner.lock").exists())
-        self.guard.sample_baseline.assert_called_once_with(self.device, self.out, "claimed-fixed-device")
+        self.assertEqual(baseline["baseline_used_mib"], 100)
+        self.assertTrue(json.loads((self.out / "claimed-fixed-device-shared-window.json").read_text())["admitted"])
         adapter.unlock(handle, locker)
         self.assertTrue(handle.closed)
         self.assertEqual(locker.calls[-1], (locker.LK_UNLCK, 1))
 
     def test_busy_fixed_gpu_never_falls_back_to_idle_owner_gpu0(self):
-        self.guard.idle.return_value = False
+        self.device.update(utilization_percent=100)
         with self.assertRaises(TimeoutError):
-            self.claim(Locker(), deadline=2)
-        self.assertTrue(all(call.args[0]["index"] == 1 for call in self.guard.idle.call_args_list))
-        self.guard.sample_baseline.assert_not_called()
+            self.claim(Locker(), deadline=30)
+        self.assertFalse((self.out / "SceneWorks/gpu-locks/GPU-owner.lock").exists())
+        window = json.loads((self.out / "claimed-fixed-device-shared-window.json").read_text())
+        self.assertFalse(window["admitted"]); self.assertEqual(window["summary"]["index"], 1)
 
     def test_lock_contention_waits_for_same_uuid_without_switching_device(self):
         locker = Locker(busy=2)
         device, handle, _, waited = self.claim(locker)
         self.assertEqual(device["uuid"], "GPU-one")
-        self.assertEqual(waited, 2)
+        self.assertEqual(waited, 2 + self.window)
         self.assertEqual(locker.calls, [(locker.LK_NBLCK, 1)] * 3)
         adapter.unlock(handle, locker)
 
     def test_identity_change_is_refused_without_new_device_selection(self):
-        self.guard.idle.return_value = False
         changed = dict(self.device, uuid="GPU-replaced")
         self.guard.inventory.side_effect = [([self.owner, self.device], []), ([self.owner, changed], [])]
         with self.assertRaisesRegex(RuntimeError, "UUID changed"):
             self.claim(Locker())
 
-    def test_idle_race_releases_then_rechecks_same_uuid(self):
-        self.guard.sample_baseline.side_effect = [RuntimeError("became occupied"), (self.device, self.baseline)]
+    def test_refused_window_releases_then_rechecks_same_uuid(self):
+        busy = dict(self.device, utilization_percent=100)
+        self.guard.inventory.side_effect = lambda *_: ([self.owner, busy if self.clock.value < 5 else self.device], [])
         locker = Locker()
         _, handle, _, _ = self.claim(locker)
         self.assertEqual(locker.calls[:3], [(2, 1), (0, 1), (2, 1)])

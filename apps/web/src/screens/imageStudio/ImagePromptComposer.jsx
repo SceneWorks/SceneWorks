@@ -63,6 +63,8 @@ export function ImagePromptComposer({
   setPromptMode,
   prompt,
   setPromptFromUser,
+  // SW-7101: ref + onSelect from usePromptTokenInsertion, so reference tokens insert at the caret.
+  promptTextareaProps,
   magicPrompt,
   onMagicExpand,
   magicModelMissing,
@@ -298,6 +300,7 @@ export function ImagePromptComposer({
               />
             ) : (
               <textarea
+                {...promptTextareaProps}
                 aria-label="Prompt"
                 className="prompt-input"
                 onChange={(event) => setPromptFromUser(event.target.value)}

@@ -45590,7 +45590,37 @@
         "q8": 42,
         "q4": 25
       },
-      "measured": false
+      "measured": false,
+      "memoryStrategyContract": {
+        "abi": 1,
+        "provider": "minimax_h3_image",
+        "implementations": [
+          {
+            "rung": "staged_residency",
+            "fingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+            "tiers": [
+              "bf16",
+              "q8",
+              "q4"
+            ],
+            "modes": [
+              "text_to_image",
+              "edit_image"
+            ],
+            "overlays": [
+              "none",
+              "lora"
+            ],
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {},
+            "parameterRanges": {},
+            "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs"
+          }
+        ]
+      }
     },
     "downloads": [
       {
