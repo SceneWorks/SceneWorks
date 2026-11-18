@@ -25,7 +25,7 @@ use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant_typed, resident_base_component_downloads,
+    is_co_requisite_download, resident_base_component_downloads,
     selected_portable_model_artifact_closure_resolved,
     selected_portable_requirements_for_model_resolved, selected_resident_base_closure_for_row,
 };
@@ -1388,17 +1388,9 @@ fn selected_runtime_variant(
     options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
     let requested = || {
-        requested_runtime_variant_typed(
-            payload.get("variant").and_then(serde_json::Value::as_str),
-            match &options.effective.quant_tier {
-                RouteField::Valid(tier) => Some(tier.as_str()),
-                _ => None,
-            },
-            match &options.effective.mlx_quantize {
-                RouteField::Valid(bits) => Some(*bits),
-                _ => None,
-            },
-        )
+        options
+            .effective
+            .requested_runtime_variant(payload.get("variant").and_then(serde_json::Value::as_str))
     };
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
         || (*job_type == JobType::PromptRefine && slot == "modelManifestEntry")

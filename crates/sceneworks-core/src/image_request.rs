@@ -300,7 +300,7 @@ pub struct ImageAdvanced {
 }
 
 /// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
-fn standard_tier_bits(tier: &str) -> Option<i64> {
+pub(crate) fn standard_tier_bits(tier: &str) -> Option<i64> {
     match tier {
         "q4" => Some(4),
         "q8" => Some(8),
@@ -314,7 +314,9 @@ impl ImageAdvanced {
     /// (`requested_runtime_variant`) — over the advanced carriers: it becomes the named
     /// `quantTier`, and the bit count becomes the variant's (q4 → 4, q8 → 8, bf16 → 0), or absent
     /// for a tier with no bit count (nvfp4, fp8r, …), since admission reads neither carrier once a
-    /// variant is named. A blank or absent variant changes nothing.
+    /// variant is named. The variant also decides ConvRot, as admission does
+    /// ([`crate::portable_sources::conv_rot_selected`]): `int8-convrot` turns `convRot` on and any
+    /// other variant turns a `convRot: true` off. A blank or absent variant changes nothing.
     pub fn bind_variant(&mut self, variant: Option<&str>) {
         let Some(tier) = variant
             .map(str::trim)
@@ -330,6 +332,13 @@ impl ImageAdvanced {
             value: Some(bits),
             origin,
         });
+        let conv_rot = crate::portable_sources::conv_rot_selected(Some(&tier), false);
+        if conv_rot || self.conv_rot.as_ref().is_some_and(|bound| bound.value) {
+            self.conv_rot = Some(Bound {
+                value: conv_rot,
+                origin,
+            });
+        }
         self.quant_tier = Some(Bound {
             value: tier,
             origin,
@@ -729,10 +738,13 @@ impl ImageRequest {
     }
 
     /// Bind the tier admission selected (`requested_runtime_variant`: the top-level `variant`,
-    /// then `advanced.quantTier`, then the `advanced.mlxQuantize` bit count) into the resolved
-    /// options, so every loader that reads `resolved_quant_bits` or the named `quantTier` loads
-    /// the tier the job was admitted and priced with.
+    /// then `advanced.quantTier`, then the legacy `advanced.quant`, then the `advanced.mlxQuantize`
+    /// bit count) into the resolved options, so every loader that reads `resolved_quant_bits` or
+    /// the named `quantTier` loads the tier the job was admitted and priced with.
     ///
+    /// * On an imported image checkpoint, a legacy `quant` without a `quantTier` becomes the named
+    ///   `quantTier` (SW-7184): admission reads it in that slot there, as the imported-checkpoint
+    ///   loaders always have. Elsewhere no loader or admission reads `quant`.
     /// * A `variant` replaces both carriers ([`ImageAdvanced::bind_variant`]).
     /// * Without one, a q4/q8/bf16 `quantTier`, or a bit count admission reads as another tier
     ///   than the loaders do (`>= 9` is bf16 to admission, q8 to `tier_for_bits`), sets the bit
@@ -744,6 +756,20 @@ impl ImageRequest {
             .resolved_advanced
             .as_mut()
             .expect("image options are bound before the tier");
+        if options
+            .quant_tier
+            .as_ref()
+            .is_none_or(|bound| bound.value.trim().is_empty())
+            && crate::jobs_store::imported_entry_honors_legacy_quant(&self.model_manifest_entry)
+        {
+            if let Some(quant) = options
+                .quant
+                .as_ref()
+                .filter(|bound| !bound.value.trim().is_empty())
+            {
+                options.quant_tier = Some(quant.clone());
+            }
+        }
         if self.variant.is_some() {
             options.bind_variant(self.variant.as_deref());
             return;
@@ -773,9 +799,12 @@ impl ImageRequest {
             return;
         }
         let origin = match (named, &options.mlx_quantize) {
-            (Some(_), _) => Origin::Authored {
-                spelling: "quantTier",
-            },
+            (Some(_), _) => options.quant_tier.as_ref().map_or(
+                Origin::Authored {
+                    spelling: "quantTier",
+                },
+                |bound| bound.origin,
+            ),
             (None, Some(bound)) => bound.origin,
             (None, None) => return,
         };
@@ -1332,6 +1361,106 @@ mod tests {
             Ok(Flux3Tier::Q8)
         );
         assert!(flux3(json!({"advanced": {"quantTier": "q4", "mlxQuantize": 8}})).is_err());
+    }
+
+    /// SW-7184: the two tier carriers admission and the loaders used to read differently. A
+    /// top-level `variant` decides ConvRot (`int8-convrot` on, any other variant off), and the
+    /// legacy `advanced.quant` names the tier in `quantTier`'s slot, so the loaders' `convRot`
+    /// flag and named tier are the ones admission (`requested_runtime_variant`) priced.
+    #[test]
+    fn convrot_variant_and_legacy_quant_bind_the_tier_admission_selects() {
+        use crate::model_artifacts::artifact_selection::requested_runtime_variant;
+        use crate::resolved_options::RouteOptionFacts;
+        let imported = json!({
+            "id": "imported_krea", "type": "image", "family": "krea_2",
+            "importSourceShape": "transformer_file"
+        });
+        let bind = |fields: Value| {
+            let mut value = json!({"projectId": "p", "model": "krea_2_turbo"});
+            for (key, field) in fields.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            let payload = payload(value);
+            let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+            (payload, request)
+        };
+        // (payload, admitted tier, loaded convRot, loaded named tier, loaded bits)
+        let cases = [
+            (
+                json!({"variant": "int8-convrot"}),
+                Some("int8-convrot"),
+                Some(true),
+                Some("int8-convrot"),
+                None,
+            ),
+            (
+                json!({"variant": "INT8-ConvRot", "advanced": {"convRot": false, "mlxQuantize": 8}}),
+                Some("int8-convrot"),
+                Some(true),
+                Some("int8-convrot"),
+                None,
+            ),
+            (
+                json!({"variant": "q8", "advanced": {"convRot": true}}),
+                Some("q8"),
+                Some(false),
+                Some("q8"),
+                Some(8),
+            ),
+            (
+                json!({"advanced": {"convRot": true}}),
+                None,
+                Some(true),
+                None,
+                None,
+            ),
+            (
+                json!({"advanced": {"quant": "q8", "mlxQuantize": 4}, "modelManifestEntry": imported.clone()}),
+                Some("q8"),
+                None,
+                Some("q8"),
+                Some(8),
+            ),
+            (
+                json!({"advanced": {"quantTier": "q4", "quant": "q8"}, "modelManifestEntry": imported.clone()}),
+                Some("q4"),
+                None,
+                Some("q4"),
+                Some(4),
+            ),
+            (
+                json!({"advanced": {"quant": "nvfp4"}, "modelManifestEntry": imported.clone()}),
+                Some("nvfp4"),
+                None,
+                Some("nvfp4"),
+                None,
+            ),
+            // No builtin loader honors `quant`, so neither does admission there.
+            (
+                json!({"advanced": {"quant": "q8", "mlxQuantize": 4}}),
+                Some("q4"),
+                None,
+                None,
+                Some(4),
+            ),
+        ];
+        for (fields, admitted, conv_rot, named, bits) in cases {
+            let (payload, request) = bind(fields.clone());
+            let facts = RouteOptionFacts::from_payload_syntax(&payload);
+            assert_eq!(
+                requested_runtime_variant(&payload).as_deref(),
+                admitted,
+                "{fields}"
+            );
+            assert_eq!(request.advanced_bool("convRot"), conv_rot, "{fields}");
+            assert_eq!(
+                facts.conv_rot_selected(),
+                conv_rot == Some(true),
+                "{fields}: admission's ConvRot choice"
+            );
+            assert_eq!(request.advanced_text("quantTier"), named, "{fields}");
+            assert_eq!(request.resolved_quant_bits(), bits, "{fields}");
+        }
     }
 
     #[test]

@@ -27227,6 +27227,60 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
     }
 }
 
+/// SW-7184: the imported-checkpoint loader honors the legacy `advanced.quant` after `quantTier`,
+/// and admission (`requested_runtime_variant`) reads it in that same slot, so the two name one tier
+/// even when `advanced.mlxQuantize` names another.
+#[cfg(native_lane)]
+#[test]
+fn imported_legacy_quant_is_the_tier_admission_selects() {
+    use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("fixture check: this backend binds krea_2 transformer-file generation");
+    for (advanced, admitted, quant) in [
+        (
+            json!({"quant": "q8", "mlxQuantize": 4}),
+            "q8",
+            gen_core::Quant::Q8,
+        ),
+        (
+            json!({"quant": "q4", "mlxQuantize": 8}),
+            "q4",
+            gen_core::Quant::Q4,
+        ),
+        (
+            json!({"quantTier": "q4", "quant": "q8"}),
+            "q4",
+            gen_core::Quant::Q4,
+        ),
+    ] {
+        let payload = json!({
+            "projectId": "p",
+            "model": "imported_krea",
+            "prompt": "a fox",
+            "count": 1,
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "id": "imported_krea",
+                "type": "image",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+            },
+        });
+        assert_eq!(
+            requested_runtime_variant(payload.as_object().unwrap()).as_deref(),
+            Some(admitted),
+            "{advanced}"
+        );
+        let (loaded, _) = imported_model_quant(&request(payload), &descriptor, "Imported")
+            .unwrap_or_else(|error| panic!("{advanced}: {error}"));
+        assert_eq!(loaded, Some(quant), "{advanced}");
+    }
+}
+
 /// Feature-end review (sc-20398, blocker 11) — linked/managed parity beyond Krea: the SDXL row.
 ///
 /// The Krea row already proves a linked and a managed copy of the same bytes compile to one
