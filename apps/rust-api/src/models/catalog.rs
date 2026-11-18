@@ -2173,9 +2173,10 @@ struct MergedModelManifestKey {
 /// Process-wide rather than per `AppState` because the content key makes sharing exact: states
 /// serving the same manifest text (the shipped catalog, in practice) share one merge. A handful of
 /// entries is plenty; a production process serves one manifest pair.
-static MERGED_MODEL_MANIFESTS: std::sync::LazyLock<
-    Mutex<VecDeque<(MergedModelManifestKey, Arc<MergedModelManifest>)>>,
-> = std::sync::LazyLock::new(Default::default);
+static MERGED_MODEL_MANIFESTS: std::sync::LazyLock<Mutex<MergedModelManifestMemo>> =
+    std::sync::LazyLock::new(Default::default);
+/// Least-recently-used first.
+type MergedModelManifestMemo = VecDeque<(MergedModelManifestKey, Arc<MergedModelManifest>)>;
 const MERGED_MODEL_MANIFEST_LIMIT: usize = 4;
 
 pub(crate) async fn merged_model_manifest(
