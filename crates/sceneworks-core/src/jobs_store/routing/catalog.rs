@@ -1330,6 +1330,15 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
     crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
 }
 
+/// Whether a job on this catalog entry runs an imported IMAGE checkpoint, whose loaders
+/// (`imported_model_quant`) honor the legacy `advanced.quant` after `advanced.quantTier`. Admission
+/// reads `quant` in that slot only here (SW-7184), so it never names a tier a builtin or video
+/// loader would ignore.
+pub fn imported_entry_honors_legacy_quant(entry: &Map<String, Value>) -> bool {
+    imported_source_shape(entry).is_some()
+        && entry.get("type").and_then(Value::as_str) != Some("video")
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1358,7 +1367,12 @@ fn imported_requested_quant_with_facts(
     ignore_quant_tier: bool,
 ) -> Result<Option<&'static str>, ()> {
     use crate::resolved_options::RouteField;
-    let named_field = if ignore_quant_tier || matches!(&facts.quant_tier, RouteField::Absent) {
+    // `quantTier`, else the legacy `quant` (SW-7184: the order admission's `named_quant_tier`
+    // and `imported_model_quant` read); a blank or null `quantTier` names nothing.
+    let named_field = if ignore_quant_tier
+        || matches!(&facts.quant_tier, RouteField::Absent | RouteField::Null)
+        || matches!(&facts.quant_tier, RouteField::Valid(tier) if tier.trim().is_empty())
+    {
         &facts.quant
     } else {
         &facts.quant_tier
@@ -1570,7 +1584,11 @@ pub(crate) fn imported_image_request_provider_eligible_with_facts(
     let ignore_quant_tier = family == "flux2" && source == "comfy_ui_tree";
     if native_nvfp4 {
         use crate::resolved_options::RouteField;
-        let named = if matches!(&route_options.quant_tier, RouteField::Absent) {
+        let named = if matches!(
+            &route_options.quant_tier,
+            RouteField::Absent | RouteField::Null
+        ) || matches!(&route_options.quant_tier, RouteField::Valid(tier) if tier.trim().is_empty())
+        {
             &route_options.quant
         } else {
             &route_options.quant_tier

@@ -361,7 +361,56 @@ impl VideoRequest {
         request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
         request.advanced = object_or_empty(authored, "advanced");
         request.duration_was_explicit = parse_safe_float(authored.get("duration")).is_some();
+        request.bind_admitted_tier(authored, effective);
         Ok(request)
+    }
+
+    /// Bind the tier admission and the portable binding select (SW-7185) into
+    /// `advanced.mlxQuantize` as its canonical bit count (q4 → 4, q8 → 8, bf16 → 0), so every video
+    /// loader, whatever its own bit thresholds, loads the tier the job was admitted with. The
+    /// selection is the shared one ([`RouteOptionFacts::requested_runtime_variant`]): the authored
+    /// top-level `variant`, then `advanced.quantTier`, then the `advanced.mlxQuantize` bit count (`5..=8` is q8, `>= 9` bf16). A tier with no bit count, or no
+    /// selection at all, leaves the options as bound: an absent value still falls back to the
+    /// verified binding's frozen tier.
+    ///
+    /// [`RouteOptionFacts::requested_runtime_variant`]: crate::resolved_options::RouteOptionFacts::requested_runtime_variant
+    fn bind_admitted_tier(&mut self, authored: &JsonObject, effective: &JsonObject) {
+        use crate::resolved_options::RouteOptionFacts;
+        let facts = RouteOptionFacts::from_payload_syntax(effective);
+        let variant = optional_id(authored, "variant");
+        let Some(bits) = facts
+            .requested_runtime_variant(variant.as_deref())
+            .and_then(|tier| match tier.as_str() {
+                "q4" => Some(4),
+                "q8" => Some(8),
+                "bf16" => Some(0),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let options = self
+            .options
+            .as_mut()
+            .expect("video options are bound before the tier");
+        let origin = if variant.is_some() {
+            Origin::Authored {
+                spelling: "variant",
+            }
+        } else if facts.named_quant_tier().is_some() {
+            Origin::Authored {
+                spelling: "quantTier",
+            }
+        } else {
+            match &options.mlx_quantize {
+                Some(bound) => bound.origin,
+                None => return,
+            }
+        };
+        options.mlx_quantize = Some(Bound {
+            value: Some(bits),
+            origin,
+        });
     }
 
     pub fn options(&self) -> &VideoOptions {
@@ -1446,6 +1495,80 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    /// SW-7185: the execution request carries the tier admission and the portable binding select
+    /// (`requested_runtime_variant`) as its canonical bit count, so a video loader reading
+    /// `resolved_quant_bits` loads that tier whatever its own bit thresholds:
+    /// `variant` over `quantTier` over `mlxQuantize`.
+    #[test]
+    fn the_resolved_tier_is_the_one_admission_selects() {
+        use crate::model_artifacts::artifact_selection::requested_runtime_variant;
+        // (payload, resolved bits)
+        let cases = [
+            (
+                json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+                Some(4),
+            ),
+            (
+                json!({"variant": " BF16 ", "advanced": {"mlxQuantize": 4}}),
+                Some(0),
+            ),
+            (
+                json!({"variant": "q8", "advanced": {"mlxQuantize": null}}),
+                Some(8),
+            ),
+            (
+                json!({"advanced": {"quantTier": "q8", "mlxQuantize": 4}}),
+                Some(8),
+            ),
+            // No video loader honors the legacy image `quant`, so neither does admission.
+            (
+                json!({"advanced": {"quant": "q8", "mlxQuantize": 4}}),
+                Some(4),
+            ),
+            (json!({"advanced": {"quantTier": "q4"}}), Some(4)),
+            (json!({"advanced": {"mlxQuantize": 16}}), Some(0)),
+            (json!({"advanced": {"mlxQuantize": 6}}), Some(8)),
+            (json!({"advanced": {"mlxQuantize": 2}}), Some(4)),
+            (json!({"advanced": {"mlxQuantize": 8}}), Some(8)),
+            (json!({"advanced": {"mlxQuantize": null}}), None),
+            (json!({}), None),
+        ];
+        let tier = |bits: Option<i64>| match bits {
+            Some(0) => Some("bf16"),
+            Some(4) => Some("q4"),
+            Some(8) => Some("q8"),
+            _ => None,
+        };
+        for (fields, bits) in cases {
+            let mut value = json!({"projectId": "p", "model": "wan_2_2"});
+            for (key, field) in fields.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            let payload = payload(value);
+            let request = VideoRequest::from_resolved(&payload, &payload).unwrap();
+            assert_eq!(request.resolved_quant_bits(), bits, "{fields}");
+            assert_eq!(
+                tier(bits),
+                requested_runtime_variant(&payload).as_deref(),
+                "{fields}"
+            );
+            // The caller's authored options are kept as written.
+            assert_eq!(request.advanced, object_or_empty(&payload, "advanced"));
+        }
+        // An explicit `null` still blocks the bound-tier fallback when nothing names a tier.
+        let null = payload(json!({"projectId": "p", "advanced": {"mlxQuantize": null}}));
+        let request = VideoRequest::from_resolved(&null, &null).unwrap();
+        assert_eq!(
+            request.options().mlx_quantize,
+            Some(Bound {
+                value: None,
+                origin: Origin::Authored {
+                    spelling: "mlxQuantize"
+                }
+            })
+        );
     }
 
     #[test]

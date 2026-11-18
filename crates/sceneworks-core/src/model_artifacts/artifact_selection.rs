@@ -639,17 +639,8 @@ pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
 /// `variant`, an advanced `quantTier`, or the advanced `mlxQuantize` bit width. This is
 /// request-shape vocabulary, never a model-name mapping.
 pub fn requested_runtime_variant(payload: &Map<String, Value>) -> Option<String> {
-    let variant = payload.get("variant").and_then(Value::as_str);
-    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    let tier = match &route.quant_tier {
-        crate::resolved_options::RouteField::Valid(value) => Some(value.as_str()),
-        _ => None,
-    };
-    let bits = match route.mlx_quantize {
-        crate::resolved_options::RouteField::Valid(value) => Some(value),
-        _ => None,
-    };
-    requested_runtime_variant_typed(variant, tier, bits)
+    crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
+        .requested_runtime_variant(payload.get("variant").and_then(Value::as_str))
 }
 
 /// Select from already-bound request fields. Numeric-string compatibility and defaults must be
@@ -776,10 +767,7 @@ pub fn selected_portable_model_artifact_closure(
     let model_id = model.get("id").and_then(Value::as_str);
     let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     let options = PortableArtifactOptions {
-        conv_rot: matches!(
-            route.conv_rot,
-            crate::resolved_options::RouteField::Valid(true)
-        ),
+        conv_rot: route.conv_rot_selected(),
         yue2_decoder: if model_id == Some("yue2") {
             payload
                 .get("yue2")
@@ -2229,6 +2217,7 @@ mod tests {
             .iter()
             .all(|file| file.as_str().unwrap().starts_with("bf16/")));
 
+        // SW-7184: a named top-level variant ranks first, so `q4` turns a `convRot: true` off.
         let mut explicit_q4 = request.as_object().unwrap().clone();
         explicit_q4.insert("variant".to_owned(), json!("q4"));
         let selected = selected_portable_model_artifact_closure(
@@ -2239,7 +2228,29 @@ mod tests {
             &explicit_q4,
         )
         .unwrap();
-        assert_eq!(selected["downloads"][0]["variant"], "int8-convrot");
+        assert_eq!(selected["downloads"][0]["variant"], "q4");
+        assert_eq!(selected["downloads"].as_array().unwrap().len(), 1);
+
+        // SW-7184: the variant `int8-convrot` alone selects ConvRot, priced with its bf16 base.
+        for convrot in [
+            json!({"model":"krea_2_turbo","variant":"int8-convrot"}),
+            json!({"model":"krea_2_turbo","variant":" INT8-ConvRot ","advanced":{"convRot":false}}),
+        ] {
+            let selected = selected_portable_model_artifact_closure(
+                model,
+                "candle",
+                "linux",
+                requested_runtime_variant(convrot.as_object().unwrap()).as_deref(),
+                convrot.as_object().unwrap(),
+            )
+            .unwrap();
+            let rows = selected["downloads"].as_array().unwrap();
+            assert_eq!(rows.len(), 2, "{convrot}");
+            assert_eq!(rows[0]["variant"], "int8-convrot", "{convrot}");
+            assert_eq!(rows[1]["repo"], "SceneWorks/krea-2-turbo-mlx", "{convrot}");
+            assert_eq!(rows[1]["variant"], "bf16", "{convrot}");
+            assert!(is_co_requisite_download(&rows[1]), "{convrot}");
+        }
 
         let ordinary = json!({"model":"krea_2_turbo","advanced":{"convRot":false}});
         let selected = selected_portable_model_artifact_closure(

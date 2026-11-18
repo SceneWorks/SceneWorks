@@ -20,14 +20,13 @@ use crate::error::ApiError;
 use crate::AppState;
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    requested_runtime_variant_typed, selected_requirements_for_model, LocalCacheEligibility,
+    selected_requirements_for_model, LocalCacheEligibility,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalLibraryUnavailableContext, ModelAvailability,
     ModelResolution,
 };
 use sceneworks_core::model_artifacts::ResolvedModelArtifact;
-use sceneworks_core::resolved_options::RouteField;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -903,17 +902,8 @@ async fn preflight_payload_model_sources(
     // portable binding freezes: a training base's plan tier, a prompt expansion's `peTier`, else
     // the request's explicit tier), not one request-wide tier.
     let (_, options) = crate::portable_admission::route_option_facts(job_type, payload)?;
-    let typed_variant = requested_runtime_variant_typed(
-        payload.get("variant").and_then(Value::as_str),
-        match &options.quant_tier {
-            RouteField::Valid(tier) => Some(tier.as_str()),
-            _ => None,
-        },
-        match &options.mlx_quantize {
-            RouteField::Valid(bits) => Some(*bits),
-            _ => None,
-        },
-    );
+    let typed_variant =
+        options.requested_runtime_variant(payload.get("variant").and_then(Value::as_str));
     let entries = payload_model_slots(payload)
         .into_iter()
         .map(|(slot, entry)| {
