@@ -634,7 +634,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     const setup = workflowStep(job, "Set up Node for Cargo cache selection");
     const select = workflowStep(job, `Isolate Cargo dependency checkout${suffix}`);
     const fetchStep = workflowStep(job, `Fetch the pinned inference release${name === "candle-worker" ? "" : " for the imported NVFP4 smoke"}`);
-    assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+    assert.match(setup, /actions\/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1/);
     assert.match(setup, /node-version: 22/);
     assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
     assert.match(select, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
@@ -6114,7 +6114,7 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
     assert.match(workflow, /ffmpeg = \$ffmpegVersion/);
     assert.match(
       workflow,
-      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9/,
       "only a verified capture may publish the MP4/stills/metadata bundle",
     );
 
