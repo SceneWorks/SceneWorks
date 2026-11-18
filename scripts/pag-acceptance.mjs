@@ -1270,7 +1270,7 @@ async function runAcceptance(env, cfg, report, signal) {
   }
 }
 
-export function summarizePagReport(routes) {
+export function summarizePagReport(routes, requiredFamilies = FAMILIES) {
   const familiesCovered = new Set();
   const familiesPassed = new Set();
   let ready = 0, ran = 0, passed = 0, skipped = 0, errors = 0;
@@ -1288,7 +1288,7 @@ export function summarizePagReport(routes) {
       }
     }
   }
-  const missingFamilies = FAMILIES.filter((f) => !(ran > 0 ? familiesPassed : familiesCovered).has(f));
+  const missingFamilies = requiredFamilies.filter((f) => !(ran > 0 ? familiesPassed : familiesCovered).has(f));
   return {
     totalRoutes: routes.length,
     ready,
@@ -1296,6 +1296,7 @@ export function summarizePagReport(routes) {
     passed,
     skipped,
     errors,
+    requiredFamilies: [...requiredFamilies],
     familiesCovered: [...familiesCovered],
     familiesPassed: [...familiesPassed],
     missingFamilies,
@@ -1303,7 +1304,8 @@ export function summarizePagReport(routes) {
 }
 
 export function pagExitCode(report) {
-  const s = summarizePagReport(report.routes ?? []);
+  const requiredFamilies = report.requiredFamilies ?? FAMILIES;
+  const s = summarizePagReport(report.routes ?? [], requiredFamilies);
   if (report.fatal) return 1;
   if (report.mode === "preflight") return s.ready > 0 && s.missingFamilies.length === 0 ? 0 : 1;
   if (report.mode === "build") return 0;
@@ -1311,14 +1313,15 @@ export function pagExitCode(report) {
 }
 
 export function renderPagMarkdown(report) {
-  const s = summarizePagReport(report.routes ?? []);
+  const requiredFamilies = report.requiredFamilies ?? FAMILIES;
+  const s = summarizePagReport(report.routes ?? [], requiredFamilies);
   const lines = [
     `# SW-F371 PAG Real-Weight Acceptance (${report.backend}) — ${report.mode}`,
     "",
     `- status: **${report.status}** (exit ${report.exitCode})`,
     `- source: \`${report.source?.sha}\` (inference \`${report.source?.inferencePin ?? "?"}\`, binary \`${report.source?.binarySha256 ?? "not built"}\`)`,
     `- runner: ${report.runner?.name ?? "local"} (${report.runner?.platform}/${report.runner?.arch})`,
-    `- summary: passed=${s.passed}/${s.ran} ran (${s.skipped} skipped, ${s.errors} errors); families=${s.familiesPassed.length || s.familiesCovered.length}/6 (missing: ${s.missingFamilies.join(", ") || "none"})`,
+    `- summary: passed=${s.passed}/${s.ran} ran (${s.skipped} skipped, ${s.errors} errors); families=${s.familiesPassed.length || s.familiesCovered.length}/${requiredFamilies.length} (missing: ${s.missingFamilies.join(", ") || "none"})`,
     "",
     "| Route | Family | Model (Tier) | ATs | Status | Verdict | Details |",
     "|---|---|---|---|---|---|---|",
@@ -1333,7 +1336,7 @@ export function renderPagMarkdown(report) {
 async function writePagReport(cfg, report) {
   const dir = path.join(cfg.work, "evidence");
   await mkdir(dir, { recursive: true });
-  report.summary = summarizePagReport(report.routes ?? []);
+  report.summary = summarizePagReport(report.routes ?? [], report.requiredFamilies ?? FAMILIES);
   const baseName = report.mode === "run" ? "report" : report.mode;
   await writeFile(path.join(dir, `${baseName}.json`), JSON.stringify(report, null, 2) + "\n");
   await writeFile(path.join(dir, `${baseName}.md`), renderPagMarkdown(report));
@@ -1357,6 +1360,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const mode = modes[argv[0]];
   const cfg = resolvePagConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
+  const explicitRoutes = Boolean((env.PAG_ACCEPTANCE_ROUTES ?? "").trim() && (env.PAG_ACCEPTANCE_ROUTES ?? "").trim() !== "default");
+  const requiredFamilies = explicitRoutes ? [...new Set(cfg.routes.map((r) => r.family))] : [...FAMILIES];
   const report = {
     schemaVersion: 1,
     kind: "sw-f371-pag-acceptance",
@@ -1365,6 +1370,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     backend: cfg.backend,
     startedAt: new Date().toISOString(),
     thresholds: ACCEPTANCE_THRESHOLDS,
+    requiredFamilies,
     runner: {
       name: env.RUNNER_NAME ?? null,
       platform: process.platform,
