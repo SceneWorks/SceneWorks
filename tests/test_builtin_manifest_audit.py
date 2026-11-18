@@ -3839,7 +3839,10 @@ def _license_acknowledgment_repo_index(models):
     for model in models:
         if model.get("requiresLicenseAcknowledgment") is not True:
             continue
-        for repo in _declared_download_repos(model):
+        # A row that declares its own `license` is a component under different terms (SW-7203), so
+        # the entry's acknowledgment does not govern its repo.
+        governed = {**model, "downloads": [d for d in model.get("downloads", []) if not str(d.get("license") or "").strip()]}
+        for repo in _declared_download_repos(governed):
             index.setdefault(repo, model["id"])
     return index
 

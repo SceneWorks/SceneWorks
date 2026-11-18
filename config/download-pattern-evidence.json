@@ -4318,6 +4318,37 @@
       ]
     },
     {
+      "key": "SceneWorks/qwen3.8-27b-dflash2@9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+      "repo": "SceneWorks/qwen3.8-27b-dflash2",
+      "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+      "resolvedSha": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+      "servedRepo": "SceneWorks/qwen3.8-27b-dflash2",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "assets/dflash2-figure.png",
+        "config.json",
+        "model.safetensors"
+      ]
+    },
+    {
+      "key": "SceneWorks/qwen3.8-27b-dspine-b16@8e450d7faf38238b64580163a7d3dd7e44af759d",
+      "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+      "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+      "resolvedSha": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+      "servedRepo": "SceneWorks/qwen3.8-27b-dspine-b16",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "config.json",
+        "model.safetensors"
+      ]
+    },
+    {
       "key": "SceneWorks/real-esrgan-onnx@09f741bac80a246b407da3ee902bf5f3291b602f",
       "repo": "SceneWorks/real-esrgan-onnx",
       "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",

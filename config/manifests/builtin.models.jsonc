@@ -15455,6 +15455,35 @@
             "prompt/edit/task_prompt.txt"
           ],
           "estimatedSizeBytes": 56282
+        },
+        // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
+        // model. Both are Apache-2.0 SceneWorks re-hosts of the unmodified upstream files at pinned revisions:
+        // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
+        // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
+        // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
+        // Each row's own `license` keeps it outside the MiniMax acknowledgment on the prompt expander (see the
+        // `license` schema note): the drafts are Apache-2.0 and must not demand MiniMax's terms.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 4051845726,
+          "footprint": { "diskSizeBytes": 4051845726 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 3848830679,
+          "footprint": { "diskSizeBytes": 3848830679 }
         }
       ],
       "paths": {
@@ -16208,6 +16237,35 @@
             "model-*.safetensors"
           ],
           "estimatedSizeBytes": 55575900000
+        },
+        // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
+        // model. Both are Apache-2.0 SceneWorks re-hosts of the unmodified upstream files at pinned revisions:
+        // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
+        // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
+        // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
+        // Each row's own `license` keeps it outside the MiniMax acknowledgment on the prompt expander (see the
+        // `license` schema note): the drafts are Apache-2.0 and must not demand MiniMax's terms.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 4051845726,
+          "footprint": { "diskSizeBytes": 4051845726 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 3848830679,
+          "footprint": { "diskSizeBytes": 3848830679 }
         }
       ],
       "paths": {

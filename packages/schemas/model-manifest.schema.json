@@ -2332,7 +2332,7 @@
                 "license": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "SPDX identifier of THIS download's own licence, for an entry assembled from components under different licences (sc-24216: Supra2-IMG's denoiser and Flan-T5-Base are Apache-2.0, its SD VAE ft-MSE decoder is MIT). The Model Manager lists it beside the component's repo, pinned revision and size. The entry-level `license` stays the whole-model summary; absent means the row carries no separate declaration."
+                  "description": "SPDX identifier of THIS download's own licence, for an entry assembled from components under different licences (sc-24216: Supra2-IMG's denoiser and Flan-T5-Base are Apache-2.0, its SD VAE ft-MSE decoder is MIT). The Model Manager lists it beside the component's repo, pinned revision and size. The entry-level `license` stays the whole-model summary; absent means the row carries no separate declaration. A row that declares its own `license` is also outside its entry's `requiresLicenseAcknowledgment`: the repo-keyed licence gate does not index it, so an Apache-2.0 component shipped with a gated model (SW-7203: the Qwen3.8-27B block drafts beside the MiniMax-H3-Image prompt expander) does not demand the gated model's terms."
                 },
                 "componentId": {
                   "type": "string",
