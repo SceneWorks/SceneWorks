@@ -496,29 +496,59 @@ export const qualityPresetLabels = {
   conservative: "Conservative",
   low_vram: "Low VRAM",
 };
-// Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
-// worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
-export const trainingAdapterVersionOptions = ["v1", "v2"];
-// The one de-distill adapter repo the worker resolves (sceneworks_core training_adapter).
+// The de-distill training adapters the worker resolves, keyed by repo (sceneworks_core
+// training_adapter::TRAINING_ADAPTER_FAMILIES, sc-25213 / SW-F369). Each names its versions →
+// catalog model, the version a blank selection means, and the legacy spellings of that default
+// (the Z-Image presets' "v2-default"). The API binds each adapter to its own base's targets.
 export const ZIMAGE_TURBO_TRAINING_ADAPTER_REPO = "ostris/zimage_turbo_training_adapter";
-
-// The catalog model a draft's de-distill adapter selection needs installed (sc-25213), or null
-// when the draft names none. Mirrors the worker's mapping: v1 → the v1 file; v2, the presets'
-// legacy "v2-default" and blank → v2. An unknown repo/version maps to null here — the API
-// refuses it as a field error at submit, so there is nothing to offer for download.
-export function trainingAdapterModelId(configDraft) {
-  const repo = asText(configDraft?.trainingAdapterRepo).trim();
-  if (!repo) return null;
-  if (repo !== ZIMAGE_TURBO_TRAINING_ADAPTER_REPO) return null;
-  const version = asText(configDraft?.trainingAdapterVersion).trim().toLowerCase();
-  if (version === "v1") return "zimage_turbo_training_adapter_v1";
-  if (version === "" || version === "v2" || version === "v2-default") return "zimage_turbo_training_adapter_v2";
-  return null;
-}
-export const trainingAdapterVersionLabels = {
-  v1: "v1 — stable (smaller)",
-  v2: "v2 — experimental (heavier de-distill)",
+export const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO = "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter";
+export const trainingAdapters = {
+  [ZIMAGE_TURBO_TRAINING_ADAPTER_REPO]: {
+    feature: "Z-Image-Turbo LoRA training",
+    title:
+      "ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.",
+    defaultVersion: "v2",
+    defaultAliases: ["v2-default"],
+    versions: {
+      v1: { modelId: "zimage_turbo_training_adapter_v1", label: "v1 — stable (smaller)" },
+      v2: { modelId: "zimage_turbo_training_adapter_v2", label: "v2 — experimental (heavier de-distill)" },
+    },
+  },
+  [MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO]: {
+    feature: "MiniMax-H3-Image LoRA training",
+    title:
+      "Fizgig de-distill adapter for the 6-step distilled MiniMax-H3-Image base. Applied at strength 1.0 for training, removed at inference.",
+    defaultVersion: "v1",
+    defaultAliases: [],
+    versions: {
+      v1: { modelId: "minimax_h3_image_training_adapter_v1", label: "v1 — Fizgig (rank 16)" },
+    },
+  },
 };
+
+// The adapter a draft's trainingAdapterRepo names, or null (none, or a repo the worker does not
+// resolve — the API refuses that as a field error at submit).
+export function trainingAdapterFor(configDraft) {
+  const repo = asText(configDraft?.trainingAdapterRepo).trim();
+  return Object.hasOwn(trainingAdapters, repo) ? trainingAdapters[repo] : null;
+}
+
+// The versions the picker offers for the draft's adapter (empty when it names none).
+export function trainingAdapterVersionOptions(configDraft) {
+  return Object.keys(trainingAdapterFor(configDraft)?.versions ?? {});
+}
+
+// The catalog model a draft's de-distill adapter selection needs installed, or null when the draft
+// names none. Mirrors the worker's mapping: a listed version → its file; blank or a legacy default
+// spelling → the repo's default. An unknown repo/version maps to null here — the API refuses it as
+// a field error at submit, so there is nothing to offer for download.
+export function trainingAdapterModelId(configDraft) {
+  const adapter = trainingAdapterFor(configDraft);
+  if (!adapter) return null;
+  let version = asText(configDraft?.trainingAdapterVersion).trim().toLowerCase();
+  if (version === "" || adapter.defaultAliases.includes(version)) version = adapter.defaultVersion;
+  return Object.hasOwn(adapter.versions, version) ? adapter.versions[version].modelId : null;
+}
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));

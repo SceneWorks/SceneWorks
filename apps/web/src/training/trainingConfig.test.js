@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import trainingTargets from "../../../../tests/fixtures/rust_migration_contracts/training/target-registry.json";
+import presetRegistry from "../../../../tests/fixtures/rust_migration_contracts/training/preset-registry.json";
 
 import { summarize } from "../validation/issues.js";
 import {
@@ -30,7 +31,9 @@ import {
   latentLossCombinationRefusal,
   depthAnchoringCombinationRefusal,
   auxModelsInstallNote,
+  trainingAdapterFor,
   trainingAdapterModelId,
+  trainingAdapterVersionOptions,
   depthAnchoringEveryMax,
   depthAnchoringMaxTDefault,
   depthAnchoringModelOptions,
@@ -728,6 +731,31 @@ describe("de-distill training adapter (sc-25213)", () => {
     expect(id("v3")).toBeNull();
     expect(id("v1", "")).toBeNull();
     expect(id("v1", "someone/else")).toBeNull();
+  });
+
+  // SW-F369: the MiniMax-H3-Image adapter is its own repo with one version; blank selects it, and
+  // a Z-Image version (or its legacy default spelling) is not one of its versions.
+  it("maps the MiniMax-H3-Image adapter to its own catalog model and offers only its versions", () => {
+    const h3 = "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter";
+    const id = (trainingAdapterVersion) => trainingAdapterModelId({ trainingAdapterRepo: h3, trainingAdapterVersion });
+    expect(id("v1")).toBe("minimax_h3_image_training_adapter_v1");
+    expect(id("")).toBe("minimax_h3_image_training_adapter_v1");
+    expect(id("v2")).toBeNull();
+    expect(id("v2-default")).toBeNull();
+    expect(trainingAdapterVersionOptions({ trainingAdapterRepo: h3 })).toEqual(["v1"]);
+    expect(trainingAdapterVersionOptions({ trainingAdapterRepo: repo })).toEqual(["v1", "v2"]);
+    expect(trainingAdapterVersionOptions({ trainingAdapterRepo: "" })).toEqual([]);
+    expect(trainingAdapterFor({ trainingAdapterRepo: h3 }).feature).toBe("MiniMax-H3-Image LoRA training");
+    expect(trainingAdapterFor({ trainingAdapterRepo: "someone/else" })).toBeNull();
+  });
+
+  // Every MiniMax-H3-Image preset in the shipped registry selects the adapter by default.
+  it("defaults every MiniMax-H3-Image preset to the Fizgig adapter", () => {
+    const h3Presets = presetRegistry.presets.filter((preset) => preset.targetId.startsWith("minimax_h3_image"));
+    expect(h3Presets).toHaveLength(5);
+    for (const preset of h3Presets) {
+      expect(trainingAdapterModelId(preset.config.advanced)).toBe("minimax_h3_image_training_adapter_v1");
+    }
   });
 
   it("blocks Start training while the adapter is not installed", () => {

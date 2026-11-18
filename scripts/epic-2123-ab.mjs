@@ -326,14 +326,18 @@ function ladderLabel(ladder) {
   return `Resolution buckets ${ladder.map((b) => b.resolution).join("/")} ×${ladder.map((b) => b.repeats).join(":")}`;
 }
 
-// The de-distill training adapter catalog model a preset's `advanced` selects (sc-25213), or null —
-// the same mapping the worker resolves (`sceneworks_core::training::training_adapter`): v1 → the v1
-// file; v2, the presets' "v2-default" and blank → v2. An unknown repo/version is the API's field
-// error at submit, so setup has nothing to install for it.
+// The de-distill training adapter catalog model a preset's `advanced` selects (sc-25213, SW-F369),
+// or null — the same mapping the worker resolves (`sceneworks_core::training::training_adapter`):
+// Z-Image-Turbo v1 → the v1 file, v2 / the presets' "v2-default" / blank → v2; MiniMax-H3-Image v1
+// or blank → its one file. An unknown repo/version is the API's field error at submit, so setup has
+// nothing to install for it.
 function trainingAdapterModelId(advanced) {
   const repo = String(advanced?.trainingAdapterRepo ?? "").trim();
-  if (repo !== "ostris/zimage_turbo_training_adapter") return null;
   const version = String(advanced?.trainingAdapterVersion ?? "").trim().toLowerCase();
+  if (repo === "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter") {
+    return ["", "v1"].includes(version) ? "minimax_h3_image_training_adapter_v1" : null;
+  }
+  if (repo !== "ostris/zimage_turbo_training_adapter") return null;
   if (version === "v1") return "zimage_turbo_training_adapter_v1";
   if (["", "v2", "v2-default"].includes(version)) return "zimage_turbo_training_adapter_v2";
   return null;

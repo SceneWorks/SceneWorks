@@ -1753,6 +1753,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsTrainingAdapter": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1858,6 +1859,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsTrainingAdapter": true,
         "supportsWeightNoise": true
       },
       "ui": {
