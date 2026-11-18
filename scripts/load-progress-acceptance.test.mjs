@@ -303,3 +303,55 @@ test('native libtest matches the production worker stack despite ambient overrid
   assert.match(controller,/\['native','ort-native'\].includes\(name\)\?nativeTestEnvironment\(childEnv\):childEnv/);
   assert.match(controller,/libtestStackBytes:NATIVE_TEST_STACK_BYTES/);
 });
+
+test('SenseNova execution uses a secondary Actions Mac or the guarded GPU1 lane', async () => {
+  const mac = {...env, LOAD_PROGRESS_CASE:'sensenova_q4', LOAD_PROGRESS_MAC_GO:'false', GITHUB_ACTIONS:'true', RUNNER_NAME:'nax-macos-2'};
+  assert.equal(admission(mac, 'darwin'), 'tests::load_progress_acceptance::sensenova');
+  for (const change of [{RUNNER_NAME:'nax-macos'}, {GITHUB_ACTIONS:'false'}, {RUNNER_NAME:'nax-macos', LOAD_PROGRESS_MAC_GO:'true'}]) {
+    assert.throws(() => admission({...mac, ...change}, 'darwin'), /secondary/);
+  }
+  assert.throws(() => admission({...mac, LOAD_PROGRESS_CASE:'image_mlx'}, 'darwin'), /explicit.*go/);
+  const input = {profile:'load-progress-acceptance',ref:env.LOAD_PROGRESS_SOURCE_SHA,inference_sha:env.LOAD_PROGRESS_INFERENCE_SHA,backend:'mlx',moss_options_json:JSON.stringify({case:'sensenova_q4',hf_hub_cache:'/frozen/hub',build_only:false})};
+  assert.equal(dispatchOptions(input,input.ref).build_only,false);
+  const cuda = {...env,LOAD_PROGRESS_CASE:'sensenova_bf16',CUDA_DEVICE_ORDER:'PCI_BUS_ID',SCENEWORKS_GPU_ID:'1',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1'};
+  assert.equal(admission(cuda,'win32'),'tests::load_progress_acceptance::sensenova');
+  assert.throws(() => admission({...cuda,CUDA_VISIBLE_DEVICES:'0'},'win32'),/required/);
+  const workflow = await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  assert.match(workflow,/startsWith\(inputs.case, 'sensenova_'\) && fromJSON\('\["self-hosted","macOS","ARM64","rw-llm"\]'/);
+  const rust = await readFile(new URL('../apps/rust-api/src/tests/load_progress_acceptance.rs',import.meta.url),'utf8');
+  assert.match(rust,/#\[ignore = "SW-7189 [^"]+"\]\s*async fn sensenova\(\)/);
+});
+
+test('SenseNova cache preflight inventories only the selected backend and immutable tier', async () => {
+  const hub = await mkdtemp(path.join(os.tmpdir(), 'sw-7189-cache-'));
+  const files = ['q4/config.json','q4/model.safetensors'];
+  const mac = {repo:'SceneWorks/fixture-mlx',revision:'a'.repeat(40),variant:'q4',platforms:['macos'],files};
+  const cuda = {...mac,repo:'SceneWorks/fixture-candle',revision:'b'.repeat(40),platforms:['windows','linux']};
+  const models = (rows) => [{id:'vision_sensenova_loop_9b',downloads:rows}];
+  try {
+    const directory = path.join(hub,'models--SceneWorks--fixture-mlx','snapshots',mac.revision,'q4');
+    await mkdir(directory,{recursive:true});
+    const {writeFile} = await import('node:fs/promises');
+    await writeFile(path.join(directory,'config.json'),'{}');
+    const inventory = await cacheInventory(hub,'sensenova_q4',models([mac,cuda]),'darwin');
+    assert.equal(inventory.tier,'q4');
+    assert.equal(inventory.requiredFiles,2);
+    assert.equal(inventory.presentFiles,1);
+    assert.deepEqual(inventory.missing.map(row => [row.repo,row.revision,row.file]),[[mac.repo,mac.revision,files[1]]]);
+    const candle = await cacheInventory(hub,'sensenova_q4',models([mac,cuda]),'win32');
+    assert(candle.files.every(row => row.repo === cuda.repo));
+    await assert.rejects(cacheInventory(hub,'sensenova_q8',models([mac,cuda]),'darwin'), /one published row/);
+    await assert.rejects(cacheInventory(hub,'sensenova_q4',models([mac,mac]),'darwin'), /one published row/);
+    await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,revision:'main'}]),'darwin'), /immutable/);
+    await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,platforms:['macos','windows']}]),'darwin'), /backend-specific/);
+    await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,revision:'0'.repeat(40)}]),'darwin'), /not published/);
+    const upstream = {repo:'sensenova/SenseNova-Loop-9B',revision:'3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6',variant:'bf16',files:['config.json','generation_config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja','preprocessor_config.json','processor_config.json','video_preprocessor_config.json','model.safetensors.index.json',...Array.from({length:11},(_,i)=>'model-'+String(i+1).padStart(5,'0')+'.safetensors')]};
+    await assert.rejects(cacheInventory(hub,'sensenova_bf16',models([{...upstream,revision:'b'.repeat(40)}]),'win32'));
+    await assert.rejects(cacheInventory(hub,'sensenova_bf16',models([{...upstream,files:upstream.files.slice(0,-1)}]),'win32'), /official shard/);
+    const bf16 = await cacheInventory(hub,'sensenova_bf16',models([mac,cuda,upstream]),'win32');
+    assert.equal(bf16.requiredFiles,20);
+    assert.equal(bf16.presentFiles,0);
+  } finally {
+    await rm(hub,{recursive:true,force:true});
+  }
+});

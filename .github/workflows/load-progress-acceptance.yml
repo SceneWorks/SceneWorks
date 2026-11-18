@@ -38,12 +38,12 @@ on:
         required: true
         type: string
       case:
-        description: One bounded job, or cuda_all for the three sequential CUDA jobs sharing one build
+        description: SenseNova q4/bf16_product exercises all tools, q8/bf16 runs the cold batch only; cuda_all shares one build
         required: true
         type: choice
-        options: [image_mlx, image_cuda, audio, training, cuda_all, ort_cpu]
+        options: [image_mlx, image_cuda, audio, training, cuda_all, ort_cpu, sensenova_q4, sensenova_q8, sensenova_bf16, sensenova_bf16_product]
       backend:
-        description: MLX requires Mac go; CUDA preserves GPU1; cpu accepts only ort_cpu
+        description: Legacy MLX requires dev Mac go; SenseNova uses the secondary rw-llm Mac; CUDA preserves GPU1; cpu accepts only ort_cpu
         required: true
         type: choice
         options: [cuda, mlx, cpu]
@@ -65,7 +65,7 @@ permissions:
   contents: read
 jobs:
   accept:
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || inputs.backend == 'cpu' && fromJSON('["self-hosted","Windows","X64","cuda"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    runs-on: ${{ inputs.backend == 'mlx' && startsWith(inputs.case, 'sensenova_') && fromJSON('["self-hosted","macOS","ARM64","rw-llm"]') || inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || inputs.backend == 'cpu' && fromJSON('["self-hosted","Windows","X64","cuda"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 180
     concurrency:
       # Distinct pending requests must remain queued; preserve the existing physical GPU1 binding.
