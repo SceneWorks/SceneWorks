@@ -1717,3 +1717,146 @@ fn replacement_refuses_a_non_directory_and_resolution_never_replaces() {
     );
     assert_eq!(store.load().unwrap(), before);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Download-driven re-bind. A SceneWorks download that completes into the bound LOCATION while a
+// different physical directory occupies it is the proof the binding was missing: the user is
+// re-downloading into their reformatted drive. Before this, downloads only wrote receipts, so even
+// the model just downloaded stayed blocked as "on a different model library".
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_completed_download_into_the_reformatted_library_rebinds_it() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let receipt_three = receipt_bytes(&data, "owner/three");
+
+    // The user re-downloads `owner/one` through SceneWorks into the configured library.
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    let one = vec![requirement("owner/one", "model.safetensors")];
+    let plan = store
+        .rebind_after_completed_download(&library, &one)
+        .unwrap()
+        .expect("the completed download re-binds the reformatted library");
+    assert_eq!(
+        plan,
+        LibraryReplacementPlan {
+            retained_repositories: vec!["owner/one".to_owned()],
+            demoted_repositories: vec!["owner/three".to_owned(), "owner/two".to_owned()],
+        }
+    );
+    let after = store.load().unwrap().unwrap();
+    assert_ne!(Some(after.clone()), before);
+    assert_eq!(
+        after.canonical_path,
+        std::fs::canonicalize(&library).unwrap()
+    );
+
+    // The downloaded model is ready; the wiped ones are not-installed (download reachable again).
+    assert_eq!(
+        resolve_model_availability(&data, &library, &one, true, &[]).availability,
+        ModelAvailability::ExternalReady
+    );
+    for (repo, receipt_backed) in [("owner/two", false), ("owner/three", true)] {
+        let requirements = vec![requirement(repo, "model.safetensors")];
+        assert_eq!(
+            resolve_model_availability(&data, &library, &requirements, receipt_backed, &[])
+                .availability,
+            ModelAvailability::Incomplete,
+            "{repo}"
+        );
+    }
+    assert_eq!(receipt_bytes(&data, "owner/three"), receipt_three);
+    assert!(store
+        .validated_closures()
+        .unwrap()
+        .contains(&canonical_requirement_closure(&one)));
+
+    // A second download into the now-bound library is a no-op.
+    seed_snapshot(&library, "owner/two", "model.safetensors");
+    let two = vec![requirement("owner/two", "model.safetensors")];
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &two)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), Some(after));
+}
+
+/// The re-bind is narrow: only the bound LOCATION, only on an identity mismatch, and only when the
+/// downloaded closure is really on disk. Everything else leaves the binding exactly as it was.
+#[test]
+fn a_completed_download_rebinds_only_the_bound_location_with_the_download_present() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let one = vec![requirement("owner/one", "model.safetensors")];
+
+    // The download's bytes are not at the root: no proof, no re-bind.
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+
+    // A download into a DIFFERENT location never moves the library; that is a relocation.
+    let elsewhere = temp.path().join("elsewhere").join("hub");
+    seed_snapshot(&elsewhere, "owner/one", "model.safetensors");
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&elsewhere, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+
+    // The bound library disconnected entirely: nothing to re-bind to.
+    std::fs::remove_dir_all(&library).unwrap();
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+}
+
+#[test]
+fn a_completed_download_leaves_an_unbound_or_matching_library_alone() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    let one = vec![requirement("owner/one", "model.safetensors")];
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+
+    // No binding yet: the first resolution binds, as it always has.
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), None);
+
+    // Bound and available: nothing changes, not even `bound_at`.
+    store.bind_or_probe_validated(&library, &one).unwrap();
+    let bound = store.load().unwrap();
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), bound);
+}

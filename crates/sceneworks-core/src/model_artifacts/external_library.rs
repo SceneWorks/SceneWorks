@@ -522,12 +522,13 @@ impl ExternalLibraryBindingStore {
     ///   makes a later STRICT relocation stricter (it is listed again for the same confirmation),
     ///   never more permissive.
     ///
-    /// The fail-closed protection against a decoy is preserved because nothing here is automatic:
-    /// [`bind_or_probe_validated`](Self::bind_or_probe_validated) still never replaces a binding,
-    /// and a caller only reaches this after the operator saw [`Self::validate_replacement`]'s list of
-    /// models that will need re-downloading and confirmed it. No layout is required — an emptied
-    /// library is exactly the case being recovered — because the confirmation, not the folder's
-    /// contents, is what authorises the swap.
+    /// Only two authorities ever reach this, and neither is a passive read:
+    /// [`bind_or_probe_validated`](Self::bind_or_probe_validated) and availability resolution still
+    /// never replace a binding. The operator either confirmed it after seeing
+    /// [`Self::validate_replacement`]'s list of models that will need re-downloading, or SceneWorks
+    /// itself just completed a download into the bound location
+    /// ([`Self::rebind_after_completed_download`]). No layout is required — an emptied library is
+    /// exactly the case being recovered.
     pub fn replace_binding(
         &self,
         library_root: &Path,
@@ -535,6 +536,62 @@ impl ExternalLibraryBindingStore {
         let _lock = self
             .lock_exclusive()
             .map_err(LibraryRelocationError::Failed)?;
+        self.replace_binding_unlocked(library_root)
+    }
+
+    /// A SceneWorks download of `downloaded` into `library_root` just completed. If the binding
+    /// records this SAME location but a different physical directory now occupies it — the drive
+    /// was reformatted or replaced, and the user is re-downloading into it — the completed download
+    /// is the proof the binding was missing: SceneWorks itself just wrote that model onto the volume
+    /// now at the user's configured library. Re-bind to it, demoting every recorded install no
+    /// longer on it, exactly as a confirmed [`Self::replace_binding`] would.
+    ///
+    /// Returns the applied plan, or `None` when there was nothing to do. Deliberately narrow:
+    /// * no binding yet → `None` (the first resolution binds, as it always has);
+    /// * the bound library is available, disconnected or unreadable → `None`;
+    /// * the bound library is a DIFFERENT location → `None`: moving the library is an explicit
+    ///   relocation (it also rewrites the shell's `HF_HOME` and needs a restart), never a download
+    ///   side effect;
+    /// * the downloaded closure does not validate at the root → `None`: only bytes that are really
+    ///   there count as proof.
+    pub fn rebind_after_completed_download(
+        &self,
+        library_root: &Path,
+        downloaded: &[ExternalArtifactRequirement],
+    ) -> Result<Option<LibraryReplacementPlan>, ExternalLibraryError> {
+        let _lock = self.lock_exclusive()?;
+        let Some(binding) = self.read_unlocked()? else {
+            return Ok(None);
+        };
+        if probe_binding(library_root, &binding).status
+            != ExternalLibraryProbeStatus::IdentityMismatch
+        {
+            return Ok(None);
+        }
+        let configured = absolute_lexical(library_root)?;
+        let canonical = std::fs::canonicalize(library_root)?;
+        if configured != binding.configured_path && canonical != binding.canonical_path {
+            return Ok(None);
+        }
+        if validate_requirements_at_root(&canonical, downloaded).is_err() {
+            return Ok(None);
+        }
+        let (_, plan) =
+            self.replace_binding_unlocked(library_root)
+                .map_err(|error| match error {
+                    LibraryRelocationError::Failed(error) => error,
+                    LibraryRelocationError::Rejected(rejection) => {
+                        ExternalLibraryError(format!("library re-bind refused: {rejection:?}"))
+                    }
+                })?;
+        self.remember_validated_closure_unlocked(downloaded)?;
+        Ok(Some(plan))
+    }
+
+    fn replace_binding_unlocked(
+        &self,
+        library_root: &Path,
+    ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
         let checked = self.check_replacement_unlocked(library_root)?;
         let binding = ExternalLibraryBinding {
             schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
