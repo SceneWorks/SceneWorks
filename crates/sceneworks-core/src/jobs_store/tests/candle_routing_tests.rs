@@ -1236,6 +1236,43 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
     }
 }
 
+/// SW-7190: routing judges the tier admission selects, so a top-level `variant` is bound over
+/// the precision carriers before any route reads them. A route that refuses `convRot: true` refuses
+/// `variant: "int8-convrot"`, one that refuses a packed bit count refuses a packed variant (and
+/// still serves the dense one over a packed carrier), and a tier picked from the bit count (the
+/// Qwen control weights) follows the variant.
+#[test]
+fn routing_reads_the_top_level_variant_admission_selects() {
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        let eligible = |payload: Value| image_request_candle_eligible(model, &object(payload));
+        for served in [
+            json!({ "prompt": "p" }),
+            json!({ "prompt": "p", "variant": "bf16" }),
+            json!({ "prompt": "p", "variant": "BF16", "advanced": { "mlxQuantize": 4, "convRot": true } }),
+        ] {
+            assert!(eligible(served.clone()), "{model}: {served}");
+        }
+        for refused in [
+            json!({ "prompt": "p", "variant": "int8-convrot" }),
+            json!({ "prompt": "p", "variant": "INT8-ConvRot", "advanced": { "convRot": false } }),
+            json!({ "prompt": "p", "variant": "q4", "advanced": { "mlxQuantize": 0 } }),
+        ] {
+            assert!(!eligible(refused.clone()), "{model}: {refused}");
+        }
+    }
+    let control_tier =
+        |payload: Value| crate::control_weights::selected_qwen_control_tier(&object(payload));
+    assert_eq!(control_tier(json!({ "variant": "q4" })), "q4");
+    assert_eq!(
+        control_tier(json!({ "variant": "bf16", "advanced": { "mlxQuantize": 8 } })),
+        "bf16"
+    );
+    assert_eq!(
+        control_tier(json!({ "advanced": { "mlxQuantize": 4 } })),
+        "q4"
+    );
+}
+
 #[test]
 fn sana_absent_reference_carrier_routes_plain_txt2img_to_candle() {
     // sc-20525: EVERY real SANA text-to-image submission was enforce-failed `candle_unsupported`

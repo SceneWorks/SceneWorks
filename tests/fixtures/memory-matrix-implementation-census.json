@@ -393,7 +393,7 @@
   "minimax_h3_image:candle:bounded_decode": [0,0,6],
   "minimax_h3_image:candle:bounded_transformer_residency": [0,0,6],
   "minimax_h3_image:candle:resident": [6,0,0],
-  "minimax_h3_image:candle:staged_residency": [0,0,6],
+  "minimax_h3_image:candle:staged_residency": [6,0,0],
   "minimax_h3_image:mlx:bounded_attention": [0,0,6],
   "minimax_h3_image:mlx:bounded_decode": [0,0,6],
   "minimax_h3_image:mlx:bounded_transformer_residency": [0,0,6],

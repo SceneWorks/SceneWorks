@@ -1382,25 +1382,24 @@ test("a regime row is held to its base row and to its regime", () => {
   }
 });
 
-// SW-F363. An engine that stages every request (MiniMax-H3-Image on both lanes) has no resident
-// render to capture: its rows must engage staging, and a `:resident` regime row is refused.
+// SW-F363. An engine that stages every request (MiniMax-H3-Image on MLX) has no resident render
+// to capture: its rows must engage staging, and a `:resident` regime row is refused. On Candle the
+// same model keeps its components warm when they fit, so it is not listed there.
 // Mutations this kills: dropping either `ENGINES_THAT_ALWAYS_STAGE` rule from `validatePlan`.
 test("an always-staging engine plans staged rows and no resident regime row", () => {
-  assert.ok(ENGINES_THAT_ALWAYS_STAGE.candle.has("minimax_h3_image"));
   assert.ok(ENGINES_THAT_ALWAYS_STAGE.mlx.has("minimax_h3_image"));
-  const candle = "minimax_h3_image:q4:candle";
-  const staged = anchorPlanFixture(candle);
-  assert.equal(validatePlan(staged), staged);
-  const withResident = anchorPlanFixture(candle);
-  withResident.anchors[`${candle}:resident`] = {
-    ...structuredClone(withResident.anchors[candle]),
+  assert.ok(!ENGINES_THAT_ALWAYS_STAGE.candle.has("minimax_h3_image"));
+  const mlx = "minimax_h3_image:q4:mlx";
+  assert.throws(() => validatePlan(anchorPlanFixture(mlx)), /must engage staged_residency/);
+  const staging = { strategy: { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] } };
+  const mlxStaged = anchorPlanFixture(mlx, staging);
+  assert.equal(validatePlan(mlxStaged), mlxStaged);
+  const withResident = anchorPlanFixture(mlx, staging);
+  withResident.anchors[`${mlx}:resident`] = {
+    ...structuredClone(withResident.anchors[mlx]),
     strategy: { rung: "resident", engagedRungs: ["resident"] },
   };
   assert.throws(() => validatePlan(withResident), /stages every request/);
-  const mlx = "minimax_h3_image:q4:mlx";
-  assert.throws(() => validatePlan(anchorPlanFixture(mlx)), /must engage staged_residency/);
-  const mlxStaged = anchorPlanFixture(mlx, { strategy: { rung: "staged_residency", engagedRungs: ["resident", "staged_residency"] } });
-  assert.equal(validatePlan(mlxStaged), mlxStaged);
 });
 
 // sc-22736: the three Candle SCAIL-2 rows ride sc-22734's single-composition `strategy` override —

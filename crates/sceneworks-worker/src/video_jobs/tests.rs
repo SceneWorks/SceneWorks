@@ -9745,12 +9745,10 @@ fn candle_scail2_tier_selector_is_exact_and_adapter_safe() {
         let payload = payload.as_object().unwrap();
         assert!(VideoRequest::from_resolved(payload, payload).is_err());
     }
-    let error = resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 6 })), false)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("exact hosted tier") || error.contains("must be exactly"),
-        "{error}"
+    // SW-7185: a bit count admission reads as q8 is bound to the q8 tier the binding froze.
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 6 })), false).unwrap(),
+        Scail2CandleTier::Q8
     );
     let adapter_error =
         resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 8 })), true)
@@ -10485,6 +10483,40 @@ fn wan_tier_order_prefers_then_falls_back() {
     // never in a default job's search path (no OOM by accident).
     let absent = request(json!({ "projectId": "p" }));
     assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
+}
+
+/// SW-7185: a video loader's preferred tier is the tier admission and the portable binding select
+/// (`requested_runtime_variant`), not its own reading of the bit count: the top-level `variant` over
+/// `advanced.quantTier` over `advanced.mlxQuantize`, with `5..=8` ⇒ q8 and `>= 9` ⇒ bf16.
+#[cfg(native_lane)]
+#[test]
+fn video_loaders_prefer_the_tier_admission_selected() {
+    use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
+    for fields in [
+        json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+        json!({"variant": "bf16", "advanced": {"mlxQuantize": 4}}),
+        json!({"advanced": {"quantTier": "q8", "mlxQuantize": 4}}),
+        json!({"advanced": {"mlxQuantize": 6}}),
+        json!({"advanced": {"mlxQuantize": 12}}),
+    ] {
+        let mut payload = json!({"projectId": "p", "model": "wan_2_2"});
+        for (key, field) in fields.as_object().unwrap() {
+            payload[key] = field.clone();
+        }
+        let admitted = requested_runtime_variant(payload.as_object().unwrap());
+        let request = request(payload);
+        assert_eq!(
+            Some(mochi_tier_order(&request)[0]),
+            admitted.as_deref(),
+            "mochi {fields}"
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            Some(wan_tier_order(&request)[0]),
+            admitted.as_deref(),
+            "wan {fields}"
+        );
+    }
 }
 
 /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
@@ -16890,10 +16922,21 @@ mod candle_video_label_tests {
             Some(q4.clone()),
             "the no-override default remains q4"
         );
+        // SW-7185: a bit count admission reads as q8 (`5..=8`) is bound to its canonical 8, so it
+        // loads the q8 tier the portable binding froze rather than failing after admission.
+        for admitted_q8 in [5, 7] {
+            let request = request(json!({
+                "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": admitted_q8 }
+            }));
+            assert_eq!(
+                candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &request)
+                    .map(|(dir, _)| dir),
+                Some(q8.clone()),
+                "mlxQuantize {admitted_q8} is admitted q8"
+            );
+        }
         for invalid_tier in [
             json!(0),
-            json!(5),
-            json!(7),
             json!(9),
             json!("bf16"),
             json!("8.0"),
@@ -17044,8 +17087,9 @@ mod candle_video_label_tests {
              carries its exact numeric identity"
         );
 
-        // The ladder is still exactly q4/q8/bf16 — an off-ladder selector stays fail-closed and
-        // must never silently downgrade to the default q4 tier.
+        // The ladder is still exactly q4/q8/bf16, and an off-ladder bit count never silently
+        // downgrades to the default q4 tier: SW-7185 binds it to the tier admission froze
+        // (`5..=8` ⇒ q8), so it loads that exact tier.
         let off_ladder = request(json!({
             "projectId": "p",
             "model": "ltx_2_5",
@@ -17053,8 +17097,8 @@ mod candle_video_label_tests {
         }));
         assert_eq!(
             candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &off_ladder),
-            None,
-            "an unpublished numeric tier must fail closed rather than resolve q4"
+            Some((root.path().join("distilled/q8"), Some(Quant::Q8))),
+            "mlxQuantize 6 is admitted q8 and must load q8, never the default q4"
         );
 
         std::fs::remove_file(root.path().join("dev/bf16/text_encoder.safetensors"))

@@ -5958,6 +5958,21 @@
       ]
     },
     {
+      "key": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter@f1a4547596faeb98bae568dd28da296c49fbe0a1",
+      "repo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+      "revision": "f1a4547596faeb98bae568dd28da296c49fbe0a1",
+      "resolvedSha": "f1a4547596faeb98bae568dd28da296c49fbe0a1",
+      "servedRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "fizgig_minimax_h3_image_training_adapter.safetensors"
+      ]
+    },
+    {
       "key": "SupraLabs/Supra2-IMG@10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
       "repo": "SupraLabs/Supra2-IMG",
       "revision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",

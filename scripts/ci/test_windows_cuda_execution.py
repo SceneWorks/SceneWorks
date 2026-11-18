@@ -2,6 +2,7 @@
 import ctypes
 import importlib.util
 import inspect
+import io
 import json
 import os
 import subprocess
@@ -726,7 +727,7 @@ class WaitReportingTests(unittest.TestCase):
         self.assertNotIn("argv", cancel["partial_receipt"])
         self.assertEqual(again["signal"], "SIGINT")
 
-    def run_main(self, run_id, execute, release):
+    def run_main(self, run_id, execute, release, actor="memory-catalog-candle"):
         """Drive main with the real cancel handler captured; return (code, stdout, stderr, receipt)."""
         import contextlib, io
         env = {"GITHUB_RUN_ID": str(run_id), "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.out), "PUBLIC": str(self.out)}
@@ -734,7 +735,7 @@ class WaitReportingTests(unittest.TestCase):
         printed, logged = io.StringIO(), io.StringIO()
         self.installed, self.handles = [], [object()]
         with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
-             patch.object(shared.sys, "argv", ["wrapper", "--actor", "memory-catalog-candle", "--budget-minutes", "1",
+             patch.object(shared.sys, "argv", ["wrapper", "--actor", actor, "--budget-minutes", "1",
                  "--cuda-ordinals", "0", "--", "bash", "run.sh"]), \
              patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
              patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
@@ -746,8 +747,29 @@ class WaitReportingTests(unittest.TestCase):
              patch.object(shared, "execute_owned", execute), \
              contextlib.redirect_stdout(printed), contextlib.redirect_stderr(logged):
             code = shared.main()
-        receipt = json.loads((self.out / f"sceneworks-cuda-execution-{run_id}-1-memory-catalog-candle/resource-receipt.json").read_text())
+        receipt = json.loads((self.out / f"sceneworks-cuda-execution-{run_id}-1-{actor}/resource-receipt.json").read_text())
         return code, printed.getvalue(), logged.getvalue(), receipt
+
+    def test_sdxl_proof_keeps_private_receipt_and_raw_error_out_of_job_logs(self):
+        secret = str(self.out / "private-plan.json")
+        code, printed, logged, receipt = self.run_main(83, Mock(side_effect=RuntimeError(secret)),
+                                                        Mock(), actor="sdxl-exact-replay")
+        self.assertEqual(code, 1)
+        self.assertIn(secret, receipt["error"])
+        self.assertNotIn(secret, printed + logged)
+        self.assertNotIn("resource_receipt", printed)
+        self.assertEqual(json.loads(printed.strip().splitlines()[-1])["error_class"], "RuntimeError")
+
+        stream = io.StringIO()
+        reporter = shared.WaitReporter(stream, private=True)
+        reporter.state = {"wait": "admission", "refused": {"reasons": [secret]}}
+        reporter.emit("wait-start", reporter.state)
+        receipt["binding"] = {"private_path": secret}
+        handler = shared.cancel_handler(receipt, reporter)
+        with self.assertRaises(KeyboardInterrupt):
+            handler(shared.signal.SIGTERM, None)
+        self.assertNotIn(secret, stream.getvalue())
+        self.assertNotIn("partial_receipt", stream.getvalue())
 
     def test_a_cancel_during_the_child_releases_once_writes_the_receipt_and_ends_with_the_summary(self):
         release = Mock()

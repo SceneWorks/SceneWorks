@@ -12,7 +12,6 @@ import { inferenceRevision } from '../lib/inference-provenance.mjs';
 import { REQUEST, digest } from './sdxl-exact-replay-proof.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PIN = 'b387b95ac7ed06cb84502a90876a669fb54fd79a';
 export const RUNTIME_INPUTS = Object.freeze(['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'vendor',
   'crates', 'apps', 'packages', 'config', 'docs/generated', 'docs/calibration', 'docker']);
 let stage = 'dispatch';
@@ -20,7 +19,8 @@ let idleObservation = 'not observed';
 let idleLogSignals = [];
 const publicReasons = new Set([
   'binding escaped private directory', 'inference pin changed', 'bound runtime source changed',
-  'runtime binary changed', 'physical host changed', 'physical index zero unavailable',
+  'runtime binary changed', 'physical host changed', 'physical index one unavailable',
+  'physical GPU UUID invalid',
   'driver bytes changed', 'isolated API has a worker', 'API did not become healthy',
   'API exited', 'worker exited', 'idle worker did not register',
   'census cannot run queued jobs', 'census created a job', 'CUDA driver not loaded',
@@ -36,6 +36,13 @@ export function validateCensusDispatch(raw) {
   assert.equal(input.ownerGo, false, 'census cannot inherit model approval');
   assert(typeof input.bindingPath === 'string' && path.win32.isAbsolute(input.bindingPath), 'private binding path required');
   return input;
+}
+
+export function selectProofDevice(devices) {
+  const matches = devices.filter(({ physicalIndex }) => physicalIndex === 1);
+  assert.equal(matches.length, 1, 'physical index one unavailable');
+  assert(/^GPU-[a-f0-9-]{36}$/i.test(matches[0].uuid), 'physical GPU UUID invalid');
+  return matches[0];
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,7 +63,6 @@ async function main() {
   assert.equal(sourceSha, process.env.GITHUB_SHA, 'source changed');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim(), '', 'checkout dirty');
   const pin = await inferenceRevision(ROOT);
-  assert.equal(pin, PIN, 'inference pin changed');
 
   stage = 'binding-path';
   const privateDir = await realpath(path.join(process.env.LOCALAPPDATA, 'SceneWorks', 'sdxl-exact-replay'));
@@ -86,8 +92,7 @@ async function main() {
       return { physicalIndex: Number(index), uuid };
     });
   assert.deepEqual(devices, binding.devices.map(({ physicalIndex, uuid }) => ({ physicalIndex, uuid })), 'physical host changed');
-  const device = devices[0];
-  assert(device && device.physicalIndex === 0, 'physical index zero unavailable');
+  const device = selectProofDevice(devices);
   stage = 'binding-driver';
   assert.equal(await fileSha256(binding.driver.path), binding.driver.sha256, 'driver bytes changed');
 

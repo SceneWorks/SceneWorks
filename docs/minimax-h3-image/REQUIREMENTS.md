@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft 0.2. Michael answered D1–D6 on 2026-11-10. No CodeGraph feature or items exist yet. |
+| **Status** | Approved (draft 0.2, Michael answered D1–D6 on 2026-11-10). Implemented as CodeGraph feature SW-F363, complete 2026-11-18; all 18 items complete. LoRA training's app-level proof (AT10) moved to SW-F369. |
 | **Date** | 2026-11-10 |
 | **Models** | [MiniMaxAI/MiniMax-H3-Image](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image) and its prompt expander [MiniMaxAI/MiniMax-H3-Image-PE](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE), both released 2026-11-10 |
 | **Base** | Existing MiniMax-H3 support (CodeGraph SW-F245, SW-F329 and follow-ons) |

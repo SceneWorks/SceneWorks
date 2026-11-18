@@ -3819,6 +3819,7 @@ fn z_image_q4_anchor() -> sceneworks_core::memory_anchor::MemoryAnchor {
         // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
         // residency structurally impossible, so it keeps the staged-only derivation law.
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     }
 }
 
@@ -5453,6 +5454,7 @@ fn an_anchored_cell_takes_the_derived_floor_and_an_unanchored_one_keeps_the_mani
         // sc-22734: an ordinary staged candle cell, not one whose engine declares staged
         // residency structurally impossible, so it keeps the staged-only derivation law.
         staged_residency_structurally_not_applicable: false,
+        staged_residency_unconditional: false,
     };
     // Under the DEFAULT architecture facts (this pin — `architecture_facts_from_contract`)
     // every ratio the law could apply is inert, so each rung's derivation is the anchor's own

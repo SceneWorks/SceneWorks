@@ -1360,32 +1360,48 @@ fn volume_identity_memo_reuses_only_an_unchanged_fresh_probe() {
     };
 
     assert_eq!(
-        memo.volume_id(memo_key(1, 10), start, probe("a")).unwrap(),
+        memo.volume_id(
+            memo_key(1, 10),
+            || {
+                // Time spent waiting behind another path's probe must not age the entry.
+                assert!(
+                    memo.entries.try_lock().is_none(),
+                    "clock read before the lock"
+                );
+                start
+            },
+            probe("a")
+        )
+        .unwrap(),
         "a"
     );
     for row in 0..140 {
         let now = start + std::time::Duration::from_millis(row);
         assert_eq!(
-            memo.volume_id(memo_key(1, 10), now, probe("never"))
+            memo.volume_id(memo_key(1, 10), || now, probe("never"))
                 .unwrap(),
             "a"
         );
     }
     assert_eq!(probes.get(), 1, "a 140-row sweep costs one volume probe");
 
-    let remounted = memo.volume_id(memo_key(2, 10), start, probe("b")).unwrap();
+    let remounted = memo
+        .volume_id(memo_key(2, 10), || start, probe("b"))
+        .unwrap();
     assert_eq!(
         remounted, "b",
         "a new st_dev is a remount and must re-probe"
     );
-    let replaced = memo.volume_id(memo_key(1, 11), start, probe("c")).unwrap();
+    let replaced = memo
+        .volume_id(memo_key(1, 11), || start, probe("c"))
+        .unwrap();
     assert_eq!(replaced, "c", "a new directory inode must re-probe");
     assert_eq!(probes.get(), 3);
 
     // Same device node and inode handed to a different disk: only the TTL can catch it.
     let expired = start + VOLUME_IDENTITY_MEMO_TTL;
     assert_eq!(
-        memo.volume_id(memo_key(1, 10), expired, probe("d"))
+        memo.volume_id(memo_key(1, 10), || expired, probe("d"))
             .unwrap(),
         "d"
     );
@@ -1395,9 +1411,10 @@ fn volume_identity_memo_reuses_only_an_unchanged_fresh_probe() {
         probes.set(probes.get() + 1);
         Err(ExternalLibraryError("diskutil unavailable".to_owned()))
     };
-    assert!(memo.volume_id(memo_key(3, 10), start, failing).is_err());
+    assert!(memo.volume_id(memo_key(3, 10), || start, failing).is_err());
     assert_eq!(
-        memo.volume_id(memo_key(3, 10), start, probe("e")).unwrap(),
+        memo.volume_id(memo_key(3, 10), || start, probe("e"))
+            .unwrap(),
         "e"
     );
     assert_eq!(probes.get(), 6, "a failed probe must not be cached");
@@ -1428,6 +1445,18 @@ fn one_catalog_sweep_probes_the_volume_once_and_still_sees_disconnect_and_swap()
         }
     };
 
+    // Pin this thread's memo clock: what is under test is how many probes a sweep costs inside
+    // the TTL, not whether a loaded host finishes 48 rows within it (the TTL itself is covered by
+    // `volume_identity_memo_reuses_only_an_unchanged_fresh_probe`). Disconnect and swap below are
+    // seen through the fresh inode and `st_dev`, never through the TTL.
+    struct PinnedClock;
+    impl Drop for PinnedClock {
+        fn drop(&mut self) {
+            TEST_VOLUME_IDENTITY_NOW.with(|now| now.set(None));
+        }
+    }
+    TEST_VOLUME_IDENTITY_NOW.with(|now| now.set(Some(std::time::Instant::now())));
+    let _pinned = PinnedClock;
     TEST_MACOS_VOLUME_PROBES.with(|probes| probes.set(0));
     sweep(ModelAvailability::ExternalReady);
     // The first row binds the library (two fresh probes around its validation, as before); every

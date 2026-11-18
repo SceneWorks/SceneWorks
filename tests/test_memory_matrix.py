@@ -1169,7 +1169,12 @@ def assert_implementation_census_shape(matrix, pinned):
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24214 (epic 24212) routes `supra2_img` to Candle under the same engine id. It
+    Last moved: SW-F363 declares the Candle `staged_residency` rung of `minimax_h3_image`
+    (`config/manifests/registry/evidence.json`; `candle-gen-minimax-h3` stages every request). It
+    moves exactly one lane, `minimax_h3_image:candle:staged_residency` [0,0,6] -> [6,0,0], to the
+    MLX lane's profile (`mlx:staged_residency` [6,0,0]) over the same tiers, modes and overlays.
+
+    Previously: sc-24214 (epic 24212) routes `supra2_img` to Candle under the same engine id. It
     adds exactly five NEW lanes (`supra2_img:candle:*`) and moves nothing else; the profile is the
     MLX one: `resident` [2,0,0] (`candle-gen-supra2` is resident-only and the entry now declares a
     `candle` floor), every other rung [0,0,2] — the provider publishes a resident-only contract, so

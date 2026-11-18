@@ -2546,6 +2546,7 @@
                     "minimax_h3",
                     "minimax_h3_image",
                     "minimax_h3_image_pe",
+                    "minimax_h3_image_training_adapter_v1",
                     "minimax_h3_ref",
                     "mmaudio_large_44k",
                     "mmaudio_small_16k",

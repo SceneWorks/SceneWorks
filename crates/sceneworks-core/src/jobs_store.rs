@@ -97,7 +97,8 @@ pub(crate) use routing::mlx::*;
 pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id,
     imported_control_intent_is_material_resolved, imported_control_intent_is_material_with_facts,
-    imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
+    imported_entry_honors_legacy_quant, imported_entry_installed_path,
+    imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported_resolved, imported_provider_routes,
     imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
@@ -487,7 +488,9 @@ pub struct PlatformReachabilitySweepStats {
 // sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
 // eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
 // SW-7102: version 4 adds `requires_nvfp4` (an NVFP4-frozen MiniMax-H3-Image expansion).
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 4;
+// SW-7190: version 5 routes by the top-level `variant` (bound over quantTier, mlxQuantize
+// and convRot), so a persisted pre-variant projection must be recomputed.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 5;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///

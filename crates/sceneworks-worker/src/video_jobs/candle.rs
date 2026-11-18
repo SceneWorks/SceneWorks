@@ -288,7 +288,9 @@ enum CandleLtxTier {
 
 /// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
 /// Only an absent value gets the q4 default. The shared native tier contract encodes bf16 as
-/// `mlxQuantize <= 0`, q4 as 4, and q8 as 8; all other explicit values fail closed.
+/// `mlxQuantize <= 0`, q4 as 4, and q8 as 8. `VideoRequest::from_resolved` canonicalizes every
+/// selection admission reads to one of those (SW-7185), so the fail-closed arm below only guards a
+/// request built without that binding.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
     let selection = sceneworks_core::payload_util::resolved_quant_selection(
@@ -2162,6 +2164,8 @@ pub(super) struct ResolvedCandleScail2Model {
 /// Resolve the request's exact SCAIL-2 package tier. We deliberately do not mirror the historical
 /// MLX `<=4 => q4, >=8 => q8` convenience mapping: q6, an unparseable value, and a fractional value
 /// name no published Candle artifact and must fail before any directory search can substitute one.
+/// A bit count admission reads as a tier (`5..=8` q8, `>= 9` bf16) reaches here already
+/// canonicalized by `VideoRequest::from_resolved` (SW-7185), so it loads the admitted tier.
 /// Omission retains the prior dense bf16 Candle baseline; q4/q8 require an explicit selection.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn resolve_candle_scail2_tier(

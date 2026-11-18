@@ -53,6 +53,35 @@ mod typed_image_detail_tier_tests {
             assert!(reject_image_detail_packed_tier_for_candle(&payload(advanced)).is_ok());
         }
     }
+
+    /// SW-7190: the dense-tier check judges the tier admission selects, so a top-level `variant`
+    /// outranks the advanced carriers exactly as it does in `requested_runtime_variant`.
+    #[test]
+    fn candle_detail_judges_the_top_level_variant_admission_selects() {
+        let request = |value: Value| value.as_object().unwrap().clone();
+        for value in [
+            json!({"variant":"q4"}),
+            json!({"variant":" Q8 ","advanced":{"mlxQuantize":0}}),
+            json!({"variant":"nvfp4","advanced":{"quantTier":"bf16"}}),
+            json!({"variant":"int8-convrot","advanced":{"convRot":false}}),
+        ] {
+            assert!(
+                reject_image_detail_packed_tier_for_candle(&request(value.clone())).is_err(),
+                "{value}"
+            );
+        }
+        for value in [
+            json!({"variant":"bf16"}),
+            json!({"variant":"BF16","advanced":{"mlxQuantize":4,"quantTier":"q8"}}),
+            json!({"variant":"bf16","advanced":{"convRot":true}}),
+            json!({"variant":" ","advanced":{"mlxQuantize":0}}),
+        ] {
+            assert!(
+                reject_image_detail_packed_tier_for_candle(&request(value.clone())).is_ok(),
+                "{value}"
+            );
+        }
+    }
 }
 
 /// Worker → API write of a job's structured generation metrics (epic 10402).
@@ -2390,6 +2419,7 @@ pub(crate) async fn canonicalize_image_model_payload(
         .unwrap_or(&empty);
     if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
         &model_id,
+        payload.get("variant").and_then(Value::as_str),
         advanced,
         &model_manifest_entry,
     ) {
@@ -2596,36 +2626,38 @@ fn reject_image_detail_packed_tier(payload: &JsonObject) -> Result<(), ApiError>
 
 #[cfg(any(not(target_os = "macos"), test))]
 fn reject_image_detail_packed_tier_for_candle(payload: &JsonObject) -> Result<(), ApiError> {
-    let Some(Value::Object(_)) = payload.get("advanced") else {
-        return Ok(());
-    };
     use sceneworks_core::resolved_options::{RouteField, RouteOptionFacts};
+    if payload
+        .get("advanced")
+        .is_some_and(|advanced| !advanced.is_object() && !advanced.is_null())
+    {
+        // `canonicalize_image_detail_dense_tier` refuses a non-object `advanced` itself.
+        return Ok(());
+    }
     let options = RouteOptionFacts::from_payload_syntax(payload);
-    match options.mlx_quantize {
-        RouteField::Valid(bits) if bits > 0 => return Err(dense_image_detail_error()),
-        RouteField::Invalid => {
-            return Err(ApiError::bad_request(
-                "image_detail advanced.mlxQuantize must be an integer",
-            ));
-        }
-        RouteField::Absent | RouteField::Null | RouteField::Valid(_) => {}
+    if options.mlx_quantize == RouteField::Invalid {
+        return Err(ApiError::bad_request(
+            "image_detail advanced.mlxQuantize must be an integer",
+        ));
     }
-    match options.conv_rot {
-        RouteField::Valid(true) => return Err(dense_image_detail_error()),
-        RouteField::Invalid => {
-            return Err(ApiError::bad_request(
-                "image_detail advanced.convRot must be a boolean",
-            ));
-        }
-        RouteField::Absent | RouteField::Null | RouteField::Valid(false) => {}
+    if options.conv_rot == RouteField::Invalid {
+        return Err(ApiError::bad_request(
+            "image_detail advanced.convRot must be a boolean",
+        ));
     }
-    match options.quant_tier {
-        RouteField::Valid(tier)
-            if tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16") => {}
-        RouteField::Absent | RouteField::Null => {}
-        RouteField::Valid(_) | RouteField::Invalid => return Err(dense_image_detail_error()),
+    if options.quant_tier == RouteField::Invalid {
+        return Err(dense_image_detail_error());
     }
-
+    // Judge the tier admission selects (the top-level `variant`, then `quantTier`, then the
+    // `mlxQuantize` bit count) and its ConvRot choice, so a packed `variant` cannot slip past a
+    // refusal its advanced spelling would trigger, and a dense `variant` outranks a packed carrier.
+    let packed = options.conv_rot_selected()
+        || options
+            .requested_runtime_variant(options.variant.as_deref())
+            .is_some_and(|tier| tier != "bf16");
+    if packed {
+        return Err(dense_image_detail_error());
+    }
     Ok(())
 }
 

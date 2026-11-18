@@ -19752,6 +19752,7 @@ async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_der
         let advanced = json!({ "quantTier": tier }).as_object().unwrap().clone();
         let reason = sceneworks_core::image_request::flux3_catalog_tier_refusal(
             "flux3_klein_base",
+            None,
             &advanced,
             &base,
         )

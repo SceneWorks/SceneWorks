@@ -47793,6 +47793,36 @@
     "evidence": {
       "candle": {
         "measured": false,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "implementations": [
+            {
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "fingerprint": "minimax-h3-image-candle-estimated-ladder-2026-11-10-v2",
+              "modes": [
+                "text_to_image",
+                "edit_image"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "parameterRanges": {},
+              "parameters": {},
+              "rung": "staged_residency",
+              "source": "inference:crates/media/candle-gen/candle-gen-minimax-h3/src/image_memory_strategy.rs",
+              "tiers": [
+                "bf16",
+                "q8",
+                "q4"
+              ]
+            }
+          ],
+          "provider": "minimax_h3_image"
+        },
         "minMemoryGb": 73,
         "minMemoryGbByTier": {
           "bf16": 73,
@@ -48055,7 +48085,7 @@
       "type": "image",
       "ui": {
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "label": "MiniMax-H3-Image",
         "multiReference": true,
         "promptGuide": {
@@ -48413,7 +48443,7 @@
       "type": "utility",
       "ui": {
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16, Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe, and the bf16 tier is not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "label": "MiniMax-H3-Image Prompt Expander",
         "promptGuide": {
           "path": "/prompt-guides/minimax-h3-image.md",
@@ -48428,6 +48458,50 @@
         "recommendedFor": [
           "minimax_h3_image_prompt_expand"
         ]
+      }
+    },
+    "routes": {}
+  },
+  "minimax_h3_image_training_adapter_v1": {
+    "evidence": {},
+    "product": {
+      "autoDownload": false,
+      "capabilities": [],
+      "componentOnly": true,
+      "downloads": [
+        {
+          "estimatedSizeBytes": 149161248,
+          "files": [
+            "fizgig_minimax_h3_image_training_adapter.safetensors"
+          ],
+          "footprint": {
+            "diskSizeBytes": 149161248
+          },
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "revision": "f1a4547596faeb98bae568dd28da296c49fbe0a1"
+        }
+      ],
+      "family": "minimax_h3_image_training_adapter",
+      "gated": false,
+      "id": "minimax_h3_image_training_adapter_v1",
+      "licenseNotice": "The MiniMax-H3-Image de-distill training adapter is a Model Derivative of MiniMax-H3-Image, so it is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026), the same agreement as MiniMax-H3-Image itself, not by SceneWorks' own AGPL-3.0 licence. SceneWorks applies it only while training a MiniMax-H3-Image LoRA and never renders with it. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use of the model, its derivatives and their Outputs is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A), including clearly and prominently disclosing machine-generated content you publish. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): the Works and their Outputs may be used to improve only MiniMax-H3-Image or its Model Derivatives; this adapter and the LoRAs it helps train are such derivatives and inherit these terms. Read the full text under About → Licenses before downloading.",
+      "licenseUrl": "https://huggingface.co/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter/blob/f1a4547596faeb98bae568dd28da296c49fbe0a1/LICENSE",
+      "name": "MiniMax-H3-Image Training Adapter",
+      "paths": {
+        "model": "${HF_CACHE}/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter"
+      },
+      "requiresLicenseAcknowledgment": true,
+      "type": "utility",
+      "ui": {
+        "description": "Fizgig de-distill training adapter for MiniMax-H3-Image (rank 16). Applied to MiniMax-H3-Image only while training a LoRA so it learns your subject instead of un-distilling the 6-step base into blurry, ghosted samples; removed for previews and generation - not a generation model. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "label": "MiniMax-H3-Image Training Adapter",
+        "recommendedFor": []
       }
     },
     "routes": {}

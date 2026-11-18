@@ -492,6 +492,18 @@ pub(super) fn probe_image_precision_options_from_facts(
         }),
         RouteField::Invalid => return Err("advanced.quantTier is malformed".to_owned()),
     };
+    // The legacy `advanced.quant` names the tier in `quantTier`'s slot (SW-7184), as admission
+    // and the image binding read it.
+    if options
+        .quant_tier
+        .as_ref()
+        .is_none_or(|bound| bound.value.trim().is_empty())
+    {
+        options.quant_tier = facts.named_quant_tier().map(|tier| Bound {
+            value: tier.to_owned(),
+            origin,
+        });
+    }
     options.mlx_quantize = match &facts.mlx_quantize {
         RouteField::Absent => None,
         RouteField::Null => Some(Bound {
@@ -512,6 +524,8 @@ pub(super) fn probe_image_precision_options_from_facts(
         }),
         RouteField::Invalid => return Err("advanced.convRot is malformed".to_owned()),
     };
+    // Route by the tier admission selects: a top-level `variant` outranks both carriers.
+    options.bind_variant(facts.variant.as_deref());
     Ok(options)
 }
 

@@ -2061,6 +2061,8 @@
           "sampleEvery": 500,
           "timestepBias": "balanced",
           "timestepType": "sigmoid",
+          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
       },
@@ -2106,6 +2108,8 @@
           "sampleEvery": 500,
           "timestepBias": "balanced",
           "timestepType": "sigmoid",
+          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
       },
@@ -2150,6 +2154,8 @@
           "sampleEvery": 500,
           "timestepBias": "balanced",
           "timestepType": "sigmoid",
+          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
       },
@@ -2194,6 +2200,8 @@
           "sampleEvery": 500,
           "timestepBias": "balanced",
           "timestepType": "sigmoid",
+          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
       },
@@ -2239,6 +2247,8 @@
           "sampleEvery": 500,
           "timestepBias": "balanced",
           "timestepType": "sigmoid",
+          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
       },

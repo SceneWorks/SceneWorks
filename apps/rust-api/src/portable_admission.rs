@@ -12,8 +12,7 @@ use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::selected_portable_model_artifact_closure;
 use sceneworks_core::model_artifacts::artifact_selection::{
     admitted_runtime_variant, is_co_requisite_download, is_supported_model_download,
-    requested_runtime_variant_typed, safe_download_dir,
-    selected_portable_model_artifact_closure_resolved,
+    safe_download_dir, selected_portable_model_artifact_closure_resolved,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
@@ -886,6 +885,7 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "editMode"
             | "variant"
             | "quantTier"
+            | "quant"
             | "mlxQuantize"
             | "convRot"
             | "decoder"
@@ -1780,17 +1780,8 @@ fn slot_requested_variant(
                 })
                 .flatten()
                 .or_else(|| {
-                    requested_runtime_variant_typed(
-                        payload.get("variant").and_then(Value::as_str),
-                        match &options.quant_tier {
-                            RouteField::Valid(tier) => Some(tier.as_str()),
-                            _ => None,
-                        },
-                        match &options.mlx_quantize {
-                            RouteField::Valid(bits) => Some(*bits),
-                            _ => None,
-                        },
-                    )
+                    options
+                        .requested_runtime_variant(payload.get("variant").and_then(Value::as_str))
                 })
         })
         .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))

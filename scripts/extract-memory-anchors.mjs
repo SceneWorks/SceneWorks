@@ -89,6 +89,7 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { MEMORY_EVIDENCE_PATH, projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import { validateOwnedProcessAccountingRecord } from "./lib/flux3-owned-accounting-contract.mjs";
+import { ENGINES_THAT_ALWAYS_STAGE } from "./memory-calibration-harness.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -661,6 +662,10 @@ function anchorRow(
   const stagedExempt = stagedExemptLanes.has(
     `${candidate.modelId}:${candidate.backend}`,
   );
+  // SW-F363: the engine fact `enginesThatAlwaysStage.mlx` (bound to the provider descriptor's
+  // `unconditionally_engages_staged_residency` by the worker's inference_runtime test).
+  const stagedUnconditional =
+    candidate.backend === "mlx" && ENGINES_THAT_ALWAYS_STAGE.mlx.has(candidate.provider);
   const loaderClosureDigest = loaderClosureDigestFor(previousStore, id);
   const currencyAttestation = currencyAttestationFor(previousStore, id);
   return {
@@ -722,6 +727,8 @@ function anchorRow(
     // the field stays byte-identical and keeps the staged-only law (`#[serde(default)]` on the
     // Rust side). Last, matching `MemoryAnchor`'s field order.
     ...(stagedExempt ? { stagedResidencyStructurallyNotApplicable: true } : {}),
+    // SW-F363: emitted only when true, like the exemption above, so every other row is unchanged.
+    ...(stagedUnconditional ? { stagedResidencyUnconditional: true } : {}),
   };
 }
 
@@ -933,8 +940,10 @@ function exceededBoundRow(entry, corpus, cell, previousStore) {
  * fix round), or `null` when the lane's law derives from it. Per-MODEL and computed from the
  * model's own retained evidence — never a blanket switch:
  *
- * * an MLX still-image anchor derives only when it is the eager unbounded resident composition
- *   (the widest, which is what lets one law upper-bound the whole ladder);
+ * * an MLX still-image anchor derives only when it is the eager unbounded composition the engine
+ *   can widest run (which is what lets one law upper-bound the whole ladder): the RESIDENT one,
+ *   or — for a provider in `enginesThatAlwaysStage.mlx` (SW-F363), whose generator stages every
+ *   request so a co-resident render never happens — the STAGED one, and only that one;
  * * an MLX VIDEO anchor that states no pipeline axes cannot be priced by the video law, whose
  *   per-token coefficients are keyed on `(transformer variant, decoder)`.
  *
@@ -957,7 +966,7 @@ function exceededBoundRow(entry, corpus, cell, previousStore) {
  * without `(transformerVariant, decoder)`), so the axis-free reason is stated lane-blind, before
  * the MLX-only image branch.
  */
-export function underivedReasonFor(candidate) {
+export function underivedReasonFor(candidate, alwaysStagingMlx = ENGINES_THAT_ALWAYS_STAGE.mlx) {
   if ((candidate.geometry.frames ?? 1) > 1) {
     if (candidate.transformerVariant === null || candidate.decoder === null) {
       return (
@@ -971,9 +980,12 @@ export function underivedReasonFor(candidate) {
   if (candidate.backend !== "mlx") return null;
   if (candidate.geometry.frames === 1) {
     const regime = candidate.measuredRegime;
+    // SW-F363: on an always-staging engine the staged composition IS the widest one it runs, the
+    // mirror of the candle sc-22734 exemption; anywhere else it stays the resident one.
+    const widestStaged = alwaysStagingMlx.has(candidate.provider);
     const unboundedEager =
       candidate.loadShape === "eager_materialization" &&
-      !regime.staged &&
+      regime.staged === widestStaged &&
       !regime.decodeTiled &&
       !regime.attentionChunked &&
       !regime.transformerWindowed;
