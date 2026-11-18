@@ -43,7 +43,7 @@ runs:
         node scripts/moss-training-acceptance.mjs --phase capture --root . --output "%MOSS_OUTPUT%" --backend cuda --manifest scripts/ci/moss-training-acceptance/campaign.json --capture-cell "%MOSS_CELL%"
     - name: Publish three decoded PNGs and hashbound inspection index now
       id: preview
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: moss-preview-${{ inputs.backend }}-${{ inputs.preview-name }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ inputs.output }}/previews/${{ inputs.preview-name }}/

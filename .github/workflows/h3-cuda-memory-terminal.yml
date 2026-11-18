@@ -29,27 +29,27 @@ jobs:
       CUDA_COMPUTE_CAP: '120'
       CUDA_PATH: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         with:
           ref: ${{ fromJSON(inputs.plan).sceneworks }}
           path: sceneworks
           fetch-depth: 128
           persist-credentials: false
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         with:
           repository: SceneWorks/inference
           ref: ${{ fromJSON(inputs.plan).inference }}
           path: inference
           fetch-depth: 128
           persist-credentials: false
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
         with:
           ref: c8815c7cd46feba2f82562a315d1a44a6c88a9e8
           path: runtime-sceneworks
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
         with:
           repository: SceneWorks/inference
@@ -113,7 +113,7 @@ jobs:
           python scripts\h3-cuda-memory-lease.py "%GITHUB_WORKSPACE%\sceneworks" "%GITHUB_WORKSPACE%\inference" "%SW_F329_OUTPUT%"
       - name: Keep output, source, allocation, numerical and media evidence
         if: always() && env.SW_F329_OUTPUT != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sw-f329-${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 'matched-resident-control' || 'cuda-memory-acceptance' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

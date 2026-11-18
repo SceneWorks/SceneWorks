@@ -752,7 +752,7 @@ test("Windows metrics Python contract rejects path, base-interpreter, and patch-
 function assertHostedWindowsWheelContract(hostedWorkflow, verification) {
   assert.match(hostedWorkflow, /runs-on: windows-2022/);
   assert.match(hostedWorkflow, /timeout-minutes: 25/);
-  assert.match(hostedWorkflow, /uses: actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/);
+  assert.match(hostedWorkflow, /uses: actions\/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0/);
   assert.match(hostedWorkflow, /python-version: "3\.12"[\s\S]*?architecture: x64[\s\S]*?update-environment: false/);
   assert.equal((hostedWorkflow.match(/shell: powershell/g) ?? []).length, 3);
   assert.match(hostedWorkflow, /select-starvector-windows-python\.test\.ps1/);
@@ -1633,7 +1633,7 @@ test("Windows provisioning selects the reviewed persistent listener cache before
   const firstCargo = windows.indexOf("cargo run --release --locked");
   const sanitizer = windows.indexOf("cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_sanitize");
   assert.ok(setup >= 0 && selection > setup && firstCargo > selection && sanitizer > selection);
-  assert.match(windows.slice(setup, selection), /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+  assert.match(windows.slice(setup, selection), /actions\/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1/);
   assert.match(windows.slice(setup, selection), /node-version: 22/);
   const selected = windows.slice(selection, windows.indexOf("- name: Resolve immutable pin-keyed terminal inputs", selection));
   assert.match(selected, /shell: powershell/);
