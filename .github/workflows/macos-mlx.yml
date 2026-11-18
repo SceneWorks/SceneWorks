@@ -337,8 +337,18 @@ jobs:
   # `cache-bin` is left at its default here, unlike the self-hosted lanes. Its post step
   # deletes non-cargo-installed regular files from `$CARGO_HOME/bin`, which orphans `rustup`
   # on a persistent box — harmless on an ephemeral hosted runner, which is what this is.
+  #
+  # SPLIT IN TWO (2026-11-18). Measured on hosted macos-26 (3 vCPU, 7 GB): the single job grew from
+  # ~35 to ~55 min between October and November as the workspace grew ~40%. The time sits in a
+  # serial chain of giant single-crate rustc invocations (sceneworks-core ~5 min, sceneworks-worker
+  # lib test ~6 min, sceneworks-rust-api lib test ~8 min) plus ~20 min of test execution. A probe
+  # (run 44388553546) showed memory pressure is present but not the cause: -j2 compiled SLOWER
+  # than -j3. More machines in parallel is the lever, so this job now owns build, lint, the
+  # memory adapter, the WORKER tests and the capability dump, and `macos-workspace-tests` below
+  # runs every other default member's tests at the same time. `macos-gate` carries the required
+  # check name and fails unless both halves passed.
   macos-checks:
-    name: macOS build, lint and workspace tests (hosted)
+    name: macOS build, lint and worker tests (hosted)
     # NO same-repo guard, deliberately — it was removed once its premise proved false. It read:
     # "the 'Fetch the pinned inference release' step reads the PRIVATE SceneWorks/inference repo,
     # and a fork PR has neither the secret nor a `github.token` that can see it."
@@ -481,12 +491,20 @@ jobs:
       # are satisfied (`memory-candle-adapter` needs `candle`, so it stays out).
       - name: Test the MLX memory adapter (lib + memory-mlx-adapter)
         run: node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx
-      # The whole workspace suite MINUS the one test that needs matrix-unit silicon.
-      # `nax_16bit_sdpa_is_correct` runs on `nax-worker` below and nowhere else; the
-      # contract test in scripts/platform-review-contracts.test.mjs pins both halves so
-      # this skip cannot quietly become a hole.
-      - name: Workspace tests (excluding the NAX guard, which needs M5)
-        run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct
+      # The worker half of the workspace suite MINUS the one test that needs matrix-unit silicon.
+      # `nax_16bit_sdpa_is_correct` (crates/sceneworks-worker/tests/nax_guard.rs) runs on
+      # `nax-worker` below and nowhere else; the contract test in
+      # scripts/platform-review-contracts.test.mjs pins both halves so this skip cannot quietly
+      # become a hole. The other default members run in `macos-workspace-tests`.
+      #
+      # `--features sceneworks-worker/test-support` reproduces the whole-workspace feature
+      # resolution: apps/rust-api's dev-dependency enables it, and the worker's own tests branch on
+      # it (`cfg(all(test, not(feature = "test-support")))`). Without it this `-p` build would
+      # test a different worker than the single `cargo test` it replaced. Verified with
+      # `cargo tree --target aarch64-apple-darwin -e features`: with the flag, every sceneworks-*
+      # and inference crate resolves identically to the full workspace.
+      - name: Worker tests (excluding the NAX guard, which needs M5)
+        run: node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker -p sceneworks-rust-worker --features sceneworks-worker/test-support -- --skip nax_16bit_sdpa_is_correct
       # Model-level H3 forwards, including synthetic weights, stay ignored here. Explicit
       # pruned/W4A8 native proofs live in server-candle-linux.yml's selected manual-only jobs.
 
@@ -536,6 +554,96 @@ jobs:
           name: backend-capability-facts-mlx
           path: ${{ runner.temp }}/engine-capability-facts-verify
           if-no-files-found: error
+
+  # THE OTHER HALF of the hosted suite, in parallel with `macos-checks` (see SPLIT IN TWO above):
+  # every default member's tests except sceneworks-worker / sceneworks-rust-worker. Same trigger
+  # condition, env, toolchain and native prerequisites as `macos-checks`; no lint or dump here.
+  #
+  # Feature resolution: dropping the worker from the `-p` set drops only the worker's macOS
+  # dev-dependency feature `runtime-macos/cv-parity-captures` (plus `toml_datetime/serde`) from
+  # this build, i.e. rust-api is tested with the feature set it ships with. Every other crate
+  # resolves as in the full workspace (`cargo tree --target aarch64-apple-darwin -e features`).
+  macos-workspace-tests:
+    name: macOS workspace tests except worker (hosted)
+    needs: changes
+    # Same FAIL-OPEN condition as `macos-checks`; see the note there.
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
+    runs-on: macos-26
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      # `shared-key: macos-checks` restores the SAME main-saved cache `macos-checks` writes (its key
+      # is derived from that job id), so this half starts warm. Its dependency set is a subset of
+      # that job's. Never saves: two jobs writing one key would race.
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2 (v2.9.1+1)
+        with:
+          shared-key: macos-checks
+          save-if: false
+      - name: Ensure Metal compiler
+        run: |
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun metal --version || true
+      - name: Fetch prebuilt MLX (sc-21382)
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Workspace tests except the worker
+        run: node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-rust-api -p sceneworks-core -p sceneworks-image-quality -p sceneworks-mcp -p sceneworks-options
+
+  # THE REQUIRED CHECK. Branch protection requires the context "macOS build, lint and workspace
+  # tests (hosted)", which `macos-checks` reported before the split. This cheap Linux job now
+  # carries that name and passes only when BOTH hosted halves passed, or when both were skipped
+  # because `changes` succeeded and reported the lane irrelevant. Anything else, including a half
+  # skipped for any other reason, fails, so the required check cannot go green on partial work.
+  macos-gate:
+    name: macOS build, lint and workspace tests (hosted)
+    needs: [changes, macos-checks, macos-workspace-tests]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both hosted halves
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          CHECKS: ${{ needs.macos-checks.result }}
+          WORKSPACE: ${{ needs.macos-workspace-tests.result }}
+        run: |
+          set -euo pipefail
+          echo "changes=$CHANGES relevant=$RELEVANT macos-checks=$CHECKS macos-workspace-tests=$WORKSPACE"
+          complete=false
+          if [ "$CHECKS" = success ] && [ "$WORKSPACE" = success ]; then
+            complete=true
+          elif [ "$CHANGES" = success ] && [ "$RELEVANT" = false ] && [ "$CHECKS" = skipped ] && [ "$WORKSPACE" = skipped ]; then
+            echo "Lane not relevant to this change; both halves skipped by design."
+            complete=true
+          fi
+          if [ "$complete" != true ]; then
+            echo "::error::macOS hosted lane incomplete: macos-checks=$CHECKS, macos-workspace-tests=$WORKSPACE"
+            exit 1
+          fi
 
   # Explicit, non-gating producer for the ignored real-router browser fixture. It is
   # hosted (never NAX), dispatch-only, and refuses every legacy calibration selector so
