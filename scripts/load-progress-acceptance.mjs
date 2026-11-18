@@ -118,14 +118,13 @@ export async function cacheInventory(hub, selectedCase, manifest = null, platfor
   if (senseNova) {
     assert.equal(sources.length, 1, 'one published row required for the selected SenseNova tier and platform');
     const [source] = sources;
+    assert(source.pendingArtifact !== true && source.revision !== '0'.repeat(40), 'selected SenseNova tier is not published');
     assert(source.files?.length && source.files.some(name => /\.(safetensors|gguf)$/.test(name)), 'declared weights required');
     if (tier === 'bf16') {
       assert.equal(source.repo, senseNovaRepo);
       assert.equal(source.revision, senseNovaRevision);
-      for (const name of ['config.json','generation_config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja','preprocessor_config.json','processor_config.json','video_preprocessor_config.json','model.safetensors.index.json']) {
-        assert(source.files.includes(name), `official metadata ${name} absent from manifest`);
-      }
-      for (let i = 1; i <= 11; i++) assert(source.files.includes(`model-${String(i).padStart(5,'0')}-of-00011.safetensors`), 'official shard absent from manifest');
+      const publisher = JSON.parse(await readFile(path.join(root,'scripts/fixtures/sensenova-loop-9b-publisher.json'),'utf8'));
+      assert.deepEqual([...source.files].sort(), Object.keys(publisher.files).sort(), 'official shard or native metadata differs from the publisher inventory');
     } else {
       assert(source.platforms?.includes(os) && !(os === 'macos' ? source.platforms.includes('windows') : source.platforms.includes('macos')) && source.repo !== senseNovaRepo, 'backend-specific quantized snapshot required');
     }

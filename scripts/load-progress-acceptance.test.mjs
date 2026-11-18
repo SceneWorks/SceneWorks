@@ -344,7 +344,8 @@ test('SenseNova cache preflight inventories only the selected backend and immuta
     await assert.rejects(cacheInventory(hub,'sensenova_q4',models([mac,mac]),'darwin'), /one published row/);
     await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,revision:'main'}]),'darwin'), /immutable/);
     await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,platforms:['macos','windows']}]),'darwin'), /backend-specific/);
-    const upstream = {repo:'sensenova/SenseNova-Loop-9B',revision:'3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6',variant:'bf16',files:['config.json','generation_config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja','preprocessor_config.json','processor_config.json','video_preprocessor_config.json','model.safetensors.index.json',...Array.from({length:11},(_,i)=>'model-'+String(i+1).padStart(5,'0')+'-of-00011.safetensors')]};
+    await assert.rejects(cacheInventory(hub,'sensenova_q4',models([{...mac,revision:'0'.repeat(40)}]),'darwin'), /not published/);
+    const upstream = {repo:'sensenova/SenseNova-Loop-9B',revision:'3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6',variant:'bf16',files:['config.json','generation_config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja','preprocessor_config.json','processor_config.json','video_preprocessor_config.json','model.safetensors.index.json',...Array.from({length:11},(_,i)=>'model-'+String(i+1).padStart(5,'0')+'.safetensors')]};
     await assert.rejects(cacheInventory(hub,'sensenova_bf16',models([{...upstream,revision:'b'.repeat(40)}]),'win32'));
     await assert.rejects(cacheInventory(hub,'sensenova_bf16',models([{...upstream,files:upstream.files.slice(0,-1)}]),'win32'), /official shard/);
     const bf16 = await cacheInventory(hub,'sensenova_bf16',models([mac,cuda,upstream]),'win32');

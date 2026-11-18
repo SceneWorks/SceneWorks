@@ -47,9 +47,15 @@ fn save(root: &Path, name: &str, value: &Value) -> Result<()> {
     .map_err(|e| e.to_string())
 }
 
+struct CancelOnPost {
+    route: String,
+    message: Option<&'static str>,
+    cancel_url: String,
+}
+
 #[derive(Clone, Default)]
 struct HttpLedger {
-    cancel_after_item: Arc<Mutex<Option<(String, String)>>>,
+    cancel_after_post: Arc<Mutex<Option<CancelOnPost>>>,
     sequence: Arc<AtomicU64>,
     rows: Arc<Mutex<Vec<Value>>>,
 }
@@ -89,14 +95,19 @@ async fn record_http(
         response.remove("executionClaimCapability");
     }
     ledger.rows.lock().expect("HTTP ledger").push(json!({"sequence":sequence,"receivedUnixMs":received,"completedUnixMs":now(),"method":method,"route":route,"request":request_value,"requestBodySha256":sha(&bytes),"response":response_value,"responseBodySha256":sha(&output),"httpStatus":parts.status.as_u16()}));
-    // The append already committed. Issue the user cancel before the worker can begin image two.
+    // Issue the user cancel after the selected worker POST commits and before its handler continues.
     let cancel_url = {
-        let mut pending = ledger.cancel_after_item.lock().unwrap();
+        let mut pending = ledger.cancel_after_post.lock().unwrap();
         if method == "POST"
             && parts.status.is_success()
-            && pending.as_ref().is_some_and(|(append, _)| append == &route)
+            && pending.as_ref().is_some_and(|trigger| {
+                trigger.route == route
+                    && trigger
+                        .message
+                        .is_none_or(|message| request_value["message"] == message)
+            })
         {
-            pending.take().map(|(_, url)| url)
+            pending.take().map(|trigger| trigger.cancel_url)
         } else {
             None
         }
@@ -833,7 +844,17 @@ async fn run(case: &str) {
     let state = temp.keep();
     settings.host_os = std::env::consts::OS.into();
     super::moss_training_acceptance::seed_acceptance_manifests(&settings).unwrap();
-    let app = create_app(settings.clone()).unwrap();
+    let app = if case.starts_with("sensenova_") {
+        let tier = case.split('_').nth(1).unwrap();
+        let ledger = sensenova_product::publisher_metadata(tier, &root)
+            .await
+            .unwrap();
+        let (app, state) = create_app_with_state(settings.clone()).unwrap();
+        sensenova_product::configure_metadata(&state, ledger);
+        app
+    } else {
+        create_app(settings.clone()).unwrap()
+    };
     let tap = ledger.clone();
     let app = app.layer(axum::middleware::from_fn(move |request, next| {
         record_http(tap.clone(), request, next)

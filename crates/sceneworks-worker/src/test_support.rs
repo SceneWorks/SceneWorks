@@ -149,7 +149,7 @@ pub async fn run_bound_acceptance_job(
     settings: &Settings,
     expected_job: &str,
     verify: impl FnOnce(
-        &sceneworks_core::model_artifacts::portable_binding::PortableRouteBinding,
+        Option<&sceneworks_core::model_artifacts::portable_binding::PortableRouteBinding>,
     ) -> Result<(), String>,
 ) -> WorkerResult<()> {
     require_acceptance_loopback(settings)?;
@@ -165,10 +165,7 @@ pub async fn run_bound_acceptance_job(
                 "worker did not claim the submitted acceptance job".into(),
             )
         })?;
-    let binding = claimed.portable_model_binding.as_ref().ok_or_else(|| {
-        crate::WorkerError::InvalidPayload("claim did not include the selected model route".into())
-    })?;
-    verify(binding).map_err(crate::WorkerError::InvalidPayload)?;
+    verify(claimed.portable_model_binding.as_ref()).map_err(crate::WorkerError::InvalidPayload)?;
     Box::pin(crate::run_job_with_shutdown(
         &api,
         settings,
