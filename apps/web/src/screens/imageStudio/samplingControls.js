@@ -102,3 +102,139 @@ function f32Decimal(value) {
   }
   return value;
 }
+
+// SW-7181: Perturbed-Attention Guidance (PAG), capability-driven from `model.pag` projected by
+// `ModelSpec::project()`. Scale 0 or blank omits `advanced.pag` (strict no-op).
+export const supportsPag = (model) =>
+  Boolean(model?.pag && typeof model.pag === "object" && Number.isInteger(model.pag.numBlocks) && model.pag.numBlocks > 0);
+
+export const pagDefaults = () => ({ scale: "", layers: "", start: "", stop: "", adaptiveScale: "" });
+
+const isBlankText = (value) =>
+  value === "" || value == null || (typeof value === "string" && value.trim() === "");
+
+function parsePagLayers(rawLayers, numBlocks) {
+  if (isBlankText(rawLayers)) return { layers: null, error: null };
+  let items;
+  if (Array.isArray(rawLayers)) {
+    if (rawLayers.length === 0) return { layers: null, error: null };
+    items = rawLayers.map((item) => String(item));
+  } else if (typeof rawLayers === "string") {
+    items = rawLayers.trim().split(/[\s,]+/).filter(Boolean);
+    if (items.length === 0) {
+      return { layers: null, error: `PAG blocks must be integers between 0 and ${numBlocks - 1}.` };
+    }
+  } else {
+    return { layers: null, error: `PAG blocks must be integers between 0 and ${numBlocks - 1}.` };
+  }
+  const seen = new Set();
+  const parsed = [];
+  for (const token of items) {
+    if (!/^\d+$/.test(token)) {
+      return { layers: null, error: `PAG blocks must be integers between 0 and ${numBlocks - 1}.` };
+    }
+    const index = Number(token);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= numBlocks) {
+      return { layers: null, error: `PAG block index ${token} must be between 0 and ${numBlocks - 1}.` };
+    }
+    if (seen.has(index)) {
+      return { layers: null, error: `PAG block index ${index} is duplicated.` };
+    }
+    seen.add(index);
+    parsed.push(index);
+  }
+  return { layers: parsed, error: null };
+}
+
+function parsePagUnit(raw, label) {
+  if (isBlankText(raw)) return { value: null, error: null };
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isFinite(Math.fround(value)) || !withinF32Bounds(value, 0, 1)) {
+    return { value: null, error: `${label} must be between 0 and 1.` };
+  }
+  return { value, error: null };
+}
+
+export function resolvePag({ model, options }) {
+  if (!supportsPag(model)) return { block: null, error: null };
+  const rawScale = options?.scale;
+  if (isBlankText(rawScale)) return { block: null, error: null };
+  const scale = Number(rawScale);
+  const maxScale = Number(model.pag.maxScale);
+  if (!Number.isFinite(scale) || !Number.isFinite(Math.fround(scale)) || !withinF32Bounds(scale, 0, maxScale)) {
+    return { block: null, error: `PAG scale must be between 0 and ${model.pag.maxScale}.` };
+  }
+  if (scale === 0) return { block: null, error: null };
+
+  const { layers, error: layersError } = parsePagLayers(options?.layers, model.pag.numBlocks);
+  if (layersError) return { block: null, error: layersError };
+
+  const { value: start, error: startError } = parsePagUnit(options?.start, "PAG window start");
+  if (startError) return { block: null, error: startError };
+
+  const { value: stop, error: stopError } = parsePagUnit(options?.stop, "PAG window stop");
+  if (stopError) return { block: null, error: stopError };
+
+  const effStart = start ?? Number(model.pag.defaultStart);
+  const effStop = stop ?? Number(model.pag.defaultStop);
+  if (Math.fround(effStart) > Math.fround(effStop)) {
+    return { block: null, error: `PAG window start (${effStart}) must be ≤ stop (${effStop}).` };
+  }
+
+  let adaptiveScale = null;
+  const rawAdaptive = options?.adaptiveScale;
+  if (!isBlankText(rawAdaptive)) {
+    const value = Number(rawAdaptive);
+    if (!Number.isFinite(value) || !Number.isFinite(Math.fround(value)) || Math.fround(value) < 0) {
+      return { block: null, error: "PAG adaptive scale must be 0 or greater." };
+    }
+    if (value > 0) adaptiveScale = value;
+  }
+
+  return {
+    block: {
+      scale,
+      ...(layers ? { layers } : {}),
+      ...(start != null ? { start } : {}),
+      ...(stop != null ? { stop } : {}),
+      ...(adaptiveScale != null ? { adaptiveScale } : {}),
+    },
+    error: null,
+  };
+}
+
+// Rehydrate UI string state from a recorded `rawAdapterSettings.pag` or preset `defaults.pag`,
+// ignoring any read-only execution receipt (`pagExecutionReport`).
+export function pagFromRecipe(recorded) {
+  const defaults = pagDefaults();
+  if (!recorded || typeof recorded !== "object") return defaults;
+  const rawScale = recorded.scale;
+  if (isBlankText(rawScale)) return defaults;
+  const numericScale = Number(rawScale);
+  if (Number.isFinite(numericScale) && numericScale === 0) return defaults;
+
+  const formatOptionalNumber = (value) => {
+    if (isBlankText(value)) return "";
+    if (typeof value === "string") return value;
+    return Number.isFinite(value) ? String(f32Decimal(value)) : String(value);
+  };
+
+  const rawAdaptive = recorded.adaptiveScale ?? recorded.adaptive_scale;
+  const numericAdaptive = Number(rawAdaptive);
+  const adaptiveScale =
+    isBlankText(rawAdaptive) || (Number.isFinite(numericAdaptive) && numericAdaptive === 0)
+      ? ""
+      : formatOptionalNumber(rawAdaptive);
+
+  return {
+    scale: formatOptionalNumber(rawScale),
+    layers: Array.isArray(recorded.layers)
+      ? recorded.layers.join(", ")
+      : typeof recorded.layers === "string"
+        ? recorded.layers
+        : "",
+    start: formatOptionalNumber(recorded.start),
+    stop: formatOptionalNumber(recorded.stop),
+    adaptiveScale,
+  };
+}

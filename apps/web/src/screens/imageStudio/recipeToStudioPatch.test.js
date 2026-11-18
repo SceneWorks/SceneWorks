@@ -53,4 +53,51 @@ describe("recipeToStudioPatch", () => {
     expect(values.appearance.looks).toEqual(["look-moody-dark"]);
   });
 
+  it("restores PAG settings while scrubbing read-only execution reports", () => {
+    const withPag = recipeToStudioPatch(
+      launch({
+        pag: { scale: 1.5, layers: [2, 5], start: 0.1, stop: 0.85, adaptiveScale: 0.25 },
+        pagExecutionReport: {
+          scale: 1.5,
+          adaptiveScale: 0.25,
+          layers: [2, 5],
+          start: 0.1,
+          stop: 0.85,
+          activeSteps: 18,
+          totalSteps: 28,
+        },
+      }),
+      context,
+    );
+    expect(withPag.values.pag).toEqual({
+      scale: "1.5",
+      layers: "2, 5",
+      start: "0.1",
+      stop: "0.85",
+      adaptiveScale: "0.25",
+    });
+
+    const withoutPag = recipeToStudioPatch(
+      launch({
+        pagExecutionReport: {
+          scale: 1.5,
+          adaptiveScale: 0,
+          layers: [2, 5],
+          start: 0.1,
+          stop: 0.85,
+          activeSteps: 18,
+          totalSteps: 28,
+        },
+      }),
+      context,
+    );
+    expect(withoutPag.values.pag).toEqual({
+      scale: "",
+      layers: "",
+      start: "",
+      stop: "",
+      adaptiveScale: "",
+    });
+  });
+
 });
