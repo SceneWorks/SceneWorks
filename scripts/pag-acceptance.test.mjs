@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
-import { decodePng } from "./tier2-ab.mjs";
+import { decodePng, readCatalog, readPatternEvidence } from "./tier2-ab.mjs";
 import {
   ACCEPTANCE_THRESHOLDS,
   FAMILIES,
@@ -14,6 +14,7 @@ import {
   pagDefaultHubs,
   pagExitCode,
   readWorkflowShareFromPng,
+  resolveMissingSnapshotFiles,
   resolvePagConfig,
   summarizePagReport,
   syntheticReferencePng,
@@ -50,9 +51,20 @@ test("dispatchPagAcceptanceOptions validates inputs and defaults preflight_only=
     routes: "",
     hubs: "",
     preflight_only: true,
+    stage_missing: false,
     inference_sha: "",
   });
+  assert.throws(() => dispatchPagAcceptanceOptions({
+    ...inputs,
+    moss_options_json: JSON.stringify({ suite: "pag-acceptance", preflight_only: true, stage_missing: true }),
+  }, SRC_SHA), /stage_missing cannot be combined with preflight_only=true/);
+  const staged = dispatchPagAcceptanceOptions({
+    ...inputs,
+    moss_options_json: JSON.stringify({ suite: "pag-acceptance", preflight_only: false, stage_missing: true }),
+  }, SRC_SHA);
+  assert.equal(staged.stage_missing, true);
   assert.ok(pagDefaultHubs("mlx", "/Users/runner").includes("/Users/runner/sceneworks-rw-weights/hub"));
+  assert.ok(pagDefaultHubs("cuda", "C:\\Users\\Michael").includes("D:\\.cache\\huggingface\\hub"));
   const cfg = resolvePagConfig(
     {
       PAG_ACCEPTANCE_BACKEND: "mlx",
@@ -127,4 +139,17 @@ test("evaluateT2iAbVerdict and pagExitCode enforce AT1, AT2, AT6 and 6-family co
   assert.equal(summarizePagReport(allSix).missingFamilies.length, 0);
   assert.equal(pagExitCode({ mode: "run", routes: allSix }), 0);
   assert.equal(pagExitCode({ mode: "run", routes: allSix.slice(0, 5) }), 1);
+});
+
+test("resolveMissingSnapshotFiles expands exact checked-in manifest and conditional files without dotfiles", async () => {
+  const catalog = await readCatalog(process.cwd());
+  const evidence = await readPatternEvidence(process.cwd());
+  const subset = PAG_ROUTES.filter((r) => ["moss-edit-kv", "flux1-dev-t2i", "qwen-2-1-turbo-t2i"].includes(r.id));
+  const plannedRoutes = subset.map((r) => ({ id: r.id, status: "skipped" }));
+  const files = resolveMissingSnapshotFiles({ routes: subset, plannedRoutes, catalog, evidence, platform: "win32" });
+  assert.ok(files.some((f) => f.repo === "OpenMOSS-Team/MOSS-Image-SFT"));
+  assert.ok(files.some((f) => f.repo === "chinoll/Moss-Image-Edit" && f.relpath === "adapter_model.safetensors"));
+  assert.ok(files.some((f) => f.repo === "SceneWorks/flux1-dev-mlx" && f.relpath.startsWith("q4/")));
+  assert.ok(files.some((f) => f.repo === "SceneWorks/qwen-image-2-1-turbo-mlx" && f.relpath.startsWith("q4/")));
+  assert.ok(files.every((f) => !f.relpath.split("/").some((seg) => seg.startsWith("."))));
 });
