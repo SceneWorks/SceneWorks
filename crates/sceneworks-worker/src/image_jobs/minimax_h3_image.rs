@@ -183,19 +183,17 @@ fn explicit_tier_in(
     variant: Option<&str>,
     advanced: &JsonObject,
 ) -> WorkerResult<Option<&'static str>> {
+    use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant_typed;
     use sceneworks_core::payload_util::QuantSelection;
-    let named = [
+    let named = requested_runtime_variant_typed(
         variant,
         sceneworks_core::image_request::authored_quant_tier(advanced),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .find(|name| !name.is_empty());
+        None,
+    );
     if let Some(name) = named {
         return TIERS
             .into_iter()
-            .find(|tier| tier.eq_ignore_ascii_case(name))
+            .find(|tier| *tier == name)
             .map(Some)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
@@ -213,11 +211,10 @@ fn explicit_tier_in(
             )))
         }
     };
-    Ok(Some(match bits {
-        bits if bits <= 0 || bits >= 9 => "bf16",
-        bits if bits <= 4 => "q4",
-        _ => "q8",
-    }))
+    let tier = requested_runtime_variant_typed(None, None, Some(bits));
+    Ok(TIERS
+        .into_iter()
+        .find(|name| Some(*name) == tier.as_deref()))
 }
 
 /// The tier directory this request renders from (see the module docs): an explicit tier is honoured

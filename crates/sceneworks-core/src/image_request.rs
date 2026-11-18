@@ -299,7 +299,43 @@ pub struct ImageAdvanced {
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
 }
 
+/// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
+fn standard_tier_bits(tier: &str) -> Option<i64> {
+    match tier {
+        "q4" => Some(4),
+        "q8" => Some(8),
+        "bf16" => Some(0),
+        _ => None,
+    }
+}
+
 impl ImageAdvanced {
+    /// Bind a job's top-level `variant` — the tier selection admission ranks first
+    /// (`requested_runtime_variant`) — over the advanced carriers: it becomes the named
+    /// `quantTier`, and the bit count becomes the variant's (q4 → 4, q8 → 8, bf16 → 0), or absent
+    /// for a tier with no bit count (nvfp4, fp8r, …), since admission reads neither carrier once a
+    /// variant is named. A blank or absent variant changes nothing.
+    pub fn bind_variant(&mut self, variant: Option<&str>) {
+        let Some(tier) = variant
+            .map(str::trim)
+            .filter(|tier| !tier.is_empty())
+            .map(str::to_ascii_lowercase)
+        else {
+            return;
+        };
+        let origin = Origin::Authored {
+            spelling: "variant",
+        };
+        self.mlx_quantize = standard_tier_bits(&tier).map(|bits| Bound {
+            value: Some(bits),
+            origin,
+        });
+        self.quant_tier = Some(Bound {
+            value: tier,
+            origin,
+        });
+    }
+
     /// Serialize the resolved typed fields at the provider and workflow wire boundary.
     /// This never reads the authored option bag and does not parse a serialized value back.
     pub fn provider_wire(&self) -> JsonObject {
@@ -688,7 +724,65 @@ impl ImageRequest {
         request.advanced = object_or_empty(authored, "advanced");
         // Admission reads the authored job payload's `variant`, so the loader must see that one.
         request.variant = optional_id(authored, "variant");
+        request.bind_admitted_tier();
         Ok(request)
+    }
+
+    /// Bind the tier admission selected (`requested_runtime_variant`: the top-level `variant`,
+    /// then `advanced.quantTier`, then the `advanced.mlxQuantize` bit count) into the resolved
+    /// options, so every loader that reads `resolved_quant_bits` or the named `quantTier` loads
+    /// the tier the job was admitted and priced with.
+    ///
+    /// * A `variant` replaces both carriers ([`ImageAdvanced::bind_variant`]).
+    /// * Without one, a q4/q8/bf16 `quantTier`, or a bit count admission reads as another tier
+    ///   than the loaders do (`>= 9` is bf16 to admission, q8 to `tier_for_bits`), sets the bit
+    ///   count to that tier's. FLUX 3 Klein is left alone here: its resolver reads both carriers
+    ///   itself and refuses a conflicting pair.
+    fn bind_admitted_tier(&mut self) {
+        use crate::model_artifacts::artifact_selection::requested_runtime_variant_typed;
+        let options = self
+            .resolved_advanced
+            .as_mut()
+            .expect("image options are bound before the tier");
+        if self.variant.is_some() {
+            options.bind_variant(self.variant.as_deref());
+            return;
+        }
+        if FLUX3_TIERED_MODEL_IDS.contains(&self.model.as_str()) {
+            return;
+        }
+        let named = options
+            .quant_tier
+            .as_ref()
+            .map(|bound| bound.value.as_str())
+            .filter(|tier| !tier.trim().is_empty());
+        let bits = options.mlx_quantize.as_ref().and_then(|bound| bound.value);
+        let Some(admitted_bits) = requested_runtime_variant_typed(None, named, bits)
+            .as_deref()
+            .and_then(standard_tier_bits)
+        else {
+            return;
+        };
+        // The tier a loader reads from the bit count (the worker's `tier_for_bits`).
+        let loaded = bits.map(|bits| match bits {
+            bits if bits <= 0 => 0,
+            bits if bits <= 4 => 4,
+            _ => 8,
+        });
+        if loaded == Some(admitted_bits) {
+            return;
+        }
+        let origin = match (named, &options.mlx_quantize) {
+            (Some(_), _) => Origin::Authored {
+                spelling: "quantTier",
+            },
+            (None, Some(bound)) => bound.origin,
+            (None, None) => return,
+        };
+        options.mlx_quantize = Some(Bound {
+            value: Some(admitted_bits),
+            origin,
+        });
     }
 
     /// Legacy authoring/persistence reader. Execution uses [`Self::resolved_quant_bits`].
@@ -1056,14 +1150,29 @@ pub fn image_quant_tier_refusal_resolved(model: &str, options: &ImageAdvanced) -
 /// borrow distilled conversion hashes or silently fall through to the default dense row.
 /// The API applies this after preset/model canonicalization; workers independently verify the
 /// selected package and its conversion pins before loading it.
+///
+/// `variant` is the job's top-level variant: like admission, it outranks the advanced carriers
+/// ([`ImageAdvanced::bind_variant`]).
 pub fn flux3_catalog_tier_refusal(
     model: &str,
+    variant: Option<&str>,
     advanced: &JsonObject,
     manifest: &Value,
 ) -> Option<String> {
     if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
         return None;
     }
+    let with_variant;
+    let advanced = match variant.map(str::trim).filter(|tier| !tier.is_empty()) {
+        Some(tier) => {
+            let mut selected = advanced.clone();
+            selected.remove("mlxQuantize");
+            selected.insert("quantTier".to_owned(), Value::String(tier.to_owned()));
+            with_variant = selected;
+            &with_variant
+        }
+        None => advanced,
+    };
     let tier = match flux3_requested_tier(advanced) {
         Ok(tier) => tier,
         Err(reason) => return Some(format!("{model}: {reason}")),
@@ -1138,6 +1247,95 @@ mod tests {
             ImageRequest::from_resolved(&blank, &blank).unwrap().variant,
             None
         );
+    }
+
+    /// SW-7183: the execution request carries the tier admission selected
+    /// (`requested_runtime_variant`), so a loader reading `resolved_quant_bits` or the named
+    /// `quantTier` loads what admission priced: `variant` over `quantTier` over `mlxQuantize`.
+    #[test]
+    fn the_resolved_tier_is_the_one_admission_selects() {
+        use crate::model_artifacts::artifact_selection::requested_runtime_variant;
+        let bits_tier = |bits: Option<i64>| match bits {
+            Some(bits) if bits <= 0 => Some("bf16"),
+            Some(bits) if bits <= 4 => Some("q4"),
+            Some(_) => Some("q8"),
+            None => None,
+        };
+        // (payload, resolved bits, resolved named tier)
+        let cases = [
+            (
+                json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+                Some(4),
+                Some("q4"),
+            ),
+            (
+                json!({"variant": " Q8 ", "advanced": {"quantTier": "q4"}}),
+                Some(8),
+                Some("q8"),
+            ),
+            (
+                json!({"variant": "bf16", "advanced": {"mlxQuantize": null}}),
+                Some(0),
+                Some("bf16"),
+            ),
+            (
+                json!({"advanced": {"quantTier": "q4", "mlxQuantize": 8}}),
+                Some(4),
+                Some("q4"),
+            ),
+            (
+                json!({"advanced": {"quantTier": "q8"}}),
+                Some(8),
+                Some("q8"),
+            ),
+            (json!({"advanced": {"mlxQuantize": 16}}), Some(0), None),
+            (json!({"advanced": {"mlxQuantize": 6}}), Some(6), None),
+            (
+                json!({"variant": "nvfp4", "advanced": {"mlxQuantize": null}}),
+                None,
+                Some("nvfp4"),
+            ),
+            (
+                json!({"advanced": {"quantTier": "nvfp4"}}),
+                None,
+                Some("nvfp4"),
+            ),
+            (json!({}), None, None),
+        ];
+        for (fields, bits, named) in cases {
+            let mut value = json!({"projectId": "p", "model": "sdxl"});
+            for (key, field) in fields.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            let payload = payload(value);
+            let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+            assert_eq!(request.resolved_quant_bits(), bits, "{fields}");
+            assert_eq!(request.advanced_text("quantTier"), named, "{fields}");
+            let admitted = requested_runtime_variant(&payload);
+            let loaded = named.filter(|tier| *tier == "nvfp4").or(bits_tier(bits));
+            assert_eq!(loaded, admitted.as_deref(), "{fields}");
+            // The caller's authored options are kept as written.
+            assert_eq!(request.advanced, object_or_empty(&payload, "advanced"));
+        }
+
+        // FLUX 3 Klein reads the variant through its own package resolver, and still refuses an
+        // advanced.quantTier / advanced.mlxQuantize pair that names two packages.
+        let flux3 = |fields: Value| {
+            let mut value = json!({"projectId": "p", "model": "flux3_klein"});
+            for (key, field) in fields.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            let payload = payload(value);
+            ImageRequest::from_resolved(&payload, &payload)
+                .unwrap()
+                .resolved_flux3_tier()
+        };
+        assert_eq!(flux3(json!({"variant": "q4"})), Ok(Flux3Tier::Q4));
+        assert_eq!(
+            flux3(json!({"variant": "q8", "advanced": {"quantTier": "fp8r"}})),
+            Ok(Flux3Tier::Q8)
+        );
+        assert!(flux3(json!({"advanced": {"quantTier": "q4", "mlxQuantize": 8}})).is_err());
     }
 
     #[test]
@@ -1278,7 +1476,7 @@ mod tests {
             (json!({"quantTier":"q4","mlxQuantize":8}), Err(())),
             (json!({"convRot":true}), Err(())),
         ] {
-            let authored = payload(json!({"advanced": advanced}));
+            let authored = payload(json!({"model": "flux3_klein", "advanced": advanced}));
             let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
             assert_eq!(request.resolved_flux3_tier().map_err(|_| ()), expected);
             assert_eq!(
@@ -1739,13 +1937,16 @@ mod tests {
     fn flux3_catalog_requires_a_real_row_for_the_requested_package() {
         let advanced = |tier| payload(json!({"quantTier":tier}));
         let dense_only = json!({"downloads":[{"variant":"bf16","default":true}]});
-        assert!(
-            flux3_catalog_tier_refusal("flux3_klein_base", &advanced("bf16"), &dense_only)
-                .is_none()
-        );
+        assert!(flux3_catalog_tier_refusal(
+            "flux3_klein_base",
+            None,
+            &advanced("bf16"),
+            &dense_only
+        )
+        .is_none());
         for tier in ["q4", "q8"] {
             let reason =
-                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
+                flux3_catalog_tier_refusal("flux3_klein_base", None, &advanced(tier), &dense_only)
                     .unwrap();
             assert!(
                 reason.contains(tier) && reason.contains("SHA-256") && !reason.contains("403"),
@@ -1753,30 +1954,50 @@ mod tests {
             );
             assert!(reason.contains("No dense fallback"), "{reason}");
             let malformed = json!({"downloads":[{"variant":tier,"localDerivation":{}}]});
-            assert!(
-                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &malformed)
-                    .is_some()
-            );
+            assert!(flux3_catalog_tier_refusal(
+                "flux3_klein_base",
+                None,
+                &advanced(tier),
+                &malformed
+            )
+            .is_some());
             // SYNTHETIC pins test the shared path only, never production base weight evidence.
             let pinned = json!({"downloads":[{"variant":tier,"localDerivation":{
                 "fromVariant":"bf16","conversion":"fixture-only","weightsFile":"model.safetensors",
                 "weightsBytes":1,"weightsSha256":"a".repeat(64)
             }}]});
             assert!(
-                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &pinned).is_none()
-            );
-        }
-        for tier in ["fp8r", "nvfp4"] {
-            assert!(
-                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
-                    .is_some()
-            );
-            let declared = json!({"downloads":[{"variant":tier}]});
-            assert!(
-                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &declared)
+                flux3_catalog_tier_refusal("flux3_klein_base", None, &advanced(tier), &pinned)
                     .is_none()
             );
         }
+        for tier in ["fp8r", "nvfp4"] {
+            assert!(flux3_catalog_tier_refusal(
+                "flux3_klein_base",
+                None,
+                &advanced(tier),
+                &dense_only
+            )
+            .is_some());
+            let declared = json!({"downloads":[{"variant":tier}]});
+            assert!(flux3_catalog_tier_refusal(
+                "flux3_klein_base",
+                None,
+                &advanced(tier),
+                &declared
+            )
+            .is_none());
+        }
+        // SW-7183: a top-level variant outranks the advanced carriers, as in admission.
+        let dense = payload(json!({"quantTier": "bf16", "mlxQuantize": 0}));
+        assert!(
+            flux3_catalog_tier_refusal("flux3_klein_base", Some("q4"), &dense, &dense_only)
+                .is_some_and(|reason| reason.contains("q4"))
+        );
+        assert!(
+            flux3_catalog_tier_refusal("flux3_klein_base", Some(" "), &dense, &dense_only)
+                .is_none()
+        );
     }
 
     #[test]

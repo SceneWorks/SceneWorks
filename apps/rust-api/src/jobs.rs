@@ -2390,6 +2390,7 @@ pub(crate) async fn canonicalize_image_model_payload(
         .unwrap_or(&empty);
     if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
         &model_id,
+        payload.get("variant").and_then(Value::as_str),
         advanced,
         &model_manifest_entry,
     ) {

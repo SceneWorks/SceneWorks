@@ -207,6 +207,9 @@ pub struct RouteOptionFacts {
     pub yue2_decoder: RouteField<String>,
     pub conv_rot: RouteField<bool>,
     pub angle_set: RouteField<bool>,
+    /// The job's top-level `variant` (trimmed; blank is absent): the tier selection admission
+    /// ranks above `advanced.quantTier` and `advanced.mlxQuantize`.
+    pub variant: Option<String>,
     /// Presence in the authored advanced object, even when execution fields come from a
     /// resolved request whose defaults materialize omitted controls.
     authored_advanced_keys: Option<BTreeSet<String>>,
@@ -215,6 +218,9 @@ pub struct RouteOptionFacts {
 impl RouteOptionFacts {
     pub fn with_authored_presence(mut self, authored: &Self) -> Self {
         self.authored_advanced_keys = authored.authored_advanced_keys.clone();
+        if authored.variant.is_some() {
+            self.variant = authored.variant.clone();
+        }
         self
     }
 
@@ -333,6 +339,7 @@ impl RouteOptionFacts {
             angle_set: field(advanced, "angleSet", |value| {
                 Some(sceneworks_options::legacy_image_flag(value))
             }),
+            variant: crate::payload_util::optional_id(payload, "variant"),
             authored_advanced_keys,
         }
     }

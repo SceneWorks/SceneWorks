@@ -512,6 +512,8 @@ pub(super) fn probe_image_precision_options_from_facts(
         }),
         RouteField::Invalid => return Err("advanced.convRot is malformed".to_owned()),
     };
+    // Route by the tier admission selects: a top-level `variant` outranks both carriers.
+    options.bind_variant(facts.variant.as_deref());
     Ok(options)
 }
 
