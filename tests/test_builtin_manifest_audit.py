@@ -4302,8 +4302,9 @@ _PE_PROMPT_FILES = [
 
 def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     """E17: its own entry — the published NVFP4 tier (Blackwell CUDA, so Windows/Linux only), the
-    bf16 conversion pending publication (null SHA + `pendingArtifact`), the published macOS q8/q4, and a `prompt`
-    co-requisite that fetches the five prompt files from the UPSTREAM snapshot for every tier."""
+    published bf16 conversion (one backend-neutral row), the published q8/q4 (an MLX row for macOS
+    and a Candle row for Windows/Linux each), and a `prompt` co-requisite that fetches the five
+    prompt files from the UPSTREAM snapshot for every tier."""
     entry = _models_by_id()["minimax_h3_image_pe"]
     assert entry["type"] == "utility"
     assert entry["adapter"] == "prompt-refine"
@@ -4320,9 +4321,13 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     assert nvfp4["default"] is True and nvfp4.get("pendingArtifact") is None
     assert nvfp4["platforms"] == ["windows", "linux"]
     assert not any(pattern.startswith("prompt") for pattern in nvfp4["files"])
-    assert primaries["bf16"]["pendingArtifact"] is True
-    assert primaries["bf16"]["revision"] == "0" * 40
-    assert primaries["bf16"]["files"] == ["bf16/*"]
+    bf16 = primaries["bf16"]
+    assert bf16.get("pendingArtifact") is None
+    assert bf16["repo"] == "SceneWorks/minimax-h3-image-pe"
+    assert bf16["revision"] == "7c0e818cc31e72839227237cc8c1cf18c4de5dbb"
+    assert bf16["files"] == ["bf16/*"]
+    # Both backends load the one dense snapshot, so the row is not narrowed to a platform.
+    assert "platforms" not in bf16
     for tier in ("q8", "q4"):
         rows = [
             download

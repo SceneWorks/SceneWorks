@@ -218,3 +218,126 @@ describe("ModelLibraryDialog", () => {
     expect(onRetry).not.toHaveBeenCalled();
   });
 });
+
+// The reformatted-drive recovery: the configured library is present but is not the recorded one,
+// and adopting a library that lacks recorded models is confirmed against an explicit list.
+describe("ModelLibraryDialog — library replacement", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  async function render(props) {
+    await act(async () => {
+      root.render(
+        <ModelLibraryDialog
+          autoProbeMs={0}
+          canRelocate
+          onCancel={() => {}}
+          onRelocate={() => {}}
+          onRetry={() => {}}
+          {...props}
+        />,
+      );
+    });
+    return document.body.querySelector(".model-library-modal");
+  }
+
+  function named(dialog) {
+    return Object.fromEntries(
+      [...dialog.querySelectorAll("button")].map((button) => [button.textContent, button]),
+    );
+  }
+
+  const confirming = {
+    status: "confirmingReplacement",
+    context: { ...CONTEXT, libraryPresent: true },
+    hint: "",
+    error: "",
+    replacement: {
+      path: "/Volumes/Models/hf/hub",
+      libraryRoot: "/Volumes/Models/hf/hub",
+      demotedRepositories: ["owner/two", "owner/three"],
+      retainedRepositories: ["owner/one"],
+      restartRequired: false,
+    },
+  };
+
+  it("offers the library at the configured location when it is present but not recorded", async () => {
+    const onUseCurrentLibrary = vi.fn();
+    const dialog = await render({
+      state: blocked({ context: { ...CONTEXT, libraryPresent: true } }),
+      onUseCurrentLibrary,
+    });
+    const buttons = named(dialog);
+    expect(buttons["Use the library at this location"].className).toContain("primary-action");
+    expect(buttons["Choose a different library location"].className).not.toContain(
+      "primary-action",
+    );
+    expect(dialog.textContent).toContain("reformatted or replaced");
+    await act(async () => buttons["Use the library at this location"].click());
+    expect(onUseCurrentLibrary).toHaveBeenCalledWith("/Volumes/Models/hf/hub");
+  });
+
+  it("never offers it for a disconnected library, or where relocation is not this app's to do", async () => {
+    let dialog = await render({ state: blocked(), onUseCurrentLibrary: vi.fn() });
+    expect(named(dialog)["Use the library at this location"]).toBeUndefined();
+    dialog = await render({
+      state: blocked({ context: { ...CONTEXT, libraryPresent: true } }),
+      onUseCurrentLibrary: vi.fn(),
+      canRelocate: false,
+    });
+    expect(named(dialog)["Use the library at this location"]).toBeUndefined();
+  });
+
+  it("lists every model that will need re-downloading before the user agrees", async () => {
+    const onConfirmReplacement = vi.fn();
+    const onCancelReplacement = vi.fn();
+    const onCancel = vi.fn();
+    const dialog = await render({
+      state: confirming,
+      onConfirmReplacement,
+      onCancelReplacement,
+      onCancel,
+    });
+    expect(dialog.textContent).toContain("re-download 2 models");
+    expect(dialog.textContent).toContain("keeps the 1 model it does contain");
+    expect(dialog.textContent).toContain("Nothing is deleted");
+    const items = [...dialog.querySelectorAll(".model-library-demoted li")].map(
+      (item) => item.textContent,
+    );
+    expect(items).toEqual(["owner/two", "owner/three"]);
+    expect(dialog.textContent).not.toContain("after a restart");
+    expect(Object.keys(named(dialog))).toEqual(["Back", "Use this library"]);
+
+    await act(async () => named(dialog)["Use this library"].click());
+    expect(onConfirmReplacement).toHaveBeenCalledTimes(1);
+    await act(async () => named(dialog).Back.click());
+    expect(onCancelReplacement).toHaveBeenCalledTimes(1);
+    // Escape backs out of the confirmation; it does not abandon the blocked action outright.
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(onCancelReplacement).toHaveBeenCalledTimes(2);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("says so when the replacement is a different location that applies after a restart", async () => {
+    const dialog = await render({
+      state: { ...confirming, replacement: { ...confirming.replacement, restartRequired: true } },
+      onConfirmReplacement: vi.fn(),
+      onCancelReplacement: vi.fn(),
+    });
+    expect(dialog.textContent).toContain("after a restart");
+  });
+});

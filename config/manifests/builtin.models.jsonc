@@ -15361,7 +15361,9 @@
       // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7099 MLX
       // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published and pinned; their sizes are the hosted
       // totals. Each tier has two rows under one variant, narrowed to the host OS before the worker sees the entry:
-      // the MLX layout (`q8/`, macOS) and the Candle layout (`candle-q8/`, Windows/Linux). bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
+      // the MLX layout (`q8/`, macOS) and the Candle layout (`candle-q8/`, Windows/Linux). bf16 is the dense
+      // `convert_snapshot_to_bf16` snapshot both backends load, published once at `bf16/` (one row, no platform
+      // narrowing) by inference's `minimax-h3-image-publish-candle-bf16` profile.
       "id": "minimax_h3_image_pe",
       "autoDownload": false,
       "macOnly": false,
@@ -15396,13 +15398,13 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "0000000000000000000000000000000000000000",
-          "pendingArtifact": true,
+          "revision": "7c0e818cc31e72839227237cc8c1cf18c4de5dbb",
           "variant": "bf16",
           "files": ["bf16/*"],
-          // DERIVED (unpublished): 27,356,728,560 x 2 + 20,284,856.
-          "estimatedSizeBytes": 54733741976,
-          "footprint": { "diskSizeBytes": 54733741976 }
+          // One backend-neutral row: MLX and Candle both load this dense snapshot.
+          // Hub tree at the pinned revision: bf16/ 54,733,722,806 B (11 files, four weight shards).
+          "estimatedSizeBytes": 54733722806,
+          "footprint": { "diskSizeBytes": 54733722806 }
         },
         {
           "provider": "huggingface",
@@ -15496,7 +15498,7 @@
       "ui": {
         "label": "MiniMax-H3-Image Prompt Expander",
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe, and the bf16 tier is not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16 tier (the NVFP4 weights dequantized to dense bf16) and the Q8 and Q4 tiers quantized from it are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "recommendedFor": ["minimax_h3_image_prompt_expand"],
         "promptGuide": {
           "title": "MiniMax-H3-Image Prompt Guide",

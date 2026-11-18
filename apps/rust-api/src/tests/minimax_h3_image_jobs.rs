@@ -1136,8 +1136,8 @@ async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_lic
     assert_eq!(refused["code"], "license_acknowledgment_required");
 
     // Accepting at the download door records the expander's own acceptance and passes the licence
-    // gate. Off-Mac the published NVFP4 tier installs; on macOS every expander tier is a converted
-    // SceneWorks tier that is not published yet (E28), so the next gate — not the licence — answers.
+    // gate, and the default tier installs: the published NVFP4 tier off-Mac, the published bf16
+    // conversion on macOS (where the Blackwell-only NVFP4 row is narrowed away).
     let (status, job) = request(
         app.clone(),
         "POST",
@@ -1145,18 +1145,8 @@ async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_lic
         json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
     )
     .await;
-    if cfg!(target_os = "macos") {
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{job}");
-        assert!(
-            job["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("not published yet")),
-            "{job}"
-        );
-    } else {
-        assert_eq!(status, StatusCode::CREATED, "{job}");
-        assert_eq!(job["type"], "model_download");
-    }
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "model_download");
     assert!(
         sceneworks_core::license_acknowledgments::current_acknowledgment(&ack_path, &expander)
             .unwrap()

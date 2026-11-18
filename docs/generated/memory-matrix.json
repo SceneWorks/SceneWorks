@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:14280eed4442d6ceb7747de932a8de1dc12dfdc4f16a15a25d7d23d3ca75a6e7",
+    "sceneWorksRevision": "source-tree:d4b8b8604a9430a6f450cbd85e897c0f90753f2de21d299203527fc99f90d5b6",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c779d38ab1e0a2bb87eeac75693ef51ff10a55c683c31143ceef175830b6f72c"
+        "sha256": "64c8c5b3ff96d909ca6554ad251b6912a452ea7f1a09657775e41a2ff3666539"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
-        "sha256": "a8d2f795073cbdab08aca466ceac7c045c38a7134821376f76d2fbb91e2024c9"
+        "sha256": "0d452f537816055a5f6a0ef20751cfab1a0eb599c4591683f772bb1f22c9b3b4"
       },
       "routePolicy": {
         "path": "config/manifests/registry/route-policy.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "9994756e14affcf8dde3017200575d07fbbc6f119c94249bb49a101e3e2dcd43"
+        "sha256": "f1800275e4aad4849087bc6d59e4561abe6f9ae50e9cfb02c59ac9b604a557f9"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
