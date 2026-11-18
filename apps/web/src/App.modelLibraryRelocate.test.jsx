@@ -373,3 +373,195 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     expect(dialogs()[0].textContent).toContain("still running");
   });
 });
+
+// The reformatted-drive dead end: the configured library is present, its identity disagrees with
+// the recording, and only some models were downloaded again. "Use the library at this location"
+// runs the strict check, shows the server's plan when models are missing, and only the user's
+// confirmation re-binds — in place, with no restart and no rewrite of the shell's location.
+describe("App model library replacement after a reformat", () => {
+  let container;
+  let root;
+  let imageJobPosts;
+  let relocateRequests;
+  let modelFetches;
+  let persistedHome;
+
+  const HUB = "/Volumes/Models/hf/hub";
+  const PLAN = {
+    libraryIdentity: { volumeId: "windows-volume:2", directoryId: 7 },
+    retainedRepositories: ["z-image/turbo"],
+    demotedRepositories: ["owner/wiped"],
+  };
+  const MISMATCHED_BODY = {
+    ...UNAVAILABLE_BODY,
+    context: { ...UNAVAILABLE_BODY.context, libraryPresent: true },
+  };
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    FakeEventSource.instances = [];
+    window.EventSource = FakeEventSource;
+    window.localStorage.clear();
+    imageJobPosts = [];
+    relocateRequests = [];
+    modelFetches = 0;
+    persistedHome = "/Volumes/Models/hf";
+    invoke.mockReset();
+    invoke.mockImplementation((command) => {
+      if (command === "get_storage_setup") {
+        return Promise.resolve({ setupCompleted: true, hfHome: persistedHome });
+      }
+      return Promise.resolve(null);
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        const method = options.method ?? "GET";
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: false }));
+        }
+        if (path.endsWith("/access")) return Promise.resolve(response({ authRequired: false }));
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        if (path.endsWith("/ui-preferences")) {
+          return Promise.resolve(
+            response({ embedWorkflowInImages: true, workflowEmbedNoticeSeen: true }),
+          );
+        }
+        if (path.endsWith("/models")) {
+          modelFetches += 1;
+          return Promise.resolve(response([MODEL]));
+        }
+        if (path.endsWith("/jobs") && method === "GET") return Promise.resolve(response([]));
+        if (path.endsWith("/model-library")) {
+          return Promise.resolve(
+            response({ schemaVersion: 1, probeStatus: "identity_mismatch", available: false }),
+          );
+        }
+        if (path.endsWith("/model-library/relocate")) {
+          const body = JSON.parse(options.body);
+          relocateRequests.push(body);
+          if (!body.acceptMissingModels) {
+            return Promise.resolve(
+              errorResponse(409, {
+                detail: "That library is missing models this installation already has.",
+                code: "model_library_relocation_rejected",
+                context: { reason: "missing_installed_models", repositories: ["owner/wiped"] },
+              }),
+            );
+          }
+          return Promise.resolve(
+            response({
+              libraryRoot: HUB,
+              hfHome: "/Volumes/Models/hf",
+              adopted: !body.dryRun,
+              restartRequired: false,
+              replacement: PLAN,
+            }),
+          );
+        }
+        if (path.endsWith("/image/jobs") && method === "POST") {
+          imageJobPosts.push(JSON.parse(options.body));
+          return Promise.resolve(errorResponse(503, MISMATCHED_BODY));
+        }
+        return Promise.resolve(response([]));
+      }),
+    );
+  });
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+  });
+
+  function dialogs() {
+    return [...document.body.querySelectorAll(".model-library-modal")];
+  }
+
+  function button(label) {
+    return dialogs()
+      .flatMap((dialog) => [...dialog.querySelectorAll("button")])
+      .find((item) => item.textContent === label);
+  }
+
+  async function submitAndUseCurrentLibrary() {
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+    const imageNav = [...document.body.querySelectorAll(".nav-label")].find(
+      (item) => item.textContent === "Image",
+    );
+    await act(async () => imageNav.closest("button").click());
+    await settle();
+    const form = document.body.querySelector(".image-studio form");
+    const promptField = field(form, "Prompt") ?? form.querySelector("textarea");
+    await changeField(promptField, "a lighthouse at dusk");
+    await act(async () => form.requestSubmit());
+    await settle();
+    expect(imageJobPosts).toHaveLength(1);
+
+    await act(async () => button("Use the library at this location").click());
+    await settle();
+  }
+
+  it("confirms the models to re-download, then re-binds in place and resumes the generation", async () => {
+    await submitAndUseCurrentLibrary();
+
+    // The strict check was refused, so the write-free plan was fetched and put in front of the
+    // user. Nothing has been re-bound yet.
+    expect(relocateRequests).toEqual([
+      { path: HUB, dryRun: true },
+      { path: HUB, dryRun: true, acceptMissingModels: true },
+    ]);
+    const confirmation = dialogs()[0];
+    expect(confirmation.textContent).toContain("re-download 1 model");
+    expect(confirmation.querySelector(".model-library-demoted").textContent).toContain(
+      "owner/wiped",
+    );
+
+    await act(async () => button("Use this library").click());
+    await settle();
+
+    // The approved plan is echoed with both the dry run and the adopt.
+    expect(relocateRequests.slice(2)).toEqual([
+      { path: HUB, dryRun: true, acceptMissingModels: true, approvedReplacement: PLAN },
+      { path: HUB, acceptMissingModels: true, approvedReplacement: PLAN },
+    ]);
+    // Same location: the shell's copy is already right and nothing needs a restart.
+    expect(invoke.mock.calls.filter(([command]) => command === "set_model_library")).toEqual([]);
+    expect(button("Restart now")).toBeUndefined();
+    expect(document.body.textContent).toContain("must be downloaded again: owner/wiped");
+    // The blocked generation was resubmitted exactly once against the re-bound library.
+    expect(imageJobPosts).toHaveLength(2);
+  });
+
+  // The server rebuilt its catalog; the client's copy must follow, or a demoted model keeps its
+  // stale "Ready" row and the re-download the notice asks for is unreachable until a reload.
+  it("refetches the model catalog after an in-place re-bind", async () => {
+    await submitAndUseCurrentLibrary();
+    const before = modelFetches;
+    await act(async () => button("Use this library").click());
+    await settle();
+    expect(modelFetches).toBeGreaterThan(before);
+  });
+
+  // "Same library as the running API" is not "same as the persisted setting": after a relocation
+  // the user deferred with "Later", the shell persists a different home. Re-binding the running
+  // library in place must put the persisted copy back, or the next launch reads the other one.
+  it("restores the persisted location when it differs from the re-bound library", async () => {
+    persistedHome = "/Volumes/Other/hf";
+    await submitAndUseCurrentLibrary();
+    await act(async () => button("Use this library").click());
+    await settle();
+    expect(invoke).toHaveBeenCalledWith("set_model_library", { path: "/Volumes/Models/hf" });
+    expect(button("Restart now")).toBeUndefined();
+  });
+});
