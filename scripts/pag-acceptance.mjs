@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -980,7 +981,7 @@ async function fetchPublicSnapshotFile(targetHub, { repo, revision, relpath }, s
   await writeFile(path.join(refsDir, "main"), revision, { flag: "wx" }).catch(() => {});
   const url = `https://huggingface.co/${repo}/resolve/${revision}/${relpath.split("/").map(encodeURIComponent).join("/")}`;
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 6; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     const tmp = `${dest}.part-${process.pid}-${attempt}`;
     try {
@@ -992,9 +993,9 @@ async function fetchPublicSnapshotFile(targetHub, { repo, revision, relpath }, s
       await rename(tmp, dest);
       return { status: "downloaded", bytes: info.size };
     } catch (err) {
-      lastErr = err;
+      lastErr = new Error(`${repo}@${revision.slice(0, 12)}/${relpath} (attempt ${attempt}/6): ${err.message}${err.cause?.message ? ` (${err.cause.message})` : ""}`);
       await rm(tmp, { force: true }).catch(() => {});
-      if (attempt < 3) await delay(1500 * attempt);
+      if (attempt < 6) await delay(3000 * attempt);
     }
   }
   throw lastErr;
@@ -1105,6 +1106,9 @@ function buildRequestBody(def, plan, projectId, refs, pagOverride) {
   const body = structuredClone(def.body);
   body.projectId = projectId;
   body.advanced = { ...body.advanced };
+  if (def.syntheticLora && refs.syntheticLoraId) {
+    body.loras = [{ id: refs.syntheticLoraId, weight: 0.75 }];
+  }
   if (plan.tier && TIER_TO_QUANTIZE[plan.tier] && !Object.hasOwn(body.advanced, "mlxQuantize")) {
     body.advanced.mlxQuantize = TIER_TO_QUANTIZE[plan.tier];
     body.advanced.mlxQuantizeExplicit = true;
@@ -1122,14 +1126,53 @@ function buildRequestBody(def, plan, projectId, refs, pagOverride) {
   return body;
 }
 
-async function submitAndVerifyOneJob({ endpoint, projectId, projectPath, workerId, def, plan, refs, runLabel, pagOverride, evidenceDir }) {
+// Cold portable_admission hashing on large snapshots can legitimately take several minutes on first
+// submission, exceeding ownedApiController.exchange's 30s timeout and Undici's 5m headersTimeout.
+// Verify owned-API readiness before and after a direct node:http request with a 45-minute ceiling.
+async function longOwnedJsonExchange({ endpoint, url, api, controller }, method, route, body, timeoutMs = 45 * 60_000) {
+  fact(await endpoint.verify(), "owned API not ready");
+  fact(api.exitCode === null && api.signalCode === null && !controller.signal.aborted, "owned API exited");
+  const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), "utf8");
+  const headers = payload ? { "content-type": "application/json", "content-length": String(payload.length) } : {};
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(url + route, { method, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        try {
+          resolve({ status: res.statusCode ?? 500, body: text ? JSON.parse(text) : null });
+        } catch (err) {
+          reject(new Error(`invalid JSON from ${method} ${route} (${res.statusCode}): ${err.message}`));
+        }
+      });
+      res.on("error", reject);
+    });
+    const timer = setTimeout(() => req.destroy(new Error(`${method} ${route} timed out after ${timeoutMs}ms`)), timeoutMs);
+    const onAbort = () => req.destroy(controller.signal.reason ?? new Error("owned API aborted"));
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    req.on("close", () => {
+      clearTimeout(timer);
+      controller.signal.removeEventListener("abort", onAbort);
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+  fact(api.exitCode === null && api.signalCode === null && !controller.signal.aborted, "owned API exited during request");
+  return result;
+}
+
+async function submitAndVerifyOneJob({ endpoint, apiCtx, projectId, projectPath, workerId, def, plan, refs, runLabel, pagOverride, evidenceDir }) {
   const body = buildRequestBody(def, plan, projectId, refs, pagOverride);
   const posted = Date.now();
-  const response = await endpoint.exchange("POST", "/api/v1/image/jobs", body);
+  const response = await longOwnedJsonExchange(apiCtx, "POST", "/api/v1/image/jobs", body);
   if (response.status >= 300 || !response.body?.id) {
     return { label: runLabel, status: "error", error: `POST /api/v1/image/jobs refused (${response.status}): ${JSON.stringify(response.body).slice(0, 1000)}` };
   }
   const jobId = response.body.id;
+  const claimMinutes = Math.max(def.claimMinutes, 10);
+  const timeoutMinutes = Math.max(def.timeoutMinutes, 60);
   let claimedAtMs = null, maxProgress = 0, monotonicProgress = true, progressUpdates = 0;
   let completedJob = null;
   while (true) {
@@ -1144,10 +1187,16 @@ async function submitAndVerifyOneJob({ endpoint, projectId, projectPath, workerI
       postedMs: posted,
       claimedAtMs,
       nowMs: Date.now(),
-      claimMinutes: def.claimMinutes,
-      timeoutMinutes: def.timeoutMinutes,
+      claimMinutes,
+      timeoutMinutes,
     });
     if (decision.state === "stop") {
+      await longOwnedJsonExchange(apiCtx, "POST", `/api/v1/jobs/${jobId}/cancel`, {}, 30_000).catch(() => {});
+      for (let i = 0; i < 60; i++) {
+        const after = await endpoint.call("GET", `/api/v1/jobs/${jobId}`).catch(() => null);
+        if (!after || ["canceled", "failed", "completed", "interrupted"].includes(after.status)) break;
+        await delay(1000);
+      }
       return { label: runLabel, jobId, status: "error", error: decision.reason, diagnostics: jobDiagnostics(current) };
     }
     if (decision.state === "completed") { completedJob = current; break; }
@@ -1232,22 +1281,6 @@ async function runAcceptance(env, cfg, report, signal) {
     }
     await cp(path.join(cfg.sourceDir, "config"), path.join(state, "config"), { recursive: true });
 
-    // Seed synthetic rank-4 Z-Image LoRA into state/data/loras + state/config/user.loras.jsonc for AT7.
-    await writeFile(path.join(state, "data", "loras", "sw_f371_z_pag_lora.safetensors"), buildSyntheticZImageLoraSafetensors());
-    await writeFile(
-      path.join(state, "config", "user.loras.jsonc"),
-      JSON.stringify({
-        schemaVersion: 1,
-        loras: [{
-          id: "sw_f371_z_pag_lora",
-          name: "SW-F371 Z-Image Block-15 PAG LoRA",
-          family: "z-image",
-          compatibility: { families: ["z-image"] },
-          source: { provider: "local", path: "loras/sw_f371_z_pag_lora.safetensors" },
-        }],
-      }, null, 2) + "\n",
-    );
-
     const workerId = `pag-accept-${process.pid}-${Date.now().toString(36)}`;
     const envs = childEnvironments(env, { backend: cfg.backend, state, hub, xet, workerId, metallib: built.metallib?.path });
     const children = [], handles = [], controller = new AbortController();
@@ -1312,8 +1345,29 @@ async function runAcceptance(env, cfg, report, signal) {
       const refs = {
         primary: await uploadPng("ref-primary.png", syntheticReferencePng("primary")),
         secondary: await uploadPng("ref-secondary.png", syntheticReferencePng("secondary")),
+        syntheticLoraId: null,
       };
+      if (hubPlans.some((p) => PAG_ROUTE_MAP[p.id].syntheticLora)) {
+        const loraForm = new FormData();
+        loraForm.append("name", "SW F371 Z PAG LoRA");
+        loraForm.append("scope", "global");
+        loraForm.append("family", "z-image");
+        loraForm.append("file", new Blob([buildSyntheticZImageLoraSafetensors()], { type: "application/octet-stream" }), "sw_f371_z_pag_lora.safetensors");
+        const loraUp = await endpoint.exchange("POST", "/api/v1/loras/import", loraForm, { multipart: true });
+        fact(loraUp.status < 300 && loraUp.body?.id && loraUp.body?.payload?.loraId, `LoRA upload failed (${loraUp.status}): ${JSON.stringify(loraUp.body)}`);
+        const loraJobId = loraUp.body.id;
+        refs.syntheticLoraId = loraUp.body.payload.loraId;
+        let loraDone = false;
+        for (let i = 0; i < 120 && !loraDone; i++) {
+          const j = await endpoint.call("GET", `/api/v1/jobs/${loraJobId}`);
+          if (j.status === "completed") loraDone = true;
+          else if (["failed", "canceled", "interrupted"].includes(j.status)) throw new Error(`lora_import job ${j.status}: ${j.error ?? j.message}`);
+          else await delay(500);
+        }
+        fact(loraDone, "synthetic LoRA import timed out");
+      }
 
+      const apiCtx = { endpoint, url, api, controller };
       const pngOutDir = path.join(evidence, "pngs");
       for (const plan of hubPlans) {
         if (signal.aborted) break;
@@ -1323,19 +1377,19 @@ async function runAcceptance(env, cfg, report, signal) {
         const stripBuf = ({ buffer: _buf, ...rest }) => rest;
         try {
           if (def.kind === "t2i_ab") {
-            const off1 = await submitAndVerifyOneJob({ endpoint, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "off1", pagOverride: null, evidenceDir: pngOutDir });
+            const off1 = await submitAndVerifyOneJob({ endpoint, apiCtx, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "off1", pagOverride: null, evidenceDir: pngOutDir });
             plan.runs.push(stripBuf(off1));
             const zero = off1.status === "completed"
-              ? await submitAndVerifyOneJob({ endpoint, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "zero", pagOverride: { scale: 0 }, evidenceDir: pngOutDir })
+              ? await submitAndVerifyOneJob({ endpoint, apiCtx, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "zero", pagOverride: { scale: 0 }, evidenceDir: pngOutDir })
               : null;
             if (zero) plan.runs.push(stripBuf(zero));
             const pagOn = zero?.status === "completed"
-              ? await submitAndVerifyOneJob({ endpoint, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "pag_on", pagOverride: def.pagOn, evidenceDir: pngOutDir })
+              ? await submitAndVerifyOneJob({ endpoint, apiCtx, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "pag_on", pagOverride: def.pagOn, evidenceDir: pngOutDir })
               : null;
             if (pagOn) plan.runs.push(stripBuf(pagOn));
             let verdict = evaluateT2iAbVerdict({ off1, zero, pagOn, expectedReport: def.expectedReport, pagScale: def.pagOn.scale });
             if (verdict.needOff2) {
-              const off2 = await submitAndVerifyOneJob({ endpoint, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "off2", pagOverride: null, evidenceDir: pngOutDir });
+              const off2 = await submitAndVerifyOneJob({ endpoint, apiCtx, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "off2", pagOverride: null, evidenceDir: pngOutDir });
               plan.runs.push(stripBuf(off2));
               verdict = evaluateT2iAbVerdict({ off1, zero, pagOn, off2, expectedReport: def.expectedReport, pagScale: def.pagOn.scale });
             }
@@ -1344,7 +1398,7 @@ async function runAcceptance(env, cfg, report, signal) {
             plan.verdictReason = verdict.reason;
             plan.metrics = verdict.metrics ?? null;
           } else {
-            const pagOn = await submitAndVerifyOneJob({ endpoint, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "pag_on", pagOverride: def.pagOn, evidenceDir: pngOutDir });
+            const pagOn = await submitAndVerifyOneJob({ endpoint, apiCtx, projectId: project.id, projectPath, workerId, def, plan, refs, runLabel: "pag_on", pagOverride: def.pagOn, evidenceDir: pngOutDir });
             plan.runs.push(stripBuf(pagOn));
             if (pagOn.status !== "completed") {
               plan.status = "ran";

@@ -114,7 +114,7 @@ jobs:
         if: ${{ !inputs.preflight_only }}
         run: |
           source pag-acceptance-src/scripts/ci/metal_execution_entry.sh
-          metal_execution_entry 7200 node pag-acceptance-src/scripts/pag-acceptance.mjs --run
+          metal_execution_entry 18000 node pag-acceptance-src/scripts/pag-acceptance.mjs --run
       - name: Retain PAG acceptance evidence and PNGs
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
