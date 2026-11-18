@@ -511,7 +511,9 @@ jobs:
     permissions:
       contents: read
     outputs:
+      suite: ${{ steps.select.outputs.suite }}
       options: ${{ steps.select.outputs.options }}
+      pag_options: ${{ steps.select.outputs.pag_options }}
     steps:
       # Full history of every branch, commits only (treeless), so the trusted-ref rule can ask
       # `git merge-base --is-ancestor` without downloading trees or blobs.
@@ -530,9 +532,19 @@ jobs:
           node --input-type=module <<'JS'
           import {appendFileSync} from 'node:fs';
           import {assertTrustedShas,dispatchOptions} from './scripts/tier2-ab.mjs';
-          const options=dispatchOptions(JSON.parse(process.env.SELECTORS),process.env.DISPATCH_SHA);
-          console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
-          appendFileSync(process.env.GITHUB_OUTPUT,'options='+JSON.stringify(options)+'\n');
+          import {dispatchPagAcceptanceOptions} from './scripts/pag-acceptance.mjs';
+          const parsed=JSON.parse(process.env.SELECTORS);
+          const rawOpts=JSON.parse(parsed.moss_options_json || '{}');
+          if (rawOpts && typeof rawOpts === 'object' && !Array.isArray(rawOpts) && rawOpts.suite === 'pag-acceptance') {
+            const pagOptions=dispatchPagAcceptanceOptions(parsed,process.env.DISPATCH_SHA);
+            console.log(JSON.stringify(assertTrustedShas({source_sha:pagOptions.source_sha},{cwd:process.cwd()})));
+            const inert={base_sha:'',head_sha:'',backend:'none',routes:'',hubs:'',inference_sha:'',preflight_only:true};
+            appendFileSync(process.env.GITHUB_OUTPUT,'suite=pag-acceptance\noptions='+JSON.stringify(inert)+'\npag_options='+JSON.stringify(pagOptions)+'\n');
+          } else {
+            const options=dispatchOptions(parsed,process.env.DISPATCH_SHA);
+            console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
+            appendFileSync(process.env.GITHUB_OUTPUT,'suite=tier2-ab\noptions='+JSON.stringify(options)+'\npag_options={}\n');
+          }
           JS
   tier2-ab:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' }}
@@ -552,6 +564,21 @@ jobs:
       hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).hubs }}
       inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).inference_sha }}
       preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).preflight_only }}
+  pag-acceptance:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' && needs.tier2-ab-selector.outputs.suite == 'pag-acceptance' }}
+    needs: [moss-selector-preflight, tier2-ab-selector]
+    permissions:
+      contents: read
+    # SW-7182 (feature SW-F371): end-to-end 6-family PAG real-weight acceptance over the production
+    # API/worker path. Evidence artifact only: no catalog walk, branch, push or PR.
+    uses: ./.github/workflows/pag-acceptance.yml
+    with:
+      source_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).source_sha }}
+      backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).backend }}
+      routes: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).routes }}
+      hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).hubs }}
+      inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).inference_sha }}
+      preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).preflight_only }}
   qwen-app-lifecycle:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     needs: moss-selector-preflight

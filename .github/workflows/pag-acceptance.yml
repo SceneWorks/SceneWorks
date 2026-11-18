@@ -1,0 +1,207 @@
+# SW-7182 (feature SW-F371): End-to-end real-weight Perturbed-Attention Guidance (PAG)
+# acceptance across all six flagship image and image-edit families over the production
+# API/worker path on MLX (nax-macos-2 via rw-mage) and Candle CUDA (cuda-windows GPU1).
+#
+# Called ONLY by memory-catalog-campaign.yml (workflow_dispatch, profile `tier2-ab`,
+# moss_options_json `{"suite":"pag-acceptance", ...}`). Has no push, pull_request,
+# schedule or merge trigger, so ordinary CI never invokes it.
+name: SW-F371 PAG real-weight acceptance
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      backend:
+        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, physical GPU1)"
+        required: true
+        type: string
+      routes:
+        required: false
+        type: string
+        default: ""
+      hubs:
+        required: false
+        type: string
+        default: ""
+      inference_sha:
+        required: false
+        type: string
+        default: ""
+      preflight_only:
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    timeout-minutes: 360
+    concurrency:
+      group: pag-acceptance-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      PAG_ACCEPTANCE_BACKEND: mlx
+      PAG_ACCEPTANCE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PAG_ACCEPTANCE_SOURCE_DIR: ${{ github.workspace }}/pag-acceptance-src
+      PAG_ACCEPTANCE_ROUTES: ${{ inputs.routes }}
+      PAG_ACCEPTANCE_HUBS: ${{ inputs.hubs }}
+      PAG_ACCEPTANCE_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      CARGO_PROFILE_RELEASE_STRIP: none
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Set attempt-owned scratch directory
+        run: echo "PAG_ACCEPTANCE_WORK=$RUNNER_TEMP/pag-accept-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - name: Check out exact source SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: pag-acceptance-src
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Preflight (inputs, checkout, pin, disk headroom, 6-family hub presence; no build or model)
+        run: node pag-acceptance-src/scripts/pag-acceptance.mjs --preflight-only
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        if: ${{ !inputs.preflight_only }}
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx for pinned mlx-rs
+        if: ${{ !inputs.preflight_only }}
+        working-directory: pag-acceptance-src
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build release API/worker once
+        if: ${{ !inputs.preflight_only }}
+        run: node pag-acceptance-src/scripts/pag-acceptance.mjs --build-only
+      - name: Run 6-family PAG acceptance under shared Metal lock
+        if: ${{ !inputs.preflight_only }}
+        run: |
+          source pag-acceptance-src/scripts/ci/metal_execution_entry.sh
+          metal_execution_entry 7200 node pag-acceptance-src/scripts/pag-acceptance.mjs --run
+      - name: Retain PAG acceptance evidence and PNGs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pag-acceptance-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PAG_ACCEPTANCE_WORK }}/evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove scratch directories
+        if: ${{ always() }}
+        run: |
+          if [ -f pag-acceptance-src/scripts/pag-acceptance.mjs ]; then
+            node pag-acceptance-src/scripts/pag-acceptance.mjs --cleanup
+          fi
+
+  cuda:
+    if: ${{ inputs.backend == 'cuda' }}
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 420
+    concurrency:
+      group: pag-acceptance-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: powershell
+    env:
+      PAG_ACCEPTANCE_BACKEND: cuda
+      PAG_ACCEPTANCE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PAG_ACCEPTANCE_SOURCE_DIR: ${{ github.workspace }}\pag-acceptance-src
+      PAG_ACCEPTANCE_ROUTES: ${{ inputs.routes }}
+      PAG_ACCEPTANCE_HUBS: ${{ inputs.hubs }}
+      PAG_ACCEPTANCE_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      CUDA_COMPUTE_CAP: "120"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      NVIDIA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
+      RUSTC_WRAPPER: ""
+      CARGO_INCREMENTAL: "0"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Set attempt-owned scratch directory
+        run: Add-Content -Path $env:GITHUB_ENV -Value "PAG_ACCEPTANCE_WORK=$env:RUNNER_TEMP\pag-accept-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+      - name: Check out exact source SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: pag-acceptance-src
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Preflight (inputs, checkout, pin, disk headroom, 6-family hub presence; no build or model)
+        run: |
+          node pag-acceptance-src/scripts/pag-acceptance.mjs --preflight-only
+          if ($LASTEXITCODE -ne 0) { throw 'pag-acceptance preflight failed' }
+      - name: Prepare the Rust toolchain
+        if: ${{ !inputs.preflight_only }}
+        uses: ./pag-acceptance-src/.github/actions/prepare-rust-runner
+        with:
+          workspace-directory: pag-acceptance-src
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        if: ${{ !inputs.preflight_only }}
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Preserve listener-owned Cargo dependency and kernel build caches
+        if: ${{ !inputs.preflight_only }}
+        working-directory: pag-acceptance-src
+        run: |
+          node scripts\select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Build release API/worker once
+        if: ${{ !inputs.preflight_only }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node pag-acceptance-src\scripts\pag-acceptance.mjs --build-only
+          if errorlevel 1 exit /b 1
+      - name: Run 6-family PAG acceptance under physical GPU1 lease
+        if: ${{ !inputs.preflight_only }}
+        working-directory: pag-acceptance-src
+        run: |
+          python -I scripts/ci/windows_cuda_execution.py --actor pag-acceptance-cuda --min-free-mib 75776 --budget-minutes 360 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/pag-acceptance.mjs --run
+          if ($LASTEXITCODE -ne 0) { throw 'pag-acceptance failed; see the evidence artifact' }
+      - name: Retain PAG acceptance evidence and PNGs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pag-acceptance-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PAG_ACCEPTANCE_WORK }}/evidence/
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-pag-acceptance-cuda/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove scratch directories
+        if: ${{ always() }}
+        run: |
+          if (Test-Path -LiteralPath 'pag-acceptance-src\scripts\pag-acceptance.mjs') {
+            node pag-acceptance-src\scripts\pag-acceptance.mjs --cleanup
+            exit $LASTEXITCODE
+          }
