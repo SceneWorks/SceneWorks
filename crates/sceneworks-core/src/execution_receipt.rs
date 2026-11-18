@@ -1377,4 +1377,67 @@ mod tests {
             "unsupported_draw_mapping"
         );
     }
+
+    #[test]
+    fn accepted_binding_digest_and_execution_identity_bind_pag() {
+        let base_payload = json!({
+            "model": "flux2_dev",
+            "prompt": "a lighthouse",
+            "seed": 41,
+            "count": 1,
+            "advanced": { "steps": 28 }
+        });
+        let pag_payload = json!({
+            "model": "flux2_dev",
+            "prompt": "a lighthouse",
+            "seed": 41,
+            "count": 1,
+            "advanced": {
+                "steps": 28,
+                "pag": { "scale": 1.5, "layers": [2, 5], "start": 0.05, "stop": 0.85 }
+            }
+        });
+        let altered_pag_payload = json!({
+            "model": "flux2_dev",
+            "prompt": "a lighthouse",
+            "seed": 41,
+            "count": 1,
+            "advanced": {
+                "steps": 28,
+                "pag": { "scale": 2.0, "layers": [2, 5], "start": 0.05, "stop": 0.85 }
+            }
+        });
+        let base_digest = json_sha256(&base_payload).unwrap();
+        let pag_digest = json_sha256(&pag_payload).unwrap();
+        let altered_digest = json_sha256(&altered_pag_payload).unwrap();
+        assert_ne!(base_digest, pag_digest);
+        assert_ne!(pag_digest, altered_digest);
+
+        let mut receipt = worker_receipt();
+        receipt.outputs.truncate(1);
+        receipt.execution["identity"]["output_units"] = json!(1);
+        receipt.execution["identity"]["randomness"]["draws"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        receipt.execution["identity"]["sampling"]["value"]["pag"] = json!({
+            "scale": 1.5,
+            "adaptive_scale": 0.0,
+            "layers": [2, 5],
+            "start": 0.05,
+            "stop": 0.85,
+            "active_steps": 18,
+            "total_steps": 28
+        });
+        let result = json!({
+            "expectedCount": 1,
+            "assetWrites": [{
+                "assetId": "a",
+                "index": 0,
+                "workerExecutionReport": receipt.execution
+            }]
+        });
+        validate_worker_receipt(&receipt, result.as_object().unwrap())
+            .expect("execution identity with PAG sampling receipt must validate");
+    }
 }

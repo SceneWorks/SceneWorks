@@ -97,6 +97,17 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     nested!("mossImage.slg", "scale", Number, Required, MOSS, WhatToMake, "MossSkipLayerGuidance.scale").limits(&["finite >=0"]),
     nested!("mossImage.slg", "start", Number, Required, MOSS, WhatToMake, "MossSkipLayerGuidance.start").limits(&["0 <= start <= stop <= 1"]),
     nested!("mossImage.slg", "stop", Number, Required, MOSS, WhatToMake, "MossSkipLayerGuidance.stop").limits(&["0 <= start <= stop <= 1"]),
+    nested!("mossImage", "pag", Object("PagConfig"), Absent, MOSS, WhatToMake, "MossImageOptions.pag").limits(&["MossImageResolved::resolve"]),
+    nested!("mossImage.pag", "scale", Number, Required, MOSS, WhatToMake, "PagConfig.scale").limits(&["0..=15"]),
+    nested!("mossImage.pag", "layers", Numbers, Absent, MOSS, WhatToMake, "PagConfig.layers").limits(&["integer layers 0..=41"]),
+    nested!("mossImage.pag", "start", Number, Absent, MOSS, WhatToMake, "PagConfig.start").limits(&["0 <= start <= stop <= 1"]),
+    nested!("mossImage.pag", "stop", Number, Absent, MOSS, WhatToMake, "PagConfig.stop").limits(&["0 <= start <= stop <= 1"]),
+    nested!("mossImage.pag", "adaptive_scale", Number, Absent, MOSS, WhatToMake, "PagConfig.adaptive_scale").limits(&["finite >= 0"]),
+    nested!("pag", "scale", Number, Required, ModelField("pag"), WhatToMake, "PagConfig.scale").limits(&["0..=pag.maxScale"]),
+    nested!("pag", "layers", Numbers, Model("pag.defaultLayers"), ModelField("pag"), WhatToMake, "PagConfig.layers").limits(&["integer block indices 0..pag.numBlocks"]),
+    nested!("pag", "start", Number, Model("pag.defaultStart"), ModelField("pag"), WhatToMake, "PagConfig.start").limits(&["0 <= start <= stop <= 1"]),
+    nested!("pag", "stop", Number, Model("pag.defaultStop"), ModelField("pag"), WhatToMake, "PagConfig.stop").limits(&["0 <= start <= stop <= 1"]),
+    nested!("pag", "adaptiveScale", Number, Literal("0"), ModelField("pag"), WhatToMake, "PagConfig.adaptive_scale").aliases(&["adaptive_scale"]).limits(&["finite >= 0"]),
     nested!("mossImageEdit", "reference_max_edge", Integer, Literal("512"), MOSS, WhatToMake, "MossImageEditInputs.reference_max_edge").limits(&["16..=4096"]),
     nested!("mossImageEdit", "use_kv_cache", Bool, Literal("true"), MOSS, MachineBudget, "MossImageEditInputs.use_kv_cache"),
     nested!("veda", "enabled", Bool, Literal("false"), H3, WhatToMake, "H3VedaSettings.enabled"),
@@ -179,6 +190,9 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .limits(&["image.captionOverflowPolicies"]),
     opt!("h3ImageSampler", Object("MiniMax-H3-Image sampler and LCM noise controls"), Absent, ModelField("image.supportsH3ImageSampler"), WhatToMake, "gen_core::h3_image::H3ImageSampler")
         .limits(&["image_sampling_controls::requested_h3_image_sampler"]),
+    opt!("pag", Object("Perturbed-Attention Guidance controls"), Absent, ModelField("pag"), WhatToMake, "gen_core::PagConfig")
+        .limits(&["pag::requested_pag"])
+        .ui("Perturbed-Attention Guidance", "pag"),
     opt!("steps", Integer, Model("defaults.steps"), VISUAL, WhatToMake, "GenerationRequest.steps")
         .limits(&["limits.hardMinSteps", "limits.hardMaxSteps", "limits.steps", "sampling::max_requested_steps"]).compat(NUMBER_INPUT),
     opt!("guidanceScale", Number, Model("defaults.guidanceScale"), Any(&[All(&[IMAGE, ModelNotFalse("image.supportsGuidance")]), All(&[VIDEO, ModelNotFalse("video.supportsGuidance")]), INTERLEAVE]), WhatToMake, "GenerationRequest.guidance / InterleaveParams.cfg_scale")
@@ -329,6 +343,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     context!("mossOrdinarySettings", Object("ordinary studio settings"), MOSS, "restore inactive ordinary controls"),
     context!("mossImageExecutionReport", Object("MossImageExecutionReport"), MOSS, "MOSS provider receipt").aliases(&["moss_image_execution_report"]),
     context!("mossImageEditExecutionReport", Object("MossImageEditExecutionReport"), MOSS, "MOSS edit receipt").aliases(&["moss_image_edit_execution_report"]),
+    context!("pagExecutionReport", Object("PagExecutionReport"), IMAGE, "PAG provider execution receipt").aliases(&["pag_execution_report"]),
     context!("mossImageSampleIndex", Integer, MOSS, "native batch output ordinal"),
     context!("characterName", Text, IMAGE, "character job snapshot"),
     context!("characterType", Text, IMAGE, "character job snapshot"),

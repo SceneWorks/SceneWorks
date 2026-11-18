@@ -462,7 +462,7 @@ pub(super) fn krea_multiphase_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         // Raw supports a negative prompt for the true-CFG phases; forwarded when the job carries one.
@@ -483,19 +483,20 @@ pub(super) fn krea_multiphase_generate_one(
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_strategy_context,
         on_progress,
     )
     .map_err(|error| crate::generation_error("Krea multi-phase generation failed", error))?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea multi-phase generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "Krea multi-phase generator returned non-image output".to_owned(),
@@ -554,6 +555,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
 
     // Reject shapes the engine will reject (edit / pose / img2img reference / PiD), loudly, before any
@@ -588,6 +590,17 @@ pub(super) async fn generate_krea_multiphase_stream(
     let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
         total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
     });
+    let phases = build_generation_phases(&specs);
+    let total_steps: u32 = specs.iter().map(|phase| phase.steps).sum();
+    let pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
+        request.width,
+        request.height,
+        1,
+        total_steps,
+        raw_model.descriptor.capabilities.pag.as_ref(),
+        sampling_controls.pag.as_ref(),
+    );
+
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let offload_policy = admit_candle_base(
         request,
@@ -595,7 +608,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         &weights_dir,
         "Krea multi-phase",
         CandleBaseEvidence::Catalog,
-        adapter_resident_bytes,
+        adapter_resident_bytes.saturating_add(pag_workspace_bytes),
         crate::mlx_fit_gate::engine_supports_sequential(engine_id),
     )
     .await?;
@@ -607,9 +620,6 @@ pub(super) async fn generate_krea_multiphase_stream(
     let guidance = resolve_guidance(request, &raw_model);
     let negative_prompt =
         (!request.negative_prompt.trim().is_empty()).then(|| request.negative_prompt.clone());
-
-    let phases = build_generation_phases(&specs);
-    let total_steps: u32 = specs.iter().map(|phase| phase.steps).sum();
 
     // Plain per-image work: `request.count` renders, each its own seed + the base prompt.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -678,42 +688,47 @@ pub(super) async fn generate_krea_multiphase_stream(
             tier,
             adapter_resident_bytes,
         );
-        let evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-            engine_id,
-            &request.model,
-            &spec,
-            candle_certified_load_spec(
+        let evaluation =
+            crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
                 engine_id,
-                settings,
+                &request.model,
                 &spec,
+                candle_certified_load_spec(
+                    engine_id,
+                    settings,
+                    &spec,
+                    &request.model_manifest_entry,
+                    tier,
+                ),
                 &request.model_manifest_entry,
                 tier,
-            ),
-            &request.model_manifest_entry,
-            tier,
-            "text_to_image",
-            (adapter_count > 0).then_some("lora"),
-            gen_core::MemoryGeometry {
-                width,
-                height,
-                batch: 1,
-                frames: 1,
-                reference_count: 0,
-            },
-            false,
-            false,
-            false,
-            true,
-            budget,
-            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-            predicted_peak_gb,
-            adapter_resident_bytes,
-            if reclaimable_gb > 0.0 {
-                gen_core::MemoryCacheState::Warm
-            } else {
-                gen_core::MemoryCacheState::Cold
-            },
-        )?;
+                "text_to_image",
+                (adapter_count > 0).then_some("lora"),
+                gen_core::MemoryGeometry {
+                    width,
+                    height,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                false,
+                true,
+                budget,
+                raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+                predicted_peak_gb,
+                adapter_resident_bytes,
+                if reclaimable_gb > 0.0 {
+                    gen_core::MemoryCacheState::Warm
+                } else {
+                    gen_core::MemoryCacheState::Cold
+                },
+                None,
+                None,
+                pag_workspace_bytes,
+                None,
+            )?;
         (
             evaluation.as_ref().and_then(|evaluation| evaluation.memory),
             evaluation.and_then(|evaluation| {
@@ -747,6 +762,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes,
     };
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -757,14 +773,15 @@ pub(super) async fn generate_krea_multiphase_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let (out_w, out_h, pixels) = krea_multiphase_generate_one(
+                    let (out_w, out_h, pixels, pag) = krea_multiphase_generate_one(
                         generator,
                         &sampling_controls,
                         &prompt,
@@ -781,6 +798,12 @@ pub(super) async fn generate_krea_multiphase_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+                    if !facts.is_empty() {
+                        let _ = facts_tx
+                            .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    }
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },
             )
@@ -805,10 +828,11 @@ pub(super) async fn generate_krea_multiphase_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -825,7 +849,7 @@ pub(super) async fn generate_krea_multiphase_stream(
                     let _request_memory_limit = memory_evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                    let (out_w, out_h, pixels) = krea_multiphase_generate_one(
+                    let (out_w, out_h, pixels, pag) = krea_multiphase_generate_one(
                         generator,
                         &sampling_controls,
                         &prompt,
@@ -842,6 +866,12 @@ pub(super) async fn generate_krea_multiphase_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+                    if !facts.is_empty() {
+                        let _ = facts_tx
+                            .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    }
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },
             )

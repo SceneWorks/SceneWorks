@@ -325,6 +325,7 @@ struct PulidRequests {
     sampler: Option<String>,
     scheduler: Option<String>,
     scheduler_shift: Option<f32>,
+    pag: Option<gen_core::PagConfig>,
     /// PiD opt-in (sc-8044): in lockstep with the `with_pid` load.
     use_pid: bool,
 }
@@ -348,6 +349,7 @@ impl PulidRequests {
             sampler: self.sampler.clone(),
             scheduler: self.scheduler.clone(),
             scheduler_shift: self.scheduler_shift,
+            pag: self.pag.clone(),
             preview: preview.clone(),
             use_pid: self.use_pid,
             cancel: cancel.clone(),
@@ -395,6 +397,7 @@ pub(super) async fn generate_candle_pulid_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let pag = super::sampling::resolve_bespoke_pag(request)?;
     let flux_base = resolve_pulid_candle_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("PuLID-FLUX base (FLUX.1-dev) not found".to_owned())
     })?;
@@ -552,8 +555,10 @@ pub(super) async fn generate_candle_pulid_stream(
                 &face_dir,
                 &settings.data_dir.join("cache").join("pulid-flux"),
             );
+    let pag_workspace_bytes =
+        crate::execution_planner::pag_workspace_bytes(width, height, 1, steps, None, pag.as_ref());
     let memory_evaluation = if pulid_memory_ladder_eligible(request, use_pid) {
-        crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+        crate::candle_memory_strategy::evaluate_shared_bespoke_image_with_pag(
             "pulid_flux",
             PULID_CANDLE_MODEL,
             &strategy_spec,
@@ -579,6 +584,7 @@ pub(super) async fn generate_candle_pulid_stream(
             gen_core::MemoryCacheState::Cold,
             pulid_contract,
             crate::candle_memory_strategy::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+            pag_workspace_bytes,
         )?
     } else {
         None
@@ -603,6 +609,7 @@ pub(super) async fn generate_candle_pulid_stream(
         sampler,
         scheduler,
         scheduler_shift,
+        pag,
         use_pid,
     };
     let planning_work = work.clone();
@@ -748,6 +755,10 @@ pub(super) async fn generate_candle_pulid_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        completed.generation.pag.as_ref(),
+                    );
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). The Image
                     // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
@@ -837,6 +848,7 @@ mod tests {
             sampler: None,
             scheduler: None,
             scheduler_shift: None,
+            pag: None,
             use_pid: false,
         };
         let reference = Image {

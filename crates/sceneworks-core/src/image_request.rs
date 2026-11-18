@@ -297,6 +297,7 @@ pub struct ImageAdvanced {
     pub moss_image: Option<Bound<gen_core::moss_image::MossImageOptions>>,
     pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
+    pub pag: Option<Bound<sceneworks_options::pag::PagWireConfig>>,
 }
 
 /// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
@@ -418,6 +419,7 @@ impl ImageAdvanced {
         put!(moss_image, "mossImage");
         put!(moss_image_edit, "mossImageEdit");
         put!(moss_image_advanced, "mossImageAdvanced");
+        put!(pag, "pag");
         wire
     }
 
@@ -492,6 +494,7 @@ impl ImageAdvanced {
             moss_image: input.structured("advanced", "mossImage")?,
             moss_image_edit: input.structured("advanced", "mossImageEdit")?,
             moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
+            pag: input.structured("advanced", "pag")?,
         })
     }
 }
@@ -783,6 +786,106 @@ impl ImageRequest {
             value: Some(admitted_bits),
             origin,
         });
+    }
+
+    /// Resolve typed `advanced.pag` from the bound execution options, validating against
+    /// `model_manifest_entry["pag"]` (or compiled `ModelSpec::pag` when the manifest entry is a
+    /// minimal test stub).
+    pub fn resolved_pag(&self) -> Result<Option<gen_core::PagConfig>, String> {
+        let Some(bound) = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .pag
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        let cfg = bound
+            .value
+            .to_policy_config()
+            .map_err(|error| format!("{}: {}", self.model, error.detail))?;
+        let capability = sceneworks_options::pag::capability_from_entry(&self.model_manifest_entry)
+            .map_err(|error| format!("{}: {}", self.model, error.detail))?
+            .or_else(|| {
+                crate::registry::builtin_model_spec(&self.model)
+                    .and_then(crate::registry::ModelSpec::pag_value)
+                    .and_then(|pag| {
+                        let mut stub = JsonObject::new();
+                        stub.insert(sceneworks_options::pag::PAG_KEY.to_owned(), pag);
+                        sceneworks_options::pag::capability_from_entry(&stub)
+                            .ok()
+                            .flatten()
+                    })
+            });
+        let Some(capability) = capability else {
+            return Err(format!(
+                "{} does not support Perturbed-Attention Guidance (advanced.pag)",
+                self.model
+            ));
+        };
+        capability
+            .resolve(Some(&cfg))
+            .map_err(|error| format!("{}: {error}", self.model))?;
+        Ok(Some(cfg))
+    }
+
+    /// Resolve typed `advanced.pag` directly against a linked provider's [`gen_core::PagCapability`].
+    pub fn resolved_pag_with_capability(
+        &self,
+        capability: Option<&gen_core::PagCapability>,
+    ) -> Result<Option<gen_core::PagConfig>, String> {
+        let Some(bound) = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .pag
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        let cfg = bound
+            .value
+            .to_policy_config()
+            .map_err(|error| format!("{}: {}", self.model, error.detail))?;
+        let Some(capability) = capability else {
+            return Err(format!(
+                "{} does not support Perturbed-Attention Guidance (advanced.pag)",
+                self.model
+            ));
+        };
+        capability
+            .resolve(Some(&cfg))
+            .map_err(|error| format!("{}: {error}", self.model))?;
+        Ok(Some(cfg))
+    }
+
+    /// Refuse active Perturbed-Attention Guidance (`scale > 0.0`) on lanes that cannot execute a
+    /// native perturbed-attention pass (external ComfyUI graph execution, SDXL tile detail, or
+    /// bespoke pose-control adapters without PAG). `None` or `scale == 0.0` is a valid no-op.
+    pub fn reject_active_pag(&self, lane_label: &str) -> Result<(), String> {
+        let Some(bound) = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .pag
+            .as_ref()
+        else {
+            return Ok(());
+        };
+        let cfg = bound
+            .value
+            .to_policy_config()
+            .map_err(|error| format!("{}: {}", self.model, error.detail))?;
+        cfg.validate()
+            .map_err(|error| format!("{}: {error}", self.model))?;
+        if cfg.scale > 0.0 {
+            return Err(format!(
+                "{}: Perturbed-Attention Guidance (advanced.pag) is not supported on the {lane_label} lane",
+                self.model
+            ));
+        }
+        Ok(())
     }
 
     /// Legacy authoring/persistence reader. Execution uses [`Self::resolved_quant_bits`].

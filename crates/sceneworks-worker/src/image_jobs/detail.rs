@@ -597,6 +597,9 @@ pub(crate) async fn run_image_detail_job(
     let mut request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     request.portable_aux = portable_aux.clone();
+    request
+        .reject_active_pag("SDXL detail enhancement")
+        .map_err(WorkerError::InvalidPayload)?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),

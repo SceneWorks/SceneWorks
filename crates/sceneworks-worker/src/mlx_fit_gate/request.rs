@@ -706,7 +706,8 @@ pub(super) fn select_request_with_budget_using_bundle(
         )?
     } else {
         0
-    };
+    }
+    .saturating_add(inputs.pag_workspace_bytes);
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity

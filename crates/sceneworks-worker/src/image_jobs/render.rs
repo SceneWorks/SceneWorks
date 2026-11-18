@@ -206,6 +206,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// with no cache reports none.
     pub(crate) prefix_kv_cache:
         Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
+    /// Where the render's `GenerationReport::pag` — the Perturbed-Attention Guidance receipt that
+    /// actually RAN (`pagExecutionReport`, SW-7180) — is collected for the image's provenance.
+    pub(crate) pag_report: Option<&'a std::cell::RefCell<Option<gen_core::PagExecutionReport>>>,
     /// Request-local completed provider report; a caller forwards it with the
     /// output instead of reading mutable generator state after another render.
     pub(crate) execution_report: Option<&'a std::cell::RefCell<Option<WorkerExecutionReport>>>,
@@ -403,6 +406,9 @@ fn render_request_on_surface(
     if let Some(sink) = surface.prefix_kv_cache {
         *sink.borrow_mut() = report.prefix_kv_cache;
     }
+    if let Some(sink) = surface.pag_report {
+        *sink.borrow_mut() = report.pag;
+    }
     let output = report
         .output
         .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
@@ -501,6 +507,7 @@ pub(super) fn build_render_request(
         cfg_interval: surface.controls.cfg_interval,
         caption_overflow: surface.controls.caption_overflow,
         h3_image_sampler: surface.controls.h3_image_sampler,
+        pag: surface.controls.pag.clone(),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
@@ -688,6 +695,7 @@ pub(super) fn compile_hires_render_plans(
 /// identity. A missing or extra image is an engine error, so an identity never attaches to the
 /// wrong output.
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn generate_planned_single_image(
     generator: &dyn Generator,
     request: &mut GenerationRequest,
@@ -696,6 +704,30 @@ pub(super) fn generate_planned_single_image(
     lane: &str,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Image, ExecutionIdentity)> {
+    let (image, execution, _) = generate_planned_single_image_with_pag(
+        generator,
+        request,
+        plan,
+        context,
+        lane,
+        on_progress,
+    )?;
+    Ok((image, execution))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn generate_planned_single_image_with_pag(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    context: Option<&gen_core::MemoryRunContext>,
+    lane: &str,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(
+    Image,
+    ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+)> {
     let completed = crate::memory_strategy::generate_with_scope_execution_report_planned(
         generator,
         request,
@@ -704,9 +736,10 @@ pub(super) fn generate_planned_single_image(
         on_progress,
     )
     .map_err(|error| generation_error(&format!("{lane} generation failed"), error))?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
-            Ok((images.remove(0), completed.execution))
+            Ok((images.remove(0), completed.execution, pag))
         }
         _ => Err(WorkerError::Engine(format!(
             "{lane} did not complete exactly one RGB image"
@@ -717,12 +750,24 @@ pub(super) fn generate_planned_single_image(
 /// Publish one output's completed execution report as its `workerExecutionReport` image fact, the
 /// receipt slot `consume_gen_events` merges into that image. `false` means the consumer is gone.
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 pub(super) fn send_execution_report(
     tx: &tokio::sync::mpsc::Sender<super::stream::GenEvent>,
     index: usize,
     execution: ExecutionIdentity,
 ) -> WorkerResult<bool> {
+    send_execution_and_pag_report(tx, index, execution, None)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn send_execution_and_pag_report(
+    tx: &tokio::sync::mpsc::Sender<super::stream::GenEvent>,
+    index: usize,
+    execution: ExecutionIdentity,
+    pag: Option<&gen_core::PagExecutionReport>,
+) -> WorkerResult<bool> {
     let mut facts = crate::JsonObject::new();
+    lane_controls::record_pag_execution_report(&mut facts, pag);
     WorkerExecutionReport::Provider(execution).insert_image_facts(&mut facts)?;
     Ok(tx
         .blocking_send(super::stream::GenEvent::ImageFacts { index, facts })
@@ -1051,6 +1096,9 @@ pub(super) fn generate_one_with_hires_on_surface(
     if let Some(sink) = surface.execution_report {
         sink.borrow_mut().take();
     }
+    if let Some(sink) = surface.pag_report {
+        sink.borrow_mut().take();
+    }
 
     let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
         memory_strategy_context.map(|context| {
@@ -1091,9 +1139,10 @@ pub(super) fn generate_one_with_hires_on_surface(
         flux3_references: surface.flux3_references,
         flux3_layout: surface.flux3_layout,
         output_channels: gen_core::OutputChannels::Rgb,
-        controls: surface.controls,
+        controls: surface.controls.clone(),
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
+        pag_report: None,
         execution_report: Some(&base_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
@@ -1169,9 +1218,10 @@ pub(super) fn generate_one_with_hires_on_surface(
         flux3_references: None,
         flux3_layout: None,
         output_channels: surface.output_channels,
-        controls: surface.controls,
+        controls: surface.controls.clone(),
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
+        pag_report: surface.pag_report,
         execution_report: Some(&refine_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
@@ -1521,7 +1571,7 @@ mod process_fault_tests {
         let plan = fixture_plan(&generator, &request());
 
         // ControlNet: the lane's own render function.
-        let (image, execution) = super::super::flux1_control::flux1_control_generate_one(
+        let (image, execution, _) = super::super::flux1_control::flux1_control_generate_one(
             &generator,
             request(),
             &plan,
@@ -1908,5 +1958,213 @@ mod hires_report_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn lane_surface_forwards_pag_preserves_progress_and_cancellation_and_captures_pag_receipt() {
+        struct PagProbe {
+            descriptor: gen_core::ModelDescriptor,
+            seen_pag: std::sync::Mutex<Option<Option<gen_core::PagConfig>>>,
+            cancel_at_step: Option<u32>,
+        }
+        impl PagProbe {
+            fn run_probe(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationReport> {
+                *self.seen_pag.lock().unwrap() = Some(req.pag.clone());
+                let total = req.steps.unwrap_or(4);
+                for current in 1..=total {
+                    if self.cancel_at_step == Some(current) {
+                        req.cancel.cancel();
+                    }
+                    if req.cancel.is_cancelled() {
+                        return Err(gen_core::Error::Canceled);
+                    }
+                    on_progress(Progress::Step { current, total });
+                }
+                let mut report = gen_core::GenerationReport::from_output(
+                    gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                        width: req.width,
+                        height: req.height,
+                        pixels: vec![9; (req.width * req.height * 3) as usize],
+                    }]),
+                );
+                report.pag = req.pag.as_ref().map(|pag| gen_core::PagExecutionReport {
+                    scale: pag.scale,
+                    adaptive_scale: pag.adaptive_scale.unwrap_or(0.0),
+                    layers: pag.layers.clone().unwrap_or_else(|| vec![2, 5]),
+                    start: pag.start.unwrap_or(0.05),
+                    stop: pag.stop.unwrap_or(0.85),
+                    active_steps: 3,
+                    total_steps: total,
+                });
+                Ok(report)
+            }
+        }
+        impl gen_core::Generator for PagProbe {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                &self.descriptor
+            }
+            fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn generate(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationOutput> {
+                Ok(self.run_probe(req, on_progress)?.output.unwrap())
+            }
+            fn generate_with_execution_report(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<CompletedGeneration> {
+                let report = self.run_probe(req, on_progress)?;
+                CompletedGeneration::new(
+                    report,
+                    ExecutionIdentity::provider_default(),
+                    &self.descriptor,
+                )
+            }
+        }
+
+        let probe = PagProbe {
+            descriptor: gen_core::ModelDescriptor {
+                id: "flux2_dev",
+                family: "flux2",
+                backend: "test",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                denoiser_output_latent_space: None,
+                control_kinds: None,
+                encoder_contract: None,
+                required_components: &[],
+            },
+            seen_pag: std::sync::Mutex::new(None),
+            cancel_at_step: None,
+        };
+        let pag_cfg = gen_core::PagConfig {
+            scale: 1.5,
+            layers: Some(vec![2, 5]),
+            start: Some(0.05),
+            stop: Some(0.85),
+            adaptive_scale: Some(0.25),
+        };
+        let pag_sink = std::cell::RefCell::new(None);
+        let exec_sink = std::cell::RefCell::new(None);
+        let mut steps = Vec::new();
+        let images = render_on_surface(
+            &probe,
+            "a lighthouse",
+            64,
+            64,
+            42,
+            4,
+            Some(4.0),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &LaneRgbaSurface {
+                controls: super::super::lane_controls::LaneRequestControls {
+                    pag: Some(pag_cfg.clone()),
+                    ..Default::default()
+                },
+                execution_report: Some(&exec_sink),
+                pag_report: Some(&pag_sink),
+                ..Default::default()
+            },
+            &CancelFlag::default(),
+            &mut |p| {
+                if let Progress::Step { current, total } = p {
+                    steps.push((current, total));
+                }
+            },
+        )
+        .expect("PAG render succeeds");
+        assert_eq!(images.len(), 1);
+        assert_eq!(steps, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+        assert_eq!(*probe.seen_pag.lock().unwrap(), Some(Some(pag_cfg)));
+        let captured = pag_sink.take().expect("pag execution report captured");
+        assert_eq!(captured.active_steps, 3);
+        assert_eq!(captured.total_steps, 4);
+
+        // Cancellation mid-run leaves pag_sink empty and returns Canceled
+        let cancelling_probe = PagProbe {
+            descriptor: probe.descriptor,
+            seen_pag: std::sync::Mutex::new(None),
+            cancel_at_step: Some(2),
+        };
+        let cancel = CancelFlag::default();
+        let cancel_pag_sink = std::cell::RefCell::new(None);
+        let mut cancel_steps = Vec::new();
+        let err = render_on_surface(
+            &cancelling_probe,
+            "a lighthouse",
+            64,
+            64,
+            42,
+            4,
+            Some(4.0),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &LaneRgbaSurface {
+                controls: super::super::lane_controls::LaneRequestControls {
+                    pag: Some(gen_core::PagConfig {
+                        scale: 1.5,
+                        layers: Some(vec![2]),
+                        start: None,
+                        stop: None,
+                        adaptive_scale: None,
+                    }),
+                    ..Default::default()
+                },
+                pag_report: Some(&cancel_pag_sink),
+                ..Default::default()
+            },
+            &cancel,
+            &mut |p| {
+                if let Progress::Step { current, total } = p {
+                    cancel_steps.push((current, total));
+                }
+            },
+        )
+        .expect_err("cancelled PAG render must error");
+        assert!(cancel.is_cancelled());
+        assert_eq!(cancel_steps, vec![(1, 4)]);
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("cancel"),
+            "{err:?}"
+        );
+        assert!(cancel_pag_sink.borrow().is_none());
     }
 }

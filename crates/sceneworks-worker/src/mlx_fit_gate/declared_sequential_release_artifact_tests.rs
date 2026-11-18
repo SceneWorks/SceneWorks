@@ -94,6 +94,7 @@ fn declared_sequential_release_matches_the_request_admission() {
                 negative_branch: false,
                 prefix_kv_cache_eligible: false,
                 reference_resources: None,
+                pag_workspace_bytes: 0,
             };
             preflight_request(candidate, &plan, &inputs, budget).unwrap()
         };

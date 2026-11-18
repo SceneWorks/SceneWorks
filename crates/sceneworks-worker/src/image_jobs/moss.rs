@@ -263,7 +263,15 @@ fn moss_render(
     .unwrap_or_default();
     facts.insert(
         sceneworks_core::moss_image::REPORT_KEY.into(),
-        serde_json::to_value(receipt).map_err(|e| WorkerError::Engine(e.to_string()))?,
+        serde_json::to_value(&receipt).map_err(|e| WorkerError::Engine(e.to_string()))?,
+    );
+    lane_controls::record_pag_execution_report(
+        &mut facts,
+        receipt
+            .data()
+            .pag
+            .as_ref()
+            .or(completed.generation.pag.as_ref()),
     );
     facts.insert(
         "workerExecutionReport".into(),
@@ -461,7 +469,11 @@ fn moss_edit_render(
     .unwrap_or_default();
     facts.insert(
         sceneworks_core::moss_image::EDIT_REPORT_KEY.into(),
-        serde_json::to_value(report).map_err(|e| WorkerError::Engine(e.to_string()))?,
+        serde_json::to_value(&report).map_err(|e| WorkerError::Engine(e.to_string()))?,
+    );
+    lane_controls::record_pag_execution_report(
+        &mut facts,
+        report.pag.as_ref().or(report.base.data().pag.as_ref()),
     );
     facts.insert(
         "workerExecutionReport".into(),
@@ -1079,6 +1091,20 @@ pub(super) async fn generate_moss_stream_with_runtime(
         &mut |_, _| {},
     );
     let spec = prepared?;
+    let moss_pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
+        native.width,
+        native.height,
+        if edit {
+            native.count.max(1)
+        } else if native.prompt_batch.is_empty() {
+            1
+        } else {
+            request.image_count()
+        },
+        resolved.steps,
+        Some(&gen_core::moss_image::moss_image_pag_capability()),
+        native.pag.as_ref(),
+    );
     let peak = runtime.cold_peak(MossColdRequest {
         variant,
         spec: &spec,
@@ -1093,6 +1119,7 @@ pub(super) async fn generate_moss_stream_with_runtime(
     })?;
     let peak = peak
         .checked_add(advanced.host_bytes as u64)
+        .and_then(|value| value.checked_add(moss_pag_workspace_bytes))
         .ok_or_else(|| WorkerError::InvalidPayload("MOSS host tensor admission overflow".into()))?;
     let adapter_identities =
         lane_controls::adapter_identities(api, settings, job, request, &spec.adapters).await;
@@ -1166,6 +1193,7 @@ pub(super) async fn generate_moss_stream_with_runtime(
                     advanced.inputs(),
                 )?
                 .checked_add(advanced.host_bytes as u64)
+                .and_then(|value| value.checked_add(moss_pag_workspace_bytes))
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload("MOSS host tensor admission overflow".into())
                 })?

@@ -232,7 +232,7 @@ fn krea_edit_candle_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &gen_core::CancelFlag,
     on_progress: &mut dyn FnMut(gen_core::Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = gen_core::GenerationRequest {
         prompt,
         negative_prompt,
@@ -245,6 +245,7 @@ fn krea_edit_candle_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         conditioning,
         use_pid,
         text_style_gain,
@@ -253,19 +254,20 @@ fn krea_edit_candle_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_strategy_context,
         on_progress,
     )
     .map_err(|error| crate::generation_error("Krea edit generation failed", error))?;
-    match output {
-        gen_core::GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(gen_core::GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea edit generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "Krea edit generator returned non-image output".to_owned(),
@@ -311,6 +313,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     if !krea_edit_candle_mode(request) {
         return Err(WorkerError::InvalidPayload(
             "Krea 2 edit requires edit_image mode + a source image".to_owned(),
@@ -399,13 +402,22 @@ pub(super) async fn generate_candle_krea_edit_stream(
         // deliberately conservative (the bundled decoder is not subtracted) and preserves the
         // estimated fallback when no route-specific evidence exists.
         .saturating_add(selected_text_encoder_bytes);
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request, width, height, 1, steps, None,
+    );
     let offload_policy = admit_candle_base(
         request,
         settings,
         &weights_dir,
         "Krea edit",
         CandleBaseEvidence::Catalog,
-        adapter_resident_bytes,
+        adapter_resident_bytes.saturating_add(pag_workspace_bytes),
         true,
     )
     .await?;
@@ -417,12 +429,6 @@ pub(super) async fn generate_candle_krea_edit_stream(
         })
         .to_owned();
 
-    let (width, height) = pid_effective_dims(
-        request.width,
-        request.height,
-        use_pid,
-        pid_output_tier(request),
-    );
     let references =
         load_krea_edit_candle_references(request, project_path, settings, width, height)?;
     let raw_settings =
@@ -437,42 +443,47 @@ pub(super) async fn generate_candle_krea_edit_stream(
         resolved_tier,
         adapter_resident_bytes,
     );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-        descriptor_id,
-        &request.model,
-        &strategy_spec,
-        candle_certified_load_spec(
+    let memory_evaluation =
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
             descriptor_id,
-            settings,
+            &request.model,
             &strategy_spec,
+            candle_certified_load_spec(
+                descriptor_id,
+                settings,
+                &strategy_spec,
+                &request.model_manifest_entry,
+                resolved_tier,
+            ),
             &request.model_manifest_entry,
             resolved_tier,
-        ),
-        &request.model_manifest_entry,
-        resolved_tier,
-        "edit_image",
-        Some("lora"),
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-            reference_count: references.len() as u32,
-        },
-        true,
-        use_pid,
-        false,
-        false,
-        budget,
-        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-        predicted_peak_gb,
-        adapter_resident_bytes,
-        if reclaimable_gb > 0.0 {
-            gen_core::MemoryCacheState::Warm
-        } else {
-            gen_core::MemoryCacheState::Cold
-        },
-    )?;
+            "edit_image",
+            Some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: references.len() as u32,
+            },
+            true,
+            use_pid,
+            false,
+            false,
+            budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+            predicted_peak_gb,
+            adapter_resident_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+            None,
+            None,
+            pag_workspace_bytes,
+            None,
+        )?;
     let generation_memory = memory_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.memory);
@@ -493,10 +504,11 @@ pub(super) async fn generate_candle_krea_edit_stream(
         strategy_spec,
         format!("{descriptor_id} load failed"),
         move |generator, tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -520,6 +532,12 @@ pub(super) async fn generate_candle_krea_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut facts, image.3.as_ref());
+                    if !facts.is_empty() {
+                        let _ = facts_tx
+                            .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    }
                     Ok(Some((seed, image.0, image.1, image.2)))
                 },
             )

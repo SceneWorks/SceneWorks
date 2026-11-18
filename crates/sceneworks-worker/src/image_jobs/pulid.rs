@@ -320,7 +320,16 @@ fn pulid_memory_route_context() -> crate::memory_route_registry::MemoryRouteRequ
     }
 }
 
+#[cfg(test)]
 fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxRequestInputs {
+    pulid_memory_inputs_with_pag(width, height, 0)
+}
+
+fn pulid_memory_inputs_with_pag(
+    width: u32,
+    height: u32,
+    pag_workspace_bytes: u64,
+) -> crate::mlx_fit_gate::MlxRequestInputs {
     crate::mlx_fit_gate::MlxRequestInputs {
         native_batch: 1,
         width,
@@ -339,6 +348,7 @@ fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxReque
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes,
     }
 }
 
@@ -375,6 +385,7 @@ pub(super) async fn generate_pulid_flux_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let pag = super::sampling::resolve_bespoke_pag(request)?;
     let flux_base = resolve_pulid_flux_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("PuLID-FLUX base (FLUX.1-dev) not found".to_owned())
     })?;
@@ -532,7 +543,9 @@ pub(super) async fn generate_pulid_flux_stream(
         Some(tier) => memory_plan.with_resolved_artifact_tier(Some(tier))?,
         None => memory_plan,
     };
-    let memory_inputs = pulid_memory_inputs(width, height);
+    let pag_workspace_bytes =
+        crate::execution_planner::pag_workspace_bytes(width, height, 1, steps, None, pag.as_ref());
+    let memory_inputs = pulid_memory_inputs_with_pag(width, height, pag_workspace_bytes);
     let (spec, memory_plan) = release_declared_sequential_for_request(
         PULID_ENGINE_ID,
         PULID_MODEL,
@@ -575,6 +588,7 @@ pub(super) async fn generate_pulid_flux_stream(
         sampler: sampler.clone(),
         scheduler: scheduler.clone(),
         scheduler_shift,
+        pag: pag.clone(),
         conditioning: vec![Conditioning::Reference {
             image: reference.clone(),
             strength: Some(id_weight),
@@ -662,21 +676,27 @@ pub(super) async fn generate_pulid_flux_stream(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let mut req =
                         pulid_request(seed, Some(memory_evaluation.memory), preview, &cancel);
-                    let (image, execution) = match super::render::generate_planned_single_image(
-                        generator,
-                        &mut req,
-                        &render_plan,
-                        Some(&memory_evaluation.context),
-                        "PuLID-FLUX",
-                        on_progress,
-                    ) {
-                        Ok(completed) => completed,
-                        // A poisoned process keeps its fatal class even when cancellation raced it.
-                        Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => return Err(error),
-                    };
-                    if !super::render::send_execution_report(&report_tx, index, execution)? {
+                    let (image, execution, pag_report) =
+                        match super::render::generate_planned_single_image_with_pag(
+                            generator,
+                            &mut req,
+                            &render_plan,
+                            Some(&memory_evaluation.context),
+                            "PuLID-FLUX",
+                            on_progress,
+                        ) {
+                            Ok(completed) => completed,
+                            // A poisoned process keeps its fatal class even when cancellation raced it.
+                            Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
+                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(error) => return Err(error),
+                        };
+                    if !super::render::send_execution_and_pag_report(
+                        &report_tx,
+                        index,
+                        execution,
+                        pag_report.as_ref(),
+                    )? {
                         return Ok(None);
                     }
                     // Score this finished image against the cached source embedding (sc-4411). The

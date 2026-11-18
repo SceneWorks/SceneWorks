@@ -8573,6 +8573,17 @@
         "minMemoryGb": 96
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 56,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -8782,6 +8793,17 @@
         "family": "flux2",
         "id": "flux2_dev",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 56,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -8823,6 +8845,17 @@
         "family": "flux2",
         "id": "flux2_dev",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 56,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -9885,6 +9918,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -10099,6 +10143,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -10140,6 +10195,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -11099,6 +11165,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -11312,6 +11389,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -11353,6 +11441,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -12251,6 +12350,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -12434,6 +12544,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -12475,6 +12596,17 @@
         "family": "flux2",
         "id": "flux2_klein_9b",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -12712,6 +12844,17 @@
           "q8": 28
         }
       }
+    },
+    "pag": {
+      "blockDomain": "flux3_blocks",
+      "defaultLayers": [
+        19
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 33,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": false,
@@ -12977,6 +13120,17 @@
         "family": "flux3",
         "id": "flux3_klein",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 33,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler"
         ],
@@ -13003,6 +13157,17 @@
         "family": "flux3",
         "id": "flux3_klein",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 33,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler"
         ],
@@ -13141,6 +13306,17 @@
           "q8": 29
         }
       }
+    },
+    "pag": {
+      "blockDomain": "flux3_blocks",
+      "defaultLayers": [
+        19
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 33,
+      "recommendedScale": 1.5
     },
     "previewByBackend": {
       "candle": false,
@@ -13404,6 +13580,17 @@
         "family": "flux3",
         "id": "flux3_klein_base",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 33,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler"
         ],
@@ -13430,6 +13617,17 @@
         "family": "flux3",
         "id": "flux3_klein_base",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 33,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler"
         ],
@@ -14865,6 +15063,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -15039,6 +15248,17 @@
         "family": "flux",
         "id": "flux1_dev",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 57,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -15076,6 +15296,17 @@
         "family": "flux",
         "id": "flux1_dev",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 57,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -15950,6 +16181,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -16101,6 +16343,17 @@
         "family": "flux",
         "id": "flux1_schnell",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 57,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -16138,6 +16391,17 @@
         "family": "flux",
         "id": "flux1_schnell",
         "modality": "image",
+        "pag": {
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 57,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -32813,6 +33077,17 @@
         "minMemoryGb": 48
       }
     },
+    "pag": {
+      "blockDomain": "single_stream_blocks",
+      "defaultLayers": [
+        14
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 28,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -33042,6 +33317,17 @@
         "family": "krea_2",
         "id": "krea_2_raw",
         "modality": "image",
+        "pag": {
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 28,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -33083,6 +33369,17 @@
         "family": "krea_2",
         "id": "krea_2_raw",
         "modality": "image",
+        "pag": {
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 28,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -35566,6 +35863,17 @@
         "minMemoryGb": 48
       }
     },
+    "pag": {
+      "blockDomain": "single_stream_blocks",
+      "defaultLayers": [
+        14
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 28,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -35823,6 +36131,17 @@
         "family": "krea_2",
         "id": "krea_2_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 28,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -35864,6 +36183,17 @@
         "family": "krea_2",
         "id": "krea_2_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 28,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -47839,6 +48169,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "dit_blocks",
+      "defaultLayers": [
+        25
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.66,
+      "maxScale": 15.0,
+      "numBlocks": 50,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -48114,6 +48455,17 @@
         "family": "minimax_h3_image",
         "id": "minimax_h3_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "dit_blocks",
+          "default_layers": [
+            25
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.6600000262260437,
+          "max_scale": 15.0,
+          "num_blocks": 50,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "lcm"
@@ -48138,6 +48490,17 @@
         "family": "minimax_h3_image",
         "id": "minimax_h3_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "dit_blocks",
+          "default_layers": [
+            25
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.6600000262260437,
+          "max_scale": 15.0,
+          "num_blocks": 50,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "lcm"
@@ -49387,6 +49750,17 @@
         "measured": false
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 42,
+      "recommendedScale": 2.5
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -49538,6 +49912,17 @@
         "family": "moss_image",
         "id": "moss_image_base",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 42,
+          "recommended_scale": 2.5
+        },
         "samplers": [
           "euler"
         ],
@@ -49559,6 +49944,17 @@
         "family": "moss_image",
         "id": "moss_image_base",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 42,
+          "recommended_scale": 2.5
+        },
         "samplers": [
           "euler"
         ],
@@ -49589,6 +49985,17 @@
       "candle": {
         "measured": false
       }
+    },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 42,
+      "recommendedScale": 2.5
     },
     "previewByBackend": {
       "candle": false,
@@ -49807,6 +50214,17 @@
         "family": "moss_image",
         "id": "moss_image_sft",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 42,
+          "recommended_scale": 2.5
+        },
         "samplers": [
           "euler"
         ],
@@ -49828,6 +50246,17 @@
         "family": "moss_image",
         "id": "moss_image_sft",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 42,
+          "recommended_scale": 2.5
+        },
         "samplers": [
           "euler"
         ],
@@ -51106,6 +51535,17 @@
         "minMemoryGb": 44
       }
     },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -51903,6 +52343,17 @@
         "minMemoryGb": 50
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -52151,6 +52602,17 @@
         "family": "qwen-image",
         "id": "qwen_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 60,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -52189,6 +52651,17 @@
         "family": "qwen-image",
         "id": "qwen_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 60,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -52913,6 +53386,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        16
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -53090,6 +53574,17 @@
         "family": "qwen-image-2-1",
         "id": "qwen_image_2_1",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -53132,6 +53627,17 @@
         "family": "qwen-image-2-1",
         "id": "qwen_image_2_1",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -54051,6 +54557,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        16
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -54232,6 +54749,17 @@
         "family": "qwen-image-2-1",
         "id": "qwen_image_2_1_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -54274,6 +54802,17 @@
         "family": "qwen-image-2-1",
         "id": "qwen_image_2_1_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 32,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -55265,6 +55804,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -55448,6 +55998,17 @@
         "family": "qwen-image",
         "id": "qwen_image_edit",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 60,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -56026,6 +56587,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -56256,6 +56828,17 @@
         "family": "qwen-image",
         "id": "qwen_image_edit",
         "modality": "image",
+        "pag": {
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 60,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -72457,6 +73040,17 @@
         "minMemoryGb": 48
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -72655,6 +73249,17 @@
         "family": "z-image",
         "id": "z_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -72692,6 +73297,17 @@
         "family": "z-image",
         "id": "z_image",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.5
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -72903,6 +73519,17 @@
         "minMemoryGb": 40
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -73066,6 +73693,17 @@
         "family": "z-image",
         "id": "z_image_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -73103,6 +73741,17 @@
         "family": "z-image",
         "id": "z_image_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -73998,6 +74647,17 @@
         "minMemoryGb": 40
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -74206,6 +74866,17 @@
         "family": "z-image",
         "id": "z_image_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -74243,6 +74914,17 @@
         "family": "z-image",
         "id": "z_image_turbo",
         "modality": "image",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
         "samplers": [
           "euler",
           "euler_ancestral",
