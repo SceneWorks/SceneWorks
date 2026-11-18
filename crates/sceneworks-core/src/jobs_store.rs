@@ -488,7 +488,9 @@ pub struct PlatformReachabilitySweepStats {
 // sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
 // eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
 // SW-7102: version 4 adds `requires_nvfp4` (an NVFP4-frozen MiniMax-H3-Image expansion).
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 4;
+// SW-7190: version 5 routes by the top-level `variant` (bound over quantTier, mlxQuantize
+// and convRot), so a persisted pre-variant projection must be recomputed.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 5;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
