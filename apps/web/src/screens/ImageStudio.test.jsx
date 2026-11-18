@@ -2438,15 +2438,21 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
     await click(buttonByText("Use Selection"));
   }
 
-  it("selects Loop and keeps the structured JSON caption with its grounded boxes", async () => {
-    const imageCaption = vi.fn(async () => VISION_REPLY);
+  it("selects Loop, reports an invalid JSON caption, and keeps grounded boxes on retry", async () => {
+    const imageCaption = vi.fn()
+      .mockResolvedValueOnce("The reply is malformed.")
+      .mockResolvedValueOnce(VISION_REPLY);
     await render(baseContext({ imageModels: [IDEOGRAM], models: [LOOP_MODEL], assets: [REF_ASSET], imageCaption }));
     await openPlainTab();
     await selectLoopReference();
     await click(buttonByText("✨ Generate JSON from image"));
-    expect(imageCaption).toHaveBeenCalledWith(expect.objectContaining({
-      sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8",
-    }));
+    expect(document.body.querySelector(".structured-reference [role=alert]").textContent).toMatch(/json/i);
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeNull();
+    await click(buttonByText("✨ Generate JSON from image"));
+    expect(imageCaption).toHaveBeenCalledTimes(2);
+    for (const [arg] of imageCaption.mock.calls) {
+      expect(arg).toMatchObject({ sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8" });
+    }
     expect(document.body.querySelector('[aria-label="Caption preview"]').textContent).toContain("100");
   });
 

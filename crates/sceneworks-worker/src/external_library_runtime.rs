@@ -8369,7 +8369,12 @@ mod tests {
             .unwrap();
             let dispatch = guard.dispatch_payload();
             assert_eq!(dispatch["modelNameOrPath"], MODEL_REPO);
-            let path = crate::loop_utility::weights_dir(&settings, dispatch).unwrap();
+            let path = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(crate::loop_utility::weights_dir(&settings, dispatch))
+                .unwrap();
             assert!(path.ends_with(Path::new(REV_A).join("q4")));
         });
     }

@@ -13,7 +13,10 @@ pub(crate) fn requirements() -> gen_core::core_llm::ModelRequirements {
         .with_constraint(Constraint::Json)
 }
 
-pub(crate) fn weights_dir(settings: &Settings, payload: &JsonObject) -> WorkerResult<PathBuf> {
+pub(crate) async fn weights_dir(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<PathBuf> {
     let tier = loop_utility::tier(payload.get("variant").and_then(Value::as_str))
         .map_err(WorkerError::InvalidPayload)?;
     let missing = || {
@@ -58,8 +61,22 @@ pub(crate) fn weights_dir(settings: &Settings, payload: &JsonObject) -> WorkerRe
     #[cfg(target_os = "macos")]
     let available = crate::fit_gate::unified_total_gb();
     #[cfg(not(target_os = "macos"))]
-    let available = crate::vram_gate::live_capped_budget_fresh_blocking(&settings.gpu_id)
-        .map(|budget| budget.free_gb);
+    let available = {
+        let spec = gen_core::core_llm::LoadSpec {
+            source: weights.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let (access, free) = crate::refine_model_cache::candle_refiner_budget(
+            &spec,
+            &requirements(),
+            &settings.gpu_id,
+        )
+        .await?;
+        if access == crate::cache_thread::CacheAccess::Warm {
+            return Ok(weights);
+        }
+        free
+    };
     if let crate::fit_gate::FitDecision::TooBig {
         needed_gb,
         available_gb,
@@ -74,13 +91,11 @@ pub(crate) fn weights_dir(settings: &Settings, payload: &JsonObject) -> WorkerRe
 }
 
 fn weights_directory(row: &Value, snapshot: &Path) -> Option<PathBuf> {
-    let files: Vec<_> = row
-        .get("files")?
-        .as_array()?
-        .iter()
-        .map(Value::as_str)
-        .collect::<Option<Vec<_>>>()?;
-    let mut configs = files.iter().copied().filter(|file| {
+    let files = loop_utility::enumerated_files(row)?;
+    if !loop_utility::missing_snapshot_files(row, snapshot)?.is_empty() {
+        return None;
+    }
+    let mut configs = files.into_iter().filter(|file| {
         Path::new(file).file_name().and_then(|name| name.to_str()) == Some("config.json")
     });
     let config = configs.next()?;
@@ -91,28 +106,6 @@ fn weights_directory(row: &Value, snapshot: &Path) -> Option<PathBuf> {
         .ok()?
         .parent()?
         .to_path_buf();
-    for file in files {
-        let file_path = crate::paths::safe_join(snapshot, file).ok()?;
-        if file_path.file_name()?.to_str()? == "model-*.safetensors" {
-            let directory = file_path.parent()?;
-            let index =
-                std::fs::read_to_string(directory.join("model.safetensors.index.json")).ok()?;
-            let index: Value = serde_json::from_str(&index).ok()?;
-            let shards = index.get("weight_map")?.as_object()?;
-            if shards.is_empty()
-                || !shards.values().all(|shard| {
-                    shard
-                        .as_str()
-                        .and_then(|file| crate::paths::safe_join(directory, file).ok())
-                        .is_some_and(|file| file.is_file())
-                })
-            {
-                return None;
-            }
-        } else if !file_path.is_file() {
-            return None;
-        }
-    }
     Some(weights)
 }
 

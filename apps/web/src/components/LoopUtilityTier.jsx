@@ -5,6 +5,7 @@ import {
   loopTierInstalled,
   loopTiers,
 } from "../loopUtility.js";
+import { useAppContextOptional } from "../context/AppContext.js";
 import { RequiredModelsNotice } from "./RequiredModelsNotice.jsx";
 
 export function LoopAccessHelp() {
@@ -17,6 +18,10 @@ export function LoopAccessHelp() {
 }
 
 export function LoopUtilityTier({ model, tier, onChange, onDownload, disabled }) {
+  const app = useAppContextOptional();
+  const downloadJobs = (app?.jobs ?? []).filter((job) =>
+    job.type === "model_download" && job.payload?.variant === tier,
+  );
   const available = loopTierAvailable(model, tier);
   const row = model?.variants?.find((entry) => entry.variant === tier);
   const installed = loopTierInstalled(model, tier);
@@ -41,6 +46,8 @@ export function LoopUtilityTier({ model, tier, onChange, onDownload, disabled })
             key={tier}
             feature="This action"
             models={[{ ...model, name: `${model.name} ${tier}`, downloadSizeBytes: row?.downloadSizeBytes }]}
+            downloadJobs={downloadJobs}
+            requireDownloadJob
             onDownload={onDownload ? () => onDownload(model, { variant: tier }) : undefined}
           />
         </>

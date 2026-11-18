@@ -37,10 +37,13 @@ export function RequiredModelsNotice({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  requireDownloadJob = false,
 }) {
   // Ids the user has clicked Download for, for callers that pass no `downloadJobs`. Without it the
   // button would sit there looking unclicked until a catalog refetch lands.
   const [requested, setRequested] = useState(() => new Set());
+  const [confirmedJobs, setConfirmedJobs] = useState(() => new Map());
+  const [submitting, setSubmitting] = useState(null);
   const [error, setError] = useState("");
 
   // Drop a model from the local "requested" set once it leaves `models` (i.e. it finished
@@ -66,23 +69,34 @@ export function RequiredModelsNotice({
     return null;
   }
 
-  const activeJobFor = (model) =>
-    downloadJobs.find(
-      (job) => job.payload?.modelId === model.id && !terminalStatuses.has(job.status),
-    );
+  const jobFor = (model) => {
+    const confirm = confirmedJobs.get(model.id);
+    const matches = (job) => job.payload?.modelId === model.id;
+    const active = downloadJobs.find((job) => matches(job) && !terminalStatuses.has(job.status));
+    return requireDownloadJob
+      ? active ?? downloadJobs.find((job) => job.id === confirm?.id) ?? confirm ?? downloadJobs.find(matches)
+      : active;
+  };
 
   async function handleDownload(model) {
     if (typeof onDownload !== "function") return;
     setError("");
+    if (requireDownloadJob) setSubmitting(model.id);
     try {
       const job = await onDownload(model);
-      // A caller whose `onDownload` resolves to nothing still gets the optimistic state — the click
-      // did enqueue something, and leaving the button live invites a duplicate download.
-      setRequested((prev) => new Set(prev).add(model.id));
+      if (requireDownloadJob) {
+        if (!job?.id) throw new Error("Could not start the model download. Try again or open the Model Manager.");
+        setConfirmedJobs((current) => new Map(current).set(model.id, job));
+      } else {
+        // Legacy callbacks may enqueue successfully without returning the job.
+        setRequested((prev) => new Set(prev).add(model.id));
+      }
       return job;
     } catch (err) {
       setError(err?.message || "Could not start the model download.");
       return null;
+    } finally {
+      if (requireDownloadJob) setSubmitting(null);
     }
   }
 
@@ -95,9 +109,12 @@ export function RequiredModelsNotice({
       </p>
       <ul className="required-models-list">
         {models.map((model) => {
-          const job = activeJobFor(model);
+          const snapshot = jobFor(model);
+          const isTerminal = terminalStatuses.has(snapshot?.status);
+          const job = isTerminal ? null : snapshot;
+          const failed = isTerminal && snapshot.status !== "completed" ? snapshot : null;
           const size = downloadSizeText(model);
-          const pending = Boolean(job) || requested.has(model.id);
+          const pending = Boolean(job) || requested.has(model.id) || submitting === model.id;
           return (
             <li key={model.id}>
               <div className="required-models-row">
@@ -111,11 +128,16 @@ export function RequiredModelsNotice({
                   onClick={() => handleDownload(model)}
                   type="button"
                 >
-                  {job ? job.status : pending ? "Queued" : "Download"}
+                  {job?.status || (pending ? "Queued" : "Download")}
                 </button>
               </div>
-              {job ? (
+              {job?.status ? (
                 <WorkerProgressCard job={job} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+              ) : null}
+              {failed ? (
+                <p className="inline-warning" role="alert">
+                  {failed.error || failed.message || `Download ${failed.status}. Try again.`}
+                </p>
               ) : null}
             </li>
           );

@@ -190,7 +190,7 @@ async fn run_training_caption_job_using(
     let loop_model = captioner_id == loop_utility::CAPTIONER;
     let weights_dir = match (loop_model, model_name_or_path.as_str()) {
         (true, loop_utility::MODEL_REPO) => {
-            crate::loop_utility::weights_dir(settings, &job.payload)?
+            crate::loop_utility::weights_dir(settings, &job.payload).await?
         }
         (false, name) if name != loop_utility::MODEL_REPO => {
             resolve_caption_weights_dir(settings, name)?

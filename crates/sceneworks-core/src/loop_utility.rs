@@ -1,5 +1,6 @@
 //! Shared identity and artifact selection for the Loop-9B utility.
 use serde_json::Value;
+use std::path::Path;
 
 pub const MODEL_ID: &str = "vision_sensenova_loop_9b";
 pub const MODEL_REPO: &str = "sensenova/SenseNova-Loop-9B";
@@ -40,11 +41,44 @@ pub fn download<'a>(entry: &'a Value, platform: &str, tier: &str) -> Option<&'a 
     let revision = row.get("revision")?.as_str()?;
     if revision == "0000000000000000000000000000000000000000"
         || crate::model_artifacts::validate_immutable_revision(revision).is_err()
-        || row.get("files")?.as_array()?.is_empty()
+        || enumerated_files(row).is_none()
     {
         return None;
     }
     Some(row)
+}
+
+/// Loop artifacts list every file. A glob or unsafe selector cannot establish completeness.
+pub fn enumerated_files(row: &Value) -> Option<Vec<&str>> {
+    let files: Vec<_> = row
+        .get("files")?
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<_>>()?;
+    (!files.is_empty()
+        && files.iter().all(|path| {
+            !path.contains(['*', '?', '[', ']'])
+                && crate::safe_path::relative_normal_components(path).is_ok()
+        }))
+    .then_some(files)
+}
+
+/// Stat the exact pinned snapshot's declared files. Portable admission and the worker source
+/// guard authenticate their bytes against the publisher ledger before execution.
+pub fn missing_snapshot_files(row: &Value, snapshot: &Path) -> Option<Vec<String>> {
+    Some(
+        enumerated_files(row)?
+            .into_iter()
+            .filter(|file| {
+                !snapshot
+                    .join(file)
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+            })
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 #[cfg(test)]

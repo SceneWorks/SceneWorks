@@ -1286,6 +1286,49 @@ async fn loop_utility_routes_bind_only_the_selected_installed_snapshot() {
         format!("/api/v1/projects/{project}/training/datasets/{dataset}/batch-describe-jobs");
     let captions = format!("/api/v1/projects/{project}/training/datasets/{dataset}/caption-jobs");
 
+    let entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(MODEL_ID)
+            .unwrap()
+            .clone(),
+    );
+    let row = sceneworks_core::loop_utility::download(&entry, "macos", "bf16").unwrap();
+    let files = row["files"].as_array().unwrap();
+    let hub = huggingface_repo_cache_path(&state.settings.data_dir, MODEL_REPO).unwrap();
+    let stale_revision = "dddddddddddddddddddddddddddddddddddddddd";
+    let stale = hub.join("snapshots").join(stale_revision);
+    std::fs::create_dir_all(hub.join("refs")).unwrap();
+    std::fs::write(hub.join("refs/main"), stale_revision).unwrap();
+    let managed =
+        state.settings.data_dir.join("models").join(
+            sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(MODEL_REPO),
+        );
+    for root in [&stale, &managed] {
+        std::fs::create_dir_all(root).unwrap();
+        for file in files {
+            std::fs::write(root.join(file.as_str().unwrap()), "fixture").unwrap();
+        }
+    }
+    std::fs::write(managed.join(".sceneworks-download-complete.json"), "{}").unwrap();
+    assert!(crate::models::installed_variant_keys(&entry, &state.settings.data_dir).is_empty());
+    #[cfg(target_os = "macos")]
+    {
+        let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        let model = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == MODEL_ID)
+            .unwrap();
+        let variant = model["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .unwrap();
+        assert_eq!(model["installState"], "missing");
+        assert_eq!(variant["installState"], "missing");
+    }
     let (status, refusal) = request(
         app.clone(),
         "POST",
@@ -1333,19 +1376,53 @@ async fn loop_utility_routes_bind_only_the_selected_installed_snapshot() {
         .unwrap()
         .is_none());
 
-    let snapshot = huggingface_repo_cache_path(&state.settings.data_dir, MODEL_REPO)
-        .unwrap()
-        .join("snapshots")
-        .join(REV);
+    let snapshot = hub.join("snapshots").join(REV);
     std::fs::create_dir_all(&snapshot).unwrap();
-    let entry = Value::Object(
-        sceneworks_core::builtin_manifests::builtin_model_entry(MODEL_ID)
-            .unwrap()
-            .clone(),
-    );
-    let row = sceneworks_core::loop_utility::download(&entry, "macos", "bf16").unwrap();
-    for file in row["files"].as_array().unwrap() {
+    for file in files {
         std::fs::write(snapshot.join(file.as_str().unwrap()), "fixture").unwrap();
+    }
+    let required = snapshot.join("config.json");
+    std::fs::write(&required, "").unwrap();
+    assert!(crate::models::installed_variant_keys(&entry, &state.settings.data_dir).is_empty());
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({
+            "model": MODEL_REPO, "variant": "bf16"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    std::fs::write(required, "fixture").unwrap();
+    assert_eq!(
+        crate::models::installed_variant_keys(&entry, &state.settings.data_dir),
+        ["bf16"]
+    );
+    #[cfg(target_os = "macos")]
+    {
+        // A real model-download job invalidates the catalog when the worker reports completion.
+        state.model_catalog_cache.invalidate();
+        let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        let model = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == MODEL_ID)
+            .unwrap();
+        let variant = model["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .unwrap();
+        assert_eq!(model["installState"], "installed");
+        assert_eq!(variant["installState"], "installed");
+        assert_eq!(
+            std::fs::canonicalize(variant["installedPath"].as_str().unwrap()).unwrap(),
+            snapshot.canonicalize().unwrap(),
+        );
     }
     let (status, asset) = request_multipart_upload(
         app.clone(),
@@ -1402,7 +1479,10 @@ async fn loop_utility_routes_bind_only_the_selected_installed_snapshot() {
         .unwrap();
         let model = &binding.select_route("mlx", "macos").unwrap().models[0];
         assert_eq!(model.model_id, MODEL_ID);
-        assert!(binding.select_route("candle", "windows").is_err());
+        assert_eq!(
+            binding.select_route("candle", "windows").is_ok(),
+            sceneworks_core::loop_utility::download(&entry, "windows", "bf16").is_some(),
+        );
         let PortableSourceIdentity::Revision { identity } = &model.members[0].source else {
             panic!("utility source did not freeze the exact tier");
         };

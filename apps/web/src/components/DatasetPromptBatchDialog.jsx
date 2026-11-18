@@ -1350,6 +1350,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               onCancelJob={typeof jobAction === "function" ? (download) => jobAction(download, "cancel") : undefined}
               onDownload={downloadMissing}
               onOpenModels={typeof setActiveView === "function" ? () => setActiveView("Models") : undefined}
+              requireDownloadJob={model.id === LOOP_UTILITY_ID}
             />
           ) : (
             <p className="inline-warning" role="status">
