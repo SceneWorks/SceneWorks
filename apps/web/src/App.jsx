@@ -420,8 +420,8 @@ export function App() {
   // action to resume but with exactly the same two-write ordering and undo.
   const modelLibraryRelocator = useMemo(
     () => ({
-      validate: (path) => validateModelLibrary(token, path),
-      adopt: (path) => relocateModelLibrary(token, path),
+      validate: (path, options) => validateModelLibrary(token, path, options),
+      adopt: (path, options) => relocateModelLibrary(token, path, options),
       // Durable persistence of a relocated library is desktop state: the API hands back the exact
       // HF_HOME the shell must store, in the same field, file and normalization as the first-run
       // storage step. Returns an undo so the gate can restore the previous location if the
@@ -435,7 +435,13 @@ export function App() {
         // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
         // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
         // changed, so the previous location genuinely is still in use.
-        if (!isDesktopShell || !target?.hfHome) return () => {};
+        //
+        // Also nothing to persist when the server says the adopted root IS the library this
+        // process already reads (a reformatted or replaced drive re-bound in place): the shell's
+        // copy of the location is already right, and rewriting it would only add a failure point.
+        if (!isDesktopShell || !target?.hfHome || target.restartRequired === false) {
+          return () => {};
+        }
         let before = null;
         try {
           before = await tauriInvoke("get_storage_setup");
@@ -476,6 +482,36 @@ export function App() {
   // that comes back while the user is choosing a folder must not resume the submission behind a
   // modal OS dialog the user cannot see past.
   const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
+  // What the user is told once the prompt's relocation is adopted. A re-bind of the library this
+  // process already reads is in effect now (the gate resumed the blocked action), so there is no
+  // restart to disclose, only which models now need downloading again. Any other location applies
+  // after a restart, as before.
+  const settleModelLibraryAdoption = useCallback(
+    (adopted) => {
+      if (!adopted) return;
+      const demoted = adopted.replacement?.demotedRepositories ?? [];
+      const redownload = demoted.length
+        ? ` ${demoted.length} ${demoted.length === 1 ? "model is" : "models are"} no longer on it and must be downloaded again: ${demoted.join(", ")}.`
+        : "";
+      if (adopted.restartRequired === false) {
+        pushNotice(
+          "general",
+          `SceneWorks is using the model library at ${adopted.libraryRoot ?? adopted.hfHome} again.${redownload}`,
+        );
+        return;
+      }
+      if (!adopted.hfHome) return;
+      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
+      // disclosure says so. The Settings path below has no submission to drop.
+      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.${redownload}`,
+      );
+    },
+    [pushNotice],
+  );
   const chooseModelLibraryLocation = useCallback(async () => {
     if (!isDesktopShell) return;
     setModelLibraryPickerOpen(true);
@@ -486,18 +522,21 @@ export function App() {
       setModelLibraryPickerOpen(false);
     }
     if (!picked) return;
-    const adopted = await modelLibraryGate.relocate(picked);
-    if (adopted?.hfHome) {
-      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
-      // disclosure says so. The Settings path below has no submission to drop.
-      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
-      // The notice outlives the dialog, so "Later" still leaves the reason visible.
-      pushNotice(
-        "general",
-        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
-      );
-    }
-  }, [modelLibraryGate, pushNotice]);
+    settleModelLibraryAdoption(await modelLibraryGate.relocate(picked));
+  }, [modelLibraryGate, settleModelLibraryAdoption]);
+  // "Use the library at this location": the configured library is present but is not the one
+  // SceneWorks recorded (the drive was reformatted or replaced). The same guarded relocation as a
+  // picked folder, so anything the library lacks still stops at the confirmation first.
+  const useCurrentModelLibrary = useCallback(
+    async (libraryPath) => {
+      if (!isDesktopShell || !libraryPath) return;
+      settleModelLibraryAdoption(await modelLibraryGate.relocate(libraryPath));
+    },
+    [modelLibraryGate, settleModelLibraryAdoption],
+  );
+  const confirmModelLibraryReplacement = useCallback(async () => {
+    settleModelLibraryAdoption(await modelLibraryGate.confirmReplacement());
+  }, [modelLibraryGate, settleModelLibraryAdoption]);
   // Settings → Storage → Model library → Change…: the same relocation (validate, persist, re-bind,
   // undo on failure) and the same restart disclosure as the prompt, with no blocked action. Resolves
   // to the adopted target, `null` when the picker was dismissed; rejects with the user-facing
@@ -1465,12 +1504,17 @@ export function App() {
   // disturbs the shell it renders in.
   const modelLibraryOverlays = (
     <>
-      {["blocked", "retrying", "relocating"].includes(modelLibraryState?.status) ? (
+      {["blocked", "retrying", "relocating", "confirmingReplacement"].includes(
+        modelLibraryState?.status,
+      ) ? (
         <ModelLibraryDialog
           autoProbePaused={modelLibraryPickerOpen}
           canRelocate={isDesktopShell}
           onCancel={modelLibraryGate.cancel}
+          onCancelReplacement={modelLibraryGate.cancelReplacement}
+          onConfirmReplacement={confirmModelLibraryReplacement}
           onRelocate={chooseModelLibraryLocation}
+          onUseCurrentLibrary={useCurrentModelLibrary}
           onRetry={modelLibraryGate.retry}
           state={modelLibraryState}
         />

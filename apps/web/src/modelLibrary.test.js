@@ -8,6 +8,7 @@ import {
   rethrowUnlessPrompted,
   setModelLibraryHandler,
   ModelLibraryPrompted,
+  MODEL_LIBRARY_RELOCATION_REJECTED_CODE,
   MODEL_LIBRARY_UNAVAILABLE_CODE,
 } from "./modelLibrary.js";
 
@@ -429,5 +430,125 @@ describe("model library gate", () => {
     const seen = listener.mock.calls.length;
     gate.block(unavailableError().context, async () => "job-2");
     expect(listener.mock.calls.length).toBe(seen);
+  });
+});
+
+// The reformatted-drive recovery: the chosen library lacks models this installation recorded.
+// Adopting it is the user's call, so the gate stops at a confirmation that carries the server's
+// plan, and only the confirmation sends `acceptMissingModels`.
+describe("model library gate — confirmed replacement", () => {
+  function missingModelsRefusal() {
+    return Object.assign(new Error("That library is missing models this installation already has"), {
+      code: MODEL_LIBRARY_RELOCATION_REJECTED_CODE,
+      context: { reason: "missing_installed_models", repositories: ["owner/two"] },
+    });
+  }
+
+  function replacementGate({ restartRequired = false } = {}) {
+    const plan = {
+      libraryRoot: "/Volumes/Models/hf/hub",
+      hfHome: "/Volumes/Models/hf",
+      adopted: false,
+      restartRequired,
+      replacement: { retainedRepositories: ["owner/one"], demotedRepositories: ["owner/two"] },
+    };
+    const validate = vi.fn(async (_path, options) => {
+      if (options?.acceptMissingModels) return plan;
+      throw missingModelsRefusal();
+    });
+    const persist = vi.fn(async () => () => {});
+    const adopt = vi.fn(async () => {});
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: false }),
+      validate,
+      persist,
+      adopt,
+    });
+    return { gate, plan, validate, persist, adopt };
+  }
+
+  it("asks before adopting a library that lacks recorded models, writing nothing", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { gate, validate, persist, adopt } = replacementGate();
+    gate.block(unavailableError({ libraryPresent: true }).context, action);
+
+    await expect(gate.relocate("/Volumes/Models/hf/hub")).resolves.toBeNull();
+    expect(gate.getState()).toMatchObject({
+      status: "confirmingReplacement",
+      replacement: {
+        path: "/Volumes/Models/hf/hub",
+        demotedRepositories: ["owner/two"],
+        retainedRepositories: ["owner/one"],
+        restartRequired: false,
+      },
+    });
+    // Strict first, then the write-free plan; neither durable write has happened.
+    expect(validate.mock.calls).toEqual([
+      ["/Volumes/Models/hf/hub"],
+      ["/Volumes/Models/hf/hub", { acceptMissingModels: true }],
+    ]);
+    expect(persist).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("re-binds in place on confirmation and resumes the blocked action exactly once", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { gate, plan, adopt } = replacementGate({ restartRequired: false });
+    gate.block(unavailableError({ libraryPresent: true }).context, action);
+    await gate.relocate("/Volumes/Models/hf/hub");
+
+    await expect(gate.confirmReplacement()).resolves.toBe(plan);
+    expect(adopt).toHaveBeenCalledWith("/Volumes/Models/hf/hub", { acceptMissingModels: true });
+    expect(gate.getState()).toMatchObject({ status: "idle", replacement: null });
+    // The library this process reads is bound again, so the action runs now — once.
+    expect(action).toHaveBeenCalledTimes(1);
+    await expect(gate.confirmReplacement()).resolves.toBeNull();
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the action when the replaced library only applies after a restart", async () => {
+    const onAbandon = vi.fn();
+    const action = Object.assign(vi.fn(async () => "job-1"), { onAbandon });
+    const { gate } = replacementGate({ restartRequired: true });
+    gate.block(unavailableError({ libraryPresent: true }).context, action);
+    await gate.relocate("/Volumes/Other/hf");
+    await gate.confirmReplacement();
+    expect(action).not.toHaveBeenCalled();
+    expect(onAbandon).toHaveBeenCalledTimes(1);
+  });
+
+  it("goes back to the blocked prompt with the action intact when the user declines", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { gate, persist, adopt } = replacementGate();
+    gate.block(unavailableError({ libraryPresent: true }).context, action);
+    await gate.relocate("/Volumes/Models/hf/hub");
+
+    gate.cancelReplacement();
+    expect(gate.getState()).toMatchObject({ status: "blocked", replacement: null });
+    expect(persist).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+    // A later confirm is inert: the confirmation is gone.
+    await expect(gate.confirmReplacement()).resolves.toBeNull();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ordinary refusal an ordinary refusal", async () => {
+    const validate = vi.fn(async () => {
+      throw Object.assign(new Error("That folder does not contain a SceneWorks model library."), {
+        code: MODEL_LIBRARY_RELOCATION_REJECTED_CODE,
+        context: { reason: "not_a_model_library" },
+      });
+    });
+    const gate = createModelLibraryGate({ probe: async () => ({ available: false }), validate });
+    gate.block(unavailableError().context, vi.fn());
+    await gate.relocate("/Users/me/Pictures");
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(gate.getState()).toMatchObject({
+      status: "blocked",
+      error: "That folder does not contain a SceneWorks model library.",
+    });
   });
 });

@@ -60,6 +60,8 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
   let imageJobPosts;
   let relocateRequests;
   let runningJobs;
+  let relocateResponder;
+  let unavailableBody;
 
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,6 +73,8 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     imageJobPosts = [];
     relocateRequests = [];
     runningJobs = [];
+    relocateResponder = null;
+    unavailableBody = UNAVAILABLE_BODY;
     invoke.mockReset();
     // The real command always answers with `hfHomeDefault` even before a library is configured,
     // so the fixture has to as well: the persist step refuses outright without a previous location.
@@ -123,12 +127,13 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
           );
         }
         if (path.endsWith("/model-library/relocate")) {
-          relocateRequests.push(JSON.parse(options.body));
-          return Promise.resolve(response(RELOCATED));
+          const body = JSON.parse(options.body);
+          relocateRequests.push(body);
+          return Promise.resolve(relocateResponder ? relocateResponder(body) : response(RELOCATED));
         }
         if (path.endsWith("/image/jobs") && method === "POST") {
           imageJobPosts.push(JSON.parse(options.body));
-          return Promise.resolve(errorResponse(503, UNAVAILABLE_BODY));
+          return Promise.resolve(errorResponse(503, unavailableBody));
         }
         return Promise.resolve(response([]));
       }),
@@ -371,5 +376,161 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     await act(async () => button("Restart now").click());
     expect(invoke.mock.calls.filter(([command]) => command === "restart_app")).toHaveLength(0);
     expect(dialogs()[0].textContent).toContain("still running");
+  });
+});
+
+// The reformatted-drive dead end: the configured library is present, its identity disagrees with
+// the recording, and only some models were downloaded again. "Use the library at this location"
+// runs the strict check, shows the server's plan when models are missing, and only the user's
+// confirmation re-binds — in place, with no restart and no rewrite of the shell's location.
+describe("App model library replacement after a reformat", () => {
+  let container;
+  let root;
+  let imageJobPosts;
+  let relocateRequests;
+
+  const HUB = "/Volumes/Models/hf/hub";
+  const MISMATCHED_BODY = {
+    ...UNAVAILABLE_BODY,
+    context: { ...UNAVAILABLE_BODY.context, libraryPresent: true },
+  };
+
+  beforeEach(() => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    FakeEventSource.instances = [];
+    window.EventSource = FakeEventSource;
+    window.localStorage.clear();
+    imageJobPosts = [];
+    relocateRequests = [];
+    invoke.mockReset();
+    invoke.mockImplementation((command) => {
+      if (command === "get_storage_setup") {
+        return Promise.resolve({ setupCompleted: true, hfHome: "/Volumes/Models/hf" });
+      }
+      return Promise.resolve(null);
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        const method = options.method ?? "GET";
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: false }));
+        }
+        if (path.endsWith("/access")) return Promise.resolve(response({ authRequired: false }));
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        if (path.endsWith("/ui-preferences")) {
+          return Promise.resolve(
+            response({ embedWorkflowInImages: true, workflowEmbedNoticeSeen: true }),
+          );
+        }
+        if (path.endsWith("/models")) return Promise.resolve(response([MODEL]));
+        if (path.endsWith("/jobs") && method === "GET") return Promise.resolve(response([]));
+        if (path.endsWith("/model-library")) {
+          return Promise.resolve(
+            response({ schemaVersion: 1, probeStatus: "identity_mismatch", available: false }),
+          );
+        }
+        if (path.endsWith("/model-library/relocate")) {
+          const body = JSON.parse(options.body);
+          relocateRequests.push(body);
+          if (!body.acceptMissingModels) {
+            return Promise.resolve(
+              errorResponse(409, {
+                detail: "That library is missing models this installation already has.",
+                code: "model_library_relocation_rejected",
+                context: { reason: "missing_installed_models", repositories: ["owner/wiped"] },
+              }),
+            );
+          }
+          return Promise.resolve(
+            response({
+              libraryRoot: HUB,
+              hfHome: "/Volumes/Models/hf",
+              adopted: !body.dryRun,
+              restartRequired: false,
+              replacement: {
+                retainedRepositories: ["z-image/turbo"],
+                demotedRepositories: ["owner/wiped"],
+              },
+            }),
+          );
+        }
+        if (path.endsWith("/image/jobs") && method === "POST") {
+          imageJobPosts.push(JSON.parse(options.body));
+          return Promise.resolve(errorResponse(503, MISMATCHED_BODY));
+        }
+        return Promise.resolve(response([]));
+      }),
+    );
+  });
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+  });
+
+  function dialogs() {
+    return [...document.body.querySelectorAll(".model-library-modal")];
+  }
+
+  function button(label) {
+    return dialogs()
+      .flatMap((dialog) => [...dialog.querySelectorAll("button")])
+      .find((item) => item.textContent === label);
+  }
+
+  it("confirms the models to re-download, then re-binds in place and resumes the generation", async () => {
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+    const imageNav = [...document.body.querySelectorAll(".nav-label")].find(
+      (item) => item.textContent === "Image",
+    );
+    await act(async () => imageNav.closest("button").click());
+    await settle();
+    const form = document.body.querySelector(".image-studio form");
+    const promptField = field(form, "Prompt") ?? form.querySelector("textarea");
+    await changeField(promptField, "a lighthouse at dusk");
+    await act(async () => form.requestSubmit());
+    await settle();
+    expect(imageJobPosts).toHaveLength(1);
+
+    await act(async () => button("Use the library at this location").click());
+    await settle();
+
+    // The strict check was refused, so the write-free plan was fetched and put in front of the
+    // user. Nothing has been re-bound yet.
+    expect(relocateRequests).toEqual([
+      { path: HUB, dryRun: true },
+      { path: HUB, dryRun: true, acceptMissingModels: true },
+    ]);
+    const confirmation = dialogs()[0];
+    expect(confirmation.textContent).toContain("re-download 1 model");
+    expect(confirmation.querySelector(".model-library-demoted").textContent).toContain(
+      "owner/wiped",
+    );
+
+    await act(async () => button("Use this library").click());
+    await settle();
+
+    expect(relocateRequests.slice(2)).toEqual([
+      { path: HUB, dryRun: true, acceptMissingModels: true },
+      { path: HUB, acceptMissingModels: true },
+    ]);
+    // Same location: the shell's copy is already right and nothing needs a restart.
+    expect(invoke.mock.calls.filter(([command]) => command === "set_model_library")).toEqual([]);
+    expect(button("Restart now")).toBeUndefined();
+    expect(document.body.textContent).toContain("must be downloaded again: owner/wiped");
+    // The blocked generation was resubmitted exactly once against the re-bound library.
+    expect(imageJobPosts).toHaveLength(2);
   });
 });

@@ -10,9 +10,16 @@
 //!   root, but only after it physically carries every closure this install recorded. Rejections are
 //!   typed (`reason` discriminants), never raw filesystem errors, so the prompt can render
 //!   actionable guidance instead of an `ENOENT`.
+//! * **Use a library that lost models** — the same route with `acceptMissingModels`, for a drive
+//!   that was reformatted or replaced and only partly re-downloaded. Strict relocation refuses it
+//!   (`missing_installed_models`); the dialog then fetches this mode's write-free plan, lists the
+//!   models that will need re-downloading, and only the user's confirmation re-binds — demoting
+//!   those models to not-installed. Nothing automatic ever replaces a binding, so a decoy volume
+//!   still fails closed. Re-binding the CURRENT location takes effect without a restart.
 //!
-//! Relocation re-binds the durable identity ledger; it never rewrites download receipts, never
-//! clears the validated-closure ledger, and never downloads. The persisted `HF_HOME` that survives
+//! Strict relocation re-binds the durable identity ledger; it never rewrites download receipts,
+//! never clears the validated-closure ledger, and never downloads. A confirmed replacement prunes
+//! the validated-closure ledger to what the new library carries and still never touches receipts. The persisted `HF_HOME` that survives
 //! a relaunch is desktop state, so the response returns the exact `hfHome` the shell must store —
 //! the API resolves the pair, the shell owns persistence, and neither guesses.
 //!
@@ -29,12 +36,12 @@ use axum::Json;
 use sceneworks_core::model_artifacts::external_library::{
     probe_model_source_library, resolve_fresh_cache_home, resolve_relocation_target,
     ExternalLibraryBindingStore, ExternalLibraryError, LibraryRelocationError,
-    LibraryRelocationRejection, ModelSourceLibraryStatus, RelocationTarget,
+    LibraryRelocationRejection, LibraryReplacementPlan, ModelSourceLibraryStatus, RelocationTarget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const RELOCATION_REJECTED_CODE: &str = "model_library_relocation_rejected";
 pub(crate) const RELOCATION_NOT_PERMITTED_CODE: &str = "model_library_relocation_not_permitted";
@@ -72,6 +79,13 @@ pub(crate) struct RelocateModelLibraryRequest {
     /// BOTH writes, leaving only an exceptional race in the window where the two could disagree.
     #[serde(default)]
     pub dry_run: bool,
+    /// The operator CONFIRMED adopting a library that lacks some recorded models (the drive was
+    /// wiped or replaced and only a subset re-downloaded). Those models are demoted to
+    /// not-installed instead of refusing the library. Only ever sent after a strict attempt was
+    /// refused with `missing_installed_models` and the dialog listed (via a dry run with this
+    /// flag) exactly which models will need re-downloading.
+    #[serde(default)]
+    pub accept_missing_models: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +99,15 @@ pub(crate) struct RelocateModelLibraryResponse {
     /// `GET /api/v1/model-library` — which probes the CONFIGURED library, the one this process is
     /// still using — reports false, because the new root only takes effect on the next launch.
     pub adopted: bool,
+    /// Present only for a confirmed replacement (`acceptMissingModels`): which recorded models the
+    /// library keeps and which become not-installed. For a dry run, this is what the dialog asks
+    /// the operator to confirm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<LibraryReplacementPlan>,
+    /// Whether the adopted root differs from the library this process is configured to read. A
+    /// re-bind of the CURRENT location (the reformatted-drive case) takes effect immediately, since
+    /// the binding is read per probe, so the client resumes instead of asking for a restart.
+    pub restart_required: bool,
 }
 
 /// `POST /api/v1/model-library/relocate` — adopt a new library root without redownloading.
@@ -109,62 +132,11 @@ pub(crate) async fn relocate_model_library(
         return Err(ApiError::bad_request("A library folder is required."));
     }
     let dry_run = request.dry_run;
+    let accept_missing = request.accept_missing_models;
     let data_dir = state.settings.data_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        let store = ExternalLibraryBindingStore::new(&data_dir).map_err(|error| {
-            relocation_failed("model library binding ledger is unavailable", &error)
-        })?;
-        let has_evidence = store.has_install_evidence().map_err(|error| {
-            relocation_failed("model library install evidence could not be read", &error)
-        })?;
-        // The fresh-home shape additionally requires that no library was ever bound: evidence
-        // detection is receipt/ledger-based, so an install whose receipts became unreadable must
-        // not slide into binding an arbitrary folder — an existing binding is itself proof this
-        // installation already had a library, and the strict shape judges the candidate.
-        let bound = store
-            .load()
-            .map_err(|error| relocation_failed("model library binding could not be read", &error))?
-            .is_some();
-        let fresh = !has_evidence && !bound;
-        let target = if fresh {
-            resolve_fresh_cache_home(std::path::Path::new(&picked))
-        } else {
-            resolve_relocation_target(std::path::Path::new(&picked))
-        }
-        .map_err(rejection_to_api_error)?;
-        if dry_run {
-            // A fresh home's `hub` may not exist yet (it is created on adopt), so the dry run
-            // validates the home directory itself: with no install evidence that is the same
-            // canonical-directory + volume-identity check the adopt makes, moving every ordinary
-            // refusal ahead of both durable writes. Writability of the folder is the one thing a
-            // write-free dry run cannot prove.
-            store
-                .validate_relocation(if fresh {
-                    &target.hf_home
-                } else {
-                    &target.library_root
-                })
-                .map_err(relocation_error_to_api_error)?;
-            return Ok(Json(RelocateModelLibraryResponse {
-                target,
-                adopted: false,
-            }));
-        }
-        if fresh {
-            std::fs::create_dir_all(&target.library_root).map_err(|error| {
-                relocation_failed(
-                    "model library folder could not be created",
-                    &ExternalLibraryError(error.to_string()),
-                )
-            })?;
-        }
-        store
-            .relocate_binding(&target.library_root)
-            .map_err(relocation_error_to_api_error)?;
-        Ok(Json(RelocateModelLibraryResponse {
-            target,
-            adopted: true,
-        }))
+    let configured = configured_library(&state);
+    let response = tokio::task::spawn_blocking(move || {
+        relocate_blocking(&data_dir, &configured, &picked, dry_run, accept_missing)
     })
     .await
     .map_err(|error| {
@@ -172,7 +144,141 @@ pub(crate) async fn relocate_model_library(
             "model library relocation could not be completed",
             &ExternalLibraryError(error.to_string()),
         )
-    })?
+    })??;
+    if response.adopted {
+        // Every catalog row's availability was judged against the previous binding. A re-bind of
+        // the configured location takes effect now, so a stale snapshot would keep showing the
+        // re-downloaded models as blocked, or a demoted one as ready.
+        state.model_catalog_cache.invalidate();
+    }
+    Ok(Json(response))
+}
+
+/// The blocking body of [`relocate_model_library`]: every filesystem read and ledger write.
+fn relocate_blocking(
+    data_dir: &Path,
+    configured: &Path,
+    picked: &str,
+    dry_run: bool,
+    accept_missing: bool,
+) -> Result<RelocateModelLibraryResponse, ApiError> {
+    let store = ExternalLibraryBindingStore::new(data_dir).map_err(|error| {
+        relocation_failed("model library binding ledger is unavailable", &error)
+    })?;
+    let has_evidence = store.has_install_evidence().map_err(|error| {
+        relocation_failed("model library install evidence could not be read", &error)
+    })?;
+    // The fresh-home shape additionally requires that no library was ever bound: evidence
+    // detection is receipt/ledger-based, so an install whose receipts became unreadable must
+    // not slide into binding an arbitrary folder — an existing binding is itself proof this
+    // installation already had a library, and the strict shape judges the candidate.
+    let bound = store
+        .load()
+        .map_err(|error| relocation_failed("model library binding could not be read", &error))?
+        .is_some();
+    let fresh = !has_evidence && !bound;
+    let picked = Path::new(picked);
+    let target = if fresh {
+        resolve_fresh_cache_home(picked)
+    } else {
+        resolve_relocation_target(picked).or_else(|rejection| {
+            // A library emptied in place (formatted, nothing re-downloaded yet) carries no
+            // `models--*` layout, so the strict shape cannot address it. When the picked folder
+            // IS the configured library, it is still the one thing worth offering: the
+            // confirmed replacement below. Any other layout-less folder stays refused.
+            match (&rejection, resolve_fresh_cache_home(picked)) {
+                (LibraryRelocationRejection::NotAModelLibrary, Ok(home))
+                    if same_library(&home.library_root, configured) =>
+                {
+                    Ok(home)
+                }
+                _ => Err(rejection),
+            }
+        })
+    }
+    .map_err(rejection_to_api_error)?;
+    let restart_required = !same_library(&target.library_root, configured);
+    if accept_missing && !fresh {
+        // The confirmed replacement. The dry run returns the plan the dialog shows; the adopt
+        // applies exactly that judgement under the ledger's exclusive lock.
+        let plan = if dry_run {
+            store.validate_replacement(&target.library_root)
+        } else {
+            store
+                .replace_binding(&target.library_root)
+                .map(|(_, plan)| plan)
+        }
+        .map_err(relocation_error_to_api_error)?;
+        return Ok(RelocateModelLibraryResponse {
+            target,
+            adopted: !dry_run,
+            replacement: Some(plan),
+            restart_required,
+        });
+    }
+    // A strict refusal of the emptied configured library reads as what it is (every recorded
+    // model is missing), so the dialog can offer the same confirmed replacement.
+    let strict_refusal = |error: LibraryRelocationError| match error {
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::NotAModelLibrary)
+            if !fresh && same_library(&target.library_root, configured) =>
+        {
+            match store.validate_replacement(&target.library_root) {
+                Ok(plan) if !plan.demoted_repositories.is_empty() => {
+                    rejection_to_api_error(LibraryRelocationRejection::MissingInstalledModels {
+                        repositories: plan.demoted_repositories,
+                    })
+                }
+                _ => rejection_to_api_error(LibraryRelocationRejection::NotAModelLibrary),
+            }
+        }
+        other => relocation_error_to_api_error(other),
+    };
+    if dry_run {
+        // A fresh home's `hub` may not exist yet (it is created on adopt), so the dry run
+        // validates the home directory itself: with no install evidence that is the same
+        // canonical-directory + volume-identity check the adopt makes, moving every ordinary
+        // refusal ahead of both durable writes. Writability of the folder is the one thing a
+        // write-free dry run cannot prove.
+        store
+            .validate_relocation(if fresh {
+                &target.hf_home
+            } else {
+                &target.library_root
+            })
+            .map_err(strict_refusal)?;
+        return Ok(RelocateModelLibraryResponse {
+            target,
+            adopted: false,
+            replacement: None,
+            restart_required,
+        });
+    }
+    if fresh {
+        std::fs::create_dir_all(&target.library_root).map_err(|error| {
+            relocation_failed(
+                "model library folder could not be created",
+                &ExternalLibraryError(error.to_string()),
+            )
+        })?;
+    }
+    store
+        .relocate_binding(&target.library_root)
+        .map_err(strict_refusal)?;
+    Ok(RelocateModelLibraryResponse {
+        target,
+        adopted: true,
+        replacement: None,
+        restart_required,
+    })
+}
+
+/// Do two library roots name the same directory? Canonical when both resolve, lexical otherwise
+/// (a root that does not exist yet can still be the configured one by name).
+fn same_library(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 /// Relocation names a host path and rewrites durable local state, so it is a local operation only.
