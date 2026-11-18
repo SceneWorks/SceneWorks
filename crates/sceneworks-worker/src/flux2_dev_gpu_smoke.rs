@@ -253,6 +253,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         scheduler: None,
         scheduler_shift: None,
         guidance: 4.0,
+        pag: None,
         seed: 42,
         // No caption upsampling on this smoke — the prompt is used verbatim, matching candle-gen
         // Default and the worker's `generate_candle_flux2_edit_stream`.
@@ -352,6 +353,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         scheduler_shift: None,
         guidance: 4.0,
         control_scale: 0.75,
+        pag: None,
         seed: 42,
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,

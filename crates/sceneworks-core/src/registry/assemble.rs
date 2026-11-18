@@ -1,7 +1,8 @@
 //! Consume the current descriptor dumps. ENG-7 replaces this input adapter at its producer cutover.
 use super::policy;
 use super::spec::{
-    BackendEvidence, GeneratorRoute, ModelSpec, ProductModel, ProviderRoute, VideoRoute,
+    BackendEvidence, GeneratorRoute, ModelSpec, PagRouteCapability, PagSpec, ProductModel,
+    ProviderRoute, VideoRoute,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -308,6 +309,39 @@ pub fn assemble(
                 }
             }
         }
+        let pag = if product.model_type == "image" {
+            let pag_routes: Vec<(&str, &Option<PagRouteCapability>)> = if !routes.is_empty() {
+                routes
+                    .iter()
+                    .map(|(backend, route)| (backend.as_str(), &route.pag))
+                    .collect()
+            } else if let Some(adapter) = product.fields.get("adapter").and_then(Value::as_str) {
+                exports
+                    .iter()
+                    .filter_map(|(&backend, dump)| {
+                        dump.snapshot
+                            .generator(adapter, backend)
+                            .map(|route| (backend, &route.pag))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if let Some((_, first)) = pag_routes.first() {
+                for (backend, candidate) in pag_routes.iter().skip(1) {
+                    if *candidate != *first {
+                        return Err(format!(
+                            "PAG capability mismatch across backends for {id} ({backend})"
+                        ));
+                    }
+                }
+                first.as_ref().map(PagSpec::from)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if specs
             .insert(
                 id.clone(),
@@ -315,6 +349,7 @@ pub fn assemble(
                     product,
                     routing: route_policy.for_model(&id),
                     preview_by_backend: preview.get(&id).cloned().unwrap_or_default(),
+                    pag,
                     routes,
                     video_routes,
                     provider_routes,

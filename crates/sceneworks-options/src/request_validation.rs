@@ -136,6 +136,14 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
         let numeric_payload = crate::sensenova_validation::canonical_numbers(kind, payload)?;
         crate::validate::shape(kind, &Value::Object(numeric_payload))
             .map_err(|error| ValidationRefusal::new(error.field, error.detail))?;
+        if let Some(raw_pag) = payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get(crate::pag::PAG_KEY))
+            .filter(|value| !value.is_null())
+        {
+            crate::pag::parse_pag_wire_value(raw_pag)?.to_policy_config()?;
+        }
         match kind {
             "image" => shape::validate_image_job(&decode::<ImageJobRequest>(payload)?),
             "video" => shape::validate_video_job(&decode::<VideoJobRequest>(payload)?),
@@ -363,6 +371,7 @@ pub fn validate(
                 "The selected model route does not support Low Res Start.",
             ));
         }
+        crate::pag::requested_pag(model, advanced, entry)?;
         if matches!(kind, "image" | "video") {
             if let Some(steps) = crate::limits::requested_steps(advanced) {
                 check(

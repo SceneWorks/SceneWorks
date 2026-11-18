@@ -189,7 +189,7 @@ pub(super) const KREA_IMPORTED_BASE_TIER: &str = "bf16";
 /// Denoise-steps fallback — the Krea 2 Turbo distilled default (the imported community merges are
 /// distilled-Turbo dense merges, like variant5). The UI normally supplies `advanced.steps`; this only
 /// applies when it does not.
-const KREA_IMPORTED_DEFAULT_STEPS: u32 = 8;
+pub(super) const KREA_IMPORTED_DEFAULT_STEPS: u32 = 8;
 // The pinned Krea runtime's curated sampler falls back to Euler when `GenerationRequest.sampler` is
 // absent. Name it explicitly in both the request and telemetry so execution and exported metadata
 // cannot drift if that library default changes.
@@ -989,6 +989,9 @@ pub(super) async fn generate_krea_imported_control_stream(
     } = target;
     let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
+    request
+        .reject_active_pag("Krea pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     let PreparedKreaImportedControlSources {
         dit_pin,
         control_pin,
@@ -1260,6 +1263,9 @@ pub(super) async fn generate_krea_imported_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    request
+        .reject_active_pag("Krea pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     let dit_pin = resolve_imported_krea_dit_pin(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Imported Krea 2 checkpoint could not be resolved (family/modelPath/single-file)"
@@ -1787,6 +1793,10 @@ pub(super) fn krea_imported_memory_inputs(
     if adapter_count > 0 {
         overlays.push(format!("adapters:{adapter_count}"));
     }
+    let steps = hires_fix.map_or_else(
+        || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
+        |hires| hires.steps,
+    );
     crate::mlx_fit_gate::MlxRequestInputs {
         native_batch: 1,
         width,
@@ -1803,6 +1813,9 @@ pub(super) fn krea_imported_memory_inputs(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::request_pag_workspace_bytes(
+            request, width, height, 1, steps, None,
+        ),
     }
 }
 
@@ -1822,7 +1835,7 @@ fn krea_imported_generate_pass(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -1838,6 +1851,7 @@ fn krea_imported_generate_pass(
         scheduler_shift: sampling.scheduler_shift,
         guidance: sampling.guidance,
         negative_prompt: sampling.negative_prompt.clone(),
+        pag: sampling.pag.clone(),
         conditioning,
         text_style_gain,
         memory,
@@ -1845,7 +1859,7 @@ fn krea_imported_generate_pass(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_context,
@@ -1854,12 +1868,13 @@ fn krea_imported_generate_pass(
     .map_err(|error| {
         crate::generation_error("Krea 2 imported checkpoint generation failed", error)
     })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea 2 imported checkpoint produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "Krea 2 imported checkpoint returned non-image output".to_owned(),
@@ -1882,7 +1897,7 @@ fn krea_imported_generate_multiphase(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -1895,13 +1910,14 @@ fn krea_imported_generate_multiphase(
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
         guidance: sampling.guidance,
+        pag: sampling.pag.clone(),
         text_style_gain,
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_evaluation.map(|evaluation| &evaluation.context),
@@ -1910,14 +1926,15 @@ fn krea_imported_generate_multiphase(
     .map_err(|error| {
         crate::generation_error("Krea 2 imported multi-phase generation failed", error)
     })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine(
                     "Krea 2 imported multi-phase request produced no image".to_owned(),
                 )
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "Krea 2 imported multi-phase request returned non-image output".to_owned(),
@@ -1941,7 +1958,7 @@ fn krea_imported_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let Some(hires) = hires_fix else {
         return krea_imported_generate_pass(
             generator,
@@ -1985,7 +2002,7 @@ fn krea_imported_generate_one(
             on_progress(Progress::Upsampling { tokens, max_tokens })
         }
     };
-    let (base_width, base_height, base_pixels) = krea_imported_generate_pass(
+    let (base_width, base_height, base_pixels, _) = krea_imported_generate_pass(
         generator,
         prompt,
         width,
@@ -2097,10 +2114,11 @@ where
     // sc-18317: ONE warm hit is ONE decision, but this driver evaluates the request once per item.
     // Hand the real proposal to the first evaluation and an inert one to the rest.
     let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+    let facts_tx = tx.clone();
     drive_gen_items(
         tx,
         work,
-        move |_index, (seed, prompt), preview, on_progress| {
+        move |index, (seed, prompt), preview, on_progress| {
             if cancel.is_cancelled() {
                 return Ok(None);
             }
@@ -2151,13 +2169,18 @@ where
                     on_progress,
                 )
             };
-            let (out_width, out_height, pixels) = match generated {
+            let (out_width, out_height, pixels, pag) = match generated {
                 Ok(image) => image,
                 // A poisoned process keeps its fatal class even when cancellation raced it.
                 Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
                 Err(_) if cancel.is_cancelled() => return Ok(None),
                 Err(error) => return Err(error),
             };
+            let mut facts = crate::JsonObject::new();
+            super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+            if !facts.is_empty() {
+                let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
+            }
             Ok(Some((seed, out_width, out_height, pixels)))
         },
     )
@@ -2202,6 +2225,10 @@ pub(super) async fn generate_krea_imported_stream(
                 .to_owned(),
         )
     })?;
+    let resolved_pag = super::sampling::resolve_bespoke_pag_with_capability(
+        request,
+        descriptor.capabilities.pag.as_ref(),
+    )?;
     let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported Krea 2")?;
 
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
@@ -2346,7 +2373,8 @@ pub(super) async fn generate_krea_imported_stream(
     let memory_inputs =
         krea_imported_memory_inputs(request, &conditioning, hires_fix, adapter_count);
 
-    let sampling = super::sampling::explicit_sampling_request(request);
+    let mut sampling = super::sampling::explicit_sampling_request(request);
+    sampling.pag = resolved_pag;
     #[cfg(target_os = "macos")]
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
@@ -2406,7 +2434,7 @@ pub(super) async fn generate_krea_imported_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -2444,13 +2472,21 @@ pub(super) async fn generate_krea_imported_stream(
                             on_progress,
                         )
                     };
-                    let (out_width, out_height, pixels) = match generated {
+                    let (out_width, out_height, pixels, pag) = match generated {
                         Ok(image) => image,
                         // A poisoned process keeps its fatal class even when cancellation raced it.
                         Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => return Err(error),
                     };
+                    let mut pag_facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut pag_facts, pag.as_ref());
+                    if !pag_facts.is_empty() {
+                        let _ = facts_tx.blocking_send(GenEvent::ImageFacts {
+                            index,
+                            facts: pag_facts,
+                        });
+                    }
                     // The engine's receipt exists only after the load materialized, so the three facts
                     // are re-assembled HERE — on the blocking thread with the handle in hand — and
                     // streamed to the consumer, which stamps them onto every subsequent asset in place

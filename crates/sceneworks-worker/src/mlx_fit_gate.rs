@@ -389,6 +389,9 @@ pub(crate) struct MlxRequestInputs {
     /// references and re-resolved CFG, under the same block) and on every lane that never reaches
     /// a cache provider.
     pub prefix_kv_cache_eligible: bool,
+    /// Conservative workspace demand for active Perturbed-Attention Guidance (`0` when PAG is
+    /// omitted, `scale == 0.0`, or the active `[start, stop]` window intercepts zero steps).
+    pub pag_workspace_bytes: u64,
 }
 
 /// A live pricing context, not a cached request cost: every tier probe binds its actual spec.

@@ -320,6 +320,7 @@ impl FluxIpRequests {
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             ip_adapter_scale: self.ip_scale,
+            pag: self.sampling.pag.clone(),
             seed: seed as u64,
             memory: self.memory,
             preview: preview.clone(),
@@ -367,6 +368,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let flux_base = resolve_flux_ipadapter_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("FLUX IP-Adapter base (FLUX.1 snapshot) not found".to_owned())
     })?;
@@ -480,32 +482,40 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 expected_adapter,
                 expected_encoder,
             );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-        engine_id,
-        &request.model,
-        &strategy_spec,
-        artifact_is_certified,
-        &request.model_manifest_entry,
-        tier,
-        &request.mode,
-        Some(FLUX_IPADAPTER_MEMORY_OVERLAY),
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-            reference_count: 1,
-        },
-        true,
-        false,
-        false,
-        false,
-        raw_budget,
-        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-        predicted_peak,
-        runtime_overlay_bytes,
-        gen_core::MemoryCacheState::Cold,
-    )?;
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request, width, height, 1, steps, None,
+    );
+    let memory_evaluation =
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
+            engine_id,
+            &request.model,
+            &strategy_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            Some(FLUX_IPADAPTER_MEMORY_OVERLAY),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            false,
+            raw_budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+            predicted_peak,
+            runtime_overlay_bytes,
+            gen_core::MemoryCacheState::Cold,
+            None,
+            None,
+            pag_workspace_bytes,
+            None,
+        )?;
     let generation_memory = memory_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.memory)
@@ -661,6 +671,10 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                     facts.insert(
                         "workerExecutionReport".into(),
                         serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    super::lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        completed.generation.pag.as_ref(),
                     );
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid

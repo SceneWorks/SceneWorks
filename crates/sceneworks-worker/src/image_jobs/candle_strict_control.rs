@@ -138,7 +138,7 @@ pub(super) trait CandleStrictControl: Send + 'static {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, ExecutionIdentity)>;
+    ) -> WorkerResult<CompletedControlImage>;
 
     /// Whether this lane compiles a source-bound render plan for every preprocessed control map before
     /// [`load`](Self::load) opens any weights (SW-6936). The driver then preprocesses the whole pose set
@@ -163,18 +163,25 @@ pub(super) trait CandleStrictControl: Send + 'static {
     }
 }
 
+pub(super) type CompletedControlImage = (
+    Image,
+    ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+);
+
 /// Extract exactly one RGB image from a completed bespoke provider call. A missing or extra image
 /// is an engine error; never attach its identity to a different pose's output.
 pub(super) fn completed_control_image(
     completed: CompletedGeneration,
-) -> WorkerResult<(Image, ExecutionIdentity)> {
+) -> WorkerResult<CompletedControlImage> {
     let CompletedGeneration {
         generation,
         execution,
     } = completed;
+    let pag = generation.pag;
     match generation.output {
         Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
-            Ok((images.remove(0), execution))
+            Ok((images.remove(0), execution, pag))
         }
         _ => Err(WorkerError::Engine(
             "strict-control provider did not complete exactly one RGB image".into(),
@@ -192,7 +199,7 @@ fn generate_control_item<P: CandleStrictControl>(
     cancel: &CancelFlag,
     preview: &gen_core::PreviewSink,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<Option<(Image, ExecutionIdentity)>> {
+) -> WorkerResult<Option<CompletedControlImage>> {
     if cancel.is_cancelled() {
         return Ok(None);
     }
@@ -210,12 +217,14 @@ fn send_control_report(
     tx: &tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
     execution: ExecutionIdentity,
+    pag: Option<&gen_core::PagExecutionReport>,
 ) -> WorkerResult<bool> {
     let mut facts = JsonObject::new();
     facts.insert(
         "workerExecutionReport".into(),
         serde_json::to_value(execution).map_err(WorkerError::Json)?,
     );
+    super::lane_controls::record_pag_execution_report(&mut facts, pag);
     Ok(tx
         .blocking_send(GenEvent::ImageFacts { index, facts })
         .is_ok())
@@ -450,7 +459,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
                 // `WorkerProgressCard`. This closure used to bind `_preview` and drop it, which is why the
                 // Krea control lane shipped an inert `Default::default()` sink.
-                let Some((out, execution)) = generate_control_item(
+                let Some((out, execution, pag)) = generate_control_item(
                     &provider,
                     &model,
                     control,
@@ -463,7 +472,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                 else {
                     return Ok(None);
                 };
-                if !send_control_report(&report_tx, index, execution)? {
+                if !send_control_report(&report_tx, index, execution, pag.as_ref())? {
                     return Ok(None);
                 }
                 // Score this finished pose against the cached source embedding (sc-4410). The candle
@@ -564,7 +573,7 @@ mod report_tests {
             cancel: &CancelFlag,
             preview: &gen_core::PreviewSink,
             _on_progress: &mut dyn FnMut(Progress),
-        ) -> WorkerResult<(Image, ExecutionIdentity)> {
+        ) -> WorkerResult<CompletedControlImage> {
             let _ = preview;
             if seed == 2 {
                 return Err(WorkerError::Engine("fixture error".into()));
@@ -588,6 +597,7 @@ mod report_tests {
                     pixels: vec![0; seed as usize * 3],
                 },
                 unavailable(&format!("attempt-{seed}")),
+                None,
             ))
         }
     }
@@ -655,7 +665,7 @@ mod report_tests {
         .unwrap()
         .unwrap();
         assert_eq!(first.0.width, 1);
-        assert!(send_control_report(&tx, 0, first.1).unwrap());
+        assert!(send_control_report(&tx, 0, first.1, first.2.as_ref()).unwrap());
 
         let failed_cancel = CancelFlag::default();
         assert!(generate_control_item(
@@ -697,7 +707,7 @@ mod report_tests {
         .unwrap()
         .unwrap();
         assert_eq!(retry.0.width, 4);
-        assert!(send_control_report(&tx, 1, retry.1).unwrap());
+        assert!(send_control_report(&tx, 1, retry.1, retry.2.as_ref()).unwrap());
 
         let first_fact = rx.try_recv().unwrap();
         let retry_fact = rx.try_recv().unwrap();

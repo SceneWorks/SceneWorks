@@ -56,6 +56,7 @@ pub fn native_request(
                             .map_err(|error| error.to_string())
                     })
                     .transpose()?,
+                pag: policy.pag,
                 ..Default::default()
             })
         })
@@ -135,12 +136,16 @@ pub fn scrub_reports(payload: &mut JsonObject) {
     payload.remove("moss_image_edit_execution_report");
     payload.remove(REPORT_KEY);
     payload.remove("moss_image_execution_report");
+    payload.remove("pagExecutionReport");
+    payload.remove("pag_execution_report");
     if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
         advanced.remove("mossImageSampleIndex");
         advanced.remove(EDIT_REPORT_KEY);
         advanced.remove("moss_image_edit_execution_report");
         advanced.remove(REPORT_KEY);
         advanced.remove("moss_image_execution_report");
+        advanced.remove("pagExecutionReport");
+        advanced.remove("pag_execution_report");
     }
 }
 

@@ -1415,6 +1415,7 @@ fn portable_owner_module(file: &str) -> bool {
             | "crates/sceneworks-options/src/limits.rs"
             | "crates/sceneworks-options/src/moss_advanced.rs"
             | "crates/sceneworks-options/src/moss_validation.rs"
+            | "crates/sceneworks-options/src/pag.rs"
             | "crates/sceneworks-options/src/payload_util.rs"
             | "crates/sceneworks-options/src/prompt_enhancement.rs"
             | "crates/sceneworks-options/src/request_validation.rs"

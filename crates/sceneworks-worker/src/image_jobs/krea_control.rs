@@ -158,6 +158,7 @@ pub(super) fn krea_control_memory_inputs(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     }
 }
 
@@ -551,6 +552,9 @@ pub(super) async fn generate_krea_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    request
+        .reject_active_pag("Krea pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     let weights_dir = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned(),

@@ -186,6 +186,7 @@ fn recipe_preset_finalize_for_write(
     let value = normalize_recipe_preset_for_write(value, scope, require_all)?;
     validate_recipe_preset_model_workflow(models, &value)?;
     validate_recipe_preset_resolution(models, &value)?;
+    validate_recipe_preset_pag(models, &value)?;
     validate_recipe_preset_lora_compatibility(models, loras, &value)?;
     Ok(value)
 }
@@ -723,6 +724,28 @@ pub(crate) fn normalize_recipe_preset_for_write(
         )
         .map_err(|message| ApiError::bad_request(format!("Recipe preset {message}")))?;
     }
+    if let Some(pag) = object
+        .get("defaults")
+        .and_then(|d| d.get("pag"))
+        .filter(|v| !v.is_null())
+        .cloned()
+    {
+        if recipe_preset_object_is_general(object) {
+            return Err(ApiError::bad_request(
+                "General recipe presets cannot set defaults.pag",
+            ));
+        }
+        sceneworks_core::options::pag::validate_standalone_pag_value(&pag)
+            .map_err(|error| ApiError::bad_request(format!("Recipe preset {}", error.detail)))?;
+        if let Some(wire) = sceneworks_core::options::pag::parse_pag_wire_value(&pag)
+            .ok()
+            .and_then(|wire| serde_json::to_value(wire).ok())
+        {
+            if let Some(defaults) = object.get_mut("defaults").and_then(Value::as_object_mut) {
+                defaults.insert("pag".to_owned(), wire);
+            }
+        }
+    }
     validate_recipe_preset_prompt(object.get("prompt"))?;
     Ok(preset)
 }
@@ -960,6 +983,28 @@ pub(crate) fn validate_recipe_preset_resolution(
     }
     validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
     validate_dimension(height, "height", MAX_IMAGE_DIMENSION)
+}
+
+pub(crate) fn validate_recipe_preset_pag(models: &[Value], preset: &Value) -> Result<(), ApiError> {
+    let Some(pag) = preset
+        .get("defaults")
+        .and_then(|defaults| defaults.get("pag"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let Some(model_id) = preset.get("model").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if let Some(entry) = models
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+        .and_then(Value::as_object)
+    {
+        sceneworks_core::options::pag::validate_pag_value_for_model(model_id, pag, entry)
+            .map_err(|error| ApiError::bad_request(format!("Recipe preset {}", error.detail)))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_recipe_preset_model_workflow(
@@ -1277,4 +1322,133 @@ async fn stamp_recipe_preset_used_inner(state: &AppState, preset_id: &str) -> Re
         ApiError::internal(format!("Failed to encode preset usage store: {error}"))
     })?;
     write_manifest_atomic(&path, &format!("{payload}\n")).await
+}
+
+#[cfg(test)]
+mod pag_preset_tests {
+    use super::*;
+
+    #[test]
+    fn model_preset_normalizes_valid_pag_and_rejects_general_or_malformed_pag() {
+        let normalized = normalize_recipe_preset_for_write(
+            json!({
+                "id": "flux2_pag_sharp",
+                "name": "FLUX.2 Sharp PAG",
+                "model": "flux2_dev",
+                "workflow": "text_to_image",
+                "defaults": {
+                    "steps": 28,
+                    "pag": {
+                        "scale": 1.5,
+                        "layers": [2, 5],
+                        "start": 0.1,
+                        "stop": 0.9,
+                        "adaptive_scale": 0.25
+                    }
+                }
+            }),
+            "global",
+            true,
+        )
+        .expect("valid model preset with defaults.pag");
+        assert_eq!(
+            normalized["defaults"]["pag"],
+            json!({
+                "scale": 1.5,
+                "layers": [2, 5],
+                "start": 0.1,
+                "stop": 0.9,
+                "adaptiveScale": 0.25
+            })
+        );
+
+        let general_err = normalize_recipe_preset_for_write(
+            json!({
+                "id": "general_pag",
+                "kind": "general",
+                "name": "General PAG",
+                "defaults": { "pag": { "scale": 1.5 } }
+            }),
+            "global",
+            true,
+        )
+        .expect_err("general preset must refuse defaults.pag");
+        assert!(
+            general_err
+                .detail
+                .contains("General recipe presets cannot set defaults.pag"),
+            "{}",
+            general_err.detail
+        );
+
+        for invalid in [
+            json!({ "scale": -1.0 }),
+            json!({ "scale": 1.5, "start": 0.9, "stop": 0.2 }),
+            json!({ "scale": 1.5, "unknownField": true }),
+        ] {
+            let err = normalize_recipe_preset_for_write(
+                json!({
+                    "id": "bad_pag",
+                    "name": "Bad PAG",
+                    "model": "flux2_dev",
+                    "workflow": "text_to_image",
+                    "defaults": { "pag": invalid }
+                }),
+                "global",
+                true,
+            )
+            .expect_err("malformed defaults.pag must fail");
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn validate_recipe_preset_pag_enforces_model_capability_and_block_bounds() {
+        let flux2_spec = sceneworks_core::registry::builtin_model_spec("flux2_dev")
+            .expect("flux2_dev spec")
+            .project(None);
+        let sdxl_spec = sceneworks_core::registry::builtin_model_spec("sdxl")
+            .expect("sdxl spec")
+            .project(None);
+        let models = vec![flux2_spec, sdxl_spec];
+
+        validate_recipe_preset_pag(
+            &models,
+            &json!({
+                "model": "flux2_dev",
+                "defaults": { "pag": { "scale": 1.5, "layers": [0, 55] } }
+            }),
+        )
+        .expect("layers within 0..56 succeed");
+
+        let out_of_bounds = validate_recipe_preset_pag(
+            &models,
+            &json!({
+                "model": "flux2_dev",
+                "defaults": { "pag": { "scale": 1.5, "layers": [56] } }
+            }),
+        )
+        .expect_err("layer 56 must fail on 56-block flux2_dev");
+        assert!(
+            out_of_bounds.detail.contains("pag.layers"),
+            "{}",
+            out_of_bounds.detail
+        );
+
+        let unsupported = validate_recipe_preset_pag(
+            &models,
+            &json!({
+                "model": "sdxl",
+                "defaults": { "pag": { "scale": 1.5 } }
+            }),
+        )
+        .expect_err("sdxl does not support PAG");
+        assert!(
+            unsupported
+                .detail
+                .contains("sdxl does not support Perturbed-Attention Guidance"),
+            "{}",
+            unsupported.detail
+        );
+    }
 }

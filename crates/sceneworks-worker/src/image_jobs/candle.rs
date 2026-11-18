@@ -997,6 +997,16 @@ async fn generate_candle_registry_stream_using(
         )));
     }
     let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
+    let pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
+        memory_width,
+        memory_height,
+        native_batch
+            .as_ref()
+            .map_or(1, lane_controls::NativePromptBatch::images),
+        hires_fix.as_ref().map_or(steps, |plan| plan.steps),
+        model.descriptor.capabilities.pag.as_ref(),
+        lane_controls.pag.as_ref(),
+    );
     // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
     // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
     // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
@@ -1122,7 +1132,7 @@ async fn generate_candle_registry_stream_using(
                                     memory_height,
                                 )?,
                             );
-                            crate::candle_memory_strategy::evaluate_shared_image_priced(
+                            crate::candle_memory_strategy::evaluate_shared_image_priced_and_pag(
                                 engine_id,
                                 &request.model,
                                 &spec,
@@ -1147,7 +1157,7 @@ async fn generate_candle_registry_stream_using(
                                 crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
                                     &request.model_manifest_entry,
                                     candidate,
-                                    overlay_bytes,
+                                    overlay_bytes.saturating_add(pag_workspace_bytes),
                                 ),
                                 overlay_bytes,
                                 if reclaimable_gb > 0.0 {
@@ -1156,6 +1166,7 @@ async fn generate_candle_registry_stream_using(
                                     gen_core::MemoryCacheState::Cold
                                 },
                                 None,
+                                pag_workspace_bytes,
                                 candidate_endpoints,
                             )?
                         } else {
@@ -1167,7 +1178,7 @@ async fn generate_candle_registry_stream_using(
                             .and_then(|dir| {
                                 krea_runtime_evidence_context(request, settings, candidate, &dir)
                             });
-                        match crate::vram_gate::krea_turbo_fit_with_runtime(
+                        match crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(
                             &request.model_manifest_entry,
                             candidate,
                             memory_width,
@@ -1176,6 +1187,7 @@ async fn generate_candle_registry_stream_using(
                             shared_reserve_gb,
                             krea_allow_streamed_blocks,
                             candidate_runtime.as_ref(),
+                            pag_workspace_bytes,
                         ) {
                             Some(
                                 crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -1201,7 +1213,7 @@ async fn generate_candle_registry_stream_using(
                                     candidate,
                                     budget,
                                     false,
-                                    candidate_adapter_bytes,
+                                    candidate_adapter_bytes.saturating_add(pag_workspace_bytes),
                                 )
                             }
                             None => {
@@ -1218,7 +1230,7 @@ async fn generate_candle_registry_stream_using(
                                     candidate,
                                     budget,
                                     false,
-                                    candidate_adapter_bytes,
+                                    candidate_adapter_bytes.saturating_add(pag_workspace_bytes),
                                 )
                             }
                         }
@@ -1228,7 +1240,7 @@ async fn generate_candle_registry_stream_using(
                             candidate,
                             budget,
                             sequential_capable,
-                            candidate_adapter_bytes,
+                            candidate_adapter_bytes.saturating_add(pag_workspace_bytes),
                         )
                     };
                     Ok((candidate, fit))
@@ -1285,7 +1297,7 @@ async fn generate_candle_registry_stream_using(
                                 });
                                 tier_quality_rank(candidate) < tier_quality_rank(smallest)
                                     && matches!(
-                                        crate::vram_gate::krea_turbo_fit_with_runtime(
+                                        crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(
                                             &request.model_manifest_entry,
                                             candidate,
                                             memory_width,
@@ -1294,6 +1306,7 @@ async fn generate_candle_registry_stream_using(
                                             shared_reserve_gb,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
+                                            pag_workspace_bytes,
                                         ),
                                         Some(
                                             crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -1374,10 +1387,16 @@ async fn generate_candle_registry_stream_using(
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
             .saturating_add(batch_overlay_bytes)
             .saturating_add(source_activation_bytes);
-    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+    let selector_resident_needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
         adapter_resident_bytes,
+    );
+    let legacy_gate_overlay_bytes = adapter_resident_bytes.saturating_add(pag_workspace_bytes);
+    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        legacy_gate_overlay_bytes,
     );
     // Chroma's selector prices the exact provider receipt after the load spec is sealed. Passing
     // generic source-file adapter bytes here would double-charge adapters, omit PiD's materialized
@@ -1411,7 +1430,7 @@ async fn generate_candle_registry_stream_using(
             base
         }
     } else {
-        needed
+        selector_resident_needed
     };
     let shared_runtime_overlay_bytes = if provider_receipt_priced {
         0
@@ -1563,7 +1582,7 @@ async fn generate_candle_registry_stream_using(
         hires_fix.is_none() && native_batch.is_none(),
     );
     let shared_memory = if let Some(references) = flux3_references.as_ref() {
-        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
             engine_id,
             &request.model,
             &shared_contract_spec,
@@ -1602,10 +1621,11 @@ async fn generate_candle_registry_stream_using(
             },
             prefix_kv_cache_surcharge,
             Some(&references.resources),
+            pag_workspace_bytes,
             sdxl_endpoints,
         )
     } else {
-        crate::candle_memory_strategy::evaluate_shared_image_priced(
+        crate::candle_memory_strategy::evaluate_shared_image_priced_and_pag(
             engine_id,
             &request.model,
             &shared_contract_spec,
@@ -1643,6 +1663,7 @@ async fn generate_candle_registry_stream_using(
                 gen_core::MemoryCacheState::Cold
             },
             prefix_kv_cache_surcharge,
+            pag_workspace_bytes,
             sdxl_endpoints,
         )
     }?;
@@ -1768,7 +1789,7 @@ async fn generate_candle_registry_stream_using(
     // unverified path; only then may the established gate remain as provider-safe fallback.
     let shared_krea_fit = (krea_turbo_ladder && adapter_count == 0)
         .then(|| {
-            crate::vram_gate::krea_turbo_fit_with_runtime(
+            crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(
                 &request.model_manifest_entry,
                 tier,
                 memory_width,
@@ -1777,6 +1798,7 @@ async fn generate_candle_registry_stream_using(
                 shared_reserve_gb,
                 krea_allow_streamed_blocks,
                 krea_runtime_context.as_ref(),
+                pag_workspace_bytes,
             )
         })
         .flatten();
@@ -1913,7 +1935,7 @@ async fn generate_candle_registry_stream_using(
                     crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
                         &request.model_manifest_entry,
                         tier,
-                        adapter_resident_bytes,
+                        legacy_gate_overlay_bytes,
                     );
                 let krea_selected = if krea_turbo_ladder {
                     match shared_krea_fit {
@@ -1967,22 +1989,20 @@ async fn generate_candle_registry_stream_using(
                             true
                         }
                         Some(crate::vram_gate::KreaTurboFit::Reject { phases, needed_gb }) => {
-                            let installed_smaller: Vec<&'static str> = installed_tier_keys(
-                                request, settings,
-                            )
-                            .into_iter()
-                            .filter(|candidate| {
-                                let candidate_runtime = resolve_tier_dir(
-                                    request, settings, candidate,
-                                )
-                                .and_then(|dir| {
-                                    krea_runtime_evidence_context(
-                                        request, settings, candidate, &dir,
-                                    )
-                                });
-                                tier_quality_rank(candidate) < tier_quality_rank(tier)
-                                    && matches!(
-                                        crate::vram_gate::krea_turbo_fit_with_runtime(
+                            let installed_smaller: Vec<&'static str> =
+                                installed_tier_keys(request, settings)
+                                    .into_iter()
+                                    .filter(|candidate| {
+                                        let candidate_runtime =
+                                            resolve_tier_dir(request, settings, candidate)
+                                                .and_then(|dir| {
+                                                    krea_runtime_evidence_context(
+                                                        request, settings, candidate, &dir,
+                                                    )
+                                                });
+                                        tier_quality_rank(candidate) < tier_quality_rank(tier)
+                                            && matches!(
+                                        crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(
                                             &request.model_manifest_entry,
                                             candidate,
                                             memory_width,
@@ -1991,14 +2011,15 @@ async fn generate_candle_registry_stream_using(
                                             shared_reserve_gb,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
+                                            pag_workspace_bytes,
                                         ),
                                         Some(
                                             crate::vram_gate::KreaTurboFit::Resident { .. }
                                                 | crate::vram_gate::KreaTurboFit::Fits { .. }
                                         )
                                     )
-                            })
-                            .collect();
+                                    })
+                                    .collect();
                             let lower_resolution =
                                 crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                                     &request.model_manifest_entry,
@@ -2137,7 +2158,7 @@ async fn generate_candle_registry_stream_using(
                         tier_quality_rank(candidate) < tier_quality_rank(tier)
                             && (!krea_turbo_ladder
                                 || matches!(
-                                    crate::vram_gate::krea_turbo_fit_with_runtime(
+                                    crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(
                                         &request.model_manifest_entry,
                                         candidate,
                                         memory_width,
@@ -2146,6 +2167,7 @@ async fn generate_candle_registry_stream_using(
                                         shared_reserve_gb,
                                         krea_allow_streamed_blocks,
                                         candidate_runtime.as_ref(),
+                                        pag_workspace_bytes,
                                     ),
                                     Some(
                                         crate::vram_gate::KreaTurboFit::Resident { .. }
@@ -2354,10 +2376,11 @@ async fn generate_candle_registry_stream_using(
         let planning_guidance_method = guidance_method.clone();
         let planning_enhance = enhance.clone();
         let planning_batch = native_batch.clone();
+        let planning_lane_controls = lane_controls.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
                 output_channels: rgba_output_channels,
-                controls: lane_controls,
+                controls: planning_lane_controls.clone(),
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
             };
@@ -2650,6 +2673,7 @@ async fn generate_candle_registry_stream_using(
                         let warnings = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
+                        let pag_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -2679,10 +2703,11 @@ async fn generate_candle_registry_stream_using(
                                 flux3_references: None,
                                 flux3_layout: None,
                                 output_channels: rgba_output_channels,
-                                controls: lane_controls,
+                                controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
+                                pag_report: Some(&pag_report),
                                 prompt_batch: Some(batch),
                                 render_plan: render_plans.first().and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2703,6 +2728,10 @@ async fn generate_candle_registry_stream_using(
                         if let Some(report) = execution_report.take() {
                             report.insert_image_facts(&mut facts)?;
                         }
+                        lane_controls::record_pag_execution_report(
+                            &mut facts,
+                            pag_report.take().as_ref(),
+                        );
                         Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
@@ -2716,6 +2745,7 @@ async fn generate_candle_registry_stream_using(
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
+                    let pag_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -2763,10 +2793,11 @@ async fn generate_candle_registry_stream_using(
                                 flux3_references: flux3_references.as_ref(),
                                 flux3_layout: flux3_layout.as_ref(),
                                 output_channels: rgba_output_channels,
-                                controls: lane_controls,
+                                controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
+                                pag_report: Some(&pag_report),
                                 prompt_batch: None,
                                 render_plan: render_plans.get(index).and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2820,6 +2851,10 @@ async fn generate_candle_registry_stream_using(
                     if let Some(report) = execution_report.take() {
                         report.insert_image_facts(&mut facts)?;
                     }
+                    lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        pag_report.take().as_ref(),
+                    );
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(
                             flux3_references::FACT_KEY.to_owned(),

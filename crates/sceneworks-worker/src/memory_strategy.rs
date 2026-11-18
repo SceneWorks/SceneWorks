@@ -2837,6 +2837,7 @@ mod tests {
                     cache_bytes: if path.is_cached() { 4096 } else { 0 },
                     overflow: None,
                 }),
+                pag: None,
             })
         }
     }

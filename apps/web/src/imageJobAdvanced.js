@@ -39,6 +39,9 @@ export function buildImageJobAdvanced(state) {
     // SW-7106: MiniMax-H3-Image's sampler block, already resolved by the studio (null for every
     // other model).
     h3ImageSampler,
+    // SW-7180: Perturbed-Attention Guidance block (`{ scale, layers?, start?, stop?, adaptiveScale? }`),
+    // already resolved by the studio (`null` / `undefined` when off or unsupported).
+    pag,
     // Step / guidance overrides.
     stepsOverride,
     guidanceOverride,
@@ -120,6 +123,7 @@ export function buildImageJobAdvanced(state) {
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
     ...(appearance ? { appearance, appearancePrompt: appearanceUserPrompt ?? "", appearanceNegativePrompt: appearanceUserNegative ?? "", ...(appearanceUserPromptBatch?.length ? { appearancePromptBatch: appearanceUserPromptBatch } : {}) } : {}),
+    ...(pag ? { pag } : {}),
     ...(mossEdit ? {
       resolution,
       mossImage: editAdvanced.mossImage,

@@ -2261,6 +2261,26 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
                 .or_insert_with(|| sampler.clone());
         }
     }
+    // SW-7180: a preset's Perturbed-Attention Guidance block expands onto the preset's own model
+    // when the caller omitted `advanced.pag`. Explicit caller blocks win; other models never inherit it.
+    if let Some(pag) = preset
+        .get("defaults")
+        .and_then(|d| d.get("pag"))
+        .filter(|v| !v.is_null())
+    {
+        let same_model = preset.get("model").and_then(Value::as_str)
+            == job_payload.get("model").and_then(Value::as_str);
+        if same_model {
+            let advanced = job_payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+            advanced
+                .entry("pag".to_owned())
+                .or_insert_with(|| pag.clone());
+        }
+    }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT
     // applied here — the studio seeds those into the form from the preset and the
     // user can override them, so the submitted values are authoritative.

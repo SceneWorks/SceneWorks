@@ -469,7 +469,7 @@ impl CandleStrictControl for Flux2StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         let req = Flux2ControlRequest {
             prompt: self.prompt.clone(),
             width: self.width,
@@ -480,6 +480,7 @@ impl CandleStrictControl for Flux2StrictControl {
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             control_scale: self.control_scale,
+            pag: self.sampling.pag.clone(),
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
@@ -521,6 +522,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let base = resolve_flux2_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("FLUX.2-dev base (FLUX.2-dev) weights not found".to_owned())
     })?;
@@ -601,33 +603,41 @@ pub(super) async fn generate_candle_flux2_control_stream(
             Path::new(&control_file),
             &control,
         );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-        "flux2_dev",
-        &request.model,
-        &strategy_spec,
-        artifact_is_certified,
-        &request.model_manifest_entry,
-        tier,
-        flux2_control_memory_request_mode(&request.mode),
-        Some("control"),
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-            // The control map is an overlay input, not a token-concatenated image reference.
-            reference_count: 0,
-        },
-        false,
-        use_pid,
-        false,
-        false,
-        raw_budget,
-        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-        predicted_peak,
-        runtime_overlay_bytes,
-        gen_core::MemoryCacheState::Cold,
-    )?;
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request, width, height, 1, steps, None,
+    );
+    let memory_evaluation =
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
+            "flux2_dev",
+            &request.model,
+            &strategy_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            flux2_control_memory_request_mode(&request.mode),
+            Some("control"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                // The control map is an overlay input, not a token-concatenated image reference.
+                reference_count: 0,
+            },
+            false,
+            use_pid,
+            false,
+            false,
+            raw_budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+            predicted_peak,
+            runtime_overlay_bytes,
+            gen_core::MemoryCacheState::Cold,
+            None,
+            None,
+            pag_workspace_bytes,
+            None,
+        )?;
     let generation_memory = memory_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.memory)

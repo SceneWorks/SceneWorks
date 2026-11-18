@@ -62,16 +62,17 @@ describe("background image regeneration", () => {
 
   it("strips every receipt while preserving nested controls and the original recipes", () => {
     const original = { ...asset, generationSet: { recipe: { ...asset.recipe,
-      rawAdapterSettings: { steps: 14, mossImage: { acceleration: "off" }, promptBatch: ["cat", "dog"],
+      rawAdapterSettings: { steps: 14, pag: { scale: 1.5, layers: [2, 5] }, mossImage: { acceleration: "off" }, promptBatch: ["cat", "dog"],
+        pagExecutionReport: { scale: 1.5, adaptiveScale: 0, layers: [2, 5], start: 0.05, stop: 0.85, activeSteps: 10, totalSteps: 14 },
         checkpointWeightFacts: { receipt: true }, memoryStrategy: "resident",
         memoryEvidenceRevision: "revision", realModelInference: true } } } };
     const before = JSON.stringify(original);
     const request = imageRecipeRequest(original);
-    for (const key of ["promptBatch", "upscale", "hiresFix", "mossImageExecutionReport", "checkpointWeightFacts", "memoryStrategy", "memoryEvidenceRevision", "realModelInference", "promptEnhancement"]) {
+    for (const key of ["promptBatch", "upscale", "hiresFix", "mossImageExecutionReport", "pagExecutionReport", "checkpointWeightFacts", "memoryStrategy", "memoryEvidenceRevision", "realModelInference", "promptEnhancement"]) {
       expect(request.advanced).not.toHaveProperty(key);
     }
     expect(request).toMatchObject({ prompts: ["cat", "dog"], upscale: { enabled: true, factor: 2 },
-      hiresFix: { enabled: true, upscaleBy: 2 }, advanced: { steps: 28, mossImage: { acceleration: "off" } } });
+      hiresFix: { enabled: true, upscaleBy: 2 }, advanced: { steps: 28, pag: { scale: 1.5, layers: [2, 5] }, mossImage: { acceleration: "off" } } });
     expect(JSON.stringify(original)).toBe(before);
   });
 

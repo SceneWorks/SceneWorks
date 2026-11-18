@@ -1052,6 +1052,103 @@ pub(crate) fn prefix_kv_cache_record(
     }))
 }
 
+/// Source-derived transient working-buffer bytes for Perturbed-Attention Guidance (SW-7180).
+///
+/// Active PAG runs a sequential perturbed-attention DiT forward on the same prompt conditioning
+/// (reusing any prefix KV cache read-only) during steps inside `[start, stop)`. While active
+/// (`scale > 0.0` and `active_steps(steps) > 0`), the extra live working set during denoise
+/// consists of:
+/// 1. Retained conditional velocity + PAG combine scratch (`v_cond`, `v_pert`, `v_cond - v_pert`)
+///    over `ceil(width / 16) * ceil(height / 16)` patch tokens at 128 latent channels × f32 width
+///    (`3 * 128 * 4` bytes/token), plus
+/// 2. Perturbed self-attention target-V slice/concat working buffers (`2 * 4096 * 4` bytes/token,
+///    upper-bounded across the 3072..4096 hidden widths of the six PAG-capable families).
+///
+/// When `pag` is `None`, `scale <= 0.0`, or `active_steps(steps) == 0`, returns strictly `0` so
+/// every non-PAG request, static memory-matrix cell, and calibration anchor is unchanged.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn pag_workspace_bytes(
+    width: u32,
+    height: u32,
+    batch: u32,
+    steps: u32,
+    capability: Option<&gen_core::PagCapability>,
+    pag: Option<&gen_core::PagConfig>,
+) -> u64 {
+    let Some(pag) = pag else {
+        return 0;
+    };
+    if !pag.scale.is_finite() || pag.scale <= 0.0 || steps == 0 {
+        return 0;
+    }
+    let resolved = match capability {
+        Some(cap) => match cap.resolve(Some(pag)) {
+            Ok(resolved) => resolved,
+            Err(_) => return 0,
+        },
+        None => {
+            if pag.validate().is_err() {
+                return 0;
+            }
+            let layers = match &pag.layers {
+                Some(layers) if layers.is_empty() => return 0,
+                Some(layers) => layers.clone(),
+                None => vec![0],
+            };
+            gen_core::PagResolved {
+                scale: pag.scale,
+                adaptive_scale: pag.adaptive_scale.unwrap_or(0.0),
+                layers,
+                start: pag.start.unwrap_or(0.0),
+                stop: pag.stop.unwrap_or(1.0),
+            }
+        }
+    };
+    if resolved.active_steps(steps) == 0 {
+        return 0;
+    }
+    let tokens =
+        u64::from(width.max(1).div_ceil(16)).saturating_mul(u64::from(height.max(1).div_ceil(16)));
+    let batch = u64::from(batch.max(1));
+    const VELOCITY_COMBINE_BYTES_PER_TOKEN: u64 = 3 * 128 * 4;
+    const PERTURBED_ATTN_V_BYTES_PER_TOKEN: u64 = 2 * 4096 * 4;
+    batch
+        .saturating_mul(tokens)
+        .saturating_mul(VELOCITY_COMBINE_BYTES_PER_TOKEN + PERTURBED_ATTN_V_BYTES_PER_TOKEN)
+}
+
+/// Convenience wrapper computing [`pag_workspace_bytes`] directly from an [`ImageRequest`].
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn request_pag_workspace_bytes(
+    request: &sceneworks_core::image_request::ImageRequest,
+    width: u32,
+    height: u32,
+    batch: u32,
+    steps: u32,
+    capability: Option<&gen_core::PagCapability>,
+) -> u64 {
+    let pag = match capability {
+        Some(cap) => request
+            .resolved_pag_with_capability(Some(cap))
+            .ok()
+            .flatten(),
+        None => request.resolved_pag().ok().flatten(),
+    };
+    let fallback_cap = capability.cloned().or_else(|| {
+        sceneworks_core::options::pag::capability_from_entry(&request.model_manifest_entry)
+            .ok()
+            .flatten()
+    });
+    pag_workspace_bytes(
+        width,
+        height,
+        batch,
+        steps,
+        fallback_cap.as_ref(),
+        pag.as_ref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2121,5 +2218,58 @@ mod corpus_replay_tests {
             "no linked provider declares an execution surface; sc-18317's planner has no reachable \
              input on this backend"
         );
+    }
+
+    #[test]
+    fn pag_workspace_bytes_is_zero_when_inert_and_scales_monotonically_when_active() {
+        let cap = gen_core::PagCapability {
+            num_blocks: 8,
+            block_domain: std::borrow::Cow::Borrowed("joint_blocks"),
+            default_layers: vec![2, 5],
+            default_start: 0.05,
+            default_stop: 0.85,
+            recommended_scale: 1.5,
+            max_scale: 10.0,
+        };
+        assert_eq!(pag_workspace_bytes(1024, 1024, 1, 28, Some(&cap), None), 0);
+
+        let scale_zero = gen_core::PagConfig {
+            scale: 0.0,
+            layers: None,
+            start: None,
+            stop: None,
+            adaptive_scale: None,
+        };
+        assert_eq!(
+            pag_workspace_bytes(1024, 1024, 1, 28, Some(&cap), Some(&scale_zero)),
+            0
+        );
+
+        // Window narrower than step grid -> active_steps == 0 -> 0 bytes
+        let empty_window = gen_core::PagConfig {
+            scale: 1.5,
+            layers: Some(vec![2]),
+            start: Some(0.90),
+            stop: Some(0.95),
+            adaptive_scale: None,
+        };
+        assert_eq!(
+            pag_workspace_bytes(1024, 1024, 1, 4, Some(&cap), Some(&empty_window)),
+            0
+        );
+
+        let active = gen_core::PagConfig {
+            scale: 1.5,
+            layers: Some(vec![2, 5]),
+            start: Some(0.05),
+            stop: Some(0.85),
+            adaptive_scale: None,
+        };
+        let b512 = pag_workspace_bytes(512, 512, 1, 28, Some(&cap), Some(&active));
+        let b1024 = pag_workspace_bytes(1024, 1024, 1, 28, Some(&cap), Some(&active));
+        let b1024_batch2 = pag_workspace_bytes(1024, 1024, 2, 28, Some(&cap), Some(&active));
+        assert!(b512 > 0);
+        assert_eq!(b1024, b512 * 4);
+        assert_eq!(b1024_batch2, b1024 * 2);
     }
 }

@@ -6857,3 +6857,92 @@ fn sc_22667_candle_five_rung_batch_is_bracketed_by_the_derivation_law() {
         "the set of cells the raw law prices under the measurement changed"
     );
 }
+
+#[test]
+fn pag_workspace_bytes_is_zero_delta_when_inert_and_charges_active_pag_with_lora_and_staged_residency(
+) {
+    let manifest = json!({
+        "candle": {
+            "vramGbByTier": { "q4": 30.0 },
+            "sequentialPeakGb": { "q4": 15.0 },
+            "measured": true
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")));
+    let contract = kolors_registered_probe_contract("q4", true, false);
+    let geometry = MemoryGeometry {
+        width: 1024,
+        height: 1024,
+        batch: 1,
+        frames: 1,
+        reference_count: 0,
+    };
+    let eval_at = |free_gb: f64, pag_bytes: u64| {
+        let budget = Some(VramBudget {
+            free_gb,
+            total_gb: 48.0,
+        });
+        evaluate_shared_image_inner_priced_with_resources(
+            "kolors",
+            "kolors",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_generation",
+            Some("lora"),
+            Some("lora"),
+            geometry,
+            false,
+            false,
+            false,
+            false,
+            budget,
+            reserve_for(budget),
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(contract.clone()),
+            None,
+            None,
+            None,
+            None,
+            0,
+            pag_bytes,
+            None,
+        )
+    };
+
+    // Inert PAG (0 bytes) vs active PAG (2 GiB) on a spacious card with LoRA + staged residency
+    let inert = eval_at(24.0, 0)
+        .expect("inert evaluation")
+        .expect("staged LoRA selection");
+    assert_eq!(
+        inert.context.selection.strategy,
+        MemoryStrategy::StagedResidency
+    );
+    let pag_surcharge = gib(2);
+    let active = eval_at(24.0, pag_surcharge)
+        .expect("spacious PAG evaluation")
+        .expect("staged LoRA + PAG selection");
+    assert_eq!(
+        active.context.predicted_peak_bytes,
+        inert.context.predicted_peak_bytes + pag_surcharge,
+        "active PAG workspace bytes must add onto Candle LoRA + staged residency peak"
+    );
+
+    // At borderline 21.2 GiB free (19.2 GiB effective after 2 GiB reserve):
+    // Staged + LoRA floor is (15 + 2 + 1) * 1.04 = 18.72 GiB -> inert fits, +2 GiB PAG rejects!
+    assert!(
+        eval_at(21.2, 0).is_ok(),
+        "inert PAG must fit borderline staged + LoRA VRAM budget"
+    );
+    assert!(
+        eval_at(21.2, pag_surcharge).is_err(),
+        "active PAG workspace surcharge must push borderline staged + LoRA request over VRAM budget"
+    );
+}

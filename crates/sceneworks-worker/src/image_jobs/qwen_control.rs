@@ -385,6 +385,7 @@ impl QwenStrictControl {
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             control_scale: self.control_scale,
+            pag: self.sampling.pag.clone(),
             seed,
             cancel: cancel.clone(),
             preview: preview.clone(),
@@ -469,7 +470,7 @@ impl CandleStrictControl for QwenStrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         let req = self.control_request(seed, cancel, preview);
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
@@ -501,6 +502,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let qwen_base = resolve_qwen_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Qwen-Image base weights not found".to_owned())
     })?;

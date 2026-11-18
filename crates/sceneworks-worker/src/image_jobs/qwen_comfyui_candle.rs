@@ -390,6 +390,9 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    request
+        .reject_active_pag("ComfyUI Qwen-Image")
+        .map_err(WorkerError::InvalidPayload)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         "qwen-image",
