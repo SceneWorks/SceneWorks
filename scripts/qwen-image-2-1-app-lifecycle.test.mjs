@@ -158,21 +158,23 @@ function assertDispatcherIsolation(workflow) {
   const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
   const headers = [...jobsText.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
   const jobs = headers.map((match) => match[1]);
-  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "flux3-app-lifecycle", "flux1-owner-worker-proof", "flux3-terminal-host", "flux3-terminal-queue", "load-progress-selector", "load-progress-acceptance", "tier2-ab-selector", "tier2-ab", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "flux3-app-lifecycle", "flux1-owner-worker-proof", "flux3-terminal-host", "flux3-terminal-queue", "load-progress-selector", "load-progress-acceptance", "tier2-ab-selector", "tier2-ab", "pag-acceptance", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const jobBlock = (name) => {
     const index = jobs.indexOf(name), header = headers[index];
     return header && jobsText.slice(header.index + header[0].length, headers[index + 1]?.index);
   };
-  const runs = (profile, backend, runMoss = false) => jobs.filter((job) => {
+  const runs = (profile, backend, runMoss = false, tier2Suite = "tier2-ab") => jobs.filter((job) => {
     const expression = /^    if: (.+)$/m.exec(jobBlock(job))?.[1];
     assert.ok(expression, `missing ${job} dispatch predicate`);
     // GitHub permits both a bare job expression and its explicit ${{ ... }} form.
     const predicate = expression.match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? expression;
     const inputs = { profile, backend, run_moss_training_acceptance: runMoss };
-    const condition = predicate.replaceAll("needs.moss-selector-preflight.outputs.enabled", "moss_enabled");
+    const condition = predicate
+      .replaceAll("needs.moss-selector-preflight.outputs.enabled", "moss_enabled")
+      .replaceAll("needs.tier2-ab-selector.outputs.suite", "tier2_suite");
     // Evaluate only the tiny predicate grammar, never a workflow step or command.
     assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
-    return Function("inputs", "moss_enabled", "github", `return (${condition})`)(inputs, String(runMoss), {event_name:"workflow_dispatch"});
+    return Function("inputs", "moss_enabled", "tier2_suite", "github", `return (${condition})`)(inputs, String(runMoss), tier2Suite, {event_name:"workflow_dispatch"});
   });
   assert.doesNotMatch(workflow, /moss-reference-maintenance:|moss-upstream-reference:|moss-dispatch:|moss-edit-terminal:/);
   for (const backend of ["mlx", "candle"]) {
@@ -186,6 +188,7 @@ function assertDispatcherIsolation(workflow) {
       assert.deepEqual(runs("flux3-image-klein-terminal-queue", backend), ["moss-selector-preflight", "flux3-terminal-queue"], "FLUX3 queue must skip all catalog mutation steps");
       assert.deepEqual(runs("load-progress-acceptance", backend), ["moss-selector-preflight", "load-progress-selector", "load-progress-acceptance"], "load progress must skip catalog walks, campaigns and publication");
       assert.deepEqual(runs("tier2-ab", backend), ["moss-selector-preflight", "tier2-ab-selector", "tier2-ab"], "SW-7033 A/B must skip catalog walks, campaigns and publication");
+      assert.deepEqual(runs("tier2-ab", backend, false, "pag-acceptance"), ["moss-selector-preflight", "tier2-ab-selector", "tier2-ab", "pag-acceptance"], "SW-7182 PAG acceptance must skip catalog walks, campaigns and publication");
       assert.deepEqual(runs("catalog", backend), ["moss-selector-preflight", backend], "default catalog contract must remain unchanged");
       assert.deepEqual(runs("", backend), ["moss-selector-preflight", backend], "omitted profile preserves catalog behavior");
       // Preserve bounded SDXL profile isolation.

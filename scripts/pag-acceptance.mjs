@@ -271,7 +271,18 @@ export const PAG_ROUTES = Object.freeze([
     kind: "edit_pag",
     tierCandidates: ["q4", "q8", "bf16"],
     references: "source_single",
-    claimMinutes: 5,
+    extraHuggingFaceRows: [
+      {
+        repo: "conradlocke/krea2-identity-edit",
+        revision: "89e9e7a09ee2e5c9331e952063d79b1b8a703280",
+        variant: null,
+        files: ["krea2_identity_edit_v1_2.safetensors"],
+        componentId: "lora:krea2_identity_edit",
+        coRequisite: true,
+        required: null,
+      },
+    ],
+    claimMinutes: 15,
     timeoutMinutes: 25,
     body: {
       mode: "edit_image",
@@ -282,7 +293,7 @@ export const PAG_ROUTES = Object.freeze([
       width: 768,
       height: 768,
       count: 1,
-      loras: [],
+      loras: [{ id: "krea2_identity_edit", weight: 1.0 }],
       advanced: {
         steps: 4,
         sampler: "euler",
@@ -291,7 +302,7 @@ export const PAG_ROUTES = Object.freeze([
     },
     pagOn: { scale: 1.5 },
     expectedReport: { layers: [14], activeSteps: 3, totalSteps: 4 },
-    at: ["AT3", "AT4", "AT6"],
+    at: ["AT3", "AT4", "AT6", "AT7"],
   },
   {
     id: "z-image-turbo-t2i",
@@ -379,7 +390,9 @@ export const PAG_ROUTES = Object.freeze([
       },
     },
     pagOn: { scale: 1.2 },
-    expectedReport: { layers: [15], activeSteps: 3, totalSteps: 4 },
+    // Z-Image edit runs img2img tail `init_time_step..steps` (`4 - floor(4 * 0.6) = 2` steps at
+    // normalized positions 0.0 and 0.5, both inside [0.0, 0.75)).
+    expectedReport: { layers: [15], activeSteps: 2, totalSteps: 2 },
     at: ["AT3", "AT6"],
   },
   {
@@ -438,7 +451,8 @@ export const PAG_ROUTES = Object.freeze([
       },
     },
     pagOn: { scale: 1.5 },
-    expectedReport: { layers: [20], activeSteps: 4, totalSteps: 4 },
+    // FLUX.2 Klein 9B KV is distilled (default_stop = 0.75 -> 3 active of 4 steps).
+    expectedReport: { layers: [20], activeSteps: 3, totalSteps: 4 },
     at: ["AT3", "AT4", "AT6"],
   },
   {
@@ -505,6 +519,8 @@ export const PAG_ROUTES = Object.freeze([
   {
     id: "qwen-edit-2511",
     family: "qwen_image",
+    group: "qwen-edit",
+    backends: ["mlx"],
     model: "qwen_image_edit_2511",
     mode: "edit_image",
     kind: "edit_pag",
@@ -530,6 +546,38 @@ export const PAG_ROUTES = Object.freeze([
     },
     pagOn: { scale: 1.5 },
     expectedReport: { layers: [30], activeSteps: 4, totalSteps: 4 },
+    at: ["AT3", "AT6"],
+  },
+  {
+    id: "qwen-2-1-turbo-edit",
+    family: "qwen_image",
+    group: "qwen-edit",
+    model: "qwen_image_2_1_turbo",
+    mode: "edit_image",
+    kind: "edit_pag",
+    licenseAck: true,
+    tierCandidates: ["q4", "q8", "bf16"],
+    references: "source_single",
+    claimMinutes: 5,
+    timeoutMinutes: 30,
+    body: {
+      mode: "edit_image",
+      model: "qwen_image_2_1_turbo",
+      prompt: EDIT_SINGLE_PROMPT,
+      negativePrompt: "",
+      seed: 71793,
+      width: 1024,
+      height: 1024,
+      count: 1,
+      loras: [],
+      advanced: {
+        steps: 4,
+        sampler: "euler",
+        guidanceScale: 1.0,
+      },
+    },
+    pagOn: { scale: 1.2 },
+    expectedReport: { layers: [16], activeSteps: 3, totalSteps: 4 },
     at: ["AT3", "AT6"],
   },
 ]);
@@ -834,10 +882,15 @@ export function evaluateT2iAbVerdict({ off1, zero, pagOn, off2 = null, expectedR
 }
 
 // ---- planning & preflight -----------------------------------------------------------------------
-export async function planPagRoutes({ routes, hubs, catalog, platform, fs, evidence = new Map() }) {
+export async function planPagRoutes({ routes, hubs, catalog, platform, backend = null, fs, evidence = new Map() }) {
+  const effectiveBackend = backend ?? (platform === "darwin" ? "mlx" : "cuda");
   const planned = [], ranGroups = new Map();
   for (const route of routes) {
     const base = { id: route.id, family: route.family, model: route.model, mode: route.mode, kind: route.kind, at: route.at };
+    if (Array.isArray(route.backends) && !route.backends.includes(effectiveBackend)) {
+      planned.push({ ...base, status: "skipped", skipReason: `${route.model} is not routed on ${effectiveBackend}` });
+      continue;
+    }
     const model = catalog.find((entry) => entry.id === route.model);
     if (!model) { planned.push({ ...base, status: "skipped", skipReason: `model ${route.model} absent from catalog` }); continue; }
     if (model.gated === true) { planned.push({ ...base, status: "skipped", skipReason: `${route.model} is gated` }); continue; }
@@ -850,11 +903,12 @@ export async function planPagRoutes({ routes, hubs, catalog, platform, fs, evide
       fact(found, `model ${route.model} has no conditionalComponent ${cid}`);
       return { repo: found.repo, revision: found.revision, variant: null, files: found.files ?? [], componentId: cid, coRequisite: false, required: null };
     });
+    const extraRows = (route.extraHuggingFaceRows ?? []).map((row) => structuredClone(row));
     const rowsByTier = [];
     for (const tier of route.tierCandidates) {
       try {
         const rows = routeDownloadRows(model, { platform, tier });
-        rows.required.push(...conditionalRows);
+        rows.required.push(...conditionalRows, ...extraRows);
         rowsByTier.push(rows);
       } catch { /* tier unavailable on platform */ }
     }
@@ -933,13 +987,15 @@ async function preflight(env, cfg, report) {
   fact(free === null || free >= 20 * GIB, `insufficient scratch space: ${free} bytes`);
   const catalog = await readCatalog(cfg.sourceDir);
   const evidence = await readPatternEvidence(cfg.sourceDir);
-  report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, evidence });
+  report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, backend: cfg.backend, evidence });
 }
 
-export function resolveMissingSnapshotFiles({ routes, plannedRoutes, catalog, evidence, platform }) {
+export function resolveMissingSnapshotFiles({ routes, plannedRoutes, catalog, evidence, platform, backend = null }) {
+  const effectiveBackend = backend ?? (platform === "darwin" ? "mlx" : "cuda");
   const byId = new Map(plannedRoutes.map((r) => [r.id, r]));
   const targets = new Map();
   for (const route of routes) {
+    if (Array.isArray(route.backends) && !route.backends.includes(effectiveBackend)) continue;
     const planned = byId.get(route.id);
     if (!planned || planned.status !== "skipped") continue;
     const model = catalog.find((entry) => entry.id === route.model);
@@ -949,6 +1005,9 @@ export function resolveMissingSnapshotFiles({ routes, plannedRoutes, catalog, ev
       const found = (model.conditionalComponents ?? []).find((c) => c.componentId === cid);
       fact(found, `model ${route.model} has no conditionalComponent ${cid}`);
       rows.required.push({ repo: found.repo, revision: found.revision, variant: null, files: found.files ?? [] });
+    }
+    for (const extra of route.extraHuggingFaceRows ?? []) {
+      rows.required.push(structuredClone(extra));
     }
     for (const row of rows.required) {
       fact(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(row.repo) && SHA.test(row.revision ?? ""), `unpinned download row ${row.repo}@${row.revision}`);
@@ -1005,7 +1064,7 @@ async function stageMissing(env, cfg, report, signal) {
   const platform = process.platform;
   const catalog = await readCatalog(cfg.sourceDir);
   const evidence = await readPatternEvidence(cfg.sourceDir);
-  const files = resolveMissingSnapshotFiles({ routes: cfg.routes, plannedRoutes: report.routes, catalog, evidence, platform });
+  const files = resolveMissingSnapshotFiles({ routes: cfg.routes, plannedRoutes: report.routes, catalog, evidence, platform, backend: cfg.backend });
   report.staging = { targetHub: cfg.hubs[0], requestedFiles: files.length, downloadedFiles: 0, cachedFiles: 0, downloadedBytes: 0 };
   if (files.length === 0) return;
   await mkdir(cfg.hubs[0], { recursive: true });
@@ -1023,7 +1082,7 @@ async function stageMissing(env, cfg, report, signal) {
       report.staging.cachedFiles++;
     }
   }
-  report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, evidence });
+  report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, backend: cfg.backend, evidence });
 }
 
 // ---- single-checkout release build --------------------------------------------------------------
@@ -1171,7 +1230,7 @@ async function submitAndVerifyOneJob({ endpoint, apiCtx, projectId, projectPath,
     return { label: runLabel, status: "error", error: `POST /api/v1/image/jobs refused (${response.status}): ${JSON.stringify(response.body).slice(0, 1000)}` };
   }
   const jobId = response.body.id;
-  const claimMinutes = Math.max(def.claimMinutes, 10);
+  const claimMinutes = Math.max(def.claimMinutes, 15);
   const timeoutMinutes = Math.max(def.timeoutMinutes, 60);
   let claimedAtMs = null, maxProgress = 0, monotonicProgress = true, progressUpdates = 0;
   let completedJob = null;

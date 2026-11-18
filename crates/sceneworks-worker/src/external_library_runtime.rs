@@ -3405,6 +3405,17 @@ fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<V
                 .file_type()
                 .map_err(|_| invalid_binding("artifact snapshot is unavailable"))?;
             if kind.is_dir() {
+                // Candle's packed-weight opener writes derived GGML projection sidecars under a
+                // model-adjacent `.candle-device-format-v1/` directory when the snapshot is writable
+                // (SC-16096). No loader opens that hidden cache as a shard
+                // (`gen_core::weightsmeta::is_hidden_dir`), so excluding an ordinary non-symlinked
+                // cache directory preserves wildcard tamper detection while keeping subsequent jobs
+                // on the same snapshot admissible.
+                if !kind.is_symlink()
+                    && entry.file_name() == gen_core::CANDLE_DEVICE_FORMAT_CACHE_DIR
+                {
+                    continue;
+                }
                 pending.push(path);
                 continue;
             }
@@ -10769,5 +10780,53 @@ mod tests {
                 .is_err()
         );
         assert!(RuntimeSourceGuard::begin(&JobType::PromptRefine, &measure, &settings).is_err());
+    }
+
+    // SW-7182: Candle's packed-weight opener materializes derived `.candle-device-format-v1/`
+    // projection sidecars inside a writable tier directory on first load (SC-16096). Wildcard
+    // closure verification must ignore that ordinary derived cache directory on subsequent jobs
+    // while still catching unexpected sibling files in the snapshot.
+    #[test]
+    fn recursive_snapshot_matches_ignores_candle_device_format_cache_but_catches_unexpected_files()
+    {
+        let temp = TempDir::new().unwrap();
+        let snapshot = temp.path().join("snapshot");
+        let transformer = snapshot.join("q4").join("transformer");
+        let sidecar_cache = transformer.join(gen_core::CANDLE_DEVICE_FORMAT_CACHE_DIR);
+        std::fs::create_dir_all(&sidecar_cache).unwrap();
+        std::fs::write(transformer.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            transformer.join("diffusion_pytorch_model.safetensors"),
+            b"weights",
+        )
+        .unwrap();
+        std::fs::write(sidecar_cache.join(".prepare.lock"), b"").unwrap();
+        std::fs::write(
+            sidecar_cache.join("proj.q4_1.safetensors"),
+            b"derived-sidecar",
+        )
+        .unwrap();
+
+        let mut matched = recursive_snapshot_matches(&snapshot, "q4/transformer/*").unwrap();
+        matched.sort();
+        assert_eq!(
+            matched,
+            vec![
+                PathBuf::from("q4").join("transformer").join("config.json"),
+                PathBuf::from("q4")
+                    .join("transformer")
+                    .join("diffusion_pytorch_model.safetensors"),
+            ]
+        );
+
+        std::fs::write(transformer.join("unexpected.safetensors"), b"rogue").unwrap();
+        let mut with_unexpected =
+            recursive_snapshot_matches(&snapshot, "q4/transformer/*").unwrap();
+        with_unexpected.sort();
+        assert!(with_unexpected.contains(
+            &PathBuf::from("q4")
+                .join("transformer")
+                .join("unexpected.safetensors")
+        ));
     }
 }

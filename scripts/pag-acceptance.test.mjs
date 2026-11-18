@@ -13,6 +13,8 @@ import {
   imageQualityStats,
   pagDefaultHubs,
   pagExitCode,
+  PAG_ROUTE_MAP,
+  planPagRoutes,
   readWorkflowShareFromPng,
   resolveMissingSnapshotFiles,
   resolvePagConfig,
@@ -145,12 +147,28 @@ test("evaluateT2iAbVerdict and pagExitCode enforce AT1, AT2, AT6 and 6-family co
 test("resolveMissingSnapshotFiles expands exact checked-in manifest and conditional files without dotfiles", async () => {
   const catalog = await readCatalog(process.cwd());
   const evidence = await readPatternEvidence(process.cwd());
-  const subset = PAG_ROUTES.filter((r) => ["moss-edit-kv", "flux1-dev-t2i", "qwen-2-1-turbo-t2i"].includes(r.id));
+  const subset = PAG_ROUTES.filter((r) => ["moss-edit-kv", "krea-turbo-edit", "flux1-dev-t2i", "qwen-edit-2511", "qwen-2-1-turbo-edit"].includes(r.id));
   const plannedRoutes = subset.map((r) => ({ id: r.id, status: "skipped" }));
-  const files = resolveMissingSnapshotFiles({ routes: subset, plannedRoutes, catalog, evidence, platform: "win32" });
+  const files = resolveMissingSnapshotFiles({ routes: subset, plannedRoutes, catalog, evidence, platform: "win32", backend: "cuda" });
   assert.ok(files.some((f) => f.repo === "OpenMOSS-Team/MOSS-Image-SFT"));
   assert.ok(files.some((f) => f.repo === "chinoll/Moss-Image-Edit" && f.relpath === "adapter_model.safetensors"));
+  assert.ok(files.some((f) => f.repo === "conradlocke/krea2-identity-edit" && f.relpath === "krea2_identity_edit_v1_2.safetensors"));
   assert.ok(files.some((f) => f.repo === "SceneWorks/flux1-dev-mlx" && f.relpath.startsWith("q4/")));
   assert.ok(files.some((f) => f.repo === "SceneWorks/qwen-image-2-1-turbo-mlx" && f.relpath.startsWith("q4/")));
+  assert.ok(!files.some((f) => f.repo === "SceneWorks/qwen-image-edit-2511-mlx"), "CUDA staging must skip MLX-only qwen_image_edit_2511");
   assert.ok(files.every((f) => !f.relpath.split("/").some((seg) => seg.startsWith("."))));
+
+  assert.deepEqual(PAG_ROUTE_MAP["krea-turbo-edit"].body.loras, [{ id: "krea2_identity_edit", weight: 1.0 }]);
+  assert.deepEqual(PAG_ROUTE_MAP["z-image-edit"].expectedReport, { layers: [15], activeSteps: 2, totalSteps: 2 });
+  assert.deepEqual(PAG_ROUTE_MAP["flux2-klein-kv-edit"].expectedReport, { layers: [20], activeSteps: 3, totalSteps: 4 });
+
+  const cudaEditPlan = await planPagRoutes({
+    routes: [PAG_ROUTE_MAP["qwen-edit-2511"], PAG_ROUTE_MAP["qwen-2-1-turbo-edit"]],
+    hubs: ["/nonexistent/hub"],
+    catalog,
+    platform: "win32",
+    backend: "cuda",
+    evidence,
+  });
+  assert.match(cudaEditPlan[0].skipReason, /not routed on cuda/);
 });
