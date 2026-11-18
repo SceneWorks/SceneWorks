@@ -579,6 +579,7 @@ jobs:
       hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).hubs }}
       inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).inference_sha }}
       preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).preflight_only }}
+      stage_missing: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).stage_missing }}
   qwen-app-lifecycle:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     needs: moss-selector-preflight

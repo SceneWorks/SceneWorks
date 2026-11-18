@@ -8,9 +8,12 @@
 // and static-contract tests in scripts/pag-acceptance.test.mjs.
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rm, statfs, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { deflateSync, inflateSync } from "node:zlib";
@@ -30,6 +33,7 @@ import {
   contentDigest,
   decodePng,
   defaultHubs,
+  expandSelector,
   gpuInventory,
   jobClaimed,
   jobDiagnostics,
@@ -44,6 +48,7 @@ import {
   routeDownloadRows,
   routePresence,
   scrubSecrets,
+  snapshotDir,
 } from "./tier2-ab.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -530,13 +535,13 @@ export const PAG_ROUTES = Object.freeze([
 
 export const PAG_ROUTE_MAP = Object.freeze(Object.fromEntries(PAG_ROUTES.map((route) => [route.id, route])));
 
-export const PAG_DISPATCH_OPTION_KEYS = Object.freeze(["suite", "routes", "hubs", "preflight_only"]);
+export const PAG_DISPATCH_OPTION_KEYS = Object.freeze(["suite", "routes", "hubs", "preflight_only", "stage_missing"]);
 
 export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
   fact(SHA.test(dispatchedSha ?? "") && inputs.ref === dispatchedSha, "ref must equal the exact dispatched 40-hex source SHA");
   fact(["mlx", "candle"].includes(inputs.backend), "backend must be mlx or candle");
-  fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "pag-acceptance never downloads; leave download_missing and qwen_persistent_weights off");
+  fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "leave catalog download_missing and qwen_persistent_weights off; use moss_options_json.stage_missing when needed");
   let options;
   try { options = JSON.parse(inputs.moss_options_json || "{}"); } catch { throw new Error("moss_options_json must be a JSON object"); }
   fact(options && typeof options === "object" && !Array.isArray(options), "pag-acceptance options must be a JSON object");
@@ -544,6 +549,10 @@ export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
   const unknown = Object.keys(options).filter((key) => !PAG_DISPATCH_OPTION_KEYS.includes(key));
   fact(unknown.length === 0, `unknown pag-acceptance option(s): ${unknown.join(", ")}`);
   fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
+  fact(options.stage_missing === undefined || typeof options.stage_missing === "boolean", "stage_missing must be boolean");
+  const preflightOnly = options.preflight_only ?? true;
+  const stageMissingFlag = options.stage_missing ?? false;
+  fact(!(stageMissingFlag && preflightOnly), "stage_missing cannot be combined with preflight_only=true");
   fact(!inputs.inference_sha || SHA.test(inputs.inference_sha), "inference_sha must be empty or exact 40-hex");
   const backend = inputs.backend === "mlx" ? "mlx" : "cuda";
   for (const key of ["routes", "hubs"]) {
@@ -557,7 +566,8 @@ export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
     backend,
     routes: options.routes ? JSON.stringify(selected) : "",
     hubs: options.hubs ? JSON.stringify(options.hubs) : "",
-    preflight_only: options.preflight_only ?? true,
+    preflight_only: preflightOnly,
+    stage_missing: stageMissingFlag,
     inference_sha: inputs.inference_sha || "",
   };
 }
@@ -576,7 +586,10 @@ export function selectPagRoutes(value) {
 
 export function pagDefaultHubs(backend, home = os.homedir()) {
   const base = defaultHubs(backend, home);
-  if (backend !== "mlx") return base;
+  if (backend === "cuda") {
+    const extra = ["D:\\.cache\\huggingface\\hub", "D:\\huggingface\\hub", path.win32.join(home, ".cache\\huggingface\\hub")];
+    return [...new Set([...base, ...extra])];
+  }
   const rw = path.posix.join(home, "sceneworks-rw-weights/hub");
   return base.includes(rw) ? base : [...base, rw];
 }
@@ -912,6 +925,96 @@ async function preflight(env, cfg, report) {
   fact(free === null || free >= 20 * GIB, `insufficient scratch space: ${free} bytes`);
   const catalog = await readCatalog(cfg.sourceDir);
   const evidence = await readPatternEvidence(cfg.sourceDir);
+  report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, evidence });
+}
+
+export function resolveMissingSnapshotFiles({ routes, plannedRoutes, catalog, evidence, platform }) {
+  const byId = new Map(plannedRoutes.map((r) => [r.id, r]));
+  const targets = new Map();
+  for (const route of routes) {
+    const planned = byId.get(route.id);
+    if (!planned || planned.status !== "skipped") continue;
+    const model = catalog.find((entry) => entry.id === route.model);
+    if (!model || model.gated === true) continue;
+    const rows = routeDownloadRows(model, { platform, tier: route.tierCandidates[0] });
+    for (const cid of route.conditionalComponentIds ?? []) {
+      const found = (model.conditionalComponents ?? []).find((c) => c.componentId === cid);
+      fact(found, `model ${route.model} has no conditionalComponent ${cid}`);
+      rows.required.push({ repo: found.repo, revision: found.revision, variant: null, files: found.files ?? [] });
+    }
+    for (const row of rows.required) {
+      fact(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(row.repo) && SHA.test(row.revision ?? ""), `unpinned download row ${row.repo}@${row.revision}`);
+      const selectors = row.files.length ? row.files : ["*"];
+      const evidenceFiles = evidence.get(`${row.repo}@${row.revision}`) ?? null;
+      for (const selector of selectors) {
+        const files = selector.includes("*") ? (evidenceFiles ? expandSelector(selector, evidenceFiles) : []) : [selector];
+        fact(files.length > 0, `cannot expand ${row.repo}@${row.revision}/${selector} without checked-in download-pattern-evidence`);
+        for (const relpath of files) {
+          if (relpath.split("/").some((segment) => !segment || segment === ".." || segment.startsWith("."))) continue;
+          const key = `${row.repo}@${row.revision}:${relpath}`;
+          if (!targets.has(key)) targets.set(key, { repo: row.repo, revision: row.revision, relpath });
+        }
+      }
+    }
+  }
+  return [...targets.values()];
+}
+
+async function fetchPublicSnapshotFile(targetHub, { repo, revision, relpath }, signal) {
+  const snap = snapshotDir(targetHub, repo, revision);
+  const dest = path.join(snap, ...relpath.split("/"));
+  try {
+    const info = await stat(dest);
+    if (info.isFile() && info.size > 0) return { status: "cached", bytes: info.size };
+  } catch { /* absent */ }
+  await mkdir(path.dirname(dest), { recursive: true });
+  const refsDir = path.join(targetHub, `models--${repo.replace("/", "--")}`, "refs");
+  await mkdir(refsDir, { recursive: true });
+  await writeFile(path.join(refsDir, "main"), revision, { flag: "wx" }).catch(() => {});
+  const url = `https://huggingface.co/${repo}/resolve/${revision}/${relpath.split("/").map(encodeURIComponent).join("/")}`;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    const tmp = `${dest}.part-${process.pid}-${attempt}`;
+    try {
+      const res = await fetch(url, { redirect: "follow", signal });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${repo}@${revision.slice(0, 12)}/${relpath}`);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
+      const info = await stat(tmp);
+      if (relpath.endsWith(".safetensors") && info.size === 0) throw new Error(`zero-byte weight file ${relpath}`);
+      await rename(tmp, dest);
+      return { status: "downloaded", bytes: info.size };
+    } catch (err) {
+      lastErr = err;
+      await rm(tmp, { force: true }).catch(() => {});
+      if (attempt < 3) await delay(1500 * attempt);
+    }
+  }
+  throw lastErr;
+}
+
+async function stageMissing(env, cfg, report, signal) {
+  const platform = process.platform;
+  const catalog = await readCatalog(cfg.sourceDir);
+  const evidence = await readPatternEvidence(cfg.sourceDir);
+  const files = resolveMissingSnapshotFiles({ routes: cfg.routes, plannedRoutes: report.routes, catalog, evidence, platform });
+  report.staging = { targetHub: cfg.hubs[0], requestedFiles: files.length, downloadedFiles: 0, cachedFiles: 0, downloadedBytes: 0 };
+  if (files.length === 0) return;
+  await mkdir(cfg.hubs[0], { recursive: true });
+  const hubFree = await freeBytes(cfg.hubs[0]);
+  report.staging.hubFreeBytes = hubFree;
+  fact(hubFree === null || hubFree >= 45 * GIB, `insufficient hub disk headroom on ${cfg.hubs[0]}: ${hubFree} bytes (< 45 GiB)`);
+  process.stdout.write(`[pag-acceptance] staging ${files.length} public snapshot files into ${cfg.hubs[0]}\n`);
+  for (const item of files) {
+    const res = await fetchPublicSnapshotFile(cfg.hubs[0], item, signal);
+    if (res.status === "downloaded") {
+      report.staging.downloadedFiles++;
+      report.staging.downloadedBytes += res.bytes;
+      process.stdout.write(`[pag-acceptance] staged ${item.repo}@${item.revision.slice(0, 12)}/${item.relpath} (${(res.bytes / (1024 * 1024)).toFixed(1)} MiB)\n`);
+    } else {
+      report.staging.cachedFiles++;
+    }
+  }
   report.routes = await planPagRoutes({ routes: cfg.routes, hubs: cfg.hubs, catalog, platform, evidence });
 }
 
@@ -1270,7 +1373,7 @@ async function runAcceptance(env, cfg, report, signal) {
   }
 }
 
-export function summarizePagReport(routes) {
+export function summarizePagReport(routes, requiredFamilies = FAMILIES) {
   const familiesCovered = new Set();
   const familiesPassed = new Set();
   let ready = 0, ran = 0, passed = 0, skipped = 0, errors = 0;
@@ -1288,7 +1391,7 @@ export function summarizePagReport(routes) {
       }
     }
   }
-  const missingFamilies = FAMILIES.filter((f) => !(ran > 0 ? familiesPassed : familiesCovered).has(f));
+  const missingFamilies = requiredFamilies.filter((f) => !(ran > 0 ? familiesPassed : familiesCovered).has(f));
   return {
     totalRoutes: routes.length,
     ready,
@@ -1296,6 +1399,7 @@ export function summarizePagReport(routes) {
     passed,
     skipped,
     errors,
+    requiredFamilies: [...requiredFamilies],
     familiesCovered: [...familiesCovered],
     familiesPassed: [...familiesPassed],
     missingFamilies,
@@ -1303,22 +1407,24 @@ export function summarizePagReport(routes) {
 }
 
 export function pagExitCode(report) {
-  const s = summarizePagReport(report.routes ?? []);
+  const requiredFamilies = report.requiredFamilies ?? FAMILIES;
+  const s = summarizePagReport(report.routes ?? [], requiredFamilies);
   if (report.fatal) return 1;
-  if (report.mode === "preflight") return s.ready > 0 && s.missingFamilies.length === 0 ? 0 : 1;
+  if (report.mode === "preflight" || report.mode === "stage") return s.ready > 0 && s.missingFamilies.length === 0 ? 0 : 1;
   if (report.mode === "build") return 0;
   return s.ran > 0 && s.errors === 0 && s.missingFamilies.length === 0 ? 0 : 1;
 }
 
 export function renderPagMarkdown(report) {
-  const s = summarizePagReport(report.routes ?? []);
+  const requiredFamilies = report.requiredFamilies ?? FAMILIES;
+  const s = summarizePagReport(report.routes ?? [], requiredFamilies);
   const lines = [
     `# SW-F371 PAG Real-Weight Acceptance (${report.backend}) — ${report.mode}`,
     "",
     `- status: **${report.status}** (exit ${report.exitCode})`,
     `- source: \`${report.source?.sha}\` (inference \`${report.source?.inferencePin ?? "?"}\`, binary \`${report.source?.binarySha256 ?? "not built"}\`)`,
     `- runner: ${report.runner?.name ?? "local"} (${report.runner?.platform}/${report.runner?.arch})`,
-    `- summary: passed=${s.passed}/${s.ran} ran (${s.skipped} skipped, ${s.errors} errors); families=${s.familiesPassed.length || s.familiesCovered.length}/6 (missing: ${s.missingFamilies.join(", ") || "none"})`,
+    `- summary: passed=${s.passed}/${s.ran} ran (${s.skipped} skipped, ${s.errors} errors); families=${s.familiesPassed.length || s.familiesCovered.length}/${requiredFamilies.length} (missing: ${s.missingFamilies.join(", ") || "none"})`,
     "",
     "| Route | Family | Model (Tier) | ATs | Status | Verdict | Details |",
     "|---|---|---|---|---|---|---|",
@@ -1333,7 +1439,7 @@ export function renderPagMarkdown(report) {
 async function writePagReport(cfg, report) {
   const dir = path.join(cfg.work, "evidence");
   await mkdir(dir, { recursive: true });
-  report.summary = summarizePagReport(report.routes ?? []);
+  report.summary = summarizePagReport(report.routes ?? [], report.requiredFamilies ?? FAMILIES);
   const baseName = report.mode === "run" ? "report" : report.mode;
   await writeFile(path.join(dir, `${baseName}.json`), JSON.stringify(report, null, 2) + "\n");
   await writeFile(path.join(dir, `${baseName}.md`), renderPagMarkdown(report));
@@ -1352,11 +1458,13 @@ async function cleanup(env, cfg) {
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
-  const modes = { "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
-  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --build-only, --run, --cleanup is required");
+  const modes = { "--preflight-only": "preflight", "--stage-missing": "stage", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
+  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-missing, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolvePagConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
+  const explicitRoutes = Boolean((env.PAG_ACCEPTANCE_ROUTES ?? "").trim() && (env.PAG_ACCEPTANCE_ROUTES ?? "").trim() !== "default");
+  const requiredFamilies = explicitRoutes ? [...new Set(cfg.routes.map((r) => r.family))] : [...FAMILIES];
   const report = {
     schemaVersion: 1,
     kind: "sw-f371-pag-acceptance",
@@ -1365,6 +1473,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     backend: cfg.backend,
     startedAt: new Date().toISOString(),
     thresholds: ACCEPTANCE_THRESHOLDS,
+    requiredFamilies,
     runner: {
       name: env.RUNNER_NAME ?? null,
       platform: process.platform,
@@ -1382,6 +1491,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   process.once("SIGINT", interrupt);
   try {
     await preflight(env, cfg, report);
+    if (mode === "stage") await stageMissing(env, cfg, report, controller.signal);
     if (mode === "build") await buildRelease(env, cfg, report);
     if (mode === "run") await runAcceptance(env, cfg, report, controller.signal);
     report.status = "finished";
