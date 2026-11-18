@@ -90,6 +90,19 @@ pub mod read_counts {
     }
 }
 
+/// The clock every stamp this store takes is dated by. Tests may skew it on their own thread, so a
+/// stamp can be made racy (or settled) by construction instead of by racing the wall clock.
+fn clock() -> StoreClockV1 {
+    #[cfg(test)]
+    {
+        StoreClockV1::skewed(tests::CLOCK_SKEW_NANOS.with(std::cell::Cell::get))
+    }
+    #[cfg(not(test))]
+    {
+        StoreClockV1::SYSTEM
+    }
+}
+
 fn note_read(path: &Path) {
     #[cfg(any(test, feature = "test-support"))]
     read_counts::note(path);
@@ -187,7 +200,7 @@ impl VerifiedSourceCache {
     ) -> io::Result<String> {
         note_read(real_path);
         let digest = source_file_sha256_with_check(real_path, check)?;
-        let after = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
+        let after = SourceStampV1::of(real_path, clock())?;
         if !before.identifies_same_entry(&after) {
             return Err(io::Error::other(format!(
                 "{} changed while it was verified",
@@ -237,7 +250,7 @@ impl VerifiedSourceCache {
         expected_sha256: &str,
         check: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<SourceVerification> {
-        let before = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
+        let before = SourceStampV1::of(real_path, clock())?;
         match self.recorded_sha256(real_path, &before) {
             Some(recorded) if recorded == expected_sha256 => return Ok(SourceVerification::Reused),
             Some(_) => return Err(Self::mismatch(real_path)),
@@ -260,7 +273,7 @@ impl VerifiedSourceCache {
         real_path: &Path,
         check: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<(String, SourceVerification)> {
-        let before = SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?;
+        let before = SourceStampV1::of(real_path, clock())?;
         if let Some(sha256) = self.recorded_sha256(real_path, &before) {
             return Ok((sha256, SourceVerification::Reused));
         }
@@ -273,7 +286,7 @@ impl VerifiedSourceCache {
     /// caller that hashes on its own (an async, heartbeating hash) can skip that hash. `None` when
     /// there is no trustworthy record.
     pub fn recorded(&self, real_path: &Path) -> Option<String> {
-        let current = SourceStampV1::of(real_path, StoreClockV1::SYSTEM).ok()?;
+        let current = SourceStampV1::of(real_path, clock()).ok()?;
         self.recorded_sha256(real_path, &current)
     }
 
@@ -282,7 +295,7 @@ impl VerifiedSourceCache {
     pub fn observe(&self, real_path: &Path) -> io::Result<ObservedSource> {
         Ok(ObservedSource {
             real_path: real_path.to_path_buf(),
-            before: SourceStampV1::of(real_path, StoreClockV1::SYSTEM)?,
+            before: SourceStampV1::of(real_path, clock())?,
         })
     }
 
@@ -290,7 +303,7 @@ impl VerifiedSourceCache {
     /// (`sha256:<hex>`), under the observed stamp, only when the stamp is unchanged since. Returns
     /// whether it was recorded (best-effort).
     pub fn record_hashed(&self, observed: ObservedSource, sha256: &str) -> io::Result<bool> {
-        let after = SourceStampV1::of(&observed.real_path, StoreClockV1::SYSTEM)?;
+        let after = SourceStampV1::of(&observed.real_path, clock())?;
         if !observed.before.identifies_same_entry(&after) {
             return Ok(false);
         }
@@ -388,7 +401,7 @@ fn tree_stamp(root: &Path, files: &[PathBuf]) -> io::Result<(String, bool)> {
                 .is_symlink()
                 .then(|| std::fs::read_link(path))
                 .transpose()?;
-            let mut stamp = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
+            let mut stamp = SourceStampV1::of(path, clock())?;
             untrusted |= !trustworthy(path, &stamp);
             stamp.observed_nanos = None;
             Ok((relative, link, stamp))
@@ -416,7 +429,7 @@ fn tree_stamp(root: &Path, files: &[PathBuf]) -> io::Result<(String, bool)> {
         digest.update([0xff]);
     }
     for directory in directories {
-        let mut stamp = SourceStampV1::of(&root.join(&directory), StoreClockV1::SYSTEM)?;
+        let mut stamp = SourceStampV1::of(&root.join(&directory), clock())?;
         stamp.observed_nanos = None;
         digest.update([2]);
         digest.update(directory.as_os_str().as_encoded_bytes());
@@ -430,6 +443,28 @@ fn tree_stamp(root: &Path, files: &[PathBuf]) -> io::Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// How far this test thread's store clock runs from the system clock ([`clock`]).
+        pub(super) static CLOCK_SKEW_NANOS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Run the store on a clock `skew` from the system clock until dropped.
+    struct SkewedClock;
+
+    impl SkewedClock {
+        fn set(skew: std::time::Duration, behind: bool) -> Self {
+            let nanos = i64::try_from(skew.as_nanos()).unwrap();
+            CLOCK_SKEW_NANOS.with(|clock| clock.set(if behind { -nanos } else { nanos }));
+            Self
+        }
+    }
+
+    impl Drop for SkewedClock {
+        fn drop(&mut self) {
+            CLOCK_SKEW_NANOS.with(|clock| clock.set(0));
+        }
+    }
 
     fn sha(bytes: &[u8]) -> String {
         format!("sha256:{}", crate::hashing::sha256_bytes(bytes))
@@ -626,8 +661,16 @@ mod tests {
             .unwrap();
         assert_eq!(run().unwrap().1, SourceVerification::Hashed, "substituted");
 
-        // A freshly written file is racy: fingerprinted, never recorded.
+        // A racy file is fingerprinted, never recorded. This one is dated ahead of the clock, so it
+        // stays racy however long this host takes to reach the stamp (a just-written file is racy
+        // only for its first 20 ms).
         std::fs::write(root.join("c.json"), b"{}").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("c.json"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
         assert_eq!(run().unwrap().1, SourceVerification::Hashed);
         assert_eq!(run().unwrap().1, SourceVerification::Hashed);
     }
@@ -670,36 +713,54 @@ mod tests {
         assert_eq!(verification, SourceVerification::Hashed);
     }
 
-    /// The racy rule is measured from the stamp taken BEFORE the hash: a file modified just before
-    /// verification began is not recorded even when the hash itself takes longer than the tick.
+    /// The racy rule is measured from the stamp taken BEFORE the hash: a file that was racy when
+    /// verification began is not recorded even though it has settled by the time the hash ends.
     #[test]
     fn the_racy_rule_uses_the_stamp_taken_before_the_hash() {
         let temp = tempfile::tempdir().unwrap();
         let cache = VerifiedSourceCache::new(temp.path().join("verified"));
         let path = temp.path().join("blob");
         std::fs::write(&path, b"weights").unwrap();
-        // Modified 40 ms "from now": racy at the stamp before the hash, settled by the time a
-        // deliberately slow hash ends.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_millis(40))
-            .unwrap();
+        settle(&path);
         let path = std::fs::canonicalize(&path).unwrap();
-        let slow = || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        // The file settled ten seconds ago by the system clock. A store clock running a minute
+        // behind dates every stamp before that modified time, so a stamp taken on it is racy
+        // however slowly this host runs; the hash's `check` puts the clock right, so every stamp
+        // after it is settled.
+        let behind = || SkewedClock::set(std::time::Duration::from_secs(60), true);
+        let skew = std::cell::RefCell::new(Some(behind()));
+        let settle_clock = || {
+            skew.borrow_mut().take();
             Ok(())
         };
         assert_eq!(
-            cache.verify(&path, &sha(b"weights"), &slow).unwrap(),
+            cache
+                .verify(&path, &sha(b"weights"), &settle_clock)
+                .unwrap(),
             SourceVerification::Hashed
         );
+        assert!(skew.borrow().is_none(), "the hash ran");
         assert_eq!(
             cache.verify(&path, &sha(b"weights"), &|| Ok(())).unwrap(),
             SourceVerification::Hashed,
             "a verdict whose before-stamp was racy is never reused"
         );
+
+        // The same rule for a caller's own hash: observed while racy, recorded once settled.
+        let path = temp.path().join("other");
+        std::fs::write(&path, b"other").unwrap();
+        settle(&path);
+        let path = std::fs::canonicalize(&path).unwrap();
+        let observed = {
+            let _behind = behind();
+            cache.observe(&path).unwrap()
+        };
+        assert!(!SourceStampV1::of(&path, clock()).unwrap().is_racy());
+        assert!(
+            !cache.record_hashed(observed, &sha(b"other")).unwrap(),
+            "a verdict whose before-stamp was racy is never recorded"
+        );
+        assert_eq!(cache.recorded(&path), None);
     }
 
     /// A trusted record for the unchanged file that names other bytes answers a mismatch without

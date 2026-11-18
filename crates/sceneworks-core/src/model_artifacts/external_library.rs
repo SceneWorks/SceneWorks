@@ -1591,8 +1591,12 @@ fn observed_physical_identity(
         device: metadata.dev(),
         directory_id: metadata.ino(),
     };
+    let probe = || macos_volume_id(path);
+    #[cfg(not(test))]
+    let volume_id = VOLUME_IDENTITY_MEMO.volume_id(key, std::time::Instant::now, probe)?;
+    #[cfg(test)]
     let volume_id =
-        VOLUME_IDENTITY_MEMO.volume_id(key, std::time::Instant::now(), || macos_volume_id(path))?;
+        VOLUME_IDENTITY_MEMO.with(|memo| memo.volume_id(key, test_volume_identity_now, probe))?;
     Ok(ExternalLibraryPhysicalIdentity {
         volume_id,
         directory_id: metadata.ino(),
@@ -1653,18 +1657,31 @@ fn macos_volume_id(path: &Path) -> Result<String, ExternalLibraryError> {
     Ok(format!("macos-volume:{compact}"))
 }
 
-// Volume-UUID probes this thread has spawned `df` + `diskutil` for, so a test can count the
-// probes one catalog sweep costs.
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
+    // Volume-UUID probes this thread has spawned `df` + `diskutil` for, so a test can count the
+    // probes one catalog sweep costs.
     static TEST_MACOS_VOLUME_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // This test thread's memo, so other tests' probes neither hold its lock nor evict its entries.
+    static VOLUME_IDENTITY_MEMO: VolumeIdentityMemo = VolumeIdentityMemo::default();
+    // The instant this test thread's memo reads as "now", when a test pins one.
+    static TEST_VOLUME_IDENTITY_NOW: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The memo's clock on this test thread: the pinned instant, if the test pinned one.
+#[cfg(all(test, target_os = "macos"))]
+fn test_volume_identity_now() -> std::time::Instant {
+    TEST_VOLUME_IDENTITY_NOW
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(std::time::Instant::now)
 }
 
 /// How long a probed volume UUID may be reused for an unchanged [`VolumeIdentityKey`].
 #[cfg(any(target_os = "macos", test))]
 const VOLUME_IDENTITY_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 static VOLUME_IDENTITY_MEMO: std::sync::LazyLock<VolumeIdentityMemo> =
     std::sync::LazyLock::new(VolumeIdentityMemo::default);
 
@@ -1688,7 +1705,8 @@ struct VolumeIdentityKey {
 /// gets a new inode, and the TTL bounds the one case those miss (a different disk handed the same
 /// device node and inode within seconds), so disconnect and foreign-volume detection hold. Errors
 /// are never cached. The lock is held across the probe, so concurrent sweeps that miss together
-/// share one `diskutil` call instead of each spawning their own.
+/// share one `diskutil` call instead of each spawning their own. The clock is read only once the
+/// lock is held, so time spent waiting behind another path's probe never ages an entry.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 struct VolumeIdentityMemo {
@@ -1702,10 +1720,11 @@ impl VolumeIdentityMemo {
     fn volume_id(
         &self,
         key: VolumeIdentityKey,
-        now: std::time::Instant,
+        clock: impl FnOnce() -> std::time::Instant,
         probe: impl FnOnce() -> Result<String, ExternalLibraryError>,
     ) -> Result<String, ExternalLibraryError> {
         let mut entries = self.entries.lock();
+        let now = clock();
         if let Some((probed_at, volume_id)) = entries.get(&key) {
             if now.saturating_duration_since(*probed_at) < VOLUME_IDENTITY_MEMO_TTL {
                 return Ok(volume_id.clone());
