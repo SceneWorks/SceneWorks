@@ -1162,18 +1162,14 @@ pub fn flux3_catalog_tier_refusal(
     if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
         return None;
     }
-    let with_variant;
-    let advanced = match variant.map(str::trim).filter(|tier| !tier.is_empty()) {
-        Some(tier) => {
-            let mut selected = advanced.clone();
-            selected.remove("mlxQuantize");
-            selected.insert("quantTier".to_owned(), Value::String(tier.to_owned()));
-            with_variant = selected;
-            &with_variant
-        }
-        None => advanced,
+    let named = if variant.is_some_and(|tier| !tier.trim().is_empty()) {
+        let mut options = ImageAdvanced::default();
+        options.bind_variant(variant);
+        flux3_requested_tier_resolved(&options)
+    } else {
+        flux3_requested_tier(advanced)
     };
-    let tier = match flux3_requested_tier(advanced) {
+    let tier = match named {
         Ok(tier) => tier,
         Err(reason) => return Some(format!("{model}: {reason}")),
     };
