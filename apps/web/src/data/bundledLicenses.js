@@ -140,6 +140,8 @@ import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?u
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?url&no-inline";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?url&no-inline";
 import qwen38DescriberApache20 from "../../../desktop/licenses/qwen3.8-27b-describer/Apache-2.0.txt?url&no-inline";
+import qwen38DspineApache20 from "../../../desktop/licenses/qwen3.8-27b-dspine-draft/Apache-2.0.txt?url&no-inline";
+import qwen38Dflash2Apache20 from "../../../desktop/licenses/qwen3.8-27b-dflash2-draft/Apache-2.0.txt?url&no-inline";
 import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?url&no-inline";
 // DWPose (sc-17634): mmpose's OWN LICENSE file, not the stock Apache text — it carries the
 // "Copyright 2018-2020 Open-MMLab. All rights reserved." notice, which is the attribution that has
@@ -294,6 +296,8 @@ const DOCUMENT_URL = {
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
   "qwen3.8-27b-describer-apache": qwen38DescriberApache20,
+  "qwen3.8-27b-dspine-apache": qwen38DspineApache20,
+  "qwen3.8-27b-dflash2-apache": qwen38Dflash2Apache20,
   "seedvr2-apache": seedvr2Apache20,
   "dwpose-apache": dwposeApache20,
   "insightface-model-notice": insightfaceModelNotice,

@@ -207,9 +207,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // @6f62669b…, SceneWorks/minimax-h3-image-pe @fdcc4059…); merged with main's record: 157 keys.
 // SW-F369 adds the MiniMax-H3-Image de-distill training adapter
 // (ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter@f1a45475…): 158 keys; every prior row is unchanged.
+// SW-7203 adds the Qwen3.8-27B block-draft re-hosts (SceneWorks/qwen3.8-27b-dspine-b16 @8e450d7f…,
+// SceneWorks/qwen3.8-27b-dflash2 @9030fabf…): 160 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "2859f265e34759ffa9cad8628d58b7c7ee077642df945cc091d06c7d8aebc9f6";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "d4b90c043152232acf4226b15f7e644e1b48bd638919c52011cfd7faf5a6c69a";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

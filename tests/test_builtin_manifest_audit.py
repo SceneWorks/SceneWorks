@@ -3839,9 +3839,56 @@ def _license_acknowledgment_repo_index(models):
     for model in models:
         if model.get("requiresLicenseAcknowledgment") is not True:
             continue
-        for repo in _declared_download_repos(model):
+        # A row that declares its own `license` is a component under different terms (SW-7203), so
+        # the entry's acknowledgment does not govern its repo.
+        governed = {**model, "downloads": [d for d in model.get("downloads", []) if not str(d.get("license") or "").strip()]}
+        for repo in _declared_download_repos(governed):
             index.setdefault(repo, model["id"])
     return index
+
+
+# SW-7203: a download row that declares its own `license` on a `requiresLicenseAcknowledgment` entry is
+# EXEMPT from that entry's repo-keyed acknowledgment (the Apache-2.0 block drafts shipped with the gated
+# MiniMax prompt expander). `license` used to be display-only, so a new display-only license on a gated
+# row would otherwise silently drop that repo from the gate. Extend the allow-list only when the shipped
+# manifest needs another permissive SPDX id.
+PERMISSIVE_OWN_LICENSE_ALLOW_LIST = frozenset({"Apache-2.0", "MIT", "BSD-3-Clause"})
+
+
+def _own_license_exempt_rows_of_gated_entries():
+    """`(entry id, repo key, license)` for every download row carrying its own `license` on a gated entry."""
+    rows = []
+    for model_id, model in _license_acknowledgment_models().items():
+        for download in model.get("downloads", []):
+            license_id = str(download.get("license") or "").strip()
+            key = _huggingface_repo_key(download.get("repo"))
+            if license_id and key:
+                rows.append((model_id, key, license_id))
+    return rows
+
+
+def test_gated_entry_rows_with_their_own_license_are_permissive_and_not_shared_with_gated_rows():
+    models = _load_builtin_models_manifest()["models"]
+    # The repos the gate really covers: unlicensed download rows of every gated entry (what the Rust index
+    # reads) plus every conditional component, which keeps its own `license` and stays gated.
+    gated = set(_license_acknowledgment_repo_index(models))
+    for model in _license_acknowledgment_models().values():
+        for component in model.get("conditionalComponents", []):
+            key = _huggingface_repo_key(component.get("repo"))
+            if key:
+                gated.add(key)
+    exempt = _own_license_exempt_rows_of_gated_entries()
+    assert exempt, "no gated entry carries a row with its own license; the exemption (and this audit) is vacuous"
+    for model_id, repo, license_id in exempt:
+        assert license_id in PERMISSIVE_OWN_LICENSE_ALLOW_LIST, (
+            f"{model_id}: row {repo} declares license {license_id!r}, which exempts it from the entry's "
+            f"license acknowledgment but is not in {sorted(PERMISSIVE_OWN_LICENSE_ALLOW_LIST)}. A display-only "
+            "license on a gated row silently drops the repo from the gate."
+        )
+        assert repo not in gated, (
+            f"{model_id}: repo {repo} is exempted by its own license here but is also named by an un-licensed "
+            "row or conditional component of a gated entry, so the exemption would not hold consistently"
+        )
 
 
 def _license_acknowledgment_models():

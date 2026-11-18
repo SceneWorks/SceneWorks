@@ -189,11 +189,20 @@ pub(super) fn license_acknowledgment_index_for_selected(
         if !model_requires_license_acknowledgment(model) {
             continue;
         }
+        // A download row that declares its own `license` is a component under different terms
+        // (SW-7203: the Apache-2.0 block drafts shipped with the gated MiniMax prompt expander), so
+        // this entry's acknowledgment does not govern its repo. Conditional components are not
+        // exempt: they carry a `license` of their own and stay gated.
         let downloads = model
             .get("downloads")
             .and_then(Value::as_array)
             .into_iter()
-            .flatten();
+            .flatten()
+            .filter(|row| {
+                !row.get("license")
+                    .and_then(Value::as_str)
+                    .is_some_and(|license| !license.trim().is_empty())
+            });
         for row in downloads.chain(conditional) {
             let Some(key) = row
                 .get("repo")
@@ -206,6 +215,35 @@ pub(super) fn license_acknowledgment_index_for_selected(
         }
     }
     index
+}
+
+#[cfg(test)]
+mod license_index_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// SW-7203: a download row that declares its own `license` is outside the entry's acknowledgment.
+    /// The Apache-2.0 block drafts ride along with the MiniMax prompt expander, and a repo-keyed
+    /// request for one must not demand MiniMax's terms; a row without its own `license` stays gated.
+    #[test]
+    fn a_row_with_its_own_license_is_not_governed_by_the_entry_acknowledgment() {
+        let models = vec![json!({
+            "id": "gated_entry",
+            "requiresLicenseAcknowledgment": true,
+            "downloads": [
+                {"provider": "huggingface", "repo": "Vendor/Gated", "files": ["a"]},
+                {"provider": "huggingface", "repo": "SceneWorks/draft", "coRequisite": true,
+                 "required": "soft", "license": "Apache-2.0", "files": ["b"]}
+            ],
+            "conditionalComponents": [
+                {"componentId": "cover", "repo": "Vendor/Cover", "license": "CC-BY-NC-4.0"}
+            ]
+        })];
+        let index = license_acknowledgment_index_for(&models);
+        assert!(index.contains_key("vendor/gated"));
+        assert!(index.contains_key("vendor/cover"));
+        assert!(!index.contains_key("sceneworks/draft"));
+    }
 }
 
 /// SW-7100 (E23): MiniMax-H3-Image is gated at RUN as well as at install. Its weights are fetched

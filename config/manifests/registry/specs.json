@@ -48421,6 +48421,40 @@
           "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
           "revision": "35603d4b63949afa12cb098227fffefedf081afa",
           "subdir": "prompt"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 4051845726,
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "LICENSE"
+          ],
+          "footprint": {
+            "diskSizeBytes": 4051845726
+          },
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "required": "soft",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 3848830679,
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "LICENSE"
+          ],
+          "footprint": {
+            "diskSizeBytes": 3848830679
+          },
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "required": "soft",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9"
         }
       ],
       "family": "minimax-h3-image-pe",
@@ -67858,6 +67892,40 @@
           "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
           "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
           "variant": "bf16"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 4051845726,
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "LICENSE"
+          ],
+          "footprint": {
+            "diskSizeBytes": 4051845726
+          },
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "required": "soft",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 3848830679,
+          "files": [
+            "config.json",
+            "model.safetensors",
+            "LICENSE"
+          ],
+          "footprint": {
+            "diskSizeBytes": 3848830679
+          },
+          "license": "Apache-2.0",
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "required": "soft",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9"
         }
       ],
       "family": "vision-caption",

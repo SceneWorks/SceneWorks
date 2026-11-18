@@ -1397,6 +1397,36 @@
       ]
     },
     {
+      "id": "qwen3.8-27b-dspine-draft",
+      "models": [],
+      "name": "DSpine draft for Qwen3.8-27B",
+      "publisher": "Tencent",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/tencent/Qwen3.8-27B-DSpine-b16",
+      "usage": "Block-draft model for faster Qwen3.8-27B decoding. Downloaded with each tier of the Qwen3.8 27B describer and the MiniMax-H3-Image prompt expander; re-hosted by SceneWorks at SceneWorks/qwen3.8-27b-dspine-b16 with the weights and config unmodified (upstream revision 260a6c23070ca873ff1a5f33b7119ac3f6a245ee).",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "qwen3.8-27b-dspine-apache"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b-dflash2-draft",
+      "models": [],
+      "name": "DFlash2 draft for Qwen3.8-27B",
+      "publisher": "incoai",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2",
+      "usage": "Block-draft model for faster Qwen3.8-27B decoding. Downloaded with each tier of the Qwen3.8 27B describer and the MiniMax-H3-Image prompt expander; re-hosted by SceneWorks at SceneWorks/qwen3.8-27b-dflash2 with the weights and config unmodified (upstream revision 015e795645c74b1a0eeef3b570031fb62e769bc5). Upstream ships no LICENSE file, so the re-host adds one containing the Apache-2.0 text, plus a provenance note in its README.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "qwen3.8-27b-dflash2-apache"
+        }
+      ]
+    },
+    {
       "id": "cephes",
       "models": [],
       "name": "Cephes Math Library",
