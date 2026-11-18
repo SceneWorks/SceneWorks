@@ -31596,3 +31596,238 @@ fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
     assert_eq!(native.sampler.as_deref(), Some("heun"));
     assert_eq!(native.scheduler.as_deref(), Some("karras"));
 }
+
+#[test]
+fn write_image_asset_and_upscaled_share_embed_sanitized_pag_execution_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    // Post-enqueue scrubbing strips any client-supplied pagExecutionReport from the payload before
+    // the worker sees `plan.workflow_source`, while `pag` itself travels normally.
+    let mut payload = embed_payload();
+    payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert(
+            "pag".to_owned(),
+            json!({
+                "scale": 1.5,
+                "layers": [5, 2],
+                "start": 0.1,
+                "stop": 0.9,
+                "adaptiveScale": 0.25
+            }),
+        );
+    assert!(
+        payload["advanced"]
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY)
+            .is_none(),
+        "workflow_source mirrors post-enqueue scrubbing without pagExecutionReport"
+    );
+
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let mut raw_settings = stub_raw_settings(&req);
+    raw_settings.insert(
+        sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+        json!({
+            "scale": 1.5,
+            "adaptive_scale": 0.25,
+            "layers": [5, 2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }),
+    );
+
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        resolve_seed(&req, 0),
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, 100),
+        STUB_ADAPTER,
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let expected_report = json!({
+        "scale": 1.5,
+        "adaptiveScale": 0.25,
+        "layers": [2, 5],
+        "start": 0.1,
+        "stop": 0.9,
+        "activeSteps": 6,
+        "totalSteps": 8
+    });
+
+    let media = project_path.join(base_fact["mediaPath"].as_str().unwrap());
+    let base_share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("it carries a workflow");
+    assert_eq!(
+        base_share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&expected_report)
+    );
+
+    let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
+    let upscaled_share = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("upscaled workflow share fits within recording ceiling");
+    assert_eq!(
+        upscaled_share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&expected_report)
+    );
+
+    // If PAG did not execute (or raw_settings holds an invalid/unknown-field receipt) and
+    // workflow_source was scrubbed at enqueue, neither base nor upscaled share embeds
+    // pagExecutionReport.
+    for hostile_report in [
+        json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.25,
+            "layers": [2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8,
+            "localScratchPath": "/Volumes/Private/pag.bin"
+        }),
+        json!({
+            "scale": 0.0,
+            "adaptiveScale": 0.0,
+            "layers": [],
+            "start": 0.9,
+            "stop": 0.1,
+            "activeSteps": 10,
+            "totalSteps": 8
+        }),
+    ] {
+        let mut invalid_raw_settings = stub_raw_settings(&req);
+        invalid_raw_settings.insert(
+            sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+            hostile_report,
+        );
+        let invalid_fact = write_image_asset(
+            &plan,
+            0,
+            resolve_seed(&req, 0),
+            req.width,
+            req.height,
+            stub_rgb8(req.width, req.height, 100),
+            STUB_ADAPTER,
+            invalid_raw_settings,
+            &project_path,
+        )
+        .unwrap();
+        let invalid_media = project_path.join(invalid_fact["mediaPath"].as_str().unwrap());
+        let invalid_share = sceneworks_core::workflow_png::read_workflow_chunk_file(&invalid_media)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !invalid_share
+                .advanced
+                .contains_key(sceneworks_core::options::pag::PAG_REPORT_KEY),
+            "base share must drop invalid or unknown-field pagExecutionReport values"
+        );
+        let invalid_upscaled =
+            upscaled_workflow_share(&req, &invalid_fact, &payload, &applied).unwrap();
+        assert!(
+            !invalid_upscaled
+                .advanced
+                .contains_key(sceneworks_core::options::pag::PAG_REPORT_KEY),
+            "upscaled share must drop invalid or unknown-field pagExecutionReport values"
+        );
+    }
+}
+
+#[cfg(native_lane)]
+#[test]
+fn write_upscaled_asset_embeds_pag_execution_report_in_png_workflow_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut payload = embed_payload();
+    payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert(
+            "pag".to_owned(),
+            json!({ "scale": 1.5, "layers": [2, 5], "start": 0.1, "stop": 0.9 }),
+        );
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let mut raw_settings = stub_raw_settings(&req);
+    raw_settings.insert(
+        sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+        json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.0,
+            "layers": [5, 2],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }),
+    );
+
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        resolve_seed(&req, 0),
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, 100),
+        STUB_ADAPTER,
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+    let upscaled =
+        image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([12, 34, 56]));
+    let upscaled_fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        None,
+        "real-esrgan",
+        2,
+        0.0,
+        None,
+        &project_path,
+    )
+    .unwrap();
+
+    let upscaled_media = project_path.join(upscaled_fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&upscaled_media)
+        .expect("the upscaled PNG is readable")
+        .expect("it carries a workflow");
+    assert_eq!(
+        share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.0,
+            "layers": [2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }))
+    );
+}

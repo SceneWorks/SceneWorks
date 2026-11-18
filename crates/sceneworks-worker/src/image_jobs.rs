@@ -2016,6 +2016,21 @@ pub(crate) fn workflow_source(
     Some(Arc::new(job_payload.clone()))
 }
 
+fn attach_pag_report_to_share(
+    share: &mut sceneworks_core::workflow_share::WorkflowShare,
+    raw_settings: Option<&JsonObject>,
+) {
+    if let Some(report) = raw_settings
+        .and_then(|raw| raw.get(sceneworks_core::options::pag::PAG_REPORT_KEY))
+        .and_then(sceneworks_core::options::pag::sanitize_share_pag_report)
+    {
+        share.advanced.insert(
+            sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+            report,
+        );
+    }
+}
+
 /// The workflow envelope for an inline-upscaled variant (sc-15948): the generation's own payload
 /// with the APPLIED pass overlaid.
 ///
@@ -2053,7 +2068,7 @@ pub(crate) fn upscaled_workflow_share(
     // describing one generation cannot disagree about the render that produced it. The base fact
     // supplies the geometry fallback for a payload that omitted it, which is the actual written
     // size of the image this variant was upscaled FROM.
-    embeddable_workflow_share(
+    let mut share = embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: request.mode.clone(),
             model: request.model.clone(),
@@ -2064,7 +2079,14 @@ pub(crate) fn upscaled_workflow_share(
             height: base_u32("height"),
         },
         &overlay,
-    )
+    )?;
+    attach_pag_report_to_share(
+        &mut share,
+        base_fact
+            .get("rawAdapterSettings")
+            .and_then(Value::as_object),
+    );
+    Some(share)
 }
 
 /// The workflow envelope for the standalone detail pass (sc-15948).
@@ -2659,6 +2681,7 @@ pub(crate) fn write_image_asset(
                     .insert(sceneworks_core::moss_image::EDIT_REPORT_KEY.into(), report);
             }
         }
+        attach_pag_report_to_share(&mut share, Some(&raw_settings));
         share.model_hash = plan.model_hash.clone();
         // Replace request-derived hints with the exact adapter stack the worker resolved. This is
         // the only seam that can attach hashes, so client-supplied attribution fields never win.

@@ -333,6 +333,7 @@ pub(super) struct QwenStrictControl {
     height: u32,
     steps: u32,
     sampling: gen_core::GenerationRequest,
+    pag_workspace_bytes: Option<u64>,
     guidance: f32,
     control_scale: f32,
     adapters: Vec<gen_core::AdapterSpec>,
@@ -351,6 +352,7 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
         height: 512,
         steps: 30,
         sampling: gen_core::GenerationRequest::default(),
+        pag_workspace_bytes: None,
         guidance: 4.0,
         control_scale: 1.0,
         adapters: Vec::new(),
@@ -417,13 +419,24 @@ impl CandleStrictControl for QwenStrictControl {
     }
 
     /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
-    /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
+    /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069), plus any active PAG
+    /// working-buffer workspace bytes (SW-7180).
     fn conditioning_admission(&self) -> ConditioningAdmission {
         // The control overlay plus the user LoRA stack — both are co-resident with whichever base
         // shape is picked below, so they are priced into either floor.
         let mut overlays = vec![self.controlnet.as_path()];
         overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
-        if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
+        let pag_workspace_bytes = self.pag_workspace_bytes.unwrap_or_else(|| {
+            crate::execution_planner::pag_workspace_bytes(
+                self.width,
+                self.height,
+                1,
+                self.steps,
+                None,
+                self.sampling.pag.as_ref(),
+            )
+        });
+        let footprint = if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
             let transformer = self.qwen_base.join("transformer");
             let vae = self.qwen_base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
@@ -432,20 +445,29 @@ impl CandleStrictControl for QwenStrictControl {
                     vae.as_path(),
                 ];
                 staged.extend(overlays.iter().copied());
-                return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
+                ConditioningFootprint::from_paths(
                     "Qwen-Image",
                     "strict-pose ControlNet branch",
                     &transformer,
                     &staged,
-                ));
+                )
+            } else {
+                ConditioningFootprint::from_paths(
+                    "Qwen-Image",
+                    "strict-pose ControlNet branch",
+                    &self.qwen_base,
+                    &overlays,
+                )
             }
-        }
-        ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
-            "Qwen-Image",
-            "strict-pose ControlNet branch",
-            &self.qwen_base,
-            &overlays,
-        ))
+        } else {
+            ConditioningFootprint::from_paths(
+                "Qwen-Image",
+                "strict-pose ControlNet branch",
+                &self.qwen_base,
+                &overlays,
+            )
+        };
+        ConditioningAdmission::Floor(footprint.with_workspace_bytes(pag_workspace_bytes))
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {
@@ -537,6 +559,14 @@ pub(super) async fn generate_candle_qwen_control_stream(
         attach_manifest_text_encoder(base_spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
     let selected_spec = attached_selected_spec.into_load_spec();
 
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request,
+        request.width,
+        request.height,
+        1,
+        steps,
+        None,
+    );
     let provider = QwenStrictControl {
         qwen_base,
         load_spec: selected_spec,
@@ -547,6 +577,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         height: request.height,
         steps,
         sampling: super::sampling::explicit_sampling_request(request),
+        pag_workspace_bytes: Some(pag_workspace_bytes),
         guidance,
         control_scale,
         adapters,
@@ -666,5 +697,87 @@ mod qwen_control_tier_tests {
             qwen_control_tier_subdir(&request(json!({})), Some(empty.path())),
             "q8"
         );
+    }
+
+    #[test]
+    fn conditioning_admission_charges_active_pag_workspace_bytes_and_zero_when_inactive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("model.safetensors"), vec![0u8; 4096]).unwrap();
+        let control = tmp.path().join("control.safetensors");
+        std::fs::write(&control, vec![0u8; 2048]).unwrap();
+
+        let inactive_req = ImageRequest::from_resolved(
+            json!({ "model": "qwen_image", "width": 1024, "height": 1024, "advanced": { "steps": 30 } })
+                .as_object()
+                .unwrap(),
+            json!({ "model": "qwen_image", "width": 1024, "height": 1024, "advanced": { "steps": 30 } })
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let inactive_pag_bytes = crate::execution_planner::request_pag_workspace_bytes(
+            &inactive_req,
+            1024,
+            1024,
+            1,
+            30,
+            None,
+        );
+        assert_eq!(inactive_pag_bytes, 0);
+
+        let mut provider = qwen_strict_control_test_fixture(base.clone());
+        provider.controlnet = control.clone();
+        provider.width = 1024;
+        provider.height = 1024;
+        provider.steps = 30;
+        provider.pag_workspace_bytes = Some(inactive_pag_bytes);
+        let ConditioningAdmission::Floor(inactive_footprint) = provider.conditioning_admission()
+        else {
+            panic!("qwen control must emit a floor footprint");
+        };
+        assert_eq!(inactive_footprint.base_bytes, 4096);
+        assert_eq!(inactive_footprint.overlay_bytes, 2048);
+        assert_eq!(inactive_footprint.workspace_bytes, 0);
+
+        let active_value = json!({
+            "model": "qwen_image",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 30,
+                "pag": { "scale": 1.5, "layers": [2], "start": 0.1, "stop": 0.9 }
+            }
+        });
+        let active_req = ImageRequest::from_resolved(
+            active_value.as_object().unwrap(),
+            active_value.as_object().unwrap(),
+        )
+        .unwrap();
+        let active_pag_bytes = crate::execution_planner::request_pag_workspace_bytes(
+            &active_req,
+            1024,
+            1024,
+            1,
+            30,
+            None,
+        );
+        assert!(active_pag_bytes > 0);
+
+        provider.sampling = super::super::sampling::explicit_sampling_request(&active_req);
+        provider.pag_workspace_bytes = Some(active_pag_bytes);
+        let ConditioningAdmission::Floor(active_footprint) = provider.conditioning_admission()
+        else {
+            panic!("qwen control must emit a floor footprint");
+        };
+        assert_eq!(active_footprint.base_bytes, 4096);
+        assert_eq!(active_footprint.overlay_bytes, 2048);
+        assert_eq!(active_footprint.workspace_bytes, active_pag_bytes);
+        let inactive_floor =
+            crate::conditioning_fit::conditioning_floor_gb(&inactive_footprint).unwrap();
+        let active_floor =
+            crate::conditioning_fit::conditioning_floor_gb(&active_footprint).unwrap();
+        assert!(active_floor > inactive_floor);
     }
 }
