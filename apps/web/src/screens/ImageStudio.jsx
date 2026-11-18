@@ -2193,6 +2193,12 @@ export function ImageStudio() {
   // older presets (which only stored count/resolution/negativePrompt) keep working and
   // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale knobs.
   // The model is intentionally absent — presets never switch the model.
+  const normalizedSelectedPreset = useMemo(() => {
+    const base = moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset;
+    if (!base?.defaults || !Object.hasOwn(base.defaults, "pag")) return base;
+    return { ...base, defaults: { ...base.defaults, pag: pagFromRecipe(base.defaults.pag) } };
+  }, [moss, selectedPreset]);
+
   const {
     presetName,
     setPresetName,
@@ -2204,7 +2210,7 @@ export function ImageStudio() {
     handleSaveAsPreset,
   } = useSavePreset({
     saved,
-    selectedPreset: moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset,
+    selectedPreset: normalizedSelectedPreset,
     presetApplicationId: isMossImage(launchRequest?.presetModel) && launchRequest?.presetId ? launchRequest.id : null,
     setSelectedPresetId,
     presets,
@@ -2238,7 +2244,7 @@ export function ImageStudio() {
       // SW-7106: restore the saved MiniMax-H3-Image sampler (absent or Euler ⇒ Euler).
       // The preset machinery applies through a functional update (to snapshot the prior value).
       ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
-      ["pag", (update) => setPag((current) => pagFromRecipe(typeof update === "function" ? update(current) : update))],
+      ["pag", setPag],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],

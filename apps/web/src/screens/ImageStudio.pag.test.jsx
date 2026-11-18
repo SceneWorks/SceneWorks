@@ -182,7 +182,7 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     expect(scaleInput).toBeTruthy();
     expect(scaleInput.value).toBe("");
     expect(scaleInput.getAttribute("placeholder")).toBe("0 (Off)");
-    expect(scaleInput.getAttribute("max")).toBe(String(model.pag.maxScale));
+    expect(scaleInput.getAttribute("step")).toBe("any");
 
     const hintText = labelled(container, "PAG scale").querySelector(".field-hint")?.textContent;
     expect(hintText).toContain(`Recommended: ${model.pag.recommendedScale}`);
@@ -351,18 +351,36 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
       adaptiveScale: 0.3,
     });
 
-    // Clear PAG manually, then apply the saved preset -> PAG controls restore intact.
-    await act(async () => setInput(field(container, "PAG scale"), ""));
-    await act(async () => setInput(field(container, "PAG blocks"), ""));
+    // Clear PAG manually, then apply the saved preset -> PAG controls restore intact,
+    // and clicking "None" restores the prior Off state without manual clearing.
     await render({ ...context, presets: [savedPreset] }, { openAdvanced: true });
     await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
-    await act(async () => setInput(field(container, "PAG scale"), ""));
+    await act(async () => {
+      setInput(field(container, "PAG scale"), "");
+      setInput(field(container, "PAG blocks"), "");
+      setInput(field(container, "PAG window start"), "");
+      setInput(field(container, "PAG window stop"), "");
+      setInput(field(container, "PAG adaptive scale"), "");
+    });
     await click(buttonWithText("Krea PAG"));
     expect(field(container, "PAG scale").value).toBe("1.8");
     expect(field(container, "PAG blocks").value).toBe("4, 14");
     expect(field(container, "PAG window start").value).toBe("0.15");
     expect(field(container, "PAG window stop").value).toBe("0.85");
     expect(field(container, "PAG adaptive scale").value).toBe("0.3");
+    await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
+    expect(field(container, "PAG scale").value).toBe("");
+    expect(field(container, "PAG blocks").value).toBe("");
+    expect(field(container, "PAG window start").value).toBe("");
+    expect(field(container, "PAG window stop").value).toBe("");
+    expect(field(container, "PAG adaptive scale").value).toBe("");
+
+    // Fine-grained decimals (e.g. 1.25 / 0.125) pass native HTML5 form validity (`step="any"`).
+    await act(async () => {
+      setInput(field(container, "PAG scale"), "1.25");
+      setInput(field(container, "PAG window start"), "0.125");
+    });
+    expect(container.querySelector("form.studio-shell").checkValidity()).toBe(true);
 
     // 3. GenerationSet recipe 'Use Settings' replay scrubs pagExecutionReport and restores pag.
     const recipeLaunch = {

@@ -331,11 +331,9 @@ export function ImageAdvancedPanel({
                     PAG scale
                     <input
                       aria-label="PAG scale"
-                      max={pagCapability.maxScale}
-                      min="0"
                       onChange={(event) => setPag((current) => ({ ...current, scale: event.target.value }))}
                       placeholder="0 (Off)"
-                      step="0.1"
+                      step="any"
                       type="number"
                       value={pag.scale}
                     />
@@ -364,10 +362,9 @@ export function ImageAdvancedPanel({
                         PAG adaptive scale
                         <input
                           aria-label="PAG adaptive scale"
-                          min="0"
                           onChange={(event) => setPag((current) => ({ ...current, adaptiveScale: event.target.value }))}
                           placeholder="0"
-                          step="0.05"
+                          step="any"
                           type="number"
                           value={pag.adaptiveScale}
                         />
@@ -376,11 +373,9 @@ export function ImageAdvancedPanel({
                         PAG window start
                         <input
                           aria-label="PAG window start"
-                          max="1"
-                          min="0"
                           onChange={(event) => setPag((current) => ({ ...current, start: event.target.value }))}
                           placeholder={String(pagCapability.defaultStart)}
-                          step="0.01"
+                          step="any"
                           type="number"
                           value={pag.start}
                         />
@@ -389,11 +384,9 @@ export function ImageAdvancedPanel({
                         PAG window stop
                         <input
                           aria-label="PAG window stop"
-                          max="1"
-                          min="0"
                           onChange={(event) => setPag((current) => ({ ...current, stop: event.target.value }))}
                           placeholder={String(pagCapability.defaultStop)}
-                          step="0.01"
+                          step="any"
                           type="number"
                           value={pag.stop}
                         />
