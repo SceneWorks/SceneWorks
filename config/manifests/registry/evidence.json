@@ -45716,7 +45716,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "0000000000000000000000000000000000000000",
+        "revision": "7c0e818cc31e72839227237cc8c1cf18c4de5dbb",
         "variant": "bf16",
         "files": [
           "bf16/*"
