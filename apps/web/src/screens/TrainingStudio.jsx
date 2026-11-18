@@ -1,3 +1,4 @@
+import { LOOP_CAPTIONER, LOOP_UTILITY_REPO, loopUtilityModel, loopUtilityTier } from "../loopUtility.js";
 import { portableFeedbackBlocks } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
@@ -156,12 +157,15 @@ function trainingCaptionJobPayload(settings) {
   // refuses a caller prompt alongside it) and trigger-only runs no captioner.
   const captionPrompt = mode === "default" ? String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim() : "";
   return {
-    captioner: "joy_caption",
+    captioner: settings.captioner === LOOP_CAPTIONER ? LOOP_CAPTIONER : "joy_caption",
+    ...(settings.captioner === LOOP_CAPTIONER && mode !== "triggerOnly" ? { variant: settings.variant } : {}),
     mode,
     // The dialog's trigger words (sc-24829): the API fills them into every item without its own,
     // so trigger-only has words to write and default/subject-only captions get them prepended.
     triggerWords: parseCaptionTriggerWords(settings.triggerWords),
-    modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
+    modelNameOrPath: settings.captioner === LOOP_CAPTIONER
+      ? LOOP_UTILITY_REPO
+      : String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
     recaption: Boolean(settings.recaption),
     requestedGpu: settings.requestedGpu || "auto",
     options: {
@@ -583,6 +587,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => models.find((entry) => entry.id === JOY_CAPTION_MODEL_ID),
     [models],
   );
+  const loopCaptionModel = loopUtilityModel(models);
   const selectedCaptionModel = String(captionSettings.modelNameOrPath ?? "").trim() || joyCaptionModel;
   const captionModelMissing =
     Boolean(macCapabilities?.macGatingActive) &&
@@ -1997,7 +2002,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         }
       }
       const payload = {
-        ...trainingCaptionJobPayload(captionSettings),
+        ...trainingCaptionJobPayload({
+          ...captionSettings, variant: loopUtilityTier(loopCaptionModel, captionSettings.variant),
+        }),
         ...(itemIds ? { itemIds, recaption: true } : {}),
       };
       const job = await createCaptionJob(saved.id, payload);
@@ -2347,9 +2354,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     selectedAssetIds, addAssets: sessionHandlers.addAssets, handleImport: sessionHandlers.handleImport, captionDialog, updateCaptionSetting: sessionHandlers.updateCaptionSetting, runCaptionJob: sessionHandlers.runCaptionJob, toggleCaptionExtraOption: sessionHandlers.toggleCaptionExtraOption,
     displayedCaptionPrompt, captionSettings, captionModelMissing, onDownloadCaptionModel: captionDownloadAvailable ? sessionHandlers.onDownloadCaptionModel : undefined, captionModelSizeLabel,
     captionModelName: captionModel?.name ?? "JoyCaption",
+    loopCaptionModel, onDownloadLoopModel: createModelDownloadJob,
   }), [captionDownloadAvailable, captionDraftById, namedCaptionsById, holdoutById, irisSelected,
   sessionHandlers, captioning, addDialogOpen, selectedAssetIds, captionDialog, displayedCaptionPrompt,
-  captionSettings, captionModelMissing, captionModelSizeLabel, captionModel]);
+  captionSettings, captionModelMissing, captionModelSizeLabel, captionModel, loopCaptionModel, createModelDownloadJob]);
   const doctorSession = useMemo(() => ({
     datasetDoctor, readinessByKey, onToggleItemAck: sessionHandlers.toggleItemQualityAck,
   }), [datasetDoctor, readinessByKey, sessionHandlers]);

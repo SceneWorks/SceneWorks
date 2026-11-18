@@ -1270,3 +1270,149 @@ async fn an_installed_describer_is_admitted_offline_once_its_download_recorded_t
     let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
 }
+
+#[tokio::test]
+async fn loop_utility_routes_bind_only_the_selected_installed_snapshot() {
+    use sceneworks_core::loop_utility::{CAPTIONER, MODEL_ID, MODEL_REPO};
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableJobBinding, PortableSourceIdentity,
+    };
+    const REV: &str = "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6";
+    let temp_dir = tempfile::tempdir().unwrap();
+    serve_builtin_models(&temp_dir, &[MODEL_ID]);
+    let (app, project, dataset, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let batch =
+        format!("/api/v1/projects/{project}/training/datasets/{dataset}/batch-describe-jobs");
+    let captions = format!("/api/v1/projects/{project}/training/datasets/{dataset}/caption-jobs");
+
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({
+            "model": MODEL_REPO, "variant": "bf16"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({"model": MODEL_REPO, "variant": "unsupported"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "model": MODEL_REPO, "prompt": "The fox in snow"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+    let (status, model_free) = request(
+        app.clone(),
+        "POST",
+        &captions,
+        json!({
+            "captioner": CAPTIONER, "modelNameOrPath": MODEL_REPO, "mode": "triggerOnly",
+            "triggerWords": ["sample-trigger"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{model_free}");
+    assert!(model_free["payload"].get("variant").is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(model_free["id"].as_str().unwrap())
+        .unwrap()
+        .is_none());
+
+    let snapshot = huggingface_repo_cache_path(&state.settings.data_dir, MODEL_REPO)
+        .unwrap()
+        .join("snapshots")
+        .join(REV);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(MODEL_ID)
+            .unwrap()
+            .clone(),
+    );
+    let row = sceneworks_core::loop_utility::download(&entry, "macos", "bf16").unwrap();
+    for file in row["files"].as_array().unwrap() {
+        std::fs::write(snapshot.join(file.as_str().unwrap()), "fixture").unwrap();
+    }
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project}/assets"),
+        "Reference.png",
+        "image/png",
+        &png_rgb(16, 8, 42),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+
+    for (route, body) in [
+        (
+            batch.as_str(),
+            json!({"model": MODEL_REPO, "variant": "bf16"}),
+        ),
+        (
+            captions.as_str(),
+            json!({"captioner": CAPTIONER, "modelNameOrPath": MODEL_REPO,
+            "variant": "bf16", "mode": "subjectOnly", "triggerWords": ["example"]}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "task": "image_caption", "sourceAssetId": asset["id"], "projectId": project}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "task": "image_describe", "captionStyle": "tags", "sourceAssetId": asset["id"], "projectId": project}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "modelId": "target-render-model", "workflow": "video", "prompt": "The fox in snow"}),
+        ),
+    ] {
+        let (status, job) = request(app.clone(), "POST", route, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{route} {body}: {job}");
+        let source_key = if route == captions {
+            "modelNameOrPath"
+        } else {
+            "model"
+        };
+        assert_eq!(job["payload"][source_key], MODEL_REPO);
+        assert_eq!(job["payload"]["variant"], "bf16");
+        let binding: PortableJobBinding = serde_json::from_value(
+            state
+                .jobs_store
+                .portable_model_binding(job["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let model = &binding.select_route("mlx", "macos").unwrap().models[0];
+        assert_eq!(model.model_id, MODEL_ID);
+        assert!(binding.select_route("candle", "windows").is_err());
+        let PortableSourceIdentity::Revision { identity } = &model.members[0].source else {
+            panic!("utility source did not freeze the exact tier");
+        };
+        assert_eq!(
+            (
+                &*identity.repository,
+                &*identity.revision,
+                &*identity.variant
+            ),
+            (MODEL_REPO, REV, "bf16")
+        );
+    }
+}

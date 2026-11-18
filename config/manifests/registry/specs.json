@@ -67898,6 +67898,76 @@
     },
     "routes": {}
   },
+  "vision_sensenova_loop_9b": {
+    "evidence": {},
+    "product": {
+      "adapter": "prompt-refine",
+      "autoDownload": false,
+      "capabilities": [],
+      "defaults": {},
+      "downloads": [
+        {
+          "estimatedSizeBytes": 18852408972,
+          "files": [
+            "chat_template.jinja",
+            "config.json",
+            "generation_config.json",
+            "model-00001.safetensors",
+            "model-00002.safetensors",
+            "model-00003.safetensors",
+            "model-00004.safetensors",
+            "model-00005.safetensors",
+            "model-00006.safetensors",
+            "model-00007.safetensors",
+            "model-00008.safetensors",
+            "model-00009.safetensors",
+            "model-00010.safetensors",
+            "model-00011.safetensors",
+            "model.safetensors.index.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "video_preprocessor_config.json"
+          ],
+          "footprint": {
+            "diskSizeBytes": 18852408972
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "sensenova/SenseNova-Loop-9B",
+          "revision": "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6",
+          "variant": "bf16"
+        }
+      ],
+      "family": "vision-caption",
+      "id": "vision_sensenova_loop_9b",
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "name": "SenseNova-Loop-9B",
+      "type": "utility",
+      "ui": {
+        "description": "Optional vision-language model for training captions, dataset prompt batches, Prompt from image, and Refine my prompt. The BF16 checkpoint requires access from Hugging Face and a Hugging Face token saved in Settings → Credentials.",
+        "label": "SenseNova-Loop-9B",
+        "promptGuide": {
+          "path": "/prompt-guides/vision-caption.md",
+          "sources": [
+            {
+              "label": "SenseNova-Loop-9B model card and BF16 access",
+              "url": "https://huggingface.co/sensenova/SenseNova-Loop-9B"
+            }
+          ],
+          "title": "Vision Captioner Guide"
+        }
+      }
+    },
+    "routes": {}
+  },
   "vitpose_plus_base": {
     "evidence": {},
     "product": {

@@ -1,3 +1,8 @@
+import {
+  LOOP_TIERS, LOOP_UTILITY_ID, LOOP_UTILITY_NAME, LOOP_UTILITY_REPO,
+  loopTierAvailable, loopTierInstalled, loopTiers, loopUtilityModel, loopUtilityTier,
+} from "../loopUtility.js";
+import { LoopAccessHelp } from "./LoopUtilityTier.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal.jsx";
 import { RequiredModelsNotice } from "./RequiredModelsNotice.jsx";
@@ -42,6 +47,11 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 // The table is rebuilt from the dataset's earlier describe jobs whenever the dialog opens, so closing
 // it, saving, or a restart that interrupts a run never loses finished descriptions: each image gets
 // its newest successful result, and a job that is still running is monitored again.
+
+const loopDescriber = {
+  id: LOOP_UTILITY_ID, repo: LOOP_UTILITY_REPO, label: LOOP_UTILITY_NAME,
+  condenses: true, tiers: LOOP_TIERS,
+};
 
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 // A describer with `tiers` runs one quant tier, sent as the job's `variant` (the first is the
@@ -197,7 +207,7 @@ export function trackProvisional(positions, items, start) {
 // stored before describers were recorded was described by the default, the Vision Captioner.
 export function describerCondenses(repo) {
   if (!repo) return true;
-  return DESCRIBE_MODELS.some((entry) => entry.repo === repo && entry.condenses);
+  return repo === LOOP_UTILITY_REPO || DESCRIBE_MODELS.some((entry) => entry.repo === repo && entry.condenses);
 }
 
 // Whether a row can be condensed: described, by a describer with a text step.
@@ -536,8 +546,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   useEffect(() => () => pollAbort.current?.abort(), []);
 
-  const model = DESCRIBE_MODELS.find((entry) => entry.id === modelId) ?? DESCRIBE_MODELS[0];
-  const tier = describerTier(model, tierChoice);
+  const loopModel = loopUtilityModel(models);
+  const availableLoopTiers = loopTiers(loopModel);
+  const describeModels = loopModel
+    ? [...DESCRIBE_MODELS, { ...loopDescriber, tiers: availableLoopTiers }]
+    : DESCRIBE_MODELS;
+  const model = modelId === LOOP_UTILITY_ID
+    ? loopDescriber
+    : describeModels.find((entry) => entry.id === modelId) ?? describeModels[0];
+  const tier = model.id === LOOP_UTILITY_ID ? loopUtilityTier(loopModel, tierChoice) : describerTier(model, tierChoice);
   const modelDefault = defaults[model.repo] ?? null;
   const defaultPrompt = modelDefault ? modelDefault.prompt : null;
 
@@ -549,7 +566,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     // A row stored before describers were recorded was described by the default Vision Captioner,
     // the same fallback its condensing (`describerCondenses`, the condense request) uses.
     const repo = row.model ?? VISION_CAPTION_MODEL_REPO;
-    const entry = DESCRIBE_MODELS.find((candidate) => candidate.repo === repo);
+    const entry = repo === LOOP_UTILITY_REPO ? loopDescriber : DESCRIBE_MODELS.find((candidate) => candidate.repo === repo);
     if (!entry) return { entry: model, tier };
     const unknownTier = Boolean(entry.tiers && row.variant && !entry.tiers.some(([key]) => key === row.variant));
     return { entry, tier: unknownTier ? row.variant : describerTier(entry, row.variant), unknownTier };
@@ -607,6 +624,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     if (promptChars(prompt) === 0 || (defaultPrompt !== null && prompt.trim() === defaultPrompt.trim())) {
       setFollowDefault(true);
     }
+    if (id === LOOP_UTILITY_ID || modelId === LOOP_UTILITY_ID) setTierChoice(null);
     setModelId(id);
   }
 
@@ -629,7 +647,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     [prompt, modelDefault, model.label],
   );
   const catalogEntry = (id) => models.find((entry) => entry.id === id);
-  const modelAvailable = (id, modelTier = null) => describerInstalled(catalogEntry(id), modelTier);
+  const modelAvailable = (id, modelTier = null) => id === LOOP_UTILITY_ID
+    ? loopTierInstalled(loopModel, modelTier)
+    : describerInstalled(catalogEntry(id), modelTier);
   const tierLabel = tier ? model.tiers.find(([key]) => key === tier)[1] : "";
   const selectedEntry = catalogEntry(model.id);
   const selectedAvailable = modelAvailable(model.id, tier);
@@ -638,7 +658,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // The tier's own size, as the Model Manager's tier panel reads it; none rather than the model-level
   // size, which describes the default tier.
   const missingModels = tier
-    ? selectedEntry && !selectedAvailable
+    ? selectedEntry && !selectedAvailable && (model.id !== LOOP_UTILITY_ID || loopTierAvailable(loopModel, tier))
       ? [
           {
             ...selectedEntry,
@@ -1198,7 +1218,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     busy || restoring || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
   // Condensing runs on each row's own describer, which must be installed.
   const condenseBlocked =
-    busy || restoring || dirty || !DESCRIBE_MODELS.some((entry) => entry.condenses && modelAvailable(entry.id));
+    busy || restoring || dirty || !describeModels.some((entry) => entry.condenses
+      && (entry.id === LOOP_UTILITY_ID ? entry.tiers.some(([key]) => modelAvailable(entry.id, key)) : modelAvailable(entry.id)));
   // Why the pending rows cannot condense yet: each condenses on its own describer and tier, so a
   // row whose model or tier is not installed (a 27B tier since uninstalled) holds the step. "" when
   // every pending row can.
@@ -1261,7 +1282,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       <div className="dataset-caption-body">
         <fieldset className="dataset-prompt-batch-models">
           <legend>Describing model</legend>
-          {DESCRIBE_MODELS.map((entry) => {
+          {describeModels.map((entry) => {
             // A tiered describer is unavailable only when no tier is installed; a missing selected
             // tier is marked on its own radio below.
             const available = entry.tiers
@@ -1288,7 +1309,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         {model.tiers ? (
           <fieldset className="dataset-prompt-batch-models">
             <legend>Tier</legend>
-            {model.tiers.map(([key, label]) => (
+            {(model.id === LOOP_UTILITY_ID ? availableLoopTiers : model.tiers).map(([key, label]) => (
               <label className="training-toggle-line" key={key}>
                 <input
                   checked={tier === key}
@@ -1307,9 +1328,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                 </span>
               </label>
             ))}
-            <span className="dataset-caption-field-hint" data-tier-hint="speed">
-              q4 is the fastest tier. Full precision takes about twice as long per image.
-            </span>
+            {model.id === VISION_DESCRIBE_MODEL_ID ? (
+              <span className="dataset-caption-field-hint" data-tier-hint="speed">
+                q4 is the fastest tier. Full precision takes about twice as long per image.
+              </span>
+            ) : null}
+            {model.id === LOOP_UTILITY_ID && !loopTierAvailable(loopModel, tier) ? (
+              <p className="inline-warning" role="status">This tier is unavailable on this platform.</p>
+            ) : null}
+            {model.id === LOOP_UTILITY_ID && tier === "bf16" && !selectedAvailable ? <LoopAccessHelp /> : null}
           </fieldset>
         ) : null}
         {!selectedAvailable ? (

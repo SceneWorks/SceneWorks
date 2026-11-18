@@ -171,6 +171,14 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     ),
     field!(
         "promptRefine",
+        "variant",
+        Text,
+        Absent,
+        MachineBudget,
+        "exact installed source model tier"
+    ),
+    field!(
+        "promptRefine",
         "thinkingMode",
         OneOf("disabled | enabled | auto"),
         Absent,

@@ -976,10 +976,14 @@ pub(crate) async fn run_prompt_refine_job(
     // provider that supports JSON constraints, preserving the existing provider/cache identity.
     // After load, [`json_decode_constraint`] decides whether to apply the mask to this decode: an
     // active thinking channel must first be allowed to close before the final JSON answer begins.
-    let mut refine_reqs = gen_core::core_llm::ModelRequirements::default();
-    if emits_json {
-        refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
-    }
+    let refine_reqs = if model == sceneworks_core::loop_utility::MODEL_REPO {
+        crate::loop_utility::requirements()
+    } else if emits_json {
+        gen_core::core_llm::ModelRequirements::default()
+            .with_constraint(gen_core::core_llm::Constraint::Json)
+    } else {
+        gen_core::core_llm::ModelRequirements::default()
+    };
     // SW-7102: render then expand. The MiniMax-H3-Image generator a render just used stays in the
     // generator cache for its idle window, and the 27B expander does not fit beside it on most
     // hosts; a cold expander load stages it out first (the render stages the expander out the

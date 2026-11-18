@@ -2417,6 +2417,55 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
     await click(plainTab);
   }
 
+  const LOOP_MODEL = {
+    id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B", type: "utility",
+    variants: [{ variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" }],
+  };
+
+  async function selectLoopReference() {
+    await act(async () => {
+      const modelSelect = document.body.querySelector(".structured-reference select");
+      modelSelect.value = "loop";
+      modelSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      const tierSelect = document.body.querySelectorAll(".structured-reference select")[1];
+      tierSelect.value = "q8";
+      tierSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click(buttonByText("Select reference image"));
+    await click(document.body.querySelector(".asset-picker-card"));
+    await click(buttonByText("Use Selection"));
+  }
+
+  it("selects Loop and keeps the structured JSON caption with its grounded boxes", async () => {
+    const imageCaption = vi.fn(async () => VISION_REPLY);
+    await render(baseContext({ imageModels: [IDEOGRAM], models: [LOOP_MODEL], assets: [REF_ASSET], imageCaption }));
+    await openPlainTab();
+    await selectLoopReference();
+    await click(buttonByText("✨ Generate JSON from image"));
+    expect(imageCaption).toHaveBeenCalledWith(expect.objectContaining({
+      sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8",
+    }));
+    expect(document.body.querySelector('[aria-label="Caption preview"]').textContent).toContain("100");
+  });
+
+  it.each([[undefined, "A fox sits in the snow."], ["tags", "fox, sitting, snow"]])(
+    "selects Loop and preserves the target's %s description style", async (captionStyle, text) => {
+      const imageDescribe = vi.fn(async () => text);
+      await render(baseContext({ imageModels: [{ ...Z_IMAGE, captionStyle }], models: [LOOP_MODEL], assets: [REF_ASSET], imageDescribe }));
+      const tile = [...document.body.querySelectorAll(".prompt-tool-title")]
+        .find((element) => element.textContent.trim() === "Prompt from image");
+      await click(tile.closest("button"));
+      await selectLoopReference();
+      await click(buttonByText("✨ Describe image"));
+      expect(imageDescribe).toHaveBeenCalledWith(expect.objectContaining({
+        sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8", captionStyle,
+      }));
+      expect(document.body.querySelector('textarea[aria-label="Prompt"]').value).toBe(text);
+    },
+  );
+
   it("shows the reference-image flow for Ideogram 4 in text-to-image mode", async () => {
     await render(
       baseContext({ imageModels: [IDEOGRAM], models: [VISION_MODEL_INSTALLED], imageCaption: vi.fn() }),

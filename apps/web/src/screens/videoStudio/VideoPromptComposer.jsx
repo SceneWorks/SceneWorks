@@ -23,6 +23,7 @@ export function VideoPromptComposer({
   model,
   refinePrompt,
   refineModel,
+  loopModel,
   createModelDownloadJob,
   motion,
   setMotion
@@ -77,6 +78,8 @@ export function VideoPromptComposer({
               prompt={prompt}
               refinePrompt={refinePrompt}
               refineModel={refineModel}
+              loopModel={loopModel}
+              onDownloadLoopModel={createModelDownloadJob}
               onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
               workflow="video"
             />

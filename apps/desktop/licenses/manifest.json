@@ -1380,6 +1380,23 @@
       ]
     },
     {
+      "id": "sensenova-loop-9b",
+      "models": [
+        "vision_sensenova_loop_9b"
+      ],
+      "name": "SenseNova-Loop-9B",
+      "publisher": "SenseNova",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/sensenova/SenseNova-Loop-9B",
+      "usage": "Optional native vision-language model for training captions, dataset prompt batches, image descriptions, and prompt refinement.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "sensenova-loop-9b-apache"
+        }
+      ]
+    },
+    {
       "id": "qwen3.8-27b-describer",
       "models": [
         "vision_describe_qwen3_8_27b"

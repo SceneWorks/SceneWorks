@@ -59,7 +59,7 @@ pub(super) async fn finalize_refine_job(
             output.usage.generated_tokens,
             max_new_tokens,
         );
-        let result = refine_failure_result(
+        let mut result = refine_failure_result(
             output.thinking.as_deref(),
             &model,
             backend,
@@ -69,6 +69,7 @@ pub(super) async fn finalize_refine_job(
             max_new_tokens,
             kv_cache,
         );
+        record_loop_tier(job, &model, &mut result);
         let mut progress = refine_progress(
             JobStatus::Failed,
             ProgressStage::Failed,
@@ -180,6 +181,7 @@ pub(super) async fn finalize_refine_job(
         max_new_tokens,
         kv_cache,
     );
+    record_loop_tier(job, &model, &mut result);
     if let Some(block) = rewrite_suggestion {
         result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
     }
@@ -197,4 +199,18 @@ pub(super) async fn finalize_refine_job(
     )
     .await?;
     Ok(())
+}
+
+// Keep the selected source tier next to the executed model and backend.
+fn record_loop_tier(job: &JobSnapshot, model: &str, result: &mut JsonObject) {
+    if model == sceneworks_core::loop_utility::MODEL_REPO {
+        if let (Some(tier), Some(identity)) = (
+            job.payload.get("variant"),
+            result
+                .get_mut("executionIdentity")
+                .and_then(Value::as_object_mut),
+        ) {
+            identity.insert("variant".to_owned(), tier.clone());
+        }
+    }
 }

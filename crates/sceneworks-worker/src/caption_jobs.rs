@@ -156,15 +156,15 @@ async fn run_training_caption_job_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
-    if job
+    use sceneworks_core::loop_utility;
+    let captioner_id = job
         .payload
         .get("captioner")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        != "joy_caption"
-    {
+        .unwrap_or_default();
+    if !matches!(captioner_id, "joy_caption" | loop_utility::CAPTIONER) {
         return Err(WorkerError::InvalidPayload(
-            "Unsupported training captioner for the native worker; use joy_caption.".to_owned(),
+            "Unsupported training captioner for the native worker.".to_owned(),
         ));
     }
 
@@ -187,7 +187,20 @@ async fn run_training_caption_job_using(
     let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(JOY_CAPTION_MODEL)
         .to_owned();
-    let weights_dir = resolve_caption_weights_dir(settings, &model_name_or_path)?;
+    let loop_model = captioner_id == loop_utility::CAPTIONER;
+    let weights_dir = match (loop_model, model_name_or_path.as_str()) {
+        (true, loop_utility::MODEL_REPO) => {
+            crate::loop_utility::weights_dir(settings, &job.payload)?
+        }
+        (false, name) if name != loop_utility::MODEL_REPO => {
+            resolve_caption_weights_dir(settings, name)?
+        }
+        _ => {
+            return Err(WorkerError::InvalidPayload(
+                "Training captioner and source model do not match.".to_owned(),
+            ))
+        }
+    };
     let backend = backend_label(&settings.gpu_id);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -220,7 +233,9 @@ async fn run_training_caption_job_using(
     )
     .await?;
 
-    let cancel = CancelFlag::new();
+    let cancel_state = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = CancelFlag::from_arc(cancel_state.clone());
+    let loop_cancel = gen_core::core_llm::CancelFlag::from_arc(cancel_state);
     // Per-item captions ride a bounded mpsc (the meaningful per-image results — kept, one send per
     // image, back-pressured by design). Per-STEP token progress is coalesced through a latest-wins
     // **watch** channel instead of a POST per token (sc-11189, F-016 — the sc-8840 F-038 pattern the
@@ -233,37 +248,19 @@ async fn run_training_caption_job_using(
     let blocking_cancel = cancel.clone();
     let blocking_items = items.clone();
     let blocking_options = options.clone();
-    // The active backend label (mlx / candle / cpu), owned into the blocking task so its engine-error
-    // strings name the REAL backend instead of a hardcoded "MLX" (sc-8916, F-114).
     let blocking_backend = backend.to_owned();
+    let load_backend = backend.to_ascii_uppercase();
     let blocking_mode = mode.clone();
     let job_id = job.id.clone();
-    let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
-        emit_event(
-            "caption_pipeline_load_start",
-            json!({
-                "jobId": job_id,
-                "engine": JOY_CAPTION_MODEL,
-            }),
-        );
-        let captioner = load_captioner(
-            JOY_CAPTION_MODEL,
-            &LoadSpec::new(WeightsSource::Dir(weights_dir)),
-        )
-        .map_err(|error| {
-            crate::provider_error(error, |error| {
-                WorkerError::Engine(format!(
-                    "JoyCaption {} load failed: {error}",
-                    blocking_backend.to_uppercase()
-                ))
-            })
-        })?;
+    let engine = if loop_model {
+        loop_utility::MODEL_REPO
+    } else {
+        JOY_CAPTION_MODEL
+    };
+    let run_captions = move |captioner: CaptionInvocation<'_>| -> WorkerResult<()> {
         emit_event(
             "caption_pipeline_load_complete",
-            json!({
-                "jobId": job_id,
-                "engine": JOY_CAPTION_MODEL,
-            }),
+            json!({ "jobId": job_id, "engine": engine }),
         );
 
         for (index, item) in blocking_items.into_iter().enumerate() {
@@ -313,19 +310,14 @@ async fn run_training_caption_job_using(
                     }
                 }
             };
-            let output = captioner
-                .caption(&request, &mut on_progress)
-                .map_err(|error| {
-                    crate::provider_error(error, |error| {
-                        WorkerError::Engine(format!(
-                            "JoyCaption {} generation failed: {error}",
-                            blocking_backend.to_uppercase()
-                        ))
-                    })
-                })?;
-            // The backend-neutral `gen-core` contract owns trigger-word normalization and complete
-            // token/phrase matching, so the MLX and Candle job paths cannot drift.
-            let text = apply_caption_trigger_words(&output.text, &item.trigger_words);
+            let output =
+                captioner.caption(&request, &mut on_progress, &blocking_backend, &loop_cancel)?;
+            if loop_model && output.trim().is_empty() {
+                return Err(WorkerError::Engine(
+                    "SenseNova-Loop-9B returned an empty caption.".to_owned(),
+                ));
+            }
+            let text = apply_caption_trigger_words(&output, &item.trigger_words);
             tx.blocking_send(CaptionedItem {
                 index,
                 item_id: item.item_id,
@@ -335,7 +327,36 @@ async fn run_training_caption_job_using(
             .map_err(|_| WorkerError::Canceled(CANCEL_MESSAGE.to_owned()))?;
         }
         Ok(())
-    });
+    };
+    emit_event(
+        "caption_pipeline_load_start",
+        json!({ "jobId": job.id, "engine": engine }),
+    );
+    let blocking = if loop_model {
+        let spec = gen_core::core_llm::LoadSpec {
+            source: weights_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
+            spec,
+            crate::loop_utility::requirements(),
+            "SenseNova-Loop-9B caption model load failed",
+            move |refiner| run_captions(CaptionInvocation::Loop(refiner)),
+        ))
+    } else {
+        crate::load_progress::spawn_blocking(move || {
+            let captioner = load_captioner(
+                JOY_CAPTION_MODEL,
+                &LoadSpec::new(WeightsSource::Dir(weights_dir)),
+            )
+            .map_err(|error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::Engine(format!("JoyCaption {load_backend} load failed: {error}"))
+                })
+            })?;
+            run_captions(CaptionInvocation::Joy(captioner.as_ref()))
+        })
+    };
 
     let mut supervisor = StreamSupervisor::new(
         cancel,
@@ -432,6 +453,120 @@ async fn run_training_caption_job_using(
     .await
 }
 
+#[cfg(native_lane)]
+enum CaptionInvocation<'a> {
+    Joy(&'a dyn Captioner),
+    Loop(&'a dyn gen_core::core_llm::TextLlm),
+}
+
+#[cfg(native_lane)]
+impl CaptionInvocation<'_> {
+    fn caption(
+        &self,
+        request: &CaptionRequest,
+        progress: &mut dyn FnMut(Progress),
+        backend: &str,
+        loop_cancel: &gen_core::core_llm::CancelFlag,
+    ) -> WorkerResult<String> {
+        match self {
+            Self::Joy(captioner) => captioner
+                .caption(request, progress)
+                .map(|output| output.text)
+                .map_err(|error| {
+                    crate::provider_error(error, |error| {
+                        WorkerError::Engine(format!(
+                            "JoyCaption {} generation failed: {error}",
+                            backend.to_uppercase()
+                        ))
+                    })
+                }),
+            Self::Loop(refiner) => loop_caption(*refiner, request, progress, loop_cancel.clone()),
+        }
+    }
+}
+
+#[cfg(native_lane)]
+fn loop_caption(
+    refiner: &dyn gen_core::core_llm::TextLlm,
+    caption: &CaptionRequest,
+    progress: &mut dyn FnMut(Progress),
+    cancel: gen_core::core_llm::CancelFlag,
+) -> WorkerResult<String> {
+    use gen_core::core_llm::{
+        Content, Message, Role, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
+    };
+    let rgb = image::RgbImage::from_raw(
+        caption.image.width,
+        caption.image.height,
+        caption.image.pixels.clone(),
+    )
+    .ok_or_else(|| WorkerError::InvalidPayload("Invalid caption image dimensions.".to_owned()))?;
+    let image = crate::prompt_refine_jobs::vision_image_ref(image::DynamicImage::ImageRgb8(rgb))
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let prompt = if caption.prompt.trim().is_empty() {
+        let options = &caption.options;
+        let length = options.caption_length.trim();
+        let format = options.caption_type.trim();
+        let mut prompt = format!("Caption this image. Style: {format}. Caption length: {length}.");
+        if !options.name_input.trim().is_empty() {
+            prompt.push_str(&format!(
+                " Name the main subject {}.",
+                options.name_input.trim()
+            ));
+        }
+        for instruction in &options.extra_options {
+            prompt.push(' ');
+            prompt.push_str(instruction);
+        }
+        prompt
+    } else {
+        caption.prompt.clone()
+    };
+    let sampling = caption.sampling;
+    let request = TextLlmRequest {
+        progress: Some(crate::load_progress::text_observer()),
+        messages: vec![
+            Message::system("Write only the requested caption. Ground it in the supplied image."),
+            Message {
+                role: Role::User,
+                content: vec![Content::Image(image), Content::text(prompt)],
+                thinking: None,
+                tool_calls: Vec::new(),
+            },
+        ],
+        sampling: Sampling {
+            temperature: sampling.temperature,
+            top_p: sampling.top_p,
+            repetition_penalty: sampling.repetition_penalty,
+            repetition_context: sampling.repetition_context,
+            ..Default::default()
+        },
+        max_new_tokens: sampling.max_new_tokens,
+        seed: sampling.seed,
+        cancel,
+        thinking: ThinkingMode::Disabled,
+        ..Default::default()
+    };
+    let output = crate::load_progress::generate_text(refiner, &request, &mut |event| {
+        if let StreamEvent::Token { index, .. } = event {
+            progress(Progress::Step {
+                current: index as u32 + 1,
+                total: sampling.max_new_tokens,
+            });
+        }
+    })
+    .map_err(|error| {
+        if caption.cancel.is_cancelled() {
+            WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+        } else {
+            WorkerError::Engine(format!(
+                "SenseNova-Loop-9B caption generation failed: {error}"
+            ))
+        }
+    })?;
+    Ok(output.text.trim().to_owned())
+}
+
 /// Where and how a finished caption job's captions are saved.
 #[cfg(native_lane)]
 struct CaptionSave<'a> {
@@ -492,6 +627,7 @@ async fn save_caption_results(
                 model_name_or_path,
                 dataset_id,
                 mode,
+                &job.payload,
                 captioned_count,
                 sidecars,
             )),
@@ -604,15 +740,23 @@ fn caption_result(
     model_name_or_path: &str,
     dataset_id: &str,
     mode: &CaptionMode,
+    payload: &JsonObject,
     captioned_count: usize,
     sidecars: Value,
 ) -> JsonObject {
     let mut result = JsonObject::new();
-    result.insert("captioner".to_owned(), json!("joy_caption"));
+    let captioner = payload
+        .get("captioner")
+        .and_then(Value::as_str)
+        .unwrap_or("joy_caption");
+    result.insert("captioner".to_owned(), json!(captioner));
     result.insert("mode".to_owned(), json!(mode));
     // A trigger-only job loads no model, so it names none.
     if !model_name_or_path.is_empty() {
         result.insert("modelNameOrPath".to_owned(), json!(model_name_or_path));
+        if let Some(tier) = payload.get("variant") {
+            result.insert("variant".to_owned(), tier.clone());
+        }
     }
     result.insert("datasetId".to_owned(), json!(dataset_id));
     result.insert(

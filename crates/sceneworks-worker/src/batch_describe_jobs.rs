@@ -111,6 +111,7 @@ pub(crate) enum DescribeModel {
     /// The Qwen3.8 27B describer (SW-F365): the Vision Captioner's describing path (same prompt,
     /// JSON-constrained decode, no thinking) over a larger model that comes in tiers.
     Qwen38,
+    Loop,
 }
 
 #[cfg(native_lane)]
@@ -122,10 +123,12 @@ impl DescribeModel {
             None | Some(VISION_CAPTIONER_REPO) => Ok(Self::VisionCaptioner),
             Some(JOYCAPTION_REPO) => Ok(Self::JoyCaption),
             Some(QWEN38_27B_DESCRIBER_REPO) => Ok(Self::Qwen38),
+            Some(sceneworks_core::loop_utility::MODEL_REPO) => Ok(Self::Loop),
             Some(other) => Err(WorkerError::InvalidPayload(format!(
                 "Dataset batch describe does not support model {other:?}; use the Vision Captioner \
                  ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
-                 describer ({QWEN38_27B_DESCRIBER_REPO})."
+                 describer ({QWEN38_27B_DESCRIBER_REPO}), or SenseNova-Loop-9B ({}).",
+                sceneworks_core::loop_utility::MODEL_REPO
             ))),
         }
     }
@@ -135,6 +138,7 @@ impl DescribeModel {
             Self::VisionCaptioner => VISION_CAPTIONER_REPO,
             Self::JoyCaption => JOYCAPTION_REPO,
             Self::Qwen38 => QWEN38_27B_DESCRIBER_REPO,
+            Self::Loop => sceneworks_core::loop_utility::MODEL_REPO,
         }
     }
 
@@ -146,7 +150,7 @@ impl DescribeModel {
     pub(crate) fn speculative(self) -> Option<gen_core::core_llm::Speculative> {
         match self {
             Self::Qwen38 => Some(gen_core::core_llm::Speculative::Auto),
-            Self::VisionCaptioner | Self::JoyCaption => None,
+            Self::VisionCaptioner | Self::JoyCaption | Self::Loop => None,
         }
     }
 
@@ -156,6 +160,7 @@ impl DescribeModel {
             Self::VisionCaptioner => "Vision Captioner",
             Self::JoyCaption => "JoyCaption",
             Self::Qwen38 => "Qwen3.8 27B describer",
+            Self::Loop => sceneworks_core::loop_utility::MODEL_NAME,
         }
     }
 
@@ -164,7 +169,7 @@ impl DescribeModel {
     /// Qwen3.8 27B describer is a Vision Captioner-class describer and uses the slot contract.
     pub(crate) fn output_section(self) -> &'static str {
         match self {
-            Self::VisionCaptioner | Self::Qwen38 => "OUTPUT",
+            Self::VisionCaptioner | Self::Qwen38 | Self::Loop => "OUTPUT",
             Self::JoyCaption => "JOYCAPTION_OUTPUT",
         }
     }
@@ -1137,7 +1142,13 @@ impl VisionCaptionerDescriber {
         gen_core::core_llm::LoadSpec,
         gen_core::core_llm::ModelRequirements,
     ) {
-        vision_describer_load(&self.weights_dir)
+        let (spec, requirements) = vision_describer_load(&self.weights_dir);
+        let requirements = if self.model == DescribeModel::Loop {
+            crate::loop_utility::requirements()
+        } else {
+            requirements
+        };
+        (spec, requirements)
     }
 }
 
@@ -1905,6 +1916,11 @@ pub(crate) async fn run_dataset_batch_describe_job(
                 job_id: job.id.clone(),
             })
         }
+        DescribeModel::Loop => Box::new(VisionCaptionerDescriber {
+            model: DescribeModel::Loop,
+            weights_dir: crate::loop_utility::weights_dir(settings, &job.payload)?,
+            job_id: job.id.clone(),
+        }),
         DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
             resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
             job.id.clone(),

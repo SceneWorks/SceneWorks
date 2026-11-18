@@ -2016,10 +2016,19 @@ fn route_loader_locator(
     member: &PortableArtifactMember,
     selected: &Path,
 ) -> WorkerResult<()> {
-    if matches!(
-        job_type,
-        JobType::DatasetAnalysis | JobType::TrainingCaption
-    ) && slot == "modelManifestEntries/0"
+    // Loop resolves its selected tier's immutable repo+revision through the verified snapshot
+    // overlay; its top-level model string remains the logical source, including for result metadata.
+    let loop_caption = *job_type == JobType::TrainingCaption
+        && dispatch_payload
+            .get("captioner")
+            .and_then(serde_json::Value::as_str)
+            == Some(sceneworks_core::loop_utility::CAPTIONER);
+    if !loop_caption
+        && matches!(
+            job_type,
+            JobType::DatasetAnalysis | JobType::TrainingCaption
+        )
+        && slot == "modelManifestEntries/0"
         && member.role == ArtifactMemberRole::Primary
     {
         dispatch_payload.insert(
@@ -2786,12 +2795,22 @@ fn verify_portable_route(
                 .iter()
                 .find(|member| member.role == ArtifactMemberRole::Primary)
                 .ok_or_else(|| invalid_binding("utility model has no admitted primary"))?;
-            if let PortableSourceIdentity::Revision { identity } = &primary.source {
-                let selected = payload
-                    .get("modelNameOrPath")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|selection| !selection.is_empty());
+            let selected = payload
+                .get("modelNameOrPath")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|selection| !selection.is_empty());
+            if model.model_id == sceneworks_core::loop_utility::MODEL_ID {
+                // A quantized tier's publisher repo may differ from the logical source name.
+                // The normal manifest-member check below verifies the immutable tier and revision.
+                if selected != Some(sceneworks_core::loop_utility::MODEL_REPO)
+                    || !matches!(&primary.source, PortableSourceIdentity::Revision { .. })
+                {
+                    return Err(invalid_binding(
+                        "Loop-9B caption requires its pinned catalog tier",
+                    ));
+                }
+            } else if let PortableSourceIdentity::Revision { identity } = &primary.source {
                 if selected.is_some_and(|selection| selection != identity.repository) {
                     return Err(invalid_binding(
                         "utility model selection differs from the frozen publisher source",
@@ -3571,6 +3590,7 @@ fn selected_local_artifact_path(
         return Ok(selected);
     }
     let utility_selected = if member.role == ArtifactMemberRole::Primary
+        && model.model_id != sceneworks_core::loop_utility::MODEL_ID
         && model_slot == "modelManifestEntries/0"
         && matches!(
             job_type,
@@ -8289,6 +8309,68 @@ mod tests {
                 Some(&route),
             )
             .is_err());
+        });
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn loop_caption_loads_the_bound_quantized_revision_under_its_logical_model_name() {
+        use sceneworks_core::loop_utility::{CAPTIONER, MODEL_ID, MODEL_REPO};
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let settings = settings(data);
+        let repo = "guardfx/loop-q4";
+        let files = ["q4/config.json", "q4/model.safetensors"];
+        for file in files {
+            seed_snapshot(&library, repo, REV_A, file);
+        }
+        // A valid-looking alternate revision may never replace the admitted one.
+        for file in files {
+            seed_snapshot(&library, repo, REV_B, file);
+        }
+        let payload = json!({
+            "captioner": CAPTIONER, "modelNameOrPath": MODEL_REPO, "variant": "q4",
+            "modelManifestEntries": [{
+                "id": MODEL_ID,
+                "downloads": [{
+                    "provider": "huggingface", "repo": repo, "revision": REV_A,
+                    "variant": "q4", "files": files
+                }]
+            }]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut route = portable_installed_model_binding();
+        let model = &mut route.models[0];
+        model.slot = "modelManifestEntries/0".to_owned();
+        model.model_id = MODEL_ID.to_owned();
+        model.variant = "q4".to_owned();
+        let member = &mut model.members[0];
+        member.source = PortableSourceIdentity::Revision {
+            identity: ArtifactIdentity::pinned(repo, REV_A, "q4").unwrap(),
+        };
+        member.files = files
+            .into_iter()
+            .map(|file| PortableArtifactFile {
+                relative_path: file.into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            })
+            .collect();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::TrainingCaption,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .unwrap();
+            let dispatch = guard.dispatch_payload();
+            assert_eq!(dispatch["modelNameOrPath"], MODEL_REPO);
+            let path = crate::loop_utility::weights_dir(&settings, dispatch).unwrap();
+            assert!(path.ends_with(Path::new(REV_A).join("q4")));
         });
     }
 
