@@ -143,6 +143,42 @@ pub async fn run_acceptance_utility_job(
     .await;
 }
 
+/// Claim one pre-submitted product job through the normal authenticated poll and verify its
+/// exact portable route before entering the same supervised dispatcher as the worker loop.
+pub async fn run_bound_acceptance_job(
+    settings: &Settings,
+    expected_job: &str,
+    verify: impl FnOnce(
+        &sceneworks_core::model_artifacts::portable_binding::PortableRouteBinding,
+    ) -> Result<(), String>,
+) -> WorkerResult<()> {
+    require_acceptance_loopback(settings)?;
+    let api = ApiClient::new(settings);
+    let health = crate::cuda_startup_health(settings).await;
+    let mut heartbeat =
+        crate::IdleHeartbeat::new(std::time::Duration::from_secs(settings.heartbeat_seconds));
+    let claimed = crate::poll_once(&api, settings, &mut heartbeat, &health)
+        .await?
+        .filter(|claimed| claimed.job.id == expected_job)
+        .ok_or_else(|| {
+            crate::WorkerError::InvalidPayload(
+                "worker did not claim the submitted acceptance job".into(),
+            )
+        })?;
+    let binding = claimed.portable_model_binding.as_ref().ok_or_else(|| {
+        crate::WorkerError::InvalidPayload("claim did not include the selected model route".into())
+    })?;
+    verify(binding).map_err(crate::WorkerError::InvalidPayload)?;
+    Box::pin(crate::run_job_with_shutdown(
+        &api,
+        settings,
+        api.http_client(),
+        claimed,
+    ))
+    .await;
+    Ok(())
+}
+
 /// Match the production worker's private terminal-claim scope in direct acceptance runs.
 pub async fn with_acceptance_execution_claim<F: std::future::Future>(
     capability: Option<String>,

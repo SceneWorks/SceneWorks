@@ -14,7 +14,11 @@ const execFile = promisify(execFileCb);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const NATIVE_CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
 export const CUDA_CASES = ['image_cuda', 'audio', 'training'];
-export const CASES = [...NATIVE_CASES, 'cuda_all', 'ort_cpu'];
+const senseNovaCases = ['sensenova_q4', 'sensenova_q8', 'sensenova_bf16', 'sensenova_bf16_product'];
+export const CASES = [...NATIVE_CASES, 'cuda_all', 'ort_cpu', ...senseNovaCases];
+const senseNovaModel = 'vision_sensenova_loop_9b';
+const senseNovaRepo = 'sensenova/SenseNova-Loop-9B';
+const senseNovaRevision = '3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6';
 export const API_TEST_TARGET = {args:['--lib'],name:'sceneworks_rust_api',source:'apps/rust-api/src/lib.rs'};
 // Match WORKER_ENTRY_STACK_BYTES and the established MOSS native libtest harness.
 export const NATIVE_TEST_STACK_BYTES = 8 * 1024 * 1024;
@@ -51,7 +55,9 @@ export function admission(env, platform = process.platform, { execute = true } =
     return ORT_FILTER;
   }
   if (platform === 'darwin') {
-    if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
+    if (execute && senseNovaCases.includes(env.LOAD_PROGRESS_CASE)) {
+      assert(env.GITHUB_ACTIONS === 'true' && env.RUNNER_NAME === 'nax-macos-2', 'SenseNova MLX execution requires the secondary rw-llm Actions runner');
+    } else if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
     assert(!['image_cuda','cuda_all'].includes(env.LOAD_PROGRESS_CASE), 'CUDA case needs Windows');
   } else {
     assert.notEqual(env.LOAD_PROGRESS_CASE, 'image_mlx', 'MLX case needs Mac');
@@ -59,7 +65,7 @@ export function admission(env, platform = process.platform, { execute = true } =
     for (const key of ['SCENEWORKS_GPU_ID', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES']) assert.equal(env[key], '1', `${key}=1 required`);
     assert.equal(env.CUDA_DEVICE_ORDER, 'PCI_BUS_ID');
   }
-  return `tests::load_progress_acceptance::${env.LOAD_PROGRESS_CASE}`;
+  return `tests::load_progress_acceptance::${senseNovaCases.includes(env.LOAD_PROGRESS_CASE) ? "sensenova" : env.LOAD_PROGRESS_CASE}`;
 }
 export function workflowEnvironment(env, platform = process.platform) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
@@ -92,17 +98,39 @@ export function dispatchOptions(inputs, dispatchedSha) {
   if(!cpu) assert(typeof options.hf_hub_cache==='string' && (platform==='win32'?path.win32:path.posix).isAbsolute(options.hf_hub_cache), 'absolute existing HF hub cache required');
   assert(!/[\r\n]/.test(options.hf_hub_cache??''), 'invalid cache path');
   const selected={case:options.case,backend,hf_hub_cache:cpu?'':options.hf_hub_cache,build_only:options.build_only??true,mac_go:options.mac_go??false};
-  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),LOAD_PROGRESS_BACKEND:backend,SCENEWORKS_GPU_ID:cpu?'cpu':'1',CUDA_VISIBLE_DEVICES:cpu?'':'1',NVIDIA_VISIBLE_DEVICES:cpu?'':'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
+  // The hosted selector cannot attest the destination machine. Both runner preflight and the
+  // native entry check it on-site. Legacy dev Mac execution still requires the explicit go here.
+  const requireExecutionApproval = !selected.build_only && !senseNovaCases.includes(selected.case);
+  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),LOAD_PROGRESS_BACKEND:backend,SCENEWORKS_GPU_ID:cpu?'cpu':'1',CUDA_VISIBLE_DEVICES:cpu?'':'1',NVIDIA_VISIBLE_DEVICES:cpu?'':'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:requireExecutionApproval});
   return selected;
 }
 // Exact manifest filenames only: metadata/stat, no recursive scans, hashes or model reads.
-export async function cacheInventory(hub, selectedCase, manifest = null) {
+export async function cacheInventory(hub, selectedCase, manifest = null, platform = process.platform) {
   assert(hub && path.isAbsolute(hub), 'explicit absolute HF_HUB_CACHE required');
   const models=manifest ?? JSON.parse(stripJsoncComments(await readFile(path.join(root,'config/manifests/builtin.models.jsonc'),'utf8'))).models;
-  const model=selectedCase==='audio'?'chatterbox_tts':'moss_image_sft';
+  const senseNova = senseNovaCases.includes(selectedCase);
+  const model=senseNova ? senseNovaModel : selectedCase==='audio'?'chatterbox_tts':'moss_image_sft';
   const entry=models.find(m=>m.id===model); assert(entry, 'shipped selected model missing');
   const rows=new Map();
-  for(const source of entry.downloads) {
+  const tier = senseNova ? selectedCase.split('_')[1] : undefined;
+  const os = platform === 'darwin' ? 'macos' : 'windows';
+  const sources = senseNova ? entry.downloads.filter(row => row.variant === tier && (!row.platforms || row.platforms.includes(os))) : entry.downloads;
+  if (senseNova) {
+    assert.equal(sources.length, 1, 'one published row required for the selected SenseNova tier and platform');
+    const [source] = sources;
+    assert(source.files?.length && source.files.some(name => /\.(safetensors|gguf)$/.test(name)), 'declared weights required');
+    if (tier === 'bf16') {
+      assert.equal(source.repo, senseNovaRepo);
+      assert.equal(source.revision, senseNovaRevision);
+      for (const name of ['config.json','generation_config.json','tokenizer.json','tokenizer_config.json','chat_template.jinja','preprocessor_config.json','processor_config.json','video_preprocessor_config.json','model.safetensors.index.json']) {
+        assert(source.files.includes(name), `official metadata ${name} absent from manifest`);
+      }
+      for (let i = 1; i <= 11; i++) assert(source.files.includes(`model-${String(i).padStart(5,'0')}-of-00011.safetensors`), 'official shard absent from manifest');
+    } else {
+      assert(source.platforms?.includes(os) && !(os === 'macos' ? source.platforms.includes('windows') : source.platforms.includes('macos')) && source.repo !== senseNovaRepo, 'backend-specific quantized snapshot required');
+    }
+  }
+  for(const source of sources) {
     assert(/^[a-f0-9]{40}$/.test(source.revision), 'immutable snapshot required');
     for(const file of source.files) {
       assert(typeof file==='string' && !file.includes('*') && !file.includes('..') && !path.isAbsolute(file),'exact manifest file required');
@@ -114,7 +142,7 @@ export async function cacheInventory(hub, selectedCase, manifest = null) {
     }
   }
   const files=[...rows.values()];
-  return {model,hub,requiredFiles:files.length,presentFiles:files.filter(f=>f.present).length,totalPresentBytes:files.reduce((sum,f)=>sum+(f.bytes??0),0),missing:files.filter(f=>!f.present),files};
+  return {model,tier,hub,requiredFiles:files.length,presentFiles:files.filter(f=>f.present).length,totalPresentBytes:files.reduce((sum,f)=>sum+(f.bytes??0),0),missing:files.filter(f=>!f.present),files};
 }
 export function childEnvironment(env, state, evidence, platform = process.platform) {
   const child = { ...env };
@@ -198,11 +226,12 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       receipt.device = {gpuId:'1',cudaVisibleDevices:'1',nvidiaVisibleDevices:'1',cudaDeviceOrder:'PCI_BUS_ID'};
     }
     await persist();
-    if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
+    if (checkOnly && !senseNovaCases.includes(env.LOAD_PROGRESS_CASE)) { receipt.status='checked-no-model-execution'; return receipt; }
     if (!buildOnly && !cpu) {
       receipt.cache=await cacheInventory(env.HF_HUB_CACHE,env.LOAD_PROGRESS_CASE); await persist();
       assert.equal(receipt.cache.missing.length,0,'provision missing frozen model files before acceptance; see controller.json');
     }
+    if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
     const execute = async (command,args,name) => {
       const log = await open(path.join(evidence,`${name}.log`),'wx');
       try {
@@ -259,13 +288,36 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     await execute(executable,[filter,'--ignored','--exact','--nocapture','--test-threads=1'],'native');
     const result = JSON.parse(await readFile(path.join(evidence,'case','receipt.json'),'utf8'));
     assert.equal(result.case,env.LOAD_PROGRESS_CASE); assert.equal(result.status,'passed');
+    if (senseNovaCases.includes(result.case)) {
+      assert.equal(result.sourceSha, receipt.sourceSha);
+      assert.equal(result.inferenceSha, receipt.inferenceSha);
+      assert.equal(result.catalogId, receipt.cache.model);
+      assert.equal(result.variant, receipt.cache.tier);
+      const {formatPromptBatch} = await import('../apps/web/src/promptBatchDescribe.js');
+      const {serializePromptBatchExport, fromPromptBatchImport} = await import('../apps/web/src/promptBatchIO.js');
+      const page = JSON.parse(await readFile(path.join(evidence,'case','batch-result-items.json'), 'utf8'));
+      const formatted = formatPromptBatch(page.items.map(row => ({...row, fields:row})));
+      assert.equal(formatted.skipped.length, 0);
+      const prompts = formatted.text.split('\n---\n');
+      assert.equal(prompts.length, 2);
+      assert(prompts.every(prompt => prompt.startsWith('[3:2]\nDescription: ')), 'Studio batch formatting lost a scene or its aspect ratio');
+      const exported = serializePromptBatchExport({name:'SenseNova product acceptance', prompts, variables:[]});
+      assert.deepEqual(fromPromptBatchImport(exported).prompts, prompts);
+      await writeFile(path.join(evidence,'studio-prompt-batch.json'), exported);
+    }
+    if (['sensenova_q4','sensenova_bf16_product'].includes(result.case)) {
+      const {validateVisionCaption} = await import('../apps/web/src/ideogramCaption.js');
+      const validation = validateVisionCaption(result.structuredCaption);
+      assert(validation.ok, `Studio rejected the generated structured caption: ${JSON.stringify(validation)}`);
+      receipt.studioCaptionValidated = true;
+    }
     receipt.status='passed'; return receipt;
   } catch(error) { receipt.status='failed'; receipt.error=error.message; throw error; }
   finally { receipt.finishedAt=new Date().toISOString(); await persist(); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU1. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
+    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu|sensenova_q4|sensenova_q8|sensenova_bf16|sensenova_bf16_product, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. SenseNova MLX uses the secondary rw-llm Actions runner; other MLX cases require LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU1. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
   } else if (process.argv.includes('--workflow-preflight')) {
     try {
       const prepared = workflowEnvironment(process.env);
