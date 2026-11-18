@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      runner_target:
+        description: "secondary=rw-mage/nax-macos-2 (default), primary=rw-starvector/nax-macos"
+        required: false
+        type: string
+        default: secondary
 
 permissions:
   contents: read
@@ -44,7 +49,7 @@ permissions:
 jobs:
   mlx:
     if: ${{ inputs.backend == 'mlx' }}
-    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    runs-on: ${{ inputs.runner_target == 'primary' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') || fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') }}
     timeout-minutes: 360
     concurrency:
       group: pag-acceptance-mlx-${{ github.run_id }}-${{ github.run_attempt }}
@@ -54,6 +59,7 @@ jobs:
         shell: bash
     env:
       PAG_ACCEPTANCE_BACKEND: mlx
+      PAG_ACCEPTANCE_RUNNER_TARGET: ${{ inputs.runner_target }}
       PAG_ACCEPTANCE_SOURCE_SHA: ${{ inputs.source_sha }}
       PAG_ACCEPTANCE_SOURCE_DIR: ${{ github.workspace }}/pag-acceptance-src
       PAG_ACCEPTANCE_ROUTES: ${{ inputs.routes }}

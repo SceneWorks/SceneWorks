@@ -52,6 +52,7 @@ test("dispatchPagAcceptanceOptions validates inputs and defaults preflight_only=
     hubs: "",
     preflight_only: true,
     stage_missing: false,
+    runner_target: "secondary",
     inference_sha: "",
   });
   assert.throws(() => dispatchPagAcceptanceOptions({

@@ -535,7 +535,7 @@ export const PAG_ROUTES = Object.freeze([
 
 export const PAG_ROUTE_MAP = Object.freeze(Object.fromEntries(PAG_ROUTES.map((route) => [route.id, route])));
 
-export const PAG_DISPATCH_OPTION_KEYS = Object.freeze(["suite", "routes", "hubs", "preflight_only", "stage_missing"]);
+export const PAG_DISPATCH_OPTION_KEYS = Object.freeze(["suite", "routes", "hubs", "preflight_only", "stage_missing", "runner_target"]);
 
 export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
@@ -550,6 +550,8 @@ export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
   fact(unknown.length === 0, `unknown pag-acceptance option(s): ${unknown.join(", ")}`);
   fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
   fact(options.stage_missing === undefined || typeof options.stage_missing === "boolean", "stage_missing must be boolean");
+  const runnerTarget = options.runner_target ?? "secondary";
+  fact(["primary", "secondary"].includes(runnerTarget), "runner_target must be primary or secondary");
   const preflightOnly = options.preflight_only ?? true;
   const stageMissingFlag = options.stage_missing ?? false;
   fact(!(stageMissingFlag && preflightOnly), "stage_missing cannot be combined with preflight_only=true");
@@ -568,6 +570,7 @@ export function dispatchPagAcceptanceOptions(inputs, dispatchedSha) {
     hubs: options.hubs ? JSON.stringify(options.hubs) : "",
     preflight_only: preflightOnly,
     stage_missing: stageMissingFlag,
+    runner_target: runnerTarget,
     inference_sha: inputs.inference_sha || "",
   };
 }
@@ -901,8 +904,12 @@ async function preflight(env, cfg, report) {
   if (cfg.backend === "mlx") fact(platform === "darwin" && process.arch === "arm64", "mlx needs Apple-silicon macOS");
   else fact(platform === "win32", "cuda needs Windows runner");
   if (env.GITHUB_ACTIONS === "true") {
-    if (cfg.backend === "mlx") fact(env.RUNNER_NAME === MLX_RUNNER, `mlx PAG acceptance must run on ${MLX_RUNNER} (rw-mage), not ${env.RUNNER_NAME}`);
-    else fact(CUDA_RUNNERS.includes(env.RUNNER_NAME), `cuda PAG acceptance must run on ${CUDA_RUNNERS.join("|")}, not ${env.RUNNER_NAME}`);
+    if (cfg.backend === "mlx") {
+      const expectedMac = (env.PAG_ACCEPTANCE_RUNNER_TARGET ?? "secondary") === "primary" ? "nax-macos" : MLX_RUNNER;
+      fact(env.RUNNER_NAME === expectedMac, `mlx PAG acceptance (${env.PAG_ACCEPTANCE_RUNNER_TARGET ?? "secondary"}) must run on ${expectedMac}, not ${env.RUNNER_NAME}`);
+    } else {
+      fact(CUDA_RUNNERS.includes(env.RUNNER_NAME), `cuda PAG acceptance must run on ${CUDA_RUNNERS.join("|")}, not ${env.RUNNER_NAME}`);
+    }
   }
   if (cfg.backend === "cuda") {
     for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) {
