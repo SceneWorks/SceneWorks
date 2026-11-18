@@ -63,6 +63,7 @@ import {
   qualityTiersForPreset,
   rangeOptions,
   samplePromptsFromTrigger,
+  trainingAdapterFor,
   trainingAdapterModelId,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
@@ -716,13 +717,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
     configDraft.lrScheduler && !lrSchedulerSelectOptions.includes(configDraft.lrScheduler)
       ? [...lrSchedulerSelectOptions, configDraft.lrScheduler]
       : lrSchedulerSelectOptions;
-  // De-distill training adapter is Z-Image-Turbo-only: show the version selector
-  // only when the resolved config declares a trainingAdapterRepo.
+  // De-distill training adapter (Z-Image-Turbo, MiniMax-H3-Image): show the version selector
+  // only when the resolved config declares a trainingAdapterRepo; its versions are that repo's.
   const showTrainingAdapter = Boolean(asText(configDraft.trainingAdapterRepo).trim());
+  const trainingAdapter = trainingAdapterFor(configDraft);
+  const adapterVersionOptions = trainingAdapterVersionOptions(configDraft);
   const visibleTrainingAdapterVersions =
-    configDraft.trainingAdapterVersion && !trainingAdapterVersionOptions.includes(configDraft.trainingAdapterVersion)
-      ? [...trainingAdapterVersionOptions, configDraft.trainingAdapterVersion]
-      : trainingAdapterVersionOptions;
+    configDraft.trainingAdapterVersion && !adapterVersionOptions.includes(configDraft.trainingAdapterVersion)
+      ? [...adapterVersionOptions, configDraft.trainingAdapterVersion]
+      : adapterVersionOptions;
   const activeTrainingJobs = useMemo(
     () =>
       jobs
@@ -2487,6 +2490,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   visibleOptimizerOptions={visibleOptimizerOptions}
                   visibleLrSchedulerOptions={visibleLrSchedulerOptions}
                   showTrainingAdapter={showTrainingAdapter}
+                  trainingAdapter={trainingAdapter}
                   visibleTrainingAdapterVersions={visibleTrainingAdapterVersions}
                   visibleResolutionOptions={visibleResolutionOptions}
                   submittingJob={submittingJob}

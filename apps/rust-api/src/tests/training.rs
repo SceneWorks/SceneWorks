@@ -3255,6 +3255,78 @@ async fn create_training_job_validates_the_training_adapter_selection() {
     }
 }
 
+/// SW-F369: the MiniMax-H3-Image targets (text-to-image and edit) advertise
+/// `supportsTrainingAdapter`, their presets' Fizgig adapter (`v1`, and blank) passes validation
+/// (then hits the missing-dataset tripwire), and each base's adapter on the other base's target is a
+/// field error on `trainingAdapterRepo` before any dataset lookup.
+#[tokio::test]
+async fn minimax_h3_image_targets_accept_only_their_own_training_adapter() {
+    use sceneworks_core::training::training_adapter::{
+        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO as H3, ZIMAGE_TURBO_TRAINING_ADAPTER_REPO as ZIMAGE,
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"H3 training adapter boundary",
+        request,
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = |id: &str| {
+        registry["targets"]
+            .as_array()
+            .expect("target list")
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))
+            .clone()
+    };
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |target: Value, repo: &str, version: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["trainingAdapterRepo"] = json!(repo);
+        config["advanced"]["trainingAdapterVersion"] = json!(version);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": target["id"],
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "H3 training adapter",
+                "licenseAcknowledged": true,
+                "dryRun": true
+            }),
+        )
+    };
+    for id in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+        let h3 = target(id);
+        assert_eq!(
+            h3["limits"]["supportsTrainingAdapter"].as_bool(),
+            Some(true),
+            "{id} advertises training-adapter support"
+        );
+        for version in ["v1", ""] {
+            let (status, error) = submit(h3.clone(), H3, version).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}/{version}: {error}");
+            assert_eq!(error["detail"], "Training dataset not found", "{id}");
+        }
+        let (status, error) = submit(h3.clone(), H3, "v2").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
+        assert_eq!(error["context"]["field"], "trainingAdapterVersion", "{id}");
+        let (status, error) = submit(h3, ZIMAGE, "v2").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{id}");
+        assert_eq!(error["context"]["field"], "trainingAdapterRepo", "{id}");
+    }
+    let (status, error) = submit(target("z_image_turbo_lora"), H3, "v1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["context"]["field"], "trainingAdapterRepo");
+}
+
 /// sc-25213 (finding 5): a REAL run whose selected de-distill adapter is not installed is refused at
 /// submit with a field error on `trainingAdapterVersion` (the worker's own check stays as defence in
 /// depth); installing exactly that version's file clears it, and installing only the OTHER version

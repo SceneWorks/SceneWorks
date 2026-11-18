@@ -2197,9 +2197,10 @@ fn not_installed(
     ))
 }
 
-/// The de-distill training adapter (sc-25213): resolve the plan's `trainingAdapterRepo` /
-/// `trainingAdapterVersion` (`v1`, `v2`, or the presets' `v2-default`) to the installed adapter
-/// `.safetensors` and hand the trainer its path (`TrainingConfig::training_adapter`). A missing file
+/// The de-distill training adapter (sc-25213, SW-F369): resolve the plan's `trainingAdapterRepo` /
+/// `trainingAdapterVersion` (Z-Image-Turbo: `v1`, `v2`, or the presets' `v2-default`;
+/// MiniMax-H3-Image: `v1`) to the installed adapter `.safetensors` and hand the trainer its path
+/// (`TrainingConfig::training_adapter`). A missing file
 /// is refused naming the catalog model to install — never a silent bare-base run; nothing is
 /// downloaded mid-job. No adapter keys (the default) leaves the config untouched.
 #[cfg(native_lane)]
@@ -7308,6 +7309,65 @@ mod tests {
             .retain(|key, _| !key.starts_with("trainingAdapter"));
         let off = parse(value);
         assert_eq!(resolve(&off).unwrap(), None);
+    }
+
+    /// SW-F369: a MiniMax-H3-Image plan's Fizgig adapter (`v1`, or blank — the repo's only
+    /// version) maps to its installed `.safetensors` and is handed to the trainer as
+    /// `training_adapter`; missing, it is refused naming the catalog model to install; `v2` (a
+    /// Z-Image version) is refused naming the field. Mutation: drop the H3 family from
+    /// `TRAINING_ADAPTER_FAMILIES` ⇒ every resolve is a field error ⇒ red.
+    #[cfg(native_lane)]
+    #[test]
+    fn minimax_h3_image_training_adapter_maps_to_the_installed_file() {
+        use sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1 as H3;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |version: Option<&str>| {
+            let mut value = plan_json(
+                dir.path(),
+                "minimax_h3_image_lora",
+                "minimax_h3_image",
+                "lora",
+                &[&image],
+            );
+            let advanced = &mut value["config"]["advanced"];
+            advanced["trainingAdapterRepo"] = json!(H3.repo);
+            if let Some(version) = version {
+                advanced["trainingAdapterVersion"] = json!(version);
+            }
+            parse(value)
+        };
+        let resolve = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config)?;
+            apply_training_adapter(&settings, plan, &mut config).map(|()| config.training_adapter)
+        };
+        match resolve(&plan(Some("v1"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(
+                    message.contains(H3.id) && message.contains("not installed"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a not-installed refusal, got {other:?}"),
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let want = fake_snapshot(&hub, H3.repo, H3.revision, H3.file).join(H3.file);
+        for version in [Some("v1"), Some(""), None] {
+            let got = resolve(&plan(version))
+                .unwrap()
+                .expect("an adapter plan sets the path");
+            assert_eq!(canon(&got), canon(&want), "{version:?}");
+        }
+        match resolve(&plan(Some("v2"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("trainingAdapterVersion"), "{message}")
+            }
+            other => panic!("expected an unknown-version refusal, got {other:?}"),
+        }
     }
 
     /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode

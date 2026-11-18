@@ -72,7 +72,7 @@ jobs:
           path: pag-acceptance-src
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Stage missing public manifest-pinned snapshots (when requested)
@@ -111,7 +111,7 @@ jobs:
           metal_execution_entry 7200 node pag-acceptance-src/scripts/pag-acceptance.mjs --run
       - name: Retain PAG acceptance evidence and PNGs
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pag-acceptance-mlx-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.PAG_ACCEPTANCE_WORK }}/evidence/
@@ -160,7 +160,7 @@ jobs:
           path: pag-acceptance-src
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Stage missing public manifest-pinned snapshots (when requested)
@@ -208,7 +208,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'pag-acceptance failed; see the evidence artifact' }
       - name: Retain PAG acceptance evidence and PNGs
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pag-acceptance-cuda-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

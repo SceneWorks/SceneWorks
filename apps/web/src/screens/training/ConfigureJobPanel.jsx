@@ -37,7 +37,6 @@ import {
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
   targetSupportsWeightNoise,
-  trainingAdapterVersionLabels,
   gradientNoiseEtaMax,
   gradientNoiseEtaSuggested,
   gradientNoiseGammaDefault,
@@ -217,6 +216,8 @@ export function ConfigureJobPanel({
   visibleOptimizerOptions,
   visibleLrSchedulerOptions,
   showTrainingAdapter,
+  // The draft's de-distill adapter (`trainingConfig.trainingAdapters` entry), or null.
+  trainingAdapter = null,
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
   submittingJob,
@@ -953,7 +954,7 @@ export function ConfigureJobPanel({
           <RequiredModelsNotice
             detail="It is applied to the base only while training, so your LoRA learns the subject instead of fighting the distillation; the run would fail without it."
             downloadJobs={controlModelDownloadJobs}
-            feature="Z-Image-Turbo LoRA training"
+            feature={trainingAdapter?.feature ?? "LoRA training"}
             models={missingTrainingAdapterModels}
             onCancelJob={onCancelJob}
             onDownload={onDownloadModel}
@@ -1188,15 +1189,16 @@ export function ConfigureJobPanel({
                 </select>
               </label>
               {showTrainingAdapter ? (
-                <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">
+                <label title={trainingAdapter?.title}>
                   De-distill adapter
                   <select
+                    disabled={visibleTrainingAdapterVersions.length < 2}
                     onChange={(event) => updateConfigDraft("trainingAdapterVersion", event.target.value)}
                     value={configDraft.trainingAdapterVersion ?? ""}
                   >
                     {visibleTrainingAdapterVersions.map((version) => (
                       <option key={version} value={version}>
-                        {trainingAdapterVersionLabels[version] ?? version}
+                        {trainingAdapter?.versions?.[version]?.label ?? version}
                       </option>
                     ))}
                   </select>

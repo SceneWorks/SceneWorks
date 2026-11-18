@@ -250,12 +250,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // sc-26234's whole-repo FLUX 3 entry adds no selective row; main's honest evidence re-record
   // and digest are retained. The Illustrious
   // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
-  // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys). The Illustrious
+  // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys), plus sw7104's MiniMax-H3-Image tiers (157 keys) and SW-F369's MiniMax-H3-Image training adapter (158 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "01cfe8322e94fa9b1fab317ad93a2336978a5bb75a125d7aef9cf2dab648d6b7");
+    "2859f265e34759ffa9cad8628d58b7c7ee077642df945cc091d06c7d8aebc9f6");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

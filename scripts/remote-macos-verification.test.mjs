@@ -611,7 +611,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       const old = "      - name: Require exact host Python 3.12\n";
       assert.equal(workflow.split(old).length - 1, 1);
       const mutated = path.join(scratch, "macos-mlx.yml");
-      writeFileSync(mutated, workflow.replace(old, '      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n        with:\n          python-version: "3.12"\n' + old)); utimesSync(mutated, new Date(), new Date());
+      writeFileSync(mutated, workflow.replace(old, '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0\n        with:\n          python-version: "3.12"\n' + old)); utimesSync(mutated, new Date(), new Date());
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: mutated }; delete childEnv.NODE_TEST_CONTEXT;
       const target = "self-hosted manual job uses provisioned Python 3.12, not the hosted toolcache installer";
       const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });

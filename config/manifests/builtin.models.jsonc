@@ -19232,6 +19232,52 @@
       }
     },
     {
+      // SW-F369: the MiniMax-H3-Image de-distill training adapter (ShootTheSound "Fizgig", rank 16,
+      // kohya keys) — the frozen LoRA the native MiniMax-H3-Image trainer applies to the 6-step
+      // distilled base for training only (strength 1.0 while training, off at inference, per its
+      // model card); without it a LoRA un-distills the base (blurry, ghosted samples). componentOnly:
+      // staged by the training lane. repo/revision/file MUST equal
+      // sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1 (parity test).
+      //
+      // The licence gate. The adapter is a Model Derivative of MiniMax-H3-Image (trained from its
+      // weights), so it inherits the MiniMax-H3-Image Community License Agreement exactly as the
+      // H3-Image prompt expander does: the repo is PUBLIC (no credential), and
+      // `requiresLicenseAcknowledgment` + `licenseNotice` raise the same in-app acceptance the
+      // base model's entry does (sc-17227 / E23) before the download. The link is the repo's own
+      // LICENSE at the pinned revision, byte-identical (sha256 edfab8ec…) to the agreement
+      // published with MiniMax-H3-Image at 492fd8c4; its NOTICE is reproduced under About → Licenses.
+      "id": "minimax_h3_image_training_adapter_v1",
+      "autoDownload": false,
+      "name": "MiniMax-H3-Image Training Adapter",
+      "family": "minimax_h3_image_training_adapter",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "revision": "f1a4547596faeb98bae568dd28da296c49fbe0a1",
+          "files": ["fizgig_minimax_h3_image_training_adapter.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 149161248,
+          "footprint": { "diskSizeBytes": 149161248 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter"
+      },
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter/blob/f1a4547596faeb98bae568dd28da296c49fbe0a1/LICENSE",
+      "licenseNotice": "The MiniMax-H3-Image de-distill training adapter is a Model Derivative of MiniMax-H3-Image, so it is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026), the same agreement as MiniMax-H3-Image itself, not by SceneWorks' own AGPL-3.0 licence. SceneWorks applies it only while training a MiniMax-H3-Image LoRA and never renders with it. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use of the model, its derivatives and their Outputs is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A), including clearly and prominently disclosing machine-generated content you publish. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): the Works and their Outputs may be used to improve only MiniMax-H3-Image or its Model Derivatives; this adapter and the LoRAs it helps train are such derivatives and inherit these terms. Read the full text under About → Licenses before downloading.",
+      "ui": {
+        "label": "MiniMax-H3-Image Training Adapter",
+        "description": "Fizgig de-distill training adapter for MiniMax-H3-Image (rank 16). Applied to MiniMax-H3-Image only while training a LoRA so it learns your subject instead of un-distilling the 6-step base into blurry, ghosted samples; removed for previews and generation - not a generation model. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": []
+      }
+    },
+    {
       // TAESDXL (madebyollin/taesdxl) — the tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESDXL_MODEL (parity test).
       "id": "taesdxl",
       "autoDownload": false,

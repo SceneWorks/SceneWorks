@@ -588,9 +588,13 @@ const TRAINING_SUPPORT_FLAGS: &[(&str, &[&str])] = &[
         latent_perceptual::LATENT_LPIPS.support_limit,
         &latent_perceptual::LATENT_LPIPS_TARGETS,
     ),
-    // sc-25213: the ostris de-distill adapter selected by Z-Image presets is honored by both
-    // native trainers. No sibling target advertises this training-adapter contract.
-    ("supportsTrainingAdapter", &["z_image_turbo_lora"]),
+    // sc-25213 / SW-F369: the de-distill adapters — ostris' for the Z-Image-Turbo trainers, the
+    // Fizgig adapter for the MiniMax-H3-Image trainer (text-to-image and edit). Each adapter is
+    // bound to its own targets (`training_adapter::TRAINING_ADAPTER_FAMILIES`).
+    (
+        training_adapter::TRAINING_ADAPTER_SUPPORT_LIMIT,
+        &training_adapter::TRAINING_ADAPTER_TARGETS,
+    ),
 ];
 
 /// The built-in training presets Rust owns out of the box.
@@ -1269,7 +1273,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
             ),
             // MiniMax-H3-Image (SW-7103): the target defaults carry the 2048x2048 canvas,
             // checkpointing and the flow-match knobs, so these only pick capacity/LR.
-            krea_preset(
+            minimax_h3_image_preset(
                 &minimax_h3_image_target,
                 "minimax_h3_image_lora.character.adamw8bit.balanced",
                 "Character balanced",
@@ -1282,7 +1286,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 10
                 })),
             ),
-            krea_preset(
+            minimax_h3_image_preset(
                 &minimax_h3_image_target,
                 "minimax_h3_image_lora.character.adamw8bit.conservative",
                 "Character conservative",
@@ -1299,7 +1303,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 20
                 })),
             ),
-            krea_preset(
+            minimax_h3_image_preset(
                 &minimax_h3_image_target,
                 "minimax_h3_image_lora.style.adamw8bit.balanced",
                 "Style balanced",
@@ -1315,7 +1319,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 30
                 })),
             ),
-            krea_preset(
+            minimax_h3_image_preset(
                 &minimax_h3_image_edit_target,
                 "minimax_h3_image_edit_lora.edit.adamw8bit.balanced",
                 "Edit balanced",
@@ -1328,7 +1332,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 10
                 })),
             ),
-            krea_preset(
+            minimax_h3_image_preset(
                 &minimax_h3_image_edit_target,
                 "minimax_h3_image_edit_lora.edit.adamw8bit.conservative",
                 "Edit conservative",
@@ -1656,6 +1660,43 @@ where
         ui,
         extra: ExtraFields::new(),
     }
+}
+
+/// A MiniMax-H3-Image preset (SW-7103): [`krea_preset`] plus the Fizgig de-distill training
+/// adapter (SW-F369). H3-Image is a 6-step distilled model, and a LoRA trained on the bare base
+/// un-distills it (blurry, ghosted samples); trained against base + adapter it learns the subject
+/// and previews / inference run without the adapter. Selected by default on every H3-Image preset,
+/// as Z-Image-Turbo's presets select the ostris adapter.
+fn minimax_h3_image_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let mut preset = krea_preset(
+        target,
+        id,
+        name,
+        recommended_for,
+        optimizer_quality,
+        mutate,
+        ui,
+    );
+    preset.config.advanced.insert(
+        training_adapter::TRAINING_ADAPTER_REPO_KEY.to_owned(),
+        json!(training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO),
+    );
+    preset.config.advanced.insert(
+        training_adapter::TRAINING_ADAPTER_VERSION_KEY.to_owned(),
+        json!("v1"),
+    );
+    preset
 }
 
 /// Mage-Flow LoRA training targets.
