@@ -22,8 +22,9 @@ pub const QWEN38_27B_DESCRIBER_REPO: &str = "huihui-ai/Huihui-Qwen3.8-27B-ablite
 pub const QWEN38_27B_DESCRIBER_MODEL_ID: &str = "vision_describe_qwen3_8_27b";
 
 /// The repositories the Qwen3.8 27B describer's quantised tiers are served from, one per engine.
-/// Each holds a `q4/` and a `q8/` snapshot folder quantised ahead of time, so a quantised tier never
-/// downloads or load-quantises the 57 GB full-precision files.
+/// Each holds snapshot folders quantised ahead of time (the shipped `q4-full/` and `q8-full/`, and
+/// the earlier plain `q4/` and `q8/`), so a quantised tier never downloads or load-quantises the
+/// 57 GB full-precision files. The catalog row of a tier names the folder it loads from.
 pub const QWEN38_27B_DESCRIBER_MLX_REPO: &str = "SceneWorks/qwen3.8-27b-abliterated-mlx";
 pub const QWEN38_27B_DESCRIBER_CANDLE_REPO: &str = "SceneWorks/qwen3.8-27b-abliterated-candle";
 
@@ -51,6 +52,19 @@ pub fn qwen38_tier_files(repo: &str, tier: &str) -> Vec<String> {
         .flatten()
         .filter_map(|file| file.as_str().map(str::to_owned))
         .collect()
+}
+
+/// The folder of the re-host snapshot that holds the Qwen3.8 27B `tier` served from `repo`: the
+/// first path segment the catalog row's files share (`q4-full/config.json` ⇒ `q4-full`), so the
+/// folder a tier loads from is whatever the catalog pins, not the tier's name. `None` for a row
+/// whose files sit at the snapshot root (full precision) or when the catalog has no such row.
+pub fn qwen38_tier_dir(repo: &str, tier: &str) -> Option<String> {
+    let files = qwen38_tier_files(repo, tier);
+    let (head, _) = files.first()?.split_once('/')?;
+    files
+        .iter()
+        .all(|file| file.split_once('/').is_some_and(|(dir, _)| dir == head))
+        .then(|| head.to_owned())
 }
 
 /// Whether `model` (the request's `model` value) selects the Qwen3.8 27B describer.
@@ -349,8 +363,13 @@ mod tests {
             for tier in ["q4", "q8"] {
                 let (repo, files) = selected(platform, Some(tier));
                 assert_eq!(repo, rehost, "{platform} {tier}");
-                // Every file of the tier's folder, named one by one (never a `<tier>/*` glob, which
-                // one file satisfies), the list every install check requires.
+                // The shipped tiers are the fully quantized `q4-full/` and `q8-full/` folders
+                // (SW-7202); the plain `q4/` / `q8/` folders stay in the re-host for older pins.
+                let folder =
+                    qwen38_tier_dir(rehost, tier).expect("a quantised row names its folder");
+                assert_eq!(folder, format!("{tier}-full"), "{platform} {tier}");
+                // Every file of the tier's folder, named one by one (never a `<folder>/*` glob,
+                // which one file satisfies), the list every install check requires.
                 let expected = [
                     "config.json",
                     "generation_config.json",
@@ -359,7 +378,7 @@ mod tests {
                     "tokenizer_config.json",
                     "model.safetensors",
                 ]
-                .map(|name| format!("{tier}/{name}"));
+                .map(|name| format!("{folder}/{name}"));
                 assert_eq!(files, expected, "{platform} {tier}");
                 assert_eq!(files, qwen38_tier_files(rehost, tier));
             }
@@ -374,7 +393,8 @@ mod tests {
                 selected(platform, None)
                     .1
                     .iter()
-                    .all(|file| file.starts_with(&format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/"))),
+                    .all(|file| file
+                        .starts_with(&format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}-full/"))),
                 "{platform}"
             );
             // Every tier in the request vocabulary has a row.

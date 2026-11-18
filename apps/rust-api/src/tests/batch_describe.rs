@@ -517,6 +517,13 @@ fn qwen38_tier_row(platform: &str, tier: &str) -> Value {
         .unwrap_or_else(|| panic!("{platform} has a {tier} row"))
 }
 
+/// The folder `platform`'s `tier` row names in its re-host snapshot (`q4-full/...` gives `q4-full/`).
+fn qwen38_tier_folder(platform: &str, tier: &str) -> String {
+    let row = qwen38_tier_row(platform, tier);
+    let first = row["files"][0].as_str().expect("a file");
+    format!("{}/", first.split_once('/').expect("a tier folder").0)
+}
+
 /// Give this app its own Hugging Face cache, so tiers staged by a test running alongside never
 /// read as installed here. Hold the guard for the whole test.
 fn private_hub(state: &crate::AppState) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
@@ -630,11 +637,9 @@ async fn a_qwen38_job_binds_its_tiers_row_on_every_route() {
                 assert_eq!(bound_repo, QWEN38_27B_DESCRIBER_REPO, "{platform}");
             } else {
                 assert_eq!(bound_repo, repo, "{platform} {tier}");
+                let folder = qwen38_tier_folder(platform, tier);
                 assert!(
-                    !files.is_empty()
-                        && files
-                            .iter()
-                            .all(|file| file.starts_with(&format!("{tier}/"))),
+                    !files.is_empty() && files.iter().all(|file| file.starts_with(&folder)),
                     "{platform} {tier} freezes only its own folder: {files:?}"
                 );
             }
@@ -696,7 +701,10 @@ async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
         cache
             .join("snapshots")
             .join(row["revision"].as_str().unwrap())
-            .join("q4/model.safetensors"),
+            .join(format!(
+                "{}model.safetensors",
+                qwen38_tier_folder(std::env::consts::OS, "q4")
+            )),
     )
     .expect("drop the q4 weights");
 
@@ -819,8 +827,9 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
             (QWEN38_27B_DESCRIBER_CANDLE_REPO, "q4")
         );
         assert_eq!(revision, qwen38_tier_row(platform, "q4")["revision"]);
+        let folder = qwen38_tier_folder(platform, "q4");
         assert!(
-            files.iter().all(|file| file.starts_with("q4/")),
+            files.iter().all(|file| file.starts_with(&folder)),
             "{files:?}"
         );
     }
@@ -943,8 +952,9 @@ async fn installing_the_q4_tier_downloads_only_the_q4_files_the_q4_job_loads() {
     assert_eq!(repo, payload["repo"].as_str().expect("repo"));
     assert_eq!(revision, payload["revision"].as_str().expect("revision"));
     assert_eq!(variant, "q4");
+    let folder = qwen38_tier_folder(platform, "q4");
     assert!(
-        files.iter().all(|file| file.starts_with("q4/")),
+        files.iter().all(|file| file.starts_with(&folder)),
         "{files:?}"
     );
 }

@@ -1,7 +1,8 @@
 """Provision the pinned Candle tiers of the Qwen3.8 27B describer (SW-7120).
 
 `SCENEWORKS_QWEN38_DESCRIBER_PROVISION` picks what is provisioned: `quantised` (the default) is the
-re-host's q4/ and q8/ folders; `bf16` is the full-precision upstream snapshot, the files the
+re-host's folders the catalog's q4 and q8 rows name (the fully quantized `q4-full/` and `q8-full/`,
+SW-7202); `bf16` is the full-precision upstream snapshot, the files the
 catalog's bf16 row names. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
@@ -16,11 +17,15 @@ import shutil
 import sys
 
 REPO = "SceneWorks/qwen3.8-27b-abliterated-candle"
-REVISION = "accaccc109912b9b194f7d5a47f2123fdc70672e"
-# Tier folder -> total bytes of its files, as the catalog's download rows record them
+# PENDING-SW-7202: the revision (a 7202000…0002 PLACEHOLDER) and totals come from the inference `qwen38-full-tiers.yml`
+# (model describer, backend candle) publication report; they must equal the catalog's rows.
+REVISION = "7202000000000000000000000000000000000002"
+# Tier (the catalog row's `variant`) -> the re-host folder its row names.
+TIER_FOLDERS = {"q4": "q4-full", "q8": "q8-full"}
+# Tier -> total bytes of its folder's files, as the catalog's download rows record them
 # (config/manifests/builtin.models.jsonc, `footprint.diskSizeBytes`).
-TIER_BYTES = {"q4": 19_995_370_331, "q8": 32_371_188_675}
-# Both tiers are ~52.4 GB; keep headroom for the volume's other tenants.
+TIER_BYTES = {"q4": 17_611_498_331, "q8": 29_987_316_675}
+# Both tiers are ~47.6 GB; keep headroom for the volume's other tenants.
 MIN_FREE_BYTES = 70 * 10**9
 
 # Full precision (bf16): the upstream repository at the catalog's pinned revision, the files its
@@ -47,16 +52,17 @@ BF16_MIN_FREE_BYTES = 75 * 10**9
 MODES = ("quantised", "bf16")
 
 
-def expected_files(entries, tier_bytes=TIER_BYTES):
+def expected_files(entries, tier_bytes=TIER_BYTES, tier_folders=TIER_FOLDERS):
     """The repo's files under each tier folder, as {path: size}, checked against the tier totals."""
     expected = {}
     for tier, total in tier_bytes.items():
-        files = {name: size for name, size in entries if name.startswith(f"{tier}/")}
+        folder = tier_folders[tier]
+        files = {name: size for name, size in entries if name.startswith(f"{folder}/")}
         if not files or any(not isinstance(size, int) or size <= 0 for size in files.values()):
-            raise RuntimeError(f"{REPO}@{REVISION} lists no sized files under {tier}/")
+            raise RuntimeError(f"{REPO}@{REVISION} lists no sized files under {folder}/")
         if sum(files.values()) != total:
             raise RuntimeError(
-                f"{tier}/ at {REVISION} totals {sum(files.values())} bytes, the catalog says {total}")
+                f"{folder}/ at {REVISION} totals {sum(files.values())} bytes, the catalog says {total}")
         expected.update(files)
     return expected
 
@@ -115,7 +121,7 @@ def plan(mode):
     free-space minimum)."""
     if mode == "quantised":
         return (REPO, REVISION, f"tiers {', '.join(TIER_BYTES)}", expected_files,
-                [f"{tier}/*" for tier in TIER_BYTES], MIN_FREE_BYTES)
+                [f"{TIER_FOLDERS[tier]}/*" for tier in TIER_BYTES], MIN_FREE_BYTES)
     if mode == "bf16":
         return (BF16_REPO, BF16_REVISION, "full precision (bf16)", bf16_expected_files,
                 [*BF16_FILES, BF16_SHARD_PATTERN], BF16_MIN_FREE_BYTES)

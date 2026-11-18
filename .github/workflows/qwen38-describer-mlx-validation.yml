@@ -1,0 +1,89 @@
+name: Qwen3.8 27B describer MLX validation
+
+# Real model inference is opt-in, never ordinary PR/main CI (SW-7202). The MLX twin of
+# qwen38-describer-validation.yml: describes one synthetic scene with the worker's Qwen3.8 27B
+# describer on the catalog's pinned MLX tier, on the Mac `mac_runner` names (the script refuses any
+# other runner), and records the process's exact peak footprint under the
+# external phys_footprint guard. That peak is the MLX floor's measured anchor
+# (floor = ceil(peak GiB / 0.9)). Fetches the tier into the task-owned hub when it is not resident.
+#
+# `nax-macos` (label `rw-starvector`, Michael's dev Mac; hub and build target on /Volumes/Models) is
+# the default ONLY while nax-macos-2's model disk is full: Michael approved that loan for SW-7202 on
+# 2026-11-18. Switch the default back to `nax-macos-2` (`rw-llm`) once its new drive is fitted.
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
+        required: true
+        type: choice
+        options: [q4, q8, bf16]
+        default: q4
+      image_side:
+        description: Synthetic scene size (1536x1536 by default, the floor's sizing image, or 512x384)
+        required: true
+        type: choice
+        options: ["1536", default]
+        default: "1536"
+      mac_runner:
+        description: nax-macos (dev Mac, approved loan while nax-macos-2's disk is full) or nax-macos-2
+        required: true
+        type: choice
+        options: [nax-macos, nax-macos-2]
+        default: nax-macos
+
+permissions:
+  contents: read
+
+jobs:
+  qwen38-describer-mlx:
+    runs-on: [self-hosted, macOS, ARM64, "${{ inputs.mac_runner == 'nax-macos-2' && 'rw-llm' || 'rw-starvector' }}"]
+    timeout-minutes: 120
+    concurrency:
+      group: qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      QWEN38_TIER: ${{ inputs.tier }}
+      QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
+      QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse any runner but the selected Mac before build
+        run: |
+          echo "runner: $RUNNER_NAME (selected: $QWEN38_MAC_RUNNER)"
+          [[ "$RUNNER_NAME" == "$QWEN38_MAC_RUNNER" ]] || { echo "::error::selected $QWEN38_MAC_RUNNER but landed on $RUNNER_NAME"; exit 1; }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Guarded describer run
+        env:
+          QWEN38_EVIDENCE_DIR: ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/ci/qwen38-describer-mlx/run.sh
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qwen38-describer-mlx-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.txt
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/result/
+          if-no-files-found: warn
+          retention-days: 30

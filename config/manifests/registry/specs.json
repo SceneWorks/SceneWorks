@@ -48205,7 +48205,7 @@
       },
       {
         "files": [
-          "q8/*"
+          "q8-full/*"
         ],
         "footprint": {
           "peakMemoryBytes": null,
@@ -48216,12 +48216,12 @@
         ],
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000003",
         "variant": "q8"
       },
       {
         "files": [
-          "candle-q8/*"
+          "candle-q8-full/*"
         ],
         "footprint": {
           "peakMemoryBytes": null,
@@ -48233,12 +48233,12 @@
         ],
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000004",
         "variant": "q8"
       },
       {
         "files": [
-          "q4/*"
+          "q4-full/*"
         ],
         "footprint": {
           "peakMemoryBytes": null,
@@ -48249,12 +48249,12 @@
         ],
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000003",
         "variant": "q4"
       },
       {
         "files": [
-          "candle-q4/*"
+          "candle-q4-full/*"
         ],
         "footprint": {
           "peakMemoryBytes": null,
@@ -48266,7 +48266,7 @@
         ],
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000004",
         "variant": "q4"
       }
     ],
@@ -48341,28 +48341,28 @@
           "variant": "bf16"
         },
         {
-          "estimatedSizeBytes": 31927190423,
+          "estimatedSizeBytes": 29543318423,
           "files": [
-            "q8/*"
+            "q8-full/*"
           ],
           "footprint": {
-            "diskSizeBytes": 31927190423
+            "diskSizeBytes": 29543318423
           },
           "platforms": [
             "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000003",
           "variant": "q8"
         },
         {
-          "estimatedSizeBytes": 31927191452,
+          "estimatedSizeBytes": 29543319452,
           "files": [
-            "candle-q8/*"
+            "candle-q8-full/*"
           ],
           "footprint": {
-            "diskSizeBytes": 31927191452
+            "diskSizeBytes": 29543319452
           },
           "platforms": [
             "windows",
@@ -48370,32 +48370,32 @@
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000004",
           "variant": "q8"
         },
         {
-          "estimatedSizeBytes": 19763707887,
+          "estimatedSizeBytes": 17379835887,
           "files": [
-            "q4/*"
+            "q4-full/*"
           ],
           "footprint": {
-            "diskSizeBytes": 19763707887
+            "diskSizeBytes": 17379835887
           },
           "platforms": [
             "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000003",
           "variant": "q4"
         },
         {
-          "estimatedSizeBytes": 19763709780,
+          "estimatedSizeBytes": 17379837780,
           "files": [
-            "candle-q4/*"
+            "candle-q4-full/*"
           ],
           "footprint": {
-            "diskSizeBytes": 19763709780
+            "diskSizeBytes": 17379837780
           },
           "platforms": [
             "windows",
@@ -48403,7 +48403,7 @@
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000004",
           "variant": "q4"
         },
         {
@@ -67789,60 +67789,60 @@
       "downloads": [
         {
           "default": true,
-          "estimatedSizeBytes": 19995477764,
+          "estimatedSizeBytes": 17611605764,
           "files": [
-            "q4/config.json",
-            "q4/generation_config.json",
-            "q4/chat_template.jinja",
-            "q4/tokenizer.json",
-            "q4/tokenizer_config.json",
-            "q4/model.safetensors"
+            "q4-full/config.json",
+            "q4-full/generation_config.json",
+            "q4-full/chat_template.jinja",
+            "q4-full/tokenizer.json",
+            "q4-full/tokenizer_config.json",
+            "q4-full/model.safetensors"
           ],
           "footprint": {
-            "diskSizeBytes": 19995477764
+            "diskSizeBytes": 17611605764
           },
           "platforms": [
             "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "7202000000000000000000000000000000000001",
           "variant": "q4"
         },
         {
-          "estimatedSizeBytes": 32371297322,
+          "estimatedSizeBytes": 29987425322,
           "files": [
-            "q8/config.json",
-            "q8/generation_config.json",
-            "q8/chat_template.jinja",
-            "q8/tokenizer.json",
-            "q8/tokenizer_config.json",
-            "q8/model.safetensors"
+            "q8-full/config.json",
+            "q8-full/generation_config.json",
+            "q8-full/chat_template.jinja",
+            "q8-full/tokenizer.json",
+            "q8-full/tokenizer_config.json",
+            "q8-full/model.safetensors"
           ],
           "footprint": {
-            "diskSizeBytes": 32371297322
+            "diskSizeBytes": 29987425322
           },
           "platforms": [
             "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "7202000000000000000000000000000000000001",
           "variant": "q8"
         },
         {
           "default": true,
-          "estimatedSizeBytes": 19995370331,
+          "estimatedSizeBytes": 17611498331,
           "files": [
-            "q4/config.json",
-            "q4/generation_config.json",
-            "q4/chat_template.jinja",
-            "q4/tokenizer.json",
-            "q4/tokenizer_config.json",
-            "q4/model.safetensors"
+            "q4-full/config.json",
+            "q4-full/generation_config.json",
+            "q4-full/chat_template.jinja",
+            "q4-full/tokenizer.json",
+            "q4-full/tokenizer_config.json",
+            "q4-full/model.safetensors"
           ],
           "footprint": {
-            "diskSizeBytes": 19995370331
+            "diskSizeBytes": 17611498331
           },
           "platforms": [
             "windows",
@@ -67850,21 +67850,21 @@
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "7202000000000000000000000000000000000002",
           "variant": "q4"
         },
         {
-          "estimatedSizeBytes": 32371188675,
+          "estimatedSizeBytes": 29987316675,
           "files": [
-            "q8/config.json",
-            "q8/generation_config.json",
-            "q8/chat_template.jinja",
-            "q8/tokenizer.json",
-            "q8/tokenizer_config.json",
-            "q8/model.safetensors"
+            "q8-full/config.json",
+            "q8-full/generation_config.json",
+            "q8-full/chat_template.jinja",
+            "q8-full/tokenizer.json",
+            "q8-full/tokenizer_config.json",
+            "q8-full/model.safetensors"
           ],
           "footprint": {
-            "diskSizeBytes": 32371188675
+            "diskSizeBytes": 29987316675
           },
           "platforms": [
             "windows",
@@ -67872,7 +67872,7 @@
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "7202000000000000000000000000000000000002",
           "variant": "q8"
         },
         {

@@ -13,6 +13,7 @@ provision = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(provision)
 
 TIERS = {"q4": 30, "q8": 50}
+FOLDERS = {"q4": "q4", "q8": "q8"}
 ENTRIES = [
     (".gitattributes", 5), ("README.md", 7),
     ("q4/config.json", 10), ("q4/model.safetensors", 20),
@@ -22,24 +23,25 @@ ENTRIES = [
 
 class ExpectedFilesTest(unittest.TestCase):
     def test_keeps_only_tier_files(self):
-        self.assertEqual(provision.expected_files(ENTRIES, TIERS), {
+        self.assertEqual(provision.expected_files(ENTRIES, TIERS, FOLDERS), {
             "q4/config.json": 10, "q4/model.safetensors": 20,
             "q8/config.json": 10, "q8/model.safetensors": 40,
         })
 
     def test_refuses_a_tier_total_that_differs_from_the_catalog(self):
         with self.assertRaisesRegex(RuntimeError, "q8/ .* totals 50 bytes, the catalog says 51"):
-            provision.expected_files(ENTRIES, {"q4": 30, "q8": 51})
+            provision.expected_files(ENTRIES, {"q4": 30, "q8": 51}, FOLDERS)
 
     def test_refuses_a_missing_tier_or_unsized_file(self):
         with self.assertRaisesRegex(RuntimeError, "no sized files under q4/"):
-            provision.expected_files([e for e in ENTRIES if not e[0].startswith("q4/")], TIERS)
+            provision.expected_files([e for e in ENTRIES if not e[0].startswith("q4/")], TIERS, FOLDERS)
         with self.assertRaisesRegex(RuntimeError, "no sized files under q4/"):
-            provision.expected_files([("q4/config.json", None), *ENTRIES[3:]], TIERS)
+            provision.expected_files([("q4/config.json", None), *ENTRIES[3:]], TIERS, FOLDERS)
 
     def test_pins_an_exact_revision_and_both_quantised_tiers(self):
         self.assertRegex(provision.REVISION, r"^[0-9a-f]{40}$")
         self.assertEqual(sorted(provision.TIER_BYTES), ["q4", "q8"])
+        self.assertEqual(provision.TIER_FOLDERS, {"q4": "q4-full", "q8": "q8-full"})
 
 
 class MismatchedFilesTest(unittest.TestCase):
@@ -48,7 +50,7 @@ class MismatchedFilesTest(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory(dir=Path(__file__).parent, prefix="qwen38-provision-unit-")
         self.cache = Path(self.scratch.name)
         self.snapshot = provision.snapshot_dir(self.cache)
-        self.expected = provision.expected_files(ENTRIES, TIERS)
+        self.expected = provision.expected_files(ENTRIES, TIERS, FOLDERS)
 
     def tearDown(self):
         self.scratch.cleanup()
@@ -125,12 +127,13 @@ class Bf16Test(unittest.TestCase):
             self.assertEqual(row["revision"], provision.REVISION, tier)
             self.assertEqual(row["estimatedSizeBytes"], total, tier)
             # The download fetches the tier folder; the catalog names every file in it.
-            self.assertTrue(all(name.startswith(f"{tier}/") for name in row["files"]), tier)
+            folder = provision.TIER_FOLDERS[tier]
+            self.assertTrue(all(name.startswith(f"{folder}/") for name in row["files"]), tier)
 
     def test_plans_keep_quantised_as_the_default_and_size_bf16_disk(self):
         repo, revision, _, read, patterns, minimum = provision.plan("quantised")
         self.assertEqual((repo, revision, read, patterns, minimum),
-                         (provision.REPO, provision.REVISION, provision.expected_files, ["q4/*", "q8/*"], 70 * 10**9))
+                         (provision.REPO, provision.REVISION, provision.expected_files, ["q4-full/*", "q8-full/*"], 70 * 10**9))
         repo, revision, _, read, patterns, minimum = provision.plan("bf16")
         self.assertEqual((repo, read, minimum), (provision.BF16_REPO, provision.bf16_expected_files, 75 * 10**9))
         self.assertEqual(patterns, [*provision.BF16_FILES, "model-*.safetensors"])

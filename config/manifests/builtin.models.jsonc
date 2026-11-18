@@ -15347,10 +15347,15 @@
       // which never carries `prompt/` — has them.
       //
       // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
-      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7099 MLX
-      // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published and pinned; their sizes are the hosted
-      // totals. Each tier has two rows under one variant, narrowed to the host OS before the worker sees the entry:
-      // the MLX layout (`q8/`, macOS) and the Candle layout (`candle-q8/`, Windows/Linux). bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
+      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7202 fully
+      // quantized conversions (inference `prepare_snapshot` recipes `q8-full` / `q4-full`, SW-7201): q8 stores every
+      // language-model matrix 8-bit (`lm_head`, `embed_tokens` and every Gated DeltaNet `in_proj_a`/`in_proj_b`
+      // included); q4 is a 4-bit body with those matrices 8-bit; the vision tower stays dense. They replace the
+      // SW-7099 plain conversions (`q8/`, `q4/`, `candle-q8/`, `candle-q4/` @ fdcc4059, still in the repository for
+      // installs pinned to that revision) and are published by inference `qwen38-full-tiers.yml` (model
+      // `expander`). Each tier has two rows under one variant, narrowed to the host OS before the worker sees the
+      // entry: the MLX layout (`q8-full/`, macOS) and the Candle layout (`candle-q8-full/`, Windows/Linux); the worker
+      // loads the folder the row's files name. bf16 is still unpublished: null SHA + `pendingArtifact`, derived size.
       "id": "minimax_h3_image_pe",
       "autoDownload": false,
       "macOnly": false,
@@ -15396,48 +15401,56 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000003",
           "variant": "q8",
-          "files": ["q8/*"],
+          "files": ["q8-full/*"],
           // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
-          // Hub tree at the pinned revision: q8/ 31,927,190,423 B (7 files).
-          "estimatedSizeBytes": 31927190423,
-          "footprint": { "diskSizeBytes": 31927190423 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes and file count.
+          "estimatedSizeBytes": 29543318423,
+          "footprint": { "diskSizeBytes": 29543318423 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000004",
           "variant": "q8",
-          "files": ["candle-q8/*"],
+          "files": ["candle-q8-full/*"],
           "platforms": ["windows", "linux"],
-          // Hub tree at the pinned revision: candle-q8/ 31,927,191,452 B (11 files, four weight shards).
-          "estimatedSizeBytes": 31927191452,
-          "footprint": { "diskSizeBytes": 31927191452 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes and file count.
+          "estimatedSizeBytes": 29543319452,
+          "footprint": { "diskSizeBytes": 29543319452 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000003",
           "variant": "q4",
-          "files": ["q4/*"],
+          "files": ["q4-full/*"],
           // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
-          // Hub tree at the pinned revision: q4/ 19,763,707,887 B (7 files).
-          "estimatedSizeBytes": 19763707887,
-          "footprint": { "diskSizeBytes": 19763707887 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes and file count.
+          "estimatedSizeBytes": 17379835887,
+          "footprint": { "diskSizeBytes": 17379835887 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "7202000000000000000000000000000000000004",
           "variant": "q4",
-          "files": ["candle-q4/*"],
+          "files": ["candle-q4-full/*"],
           "platforms": ["windows", "linux"],
-          // Hub tree at the pinned revision: candle-q4/ 19,763,709,780 B (11 files, four weight shards).
-          "estimatedSizeBytes": 19763709780,
-          "footprint": { "diskSizeBytes": 19763709780 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes and file count.
+          "estimatedSizeBytes": 17379837780,
+          "footprint": { "diskSizeBytes": 17379837780 }
         },
         // The prompt files, read at run time from the upstream snapshot for every tier.
         {
@@ -16109,10 +16122,16 @@
       // Hugging Face API on 2026-11-13 at the pinned revision). It runs on the same native TextLlm
       // path as the Vision Captioner: JSON-constrained decode, thinking off.
       //
-      // TIERS. q4 (the default) and q8 are quantised ahead of time with mlx-llm's
-      // `prepare_snapshot` (inference 4a36a7f8) and served from the SceneWorks re-host
-      // `SceneWorks/qwen3.8-27b-abliterated-mlx` @ 76f3c445 as self-contained `q4/` and `q8/`
-      // folders (vision tower kept bf16). bf16 is the upstream repository (18 shards, 55.6 GB).
+      // TIERS. q4 (the default) and q8 are the fully quantized tiers (SW-7202, feature SW-F374):
+      // quantised ahead of time with `prepare_snapshot` recipes `q4-full` / `q8-full` (SW-7201) by
+      // inference `qwen38-full-tiers.yml` (model `describer`) and served as self-contained
+      // `q4-full/` and `q8-full/` folders of the SceneWorks re-host
+      // `SceneWorks/qwen3.8-27b-abliterated-mlx`. q8 stores every language-model matrix 8-bit
+      // (`lm_head`, `embed_tokens` and every Gated DeltaNet `in_proj_a`/`in_proj_b` included); q4 is a
+      // 4-bit body with those matrices 8-bit (decision D3/E15). The vision tower stays bf16. The
+      // earlier plain `q4/` / `q8/` folders (@ 76f3c445 here, @ accaccc1 on the Candle re-host) stay in
+      // the repositories for installs pinned to those revisions; the worker loads the folder the
+      // row's files name. bf16 is the upstream repository (18 shards, 55.6 GB).
       // Load-time quantisation is deliberately not offered: MLX load admission prices it at twice
       // the bf16 source, and a q4 user must not download the 55.6 GB. A describe job names its
       // tier as the request's `variant`, so source admission selects the row the worker loads.
@@ -16120,9 +16139,13 @@
       // MLX and Candle store a quantised tier in different formats, so each engine has its own
       // re-host: the `macos` rows above are MLX snapshots, and the `windows`/`linux` rows are
       // candle-llm `prepare_snapshot` tiers (stored GGML blocks) from
-      // `SceneWorks/qwen3.8-27b-abliterated-candle` @ accaccc1. Exactly one q4 and one q8 row is in
-      // scope on any platform. Candle q4 was loaded on Metal and grounded on an image (peak
-      // footprint 41 GB).
+      // `SceneWorks/qwen3.8-27b-abliterated-candle`. Exactly one q4 and one q8 row is in scope on any
+      // platform.
+      //
+      // PENDING-SW-7202: the floors below were measured on the plain tiers. They stay as the
+      // conservative floors until the full tiers' two anchors (q4 and q8 at 1536x1536 on each lane)
+      // are measured; the full tiers hold ~2.38 GB less weight than the plain ones, so the plain
+      // floors over-state them and the q4 floor still admits every card it admitted before.
       //
       // MEMORY FLOORS (registry evidence.json, `mlx` / `candle` `minMemoryGbByTier`, GiB). A describe
       // job reads its tier's floor on the worker's lane and refuses before any image when the
@@ -16181,44 +16204,56 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "7202000000000000000000000000000000000001",
           "variant": "q4",
           "default": true,
-          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
+          "files": ["q4-full/config.json", "q4-full/generation_config.json", "q4-full/chat_template.jinja", "q4-full/tokenizer.json", "q4-full/tokenizer_config.json", "q4-full/model.safetensors"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 19995477764,
-          "footprint": { "diskSizeBytes": 19995477764 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes.
+          "estimatedSizeBytes": 17611605764,
+          "footprint": { "diskSizeBytes": 17611605764 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "7202000000000000000000000000000000000001",
           "variant": "q8",
-          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
+          "files": ["q8-full/config.json", "q8-full/generation_config.json", "q8-full/chat_template.jinja", "q8-full/tokenizer.json", "q8-full/tokenizer_config.json", "q8-full/model.safetensors"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 32371297322,
-          "footprint": { "diskSizeBytes": 32371297322 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes.
+          "estimatedSizeBytes": 29987425322,
+          "footprint": { "diskSizeBytes": 29987425322 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "7202000000000000000000000000000000000002",
           "variant": "q4",
           "default": true,
-          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
+          "files": ["q4-full/config.json", "q4-full/generation_config.json", "q4-full/chat_template.jinja", "q4-full/tokenizer.json", "q4-full/tokenizer_config.json", "q4-full/model.safetensors"],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 19995370331,
-          "footprint": { "diskSizeBytes": 19995370331 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes.
+          "estimatedSizeBytes": 17611498331,
+          "footprint": { "diskSizeBytes": 17611498331 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "7202000000000000000000000000000000000002",
           "variant": "q8",
-          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
+          "files": ["q8-full/config.json", "q8-full/generation_config.json", "q8-full/chat_template.jinja", "q8-full/tokenizer.json", "q8-full/tokenizer_config.json", "q8-full/model.safetensors"],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 32371188675,
-          "footprint": { "diskSizeBytes": 32371188675 }
+          // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
+          // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
+          // embedding save); replace with the publication report's prefixBytes.
+          "estimatedSizeBytes": 29987316675,
+          "footprint": { "diskSizeBytes": 29987316675 }
         },
         {
           "provider": "huggingface",

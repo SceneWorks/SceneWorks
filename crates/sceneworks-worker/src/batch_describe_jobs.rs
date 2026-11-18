@@ -171,8 +171,9 @@ impl DescribeModel {
 }
 
 /// Where a Qwen3.8 27B tier's snapshot lives. Full precision (`bf16`) is the upstream repository's
-/// snapshot. A quantised tier is the `<tier>/` folder of this engine's re-host repository: it was
-/// quantised ahead of time, so loading it never reads or load-quantises the full-precision files.
+/// snapshot. A quantised tier is a folder of this engine's re-host repository (the one its catalog
+/// row's files name, e.g. `q4-full/`): it was quantised ahead of time, so loading it never reads
+/// or load-quantises the full-precision files.
 #[cfg(native_lane)]
 pub(crate) fn qwen38_describer_weights_dir(
     settings: &Settings,
@@ -204,11 +205,14 @@ pub(crate) fn qwen38_describer_weights_dir(
     if files.is_empty() || !qwen38_snapshot_holds(&snapshot, &files) {
         return Err(not_installed());
     }
-    Ok(if tier == "bf16" {
-        snapshot
-    } else {
-        snapshot.join(tier)
-    })
+    // A quantised tier loads from the folder its catalog row's files name (`q4-full/`), never a
+    // folder guessed from the tier's name.
+    Ok(
+        match sceneworks_core::dataset_batch_describe::qwen38_tier_dir(repo, tier) {
+            Some(dir) => snapshot.join(dir),
+            None => snapshot,
+        },
+    )
 }
 
 /// Whether `snapshot` holds every file in `files`. A `model-*.safetensors` shard glob is satisfied
@@ -245,13 +249,13 @@ pub(crate) struct Qwen38PinnedSnapshot {
     pub(crate) repo: String,
     pub(crate) revision: String,
     /// The weights folder relative to the hub cache:
-    /// `models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier.
+    /// `models--<repo>/snapshots/<revision>`, then the tier's folder for a quantised tier.
     pub(crate) relative_dir: PathBuf,
 }
 
 /// Read a tier's pinned snapshot from the catalog `entry`'s download rows: full precision (`bf16`)
 /// is the upstream repository's row at its root, a quantised tier is `rehost_repo`'s row for that
-/// variant, in its `<tier>/` folder. `None` when the catalog has no such row.
+/// variant, in the folder its files name. `None` when the catalog has no such row.
 #[cfg(all(test, native_lane))]
 pub(crate) fn qwen38_pinned_snapshot(
     entry: &JsonObject,
@@ -263,22 +267,23 @@ pub(crate) fn qwen38_pinned_snapshot(
     } else {
         rehost_repo
     };
-    let revision = entry
-        .get("downloads")?
-        .as_array()?
-        .iter()
-        .find(|row| {
-            row.get("repo").and_then(Value::as_str) == Some(repo)
-                && row.get("variant").and_then(Value::as_str) == Some(tier)
-        })?
-        .get("revision")?
-        .as_str()?
-        .to_owned();
+    let row = entry.get("downloads")?.as_array()?.iter().find(|row| {
+        row.get("repo").and_then(Value::as_str) == Some(repo)
+            && row.get("variant").and_then(Value::as_str) == Some(tier)
+    })?;
+    let revision = row.get("revision")?.as_str()?.to_owned();
     let mut relative_dir = PathBuf::from(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots")
         .join(&revision);
-    if tier != "bf16" {
-        relative_dir.push(tier);
+    // A quantised tier's folder is the one its row's files name (`q4-full/`).
+    if let Some((dir, _)) = row
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .and_then(|file| file.split_once('/'))
+    {
+        relative_dir.push(dir);
     }
     Some(Qwen38PinnedSnapshot {
         repo: repo.to_owned(),

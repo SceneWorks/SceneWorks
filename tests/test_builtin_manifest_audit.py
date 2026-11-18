@@ -4367,10 +4367,16 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
         ]
         by_platforms = {tuple(row["platforms"]): row for row in rows}
         assert len(rows) == len(by_platforms) == 2, tier
-        for platforms, directory in ((("macos",), tier), (("windows", "linux"), f"candle-{tier}")):
+        # SW-7202: the fully quantized tiers (`prepare_snapshot` q8-full / q4-full), each backend's
+        # folders at its own publication commit. PENDING-SW-7202: the 7202000...000N revisions are
+        # placeholders replaced by the qwen38-full-tiers.yml publication reports.
+        for platforms, directory, revision in (
+            (("macos",), f"{tier}-full", "7202000000000000000000000000000000000003"),
+            (("windows", "linux"), f"candle-{tier}-full", "7202000000000000000000000000000000000004"),
+        ):
             row = by_platforms[platforms]
             assert row.get("pendingArtifact") is None, (tier, platforms)
-            assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", (tier, platforms)
+            assert row["revision"] == revision, (tier, platforms)
             assert row["files"] == [f"{directory}/*"], (tier, platforms)
     prompt_rows = [
         download

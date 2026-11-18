@@ -2,8 +2,8 @@ name: Qwen3.8 27B describer weight provisioning
 
 # Dispatch-only (SW-7120). Downloads pinned Candle tiers of the Qwen3.8 27B describer into the CUDA
 # real-weights runner's hub cache, in the standard hub layout, for qwen38-describer-validation.yml.
-# `tiers: quantised` (the default) is the q4/ and q8/ folders of
-# SceneWorks/qwen3.8-27b-abliterated-candle (~52.4 GB; refuses with under 70 GB free). `tiers: bf16`
+# `tiers: quantised` (the default) is the fully quantized q4-full/ and q8-full/ folders (SW-7202) of
+# SceneWorks/qwen3.8-27b-abliterated-candle (~47.6 GB; refuses with under 70 GB free). `tiers: bf16`
 # is the full-precision huihui-ai/Huihui-Qwen3.8-27B-abliterated snapshot the catalog's bf16 row
 # names (~55.6 GB; refuses with under 75 GB free). Runs no model. Does nothing when every file is
 # already present at its published size.

@@ -1534,12 +1534,12 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
 }
 
 /// The pinned snapshot the CUDA smoke checks for each tier comes from the shipped catalog's rows:
-/// the engine's re-host `<tier>/` folder for q4 and q8, the upstream repository's root for bf16.
+/// the engine's re-host folder its row names for q4 and q8, the upstream repository's root for bf16.
 /// The production resolver lands on exactly that folder when it is the cached snapshot.
 #[test]
 fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
     use sceneworks_core::dataset_batch_describe::{
-        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        qwen38_tier_dir, QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
         QWEN38_27B_DESCRIBER_MODEL_ID, QWEN38_27B_DESCRIBER_TIERS,
     };
     let entry = crate::test_env::shipped_catalog_entry(QWEN38_27B_DESCRIBER_MODEL_ID);
@@ -1558,7 +1558,7 @@ fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
                 Path::new(&format!("models--{}", rehost.replace('/', "--")))
                     .join("snapshots")
                     .join(&pinned.revision)
-                    .join(tier)
+                    .join(qwen38_tier_dir(rehost, tier).expect("a quantised row names its folder"))
             );
         }
         // Full precision is the upstream repository on every lane, at its root.
@@ -1603,13 +1603,14 @@ fn each_qwen38_tier_resolves_to_its_pinned_catalog_snapshot() {
     }
 }
 
-/// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is
+/// A quantised tier is the folder its catalog row names in this engine's re-host snapshot (never a
+/// folder named after the tier), and full precision is
 /// the upstream snapshot. A tier counts as installed only when every file its catalog row pins is
 /// present: a partial download (some of them, as a cancelled download leaves) is refused by name.
 #[test]
 fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     use sceneworks_core::dataset_batch_describe::{
-        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+        qwen38_tier_dir, QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
     };
     let dir = tempfile::tempdir().expect("tempdir");
     let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
@@ -1630,8 +1631,9 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     let upstream = snapshot(QWEN38_27B_DESCRIBER_REPO, "bbb222");
     stage_tier_files(&rehost, rehost_repo, "q4");
     // q8 holds only its config, as a download cancelled after its small files leaves it.
-    std::fs::create_dir_all(rehost.join("q8")).expect("q8 dir");
-    std::fs::write(rehost.join("q8").join("config.json"), b"{}").expect("q8 config");
+    let folder = |tier: &str| qwen38_tier_dir(rehost_repo, tier).expect("quantised row folder");
+    std::fs::create_dir_all(rehost.join(folder("q8"))).expect("q8 dir");
+    std::fs::write(rehost.join(folder("q8")).join("config.json"), b"{}").expect("q8 config");
     stage_tier_files(&upstream, QWEN38_27B_DESCRIBER_REPO, "bf16");
 
     let _env = crate::test_env::EnvVars::set(&[(
@@ -1644,7 +1646,7 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     };
     assert!(same(
         &resolved("q4").expect("q4 installed"),
-        &rehost.join("q4")
+        &rehost.join(folder("q4"))
     ));
     assert!(same(&resolved("bf16").expect("bf16 installed"), &upstream));
     let error = resolved("q8").expect_err("q8 has only some of its files");
@@ -2122,7 +2124,12 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
         let weights = hf_cache
             .path()
             .join(format!("models--{}", repo.replace('/', "--")))
-            .join("snapshots/aaa111/q8/model.safetensors");
+            .join("snapshots/aaa111")
+            .join(
+                sceneworks_core::dataset_batch_describe::qwen38_tier_dir(repo, "q8")
+                    .expect("q8 folder"),
+            )
+            .join("model.safetensors");
         std::fs::remove_file(weights).expect("drop the q8 weights");
     }
     let error = {
