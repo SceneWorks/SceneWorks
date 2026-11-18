@@ -189,22 +189,21 @@ pub(super) fn license_acknowledgment_index_for_selected(
         if !model_requires_license_acknowledgment(model) {
             continue;
         }
+        // A download row that declares its own `license` is a component under different terms
+        // (SW-7203: the Apache-2.0 block drafts shipped with the gated MiniMax prompt expander), so
+        // this entry's acknowledgment does not govern its repo. Conditional components are not
+        // exempt: they carry a `license` of their own and stay gated.
         let downloads = model
             .get("downloads")
             .and_then(Value::as_array)
             .into_iter()
-            .flatten();
+            .flatten()
+            .filter(|row| {
+                !row.get("license")
+                    .and_then(Value::as_str)
+                    .is_some_and(|license| !license.trim().is_empty())
+            });
         for row in downloads.chain(conditional) {
-            // A download row that declares its own `license` is a component under different
-            // terms (SW-7203: the Apache-2.0 block drafts shipped with the gated MiniMax prompt
-            // expander), so this entry's acknowledgment does not govern its repo.
-            if row
-                .get("license")
-                .and_then(Value::as_str)
-                .is_some_and(|license| !license.trim().is_empty())
-            {
-                continue;
-            }
             let Some(key) = row
                 .get("repo")
                 .and_then(Value::as_str)
@@ -235,10 +234,14 @@ mod license_index_tests {
                 {"provider": "huggingface", "repo": "Vendor/Gated", "files": ["a"]},
                 {"provider": "huggingface", "repo": "SceneWorks/draft", "coRequisite": true,
                  "required": "soft", "license": "Apache-2.0", "files": ["b"]}
+            ],
+            "conditionalComponents": [
+                {"componentId": "cover", "repo": "Vendor/Cover", "license": "CC-BY-NC-4.0"}
             ]
         })];
         let index = license_acknowledgment_index_for(&models);
         assert!(index.contains_key("vendor/gated"));
+        assert!(index.contains_key("vendor/cover"));
         assert!(!index.contains_key("sceneworks/draft"));
     }
 }
