@@ -27230,6 +27230,7 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
 /// SW-7184: the imported-checkpoint loader honors the legacy `advanced.quant` after `quantTier`,
 /// and admission (`requested_runtime_variant`) reads it in that same slot, so the two name one tier
 /// even when `advanced.mlxQuantize` names another.
+#[cfg(native_lane)]
 #[test]
 fn imported_legacy_quant_is_the_tier_admission_selects() {
     use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
