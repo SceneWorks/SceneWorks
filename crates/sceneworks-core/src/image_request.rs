@@ -300,7 +300,7 @@ pub struct ImageAdvanced {
 }
 
 /// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
-fn standard_tier_bits(tier: &str) -> Option<i64> {
+pub(crate) fn standard_tier_bits(tier: &str) -> Option<i64> {
     match tier {
         "q4" => Some(4),
         "q8" => Some(8),

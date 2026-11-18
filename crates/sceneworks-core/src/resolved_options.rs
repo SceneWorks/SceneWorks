@@ -260,6 +260,7 @@ impl RouteOptionFacts {
         self.authored_advanced_keys = authored.authored_advanced_keys.clone();
         if authored.variant.is_some() {
             self.variant = authored.variant.clone();
+            return self.with_variant_bound();
         }
         self
     }
@@ -386,6 +387,60 @@ impl RouteOptionFacts {
                 .is_some_and(crate::jobs_store::imported_entry_honors_legacy_quant),
             authored_advanced_keys,
         }
+        .with_variant_bound()
+    }
+
+    /// Bind the top-level `variant` over the precision carriers, so every check that reads
+    /// `quantTier`, `mlxQuantize` or `convRot` judges the tier admission selects
+    /// ([`Self::requested_runtime_variant`]) rather than a carrier the variant outranks, and loads
+    /// what the image binding ([`crate::image_request::ImageAdvanced::bind_variant`]) hands the
+    /// loader:
+    ///
+    /// * a tier with a bit count (q4 → 4, q8 → 8, bf16 → 0) becomes an authored `mlxQuantize`, and
+    ///   the named carriers (`quantTier`, the legacy `quant`) are cleared, so a route judges it by
+    ///   its bit count exactly as it judges `mlxQuantize` (a route that refuses every named tier
+    ///   still serves a standard variant whose bit count it serves);
+    /// * any other tier (nvfp4, fp8r, int8-convrot, …) becomes an authored `quantTier` with no bit
+    ///   count, so a route that refuses a named tier refuses it;
+    /// * the variant alone decides ConvRot ([`crate::portable_sources::conv_rot_selected`]):
+    ///   `int8-convrot` is an authored `convRot: true`, and any other variant clears the flag.
+    ///
+    /// A malformed carrier stays malformed, so the checks that fail closed on it still do. A blank
+    /// or absent variant changes nothing.
+    fn with_variant_bound(mut self) -> Self {
+        let Some(tier) = self.variant.as_deref().map(str::to_ascii_lowercase) else {
+            return self;
+        };
+        let bits = crate::image_request::standard_tier_bits(&tier);
+        let mut authored = Vec::new();
+        if self.mlx_quantize != RouteField::Invalid {
+            self.mlx_quantize = bits.map_or(RouteField::Absent, RouteField::Valid);
+            authored.push("mlxQuantize");
+        }
+        if self.conv_rot != RouteField::Invalid {
+            self.conv_rot = if crate::portable_sources::conv_rot_selected(Some(&tier), false) {
+                authored.push("convRot");
+                RouteField::Valid(true)
+            } else {
+                RouteField::Absent
+            };
+        }
+        if self.quant != RouteField::Invalid {
+            self.quant = RouteField::Absent;
+        }
+        if self.quant_tier != RouteField::Invalid {
+            self.quant_tier = match bits {
+                Some(_) => RouteField::Absent,
+                None => {
+                    authored.push("quantTier");
+                    RouteField::Valid(tier)
+                }
+            };
+        }
+        if let Some(keys) = self.authored_advanced_keys.as_mut() {
+            keys.extend(authored.into_iter().map(str::to_owned));
+        }
+        self
     }
 
     /// Build the portable companion-source selector from an already-resolved request. A caller
