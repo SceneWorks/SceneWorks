@@ -15457,7 +15457,7 @@
           "estimatedSizeBytes": 56282
         },
         // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
-        // model. Both are Apache-2.0 SceneWorks re-hosts of the unmodified upstream files at pinned revisions:
+        // model. Both are Apache-2.0 SceneWorks re-hosts at pinned revisions with the upstream weights and config unmodified (the DFlash2 re-host adds a LICENSE file with the Apache-2.0 text, since upstream has none, and a README provenance note):
         // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
         // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
         // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
@@ -16239,7 +16239,7 @@
           "estimatedSizeBytes": 55575900000
         },
         // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
-        // model. Both are Apache-2.0 SceneWorks re-hosts of the unmodified upstream files at pinned revisions:
+        // model. Both are Apache-2.0 SceneWorks re-hosts at pinned revisions with the upstream weights and config unmodified (the DFlash2 re-host adds a LICENSE file with the Apache-2.0 text, since upstream has none, and a README provenance note):
         // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
         // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
         // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
