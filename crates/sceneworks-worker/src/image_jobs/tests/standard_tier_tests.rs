@@ -208,6 +208,54 @@ fn seed_tier(root: &Path, tier: &str, file: &str) {
     std::fs::write(dir.join(file), b"x").unwrap();
 }
 
+/// SW-7183: the standard-tier loader loads the tier admission selected
+/// (`requested_runtime_variant`), not the bit count, when a higher-ranked carrier names another:
+/// the top-level `variant` over `advanced.quantTier` over `advanced.mlxQuantize`.
+#[test]
+fn the_standard_tier_loader_loads_the_tier_admission_selected() {
+    use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for tier in ["q4", "q8", "bf16"] {
+        seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+    }
+    for (fields, admitted) in [
+        (
+            json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+            "q4",
+        ),
+        (
+            json!({"variant": "bf16", "advanced": {"mlxQuantize": 4}}),
+            "bf16",
+        ),
+        (
+            json!({"variant": "Q8", "advanced": {"quantTier": "q4", "mlxQuantize": 4}}),
+            "q8",
+        ),
+        (
+            json!({"advanced": {"quantTier": "q4", "mlxQuantize": 8}}),
+            "q4",
+        ),
+        (json!({"advanced": {"mlxQuantize": 16}}), "bf16"),
+    ] {
+        let mut payload = json!({"model": "sd3_5_large"});
+        for (key, field) in fields.as_object().unwrap() {
+            payload[key] = field.clone();
+        }
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            requested_runtime_variant(payload).as_deref(),
+            Some(admitted),
+            "{fields}"
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &resolved_request(payload)),
+            root.join(admitted),
+            "{fields}"
+        );
+    }
+}
+
 #[test]
 fn defaults_to_q8_and_honors_quantize_selection() {
     let tmp = tempfile::tempdir().unwrap();

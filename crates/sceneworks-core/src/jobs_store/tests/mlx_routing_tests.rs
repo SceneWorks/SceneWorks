@@ -2232,6 +2232,18 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
         ] {
             assert!(!eligible(refused.clone()), "{model}: {refused}");
         }
+        // SW-7183: the lane follows the tier admission selects, so a top-level variant outranks
+        // the advanced carriers: a CUDA package stays off MLX, an MLX package over a bit count
+        // MLX does not serve routes here.
+        for variant in ["fp8r", "nvfp4"] {
+            assert!(
+                !eligible(json!({"model":model,"variant":variant})),
+                "{model}: {variant}"
+            );
+        }
+        assert!(eligible(
+            json!({"model":model,"variant":"q4","advanced":{"mlxQuantize":6}})
+        ));
         let support = model_mac_support(model, "image", Some("flux3"));
         assert!(support.supported);
         assert!(support.features.edit && support.features.reference && !support.features.pose);
