@@ -10487,6 +10487,40 @@ fn wan_tier_order_prefers_then_falls_back() {
     assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
 }
 
+/// SW-7185: a video loader's preferred tier is the tier admission and the portable binding select
+/// (`requested_runtime_variant`), not its own reading of the bit count: the top-level `variant` over
+/// `advanced.quantTier` over `advanced.mlxQuantize`, with `5..=8` ⇒ q8 and `>= 9` ⇒ bf16.
+#[cfg(native_lane)]
+#[test]
+fn video_loaders_prefer_the_tier_admission_selected() {
+    use sceneworks_core::model_artifacts::artifact_selection::requested_runtime_variant;
+    for fields in [
+        json!({"variant": "q4", "advanced": {"mlxQuantize": 8}}),
+        json!({"variant": "bf16", "advanced": {"mlxQuantize": 4}}),
+        json!({"advanced": {"quantTier": "q8", "mlxQuantize": 4}}),
+        json!({"advanced": {"mlxQuantize": 6}}),
+        json!({"advanced": {"mlxQuantize": 12}}),
+    ] {
+        let mut payload = json!({"projectId": "p", "model": "wan_2_2"});
+        for (key, field) in fields.as_object().unwrap() {
+            payload[key] = field.clone();
+        }
+        let admitted = requested_runtime_variant(payload.as_object().unwrap());
+        let request = request(payload);
+        assert_eq!(
+            Some(mochi_tier_order(&request)[0]),
+            admitted.as_deref(),
+            "mochi {fields}"
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            Some(wan_tier_order(&request)[0]),
+            admitted.as_deref(),
+            "wan {fields}"
+        );
+    }
+}
+
 /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
 /// tier, ignores a partially-downloaded one, and returns `None` for a legacy flat root.
 #[cfg(target_os = "macos")]

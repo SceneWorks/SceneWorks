@@ -210,12 +210,52 @@ pub struct RouteOptionFacts {
     /// The job's top-level `variant` (trimmed; blank is absent): the tier selection admission
     /// ranks above `advanced.quantTier` and `advanced.mlxQuantize`.
     pub variant: Option<String>,
+    /// Whether the job's `modelManifestEntry` is an imported image checkpoint, the only route
+    /// whose loaders honor the legacy `advanced.quant` ([`Self::named_quant_tier`]).
+    pub legacy_quant_honored: bool,
     /// Presence in the authored advanced object, even when execution fields come from a
     /// resolved request whose defaults materialize omitted controls.
     authored_advanced_keys: Option<BTreeSet<String>>,
 }
 
 impl RouteOptionFacts {
+    /// The named tier a request selects below its top-level `variant`: `advanced.quantTier`, else
+    /// — on an imported image checkpoint only ([`Self::legacy_quant_honored`]) — the legacy
+    /// `advanced.quant` its loaders honor in that same slot (`imported_model_quant`). Blank values
+    /// name nothing.
+    pub fn named_quant_tier(&self) -> Option<&str> {
+        let legacy = self.legacy_quant_honored.then_some(&self.quant);
+        std::iter::once(&self.quant_tier)
+            .chain(legacy)
+            .find_map(|field| match field {
+                RouteField::Valid(tier) if !tier.trim().is_empty() => Some(tier.as_str()),
+                _ => None,
+            })
+    }
+
+    /// The tier admission selects from these facts and the job's top-level `variant`
+    /// ([`requested_runtime_variant_typed`](crate::model_artifacts::artifact_selection::requested_runtime_variant_typed)):
+    /// the variant, then [`Self::named_quant_tier`], then the `advanced.mlxQuantize` bit count.
+    pub fn requested_runtime_variant(&self, variant: Option<&str>) -> Option<String> {
+        crate::model_artifacts::artifact_selection::requested_runtime_variant_typed(
+            variant,
+            self.named_quant_tier(),
+            match self.mlx_quantize {
+                RouteField::Valid(bits) => Some(bits),
+                _ => None,
+            },
+        )
+    }
+
+    /// Whether the request selects the Krea ConvRot recipe: the top-level `variant` ranks first
+    /// ([`crate::portable_sources::conv_rot_selected`]), then `advanced.convRot`.
+    pub fn conv_rot_selected(&self) -> bool {
+        crate::portable_sources::conv_rot_selected(
+            self.variant.as_deref(),
+            matches!(self.conv_rot, RouteField::Valid(true)),
+        )
+    }
+
     pub fn with_authored_presence(mut self, authored: &Self) -> Self {
         self.authored_advanced_keys = authored.authored_advanced_keys.clone();
         if authored.variant.is_some() {
@@ -340,6 +380,10 @@ impl RouteOptionFacts {
                 Some(sceneworks_options::legacy_image_flag(value))
             }),
             variant: crate::payload_util::optional_id(payload, "variant"),
+            legacy_quant_honored: payload
+                .get("modelManifestEntry")
+                .and_then(Value::as_object)
+                .is_some_and(crate::jobs_store::imported_entry_honors_legacy_quant),
             authored_advanced_keys,
         }
     }
@@ -390,7 +434,7 @@ impl RouteOptionFacts {
         };
         Ok(
             crate::model_artifacts::artifact_selection::PortableArtifactOptions {
-                conv_rot: matches!(self.conv_rot, RouteField::Valid(true)),
+                conv_rot: self.conv_rot_selected(),
                 yue2_decoder,
             },
         )

@@ -63,6 +63,19 @@ pub fn krea_convrot_requested(
     )
 }
 
+/// The top-level `variant` that names the Krea 2 INT8-ConvRot tier.
+pub const KREA_CONVROT_VARIANT: &str = "int8-convrot";
+
+/// Whether a request selects the ConvRot load recipe. A named top-level `variant` ranks first, as
+/// it does in admission (`requested_runtime_variant`): `int8-convrot` turns ConvRot on and any
+/// other named variant turns it off. Without one, the `advanced.convRot` flag decides.
+pub fn conv_rot_selected(variant: Option<&str>, flag: bool) -> bool {
+    match variant.map(str::trim).filter(|variant| !variant.is_empty()) {
+        Some(variant) => variant.eq_ignore_ascii_case(KREA_CONVROT_VARIANT),
+        None => flag,
+    }
+}
+
 pub fn krea_convrot_requested_resolved(
     model_id: &str,
     backend: &str,
