@@ -207,9 +207,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // @6f62669b…, SceneWorks/minimax-h3-image-pe @fdcc4059…); merged with main's record: 157 keys.
 // SW-F369 adds the MiniMax-H3-Image de-distill training adapter
 // (ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter@f1a45475…): 158 keys; every prior row is unchanged.
+// The MiniMax-H3-Image-PE bf16 tier is published and pinned (SceneWorks/minimax-h3-image-pe@7c0e818c…):
+// 159 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "2859f265e34759ffa9cad8628d58b7c7ee077642df945cc091d06c7d8aebc9f6";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "411f4aade049eb1384daf5caabffd89d69417601908ffe8fe04e505ddec2c543";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
