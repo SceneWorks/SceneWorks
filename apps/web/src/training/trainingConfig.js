@@ -501,6 +501,9 @@ export const qualityPresetLabels = {
 // catalog model, the version a blank selection means, and the legacy spellings of that default
 // (the Z-Image presets' "v2-default"). The API binds each adapter to its own base's targets.
 export const ZIMAGE_TURBO_TRAINING_ADAPTER_REPO = "ostris/zimage_turbo_training_adapter";
+// MiniMax-H3-Image: ostris' adapter (the one ai-toolkit trains this model with) is the presets'
+// default; the Fizgig adapter stays selectable for drafts and presets that name it.
+export const MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO = "ostris/minimax_h3_training_adapter";
 export const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO = "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter";
 export const trainingAdapters = {
   [ZIMAGE_TURBO_TRAINING_ADAPTER_REPO]: {
@@ -512,6 +515,16 @@ export const trainingAdapters = {
     versions: {
       v1: { modelId: "zimage_turbo_training_adapter_v1", label: "v1 — stable (smaller)" },
       v2: { modelId: "zimage_turbo_training_adapter_v2", label: "v2 — experimental (heavier de-distill)" },
+    },
+  },
+  [MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO]: {
+    feature: "MiniMax-H3-Image LoRA training",
+    title:
+      "ostris de-distill adapter for the 6-step distilled MiniMax-H3-Image base — the one ai-toolkit trains this model with. Applied at strength 1.0 for training, removed at inference.",
+    defaultVersion: "v1",
+    defaultAliases: [],
+    versions: {
+      v1: { modelId: "minimax_h3_image_ostris_training_adapter_v1", label: "v1 — ostris / ai-toolkit (rank 16)" },
     },
   },
   [MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO]: {

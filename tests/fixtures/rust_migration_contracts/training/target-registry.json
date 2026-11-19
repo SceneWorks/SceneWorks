@@ -1699,7 +1699,7 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
+          "timestepType": "uniform",
           "weightDecay": 0.0001
         }
       },
@@ -1722,6 +1722,12 @@
           "constant",
           "linear",
           "cosine"
+        ],
+        "timestepTypes": [
+          "uniform"
+        ],
+        "timestepBiases": [
+          "balanced"
         ],
         "networkTypes": [
           "lora",
@@ -1804,7 +1810,7 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
+          "timestepType": "uniform",
           "weightDecay": 0.0001
         }
       },
@@ -1827,6 +1833,12 @@
           "constant",
           "linear",
           "cosine"
+        ],
+        "timestepTypes": [
+          "uniform"
+        ],
+        "timestepBiases": [
+          "balanced"
         ],
         "maxReferenceImages": 16,
         "networkTypes": [

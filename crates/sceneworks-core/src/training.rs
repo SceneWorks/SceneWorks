@@ -588,9 +588,9 @@ const TRAINING_SUPPORT_FLAGS: &[(&str, &[&str])] = &[
         latent_perceptual::LATENT_LPIPS.support_limit,
         &latent_perceptual::LATENT_LPIPS_TARGETS,
     ),
-    // sc-25213 / SW-F369: the de-distill adapters — ostris' for the Z-Image-Turbo trainers, the
-    // Fizgig adapter for the MiniMax-H3-Image trainer (text-to-image and edit). Each adapter is
-    // bound to its own targets (`training_adapter::TRAINING_ADAPTER_FAMILIES`).
+    // sc-25213 / SW-F369: the de-distill adapters — ostris' for the Z-Image-Turbo trainers, ostris'
+    // (default) and Fizgig's for the MiniMax-H3-Image trainer (text-to-image and edit). Each
+    // adapter is bound to its own targets (`training_adapter::TRAINING_ADAPTER_FAMILIES`).
     (
         training_adapter::TRAINING_ADAPTER_SUPPORT_LIMIT,
         &training_adapter::TRAINING_ADAPTER_TARGETS,
@@ -1662,11 +1662,12 @@ where
     }
 }
 
-/// A MiniMax-H3-Image preset (SW-7103): [`krea_preset`] plus the Fizgig de-distill training
-/// adapter (SW-F369). H3-Image is a 6-step distilled model, and a LoRA trained on the bare base
-/// un-distills it (blurry, ghosted samples); trained against base + adapter it learns the subject
-/// and previews / inference run without the adapter. Selected by default on every H3-Image preset,
-/// as Z-Image-Turbo's presets select the ostris adapter.
+/// A MiniMax-H3-Image preset (SW-7103): [`krea_preset`] plus ostris' MiniMax-H3-Image de-distill
+/// training adapter (SW-F369) — the assistant LoRA ai-toolkit's own `minimax_h3_image` training
+/// applies. H3-Image is a 6-step distilled model, and a LoRA trained on the bare base un-distills
+/// it (blurry, ghosted samples); trained against base + adapter it learns the subject and previews
+/// / inference run without the adapter. Selected by default on every H3-Image preset, as
+/// Z-Image-Turbo's presets select ostris' Z-Image adapter. (The Fizgig adapter stays selectable.)
 fn minimax_h3_image_preset<F>(
     target: &TrainingTarget,
     id: &str,
@@ -1690,7 +1691,7 @@ where
     );
     preset.config.advanced.insert(
         training_adapter::TRAINING_ADAPTER_REPO_KEY.to_owned(),
-        json!(training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO),
+        json!(training_adapter::MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO),
     );
     preset.config.advanced.insert(
         training_adapter::TRAINING_ADAPTER_VERSION_KEY.to_owned(),
@@ -3782,9 +3783,12 @@ fn minimax_h3_image_lora_target() -> TrainingTarget {
                 "gradientCheckpointing": true,
                 "networkType": "lora",
                 "baseTier": "auto",
-                // The drawn noise level is quantized onto the six published sigmas the distilled
-                // heads were trained at (`gen_core_train::h3_image::training_step`).
-                "timestepType": "sigmoid",
+                // The drawn noise level trains the distilled head whose equal slice of `t` it falls
+                // in (`gen_core_train::h3_image::training_step`), so a uniform draw trains each of
+                // the six heads 1/6 of the time — ai-toolkit's `fixed_train_sigmas` draw for this
+                // architecture (`randint` over the six sigmas, the timestep type ignored). A sigmoid
+                // draw gave the pure-noise head 0 about 5% of the steps.
+                "timestepType": "uniform",
                 "timestepBias": "balanced",
                 "lossType": "mse",
                 "weightDecay": 0.0001,
@@ -3807,6 +3811,9 @@ fn minimax_h3_image_lora_target() -> TrainingTarget {
             // Both install as forward-time residuals on every tier (SW-7096).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
+            // The six-step grid governs: every head equally often, as ai-toolkit trains it.
+            "timestepTypes": ["uniform"],
+            "timestepBiases": ["balanced"],
             "outputScopes": ["project", "global"],
             "baseTiers": ["auto", "bf16", "q8", "q4"],
         })),

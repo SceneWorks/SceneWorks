@@ -7118,6 +7118,28 @@
       ]
     },
     {
+      "key": "ostris/minimax_h3_training_adapter@e4e119caa391053286145e48ebbaf0e0c00293d3",
+      "repo": "ostris/minimax_h3_training_adapter",
+      "revision": "e4e119caa391053286145e48ebbaf0e0c00293d3",
+      "resolvedSha": "e4e119caa391053286145e48ebbaf0e0c00293d3",
+      "servedRepo": "ostris/minimax_h3_training_adapter",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "fastvideo_fasth3_8step_v2_training_adapter_v1.safetensors",
+        "fastvideo_fasth3_omni_training_adapter_v1.safetensors",
+        "minimax_h3_image_training_adapter_v1.safetensors",
+        "minimax_h3_ref2va_training_adapter_v1.safetensors",
+        "minimax_h3_ref2va_training_adapter_v2.safetensors",
+        "minimax_h3_ref2va_training_adapter_v3.safetensors",
+        "minimax_h3_training_adapter_alpha.safetensors",
+        "minimax_h3_training_adapter_v1.safetensors",
+        "minimax_h3_training_adapter_v2.safetensors",
+        "minimax_h3_training_adapter_v3.safetensors",
+        "p_h3_image_training_adapter_v1.safetensors"
+      ]
+    },
+    {
       "key": "ostris/zimage_turbo_training_adapter@654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
       "repo": "ostris/zimage_turbo_training_adapter",
       "revision": "654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
