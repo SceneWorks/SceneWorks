@@ -16,8 +16,17 @@ use crate::time::utc_now;
 pub const FILM_DRAFT_SCHEMA_VERSION: u32 = 1;
 pub const FILM_RUN_LOCATOR_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_FILM_PLANNING_PROVIDER: &str = "prompt_refiner";
-pub const QWEN36_FILM_PLANNER_MODEL_ID: &str = "film_planner_qwen3_6_27b";
-pub const QWEN36_FILM_PLANNER_REPO: &str = "Qwen/Qwen3.6-27B";
+/// The native film planner's catalog entry: the app's Qwen3.8 27B checkpoint, the SAME entry (and
+/// so the same downloaded tier) the dataset batch describer runs. A user who already has it for
+/// describing plans films with no second 27B download, and one install serves both features.
+pub const NATIVE_FILM_PLANNER_MODEL_ID: &str =
+    crate::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+/// The repository the planning job names as its `model`, as the describe job does; the API freezes
+/// the installed tier as the job's `variant`, and the worker loads that tier's folder.
+pub const NATIVE_FILM_PLANNER_REPO: &str = crate::dataset_batch_describe::QWEN38_27B_DESCRIBER_REPO;
+/// The retired Qwen3.6-27B planner's catalog id. Drafts saved while it was the native planner still
+/// carry it; they are read as the current native planner (see [`FilmPlanningSelection`]).
+pub const LEGACY_QWEN36_FILM_PLANNER_MODEL_ID: &str = "film_planner_qwen3_6_27b";
 
 /// How the film's plan-level adapters and step count are chosen.
 ///
@@ -67,7 +76,7 @@ pub struct FilmRenderOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", from = "FilmPlanningSelectionDocument")]
 pub struct FilmPlanningSelection {
     pub provider: String,
     /// Catalog identity of an explicitly selected native planner. The built-in provider keeps this
@@ -96,6 +105,46 @@ pub struct FilmPlanningSelection {
 
 fn default_planning_thinking_mode() -> String {
     "disabled".to_owned()
+}
+
+/// The stored shape of [`FilmPlanningSelection`]. Reading through it migrates a native selection of
+/// the retired Qwen3.6-27B planner to the current native planner, so a draft saved before the
+/// planner moved to Qwen3.8 27B keeps working and is rewritten on its next save. Only a `native`
+/// selection is migrated: an OpenAI-compatible `modelId` is the user's own external model name.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilmPlanningSelectionDocument {
+    provider: String,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+    #[serde(default = "default_planning_thinking_mode")]
+    thinking_mode: String,
+    #[serde(default)]
+    refine_prompts: bool,
+    #[serde(default)]
+    send_reference_pixels: bool,
+}
+
+impl From<FilmPlanningSelectionDocument> for FilmPlanningSelection {
+    fn from(document: FilmPlanningSelectionDocument) -> Self {
+        let model_id = if document.provider == "native"
+            && document.model_id.as_deref() == Some(LEGACY_QWEN36_FILM_PLANNER_MODEL_ID)
+        {
+            Some(NATIVE_FILM_PLANNER_MODEL_ID.to_owned())
+        } else {
+            document.model_id
+        };
+        Self {
+            provider: document.provider,
+            model_id,
+            connection_id: document.connection_id,
+            thinking_mode: document.thinking_mode,
+            refine_prompts: document.refine_prompts,
+            send_reference_pixels: document.send_reference_pixels,
+        }
+    }
 }
 
 impl Default for FilmPlanningSelection {
@@ -498,6 +547,50 @@ mod tests {
         assert_eq!(
             parsed.limits.max_memory_gb,
             crate::film_review::DEFAULT_MAX_MEMORY_GB
+        );
+    }
+
+    #[test]
+    fn a_native_selection_of_the_retired_qwen36_planner_reads_as_the_qwen38_planner() {
+        let legacy: FilmPlanningSelection = serde_json::from_value(json!({
+            "provider": "native",
+            "modelId": LEGACY_QWEN36_FILM_PLANNER_MODEL_ID,
+            "thinkingMode": "enabled",
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy.model_id.as_deref(),
+            Some(NATIVE_FILM_PLANNER_MODEL_ID)
+        );
+        assert_eq!(NATIVE_FILM_PLANNER_MODEL_ID, "vision_describe_qwen3_8_27b");
+        assert_eq!(legacy.thinking_mode, "enabled");
+        // An external connection's model name is the user's own and is never rewritten.
+        let external: FilmPlanningSelection = serde_json::from_value(json!({
+            "provider": "openai_compatible",
+            "modelId": LEGACY_QWEN36_FILM_PLANNER_MODEL_ID,
+            "connectionId": "conn_1",
+        }))
+        .unwrap();
+        assert_eq!(
+            external.model_id.as_deref(),
+            Some(LEGACY_QWEN36_FILM_PLANNER_MODEL_ID)
+        );
+        // The stored shape still refuses unknown fields and round-trips unchanged.
+        assert!(serde_json::from_value::<FilmPlanningSelection>(
+            json!({"provider": "native", "surprise": true})
+        )
+        .is_err());
+        let current = FilmPlanningSelection {
+            provider: "native".to_owned(),
+            model_id: Some(NATIVE_FILM_PLANNER_MODEL_ID.to_owned()),
+            ..FilmPlanningSelection::default()
+        };
+        assert_eq!(
+            serde_json::from_value::<FilmPlanningSelection>(
+                serde_json::to_value(&current).unwrap()
+            )
+            .unwrap(),
+            current
         );
     }
 

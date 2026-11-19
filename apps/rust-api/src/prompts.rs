@@ -185,6 +185,16 @@ pub(crate) async fn create_prompt_refine_job(
             .filter(|value| !value.is_empty())
         {
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+            // The native planner is the shared Qwen3.8 27B checkpoint, whose tiers are separate
+            // downloads. Freeze the installed tier as `variant` BEFORE admission binds the job's
+            // sources — the same request vocabulary the dataset describe job uses — so the source
+            // admitted is the tier the worker loads. No tier installed leaves the worker's "not
+            // installed" refusal to explain it.
+            if model == sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO {
+                if let Some(tier) = crate::film_planning::native_planner_tier(&state).await? {
+                    job_payload.insert("variant".to_owned(), Value::String(tier.to_owned()));
+                }
+            }
         }
         if let Some(thinking_mode) = payload
             .thinking_mode

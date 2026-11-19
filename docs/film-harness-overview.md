@@ -295,7 +295,8 @@ uses** (runbook § *Planning from a brief*). The loop:
 
 The Film workspace uses the same generation, validation, repair and compile functions through a
 durable planning operation. New drafts select the built-in `prompt_refine_anubis_8b`; the optional
-local Qwen3.6-27B planner is installed and selected only on request. A saved OpenAI-compatible
+local Qwen3.8-27B planner (the model shared with dataset describing) is installed and selected
+only on request. A saved OpenAI-compatible
 connection is also an explicit choice, with disclosure, backend-held secret and separate reference
 pixel opt-in. Planner identity and thinking mode are recorded independently of the target video
 model. There is no provider fallback, and an unavailable, canceled or exhausted operation leaves

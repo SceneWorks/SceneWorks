@@ -10679,7 +10679,7 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
 /// The point of this test is what it does NOT find: no new route, no new job type, no second LLM
 /// runtime. The rewrite is a `task` discriminator on `POST /api/v1/prompts/refine`, exactly as the
 /// film planner and the two caption tasks are, and the checkpoints it runs are Qwen3.5/3.6
-/// (`qwen3_5`) — the same architecture the optional `film_planner_qwen3_6_27b` entry already loads
+/// (`qwen3_5`) — the same architecture the `vision_describe_qwen3_8_27b` entry (also the film planner) loads
 /// on the native TextLlm lane.
 ///
 /// Three request shapes matter and all three are here: the text-to-image rewrite (no references),

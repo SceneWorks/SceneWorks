@@ -733,6 +733,59 @@ async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
     );
 }
 
+/// The Video Editor's native film planner runs the SAME 27B download, never a second 27B model: a
+/// film-plan refine job names the describer's repository, freezes the tier this host installed as
+/// `variant` (here q8, the only one), and binds that tier's row on every route. With no tier
+/// installed it freezes none, leaving the worker's "not installed" refusal to explain it.
+#[tokio::test]
+async fn the_native_film_planner_runs_on_the_installed_qwen38_tier() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    use sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let _hub = private_hub(&state);
+    let plan = json!({
+        "prompt": "Return a film plan JSON object.",
+        "task": "film_plan",
+        "workflow": "video",
+        "model": NATIVE_FILM_PLANNER_REPO,
+        "modelId": "minimax_h3",
+        "thinkingMode": "enabled"
+    });
+    assert_eq!(NATIVE_FILM_PLANNER_REPO, QWEN38_27B_DESCRIBER_REPO);
+
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", plan.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("variant").is_none(), "{job}");
+
+    seed_qwen38_tier(&state.settings.data_dir, "q8");
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", plan).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["variant"], "q8");
+    assert_eq!(job["payload"]["model"], NATIVE_FILM_PLANNER_REPO);
+    let job_id = job["id"].as_str().expect("job id");
+    for (backend, platform, repo) in [
+        ("mlx", "macos", QWEN38_27B_DESCRIBER_MLX_REPO),
+        ("candle", "linux", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+        ("candle", "windows", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+    ] {
+        let (bound_repo, revision, variant, files) =
+            bound_describer_source(&state, job_id, backend, platform);
+        assert_eq!(
+            (bound_repo.as_str(), variant.as_str()),
+            (repo, "q8"),
+            "{backend}:{platform}"
+        );
+        assert_eq!(revision, qwen38_tier_row(platform, "q8")["revision"]);
+        assert!(
+            !files.is_empty() && files.iter().all(|file| file.starts_with("q8/")),
+            "{backend}:{platform} {files:?}"
+        );
+    }
+}
+
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
 /// message that names the tier and what to do. Another installed tier does not stand in for it.
 #[tokio::test]

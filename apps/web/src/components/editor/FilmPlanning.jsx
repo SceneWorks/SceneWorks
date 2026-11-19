@@ -38,7 +38,7 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
         <label>Planning provider
           <select aria-label="Planning provider" disabled={disabled || active} value={planning.provider} onChange={(event) => setProvider(event.target.value)}>
             <option value="prompt_refiner">Built-in prompt refiner (default)</option>
-            <option disabled={!qwen?.modelId} value="native">Native Qwen3.6-27B (optional)</option>
+            <option disabled={!qwen?.modelId} value="native">Native Qwen3.8-27B (optional)</option>
             <option value="openai_compatible">Saved OpenAI-compatible connection</option>
           </select>
         </label>
@@ -70,20 +70,20 @@ export function FilmPlanning({ draft, availability, operation, disabled, install
       <p className="ve-film-provider-state">
         {planning.provider === "native"
           ? (availability == null
-            ? "Checking Qwen3.6-27B availability. No download starts automatically."
+            ? "Checking Qwen3.8-27B availability. No download starts automatically."
             : qwen?.available
-              ? "Qwen3.6-27B is installed and available."
-              : "Qwen3.6-27B is not installed. The built-in planner remains available and no download starts automatically.")
+              ? "Qwen3.8-27B is installed and available."
+              : "Qwen3.8-27B is not installed. It is the same model Create Prompt Batch from Dataset uses, so one download serves both. The built-in planner remains available and no download starts automatically.")
           : planning.provider === "openai_compatible"
             ? "External planning runs only when explicitly selected. Configured credentials never change the local planner route."
-          : "New drafts use the built-in prompt refiner. Qwen3.6-27B is not required."}
+          : "New drafts use the built-in prompt refiner. Qwen3.8-27B is not required."}
       </p>
       {planning.provider === "native" && availability != null && !qwen?.available ? (
-        <button disabled={disabled || installActive || !qwen?.modelId} onClick={() => onInstall(qwen.modelId)} type="button">Install Qwen3.6-27B (large download)</button>
+        <button disabled={disabled || installActive || !qwen?.modelId} onClick={() => onInstall(qwen.modelId)} type="button">Install Qwen3.8-27B (large download)</button>
       ) : null}
       {installJob ? <div aria-live="polite" className={`ve-film-operation is-${installJob.status}`}>
-        <strong>Qwen3.6-27B download: {installJob.status}</strong>
-        {Number.isFinite(installJob.progress) ? <progress aria-label="Qwen3.6-27B download progress" max="1" value={installJob.progress} /> : null}
+        <strong>Qwen3.8-27B download: {installJob.status}</strong>
+        {Number.isFinite(installJob.progress) ? <progress aria-label="Qwen3.8-27B download progress" max="1" value={installJob.progress} /> : null}
         {errorStatuses.has(installJob.status) && (installJob.message || installJob.error) ? <span>{installJob.message || installJob.error}</span> : null}
         {installError ? <span role="alert">Status refresh failed: {installError}. Retrying.</span> : null}
       </div> : null}

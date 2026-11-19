@@ -45821,11 +45821,6 @@
       "minMemoryGb": 64
     }
   },
-  "film_planner_qwen3_6_27b": {
-    "model": {
-      "minMemoryGb": 96
-    }
-  },
   "qwen_image_2_1_pe_t2i": {
     "model": {
       "minMemoryGb": 32

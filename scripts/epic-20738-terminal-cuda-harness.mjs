@@ -211,7 +211,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // 159 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "411f4aade049eb1384daf5caabffd89d69417601908ffe8fe04e505ddec2c543";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "a73669dabec5ca8090818da2e0d1c64cde30942f0d838be0c3a8933635469cc2";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

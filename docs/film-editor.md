@@ -41,10 +41,13 @@ Check these prerequisites before a real run:
 - Planning needs a planner. New drafts select **Built-in prompt refiner (default)**, catalog ID
   `prompt_refine_anubis_8b` (`TheDrummer/Anubis-Mini-8B-v1`). It is a local model with
   `autoDownload: false`, so install it through the normal Models flow if it is missing.
-- **Native Qwen3.6-27B (optional)** is catalog ID `film_planner_qwen3_6_27b`
-  (`Qwen/Qwen3.6-27B`). It is never downloaded or selected automatically. Its catalog estimate is
-  57 GB and its declared minimum memory is 96 GB. Selecting it exposes an explicit
-  **Install Qwen3.6-27B (large download)** action when it is absent.
+- **Native Qwen3.8-27B (optional)** is catalog ID `vision_describe_qwen3_8_27b`
+  (`huihui-ai/Huihui-Qwen3.8-27B-abliterated`), the same model **Create Prompt Batch from
+  Dataset** uses, so one download serves both. It is never downloaded or selected automatically.
+  The planner runs whichever tier is installed for the platform (q4, then q8, then bf16); the
+  default q4 download is about 20 GB. Selecting it exposes an explicit
+  **Install Qwen3.8-27B (large download)** action when no tier is installed. Drafts saved with the
+  retired `film_planner_qwen3_6_27b` planner open with this one selected.
 - MiniMax-H3 rendering may require accepting the model's license notice. Use the install state,
   platform eligibility, memory admission, and limits shown by the current catalog rather than
   assuming another machine matches a previous evaluation.
@@ -172,9 +175,9 @@ missing, planning stops with an actionable error; SceneWorks does not switch pro
 Advanced planning settings expose the same per-call local planner job timeout as the film harness
 `--llm-timeout-seconds` option (1200 seconds by default), along with the bounded repair count.
 
-### Native Qwen3.6-27B
+### Native Qwen3.8-27B
 
-Select **Native Qwen3.6-27B (optional)** only when you intend to use and, if necessary, install the
+Select **Native Qwen3.8-27B (optional)** only when you intend to use and, if necessary, install the
 large local model. Thinking is a separate planner setting and is recorded separately from the
 candidate text. Selecting native Qwen does not change the target video model and does not create a
 remote request. The local planner job timeout also applies to Qwen and is retained by a recovered

@@ -146,12 +146,12 @@ describe("FilmShots", () => {
   it("shows field findings, effective settings and recorded refinement identity", async () => {
     const compiled = {
       requests: [{ shotId: "SH010", model: "minimax_h3", width: 576, height: 320, fps: 24, durationSeconds: 5.1667, mode: "text_to_video", referenceRoles: [], effectiveSteps: 4, loras: ["turbo"], promptSource: "refined" }],
-      planner: { executions: [{ jobId: "job_1", provider: "native", model: "Qwen/Qwen3.6-27B", thinkingMode: "enabled", targetVideoModelId: "minimax_h3" }] },
+      planner: { executions: [{ jobId: "job_1", provider: "native", model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", thinkingMode: "enabled", targetVideoModelId: "minimax_h3" }] },
     };
     await render({ compiled, findings: [{ shotId: "SH010", field: "prompt", message: "prompt is required" }] });
     expect(container.textContent).toContain("prompt is required");
     expect(container.textContent).toContain("576×320");
-    expect(container.textContent).toContain("Qwen/Qwen3.6-27B");
+    expect(container.textContent).toContain("huihui-ai/Huihui-Qwen3.8-27B-abliterated");
     expect(container.textContent).toContain("target minimax_h3");
   });
 

@@ -89,7 +89,7 @@ describe("FilmPlanning", () => {
     };
     root = createRoot(container);
     await act(async () => root.render(<FilmPlanning
-      availability={{ providers: [{ modelId: "film_planner_qwen3_6_27b", available: true }] }}
+      availability={{ providers: [{ modelId: "vision_describe_qwen3_8_27b", available: true }] }}
       disabled={false}
       draft={draft}
       models={[]}
@@ -99,7 +99,7 @@ describe("FilmPlanning", () => {
       onInstall={vi.fn()}
       onNotice={vi.fn()}
       onStart={vi.fn()}
-      operation={{ status: "failed", provider: "native", plannerModel: "Qwen/Qwen3.6-27B", videoModelId: "minimax_h3", maxRepairRounds: 1, llmTimeoutSeconds: 75, detail: "Timed out; the draft was preserved.", findings: [] }}
+      operation={{ status: "failed", provider: "native", plannerModel: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", videoModelId: "minimax_h3", maxRepairRounds: 1, llmTimeoutSeconds: 75, detail: "Timed out; the draft was preserved.", findings: [] }}
       token=""
     />));
 
