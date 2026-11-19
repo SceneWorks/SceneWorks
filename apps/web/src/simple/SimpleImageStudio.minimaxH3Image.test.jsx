@@ -11,8 +11,8 @@ import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
 import { writeSimpleStudioSnapshot } from "../simpleStudioStore.js";
 
 // SW-7100 (feature SW-F363): MiniMax-H3-Image in the Simple Image Studio, from the SHIPPED catalog
-// entry — the published presets up to 6272 px, no Steps / Guidance / Negative prompt, and the
-// §IV.2 "MiniMax-H3-Image" attribution.
+// entry — the published 16 MP presets plus their ~36 MP scalings up to 9408 px (SW-7206), no
+// Steps / Guidance / Negative prompt, and the §IV.2 "MiniMax-H3-Image" attribution.
 
 function setTextarea(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -132,9 +132,10 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     const tiles = [...container.querySelectorAll(".su-sheet .su-option-tile")];
     expect(tiles).toHaveLength(H3_IMAGE.limits.resolutions.length);
     expect(tiles.some((tile) => tile.textContent.includes("6272") && tile.textContent.includes("2688"))).toBe(true);
+    expect(tiles.some((tile) => tile.textContent.includes("9408") && tile.textContent.includes("4032"))).toBe(true);
   });
 
-  it("hides steps, guidance and negative prompt, accepts a 6272 px width and sends no steps", async () => {
+  it("hides steps, guidance and negative prompt, accepts a 9408 px width and sends no steps", async () => {
     const context = await openImage();
     await openAdvanced();
     expect(container.querySelector("#su-image-steps")).toBeNull();
@@ -142,15 +143,15 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(container.querySelector("#su-image-negative")).toBeNull();
     expect(container.querySelector("#su-image-seed")).toBeTruthy();
     const width = container.querySelector("#su-image-width");
-    expect(width.getAttribute("max")).toBe("6272");
+    expect(width.getAttribute("max")).toBe("9408");
     await act(async () => setTextarea(container.querySelector("#su-image-prompt"), "a harbour at dawn"));
-    await act(async () => setInput(width, "6272"));
-    await act(async () => setInput(container.querySelector("input[aria-label=\"Custom height\"]"), "2688"));
+    await act(async () => setInput(width, "9408"));
+    await act(async () => setInput(container.querySelector("input[aria-label=\"Custom height\"]"), "4032"));
     await act(async () => {});
     await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
-    expect(request).toMatchObject({ model: "minimax_h3_image", width: 6272, height: 2688 });
+    expect(request).toMatchObject({ model: "minimax_h3_image", width: 9408, height: 4032 });
     expect(request.advanced?.steps).toBeUndefined();
     expect(request.advanced?.guidanceScale).toBeUndefined();
   });

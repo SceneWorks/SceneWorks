@@ -13947,7 +13947,7 @@ fn the_shape_ceiling_covers_every_declared_image_edge() {
         u64::from(crate::validators::SHAPE_MAX_IMAGE_DIMENSION),
         largest
     );
-    assert_eq!(largest, 6272);
+    assert_eq!(largest, 9408);
     assert_eq!(crate::MAX_IMAGE_DIMENSION, 4096);
 }
 
