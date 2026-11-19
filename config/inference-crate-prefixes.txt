@@ -39,6 +39,7 @@ crates/contracts/gen-core-ltx
 crates/contracts/gen-core-memory-wan
 crates/contracts/gen-core-moss-image
 crates/contracts/gen-core-moss-image-policy
+crates/contracts/gen-core-pag-policy
 crates/contracts/gen-core-supra2-policy
 crates/contracts/gen-core-telemetry
 crates/contracts/gen-core-testkit

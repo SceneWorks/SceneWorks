@@ -591,6 +591,7 @@ fn completed_receipt_for(
         }
     }
     MossImageExecutionReport::new(MossImageExecutionData {
+        pag: None,
         execution_device: MossImageExecutionDevice::Cpu,
         selected_stream_device: None,
         resolved,
@@ -915,6 +916,7 @@ impl Generator for Probe {
         }
         let total = base.data().samples.len();
         *self.edit_report.borrow_mut() = Some(MossImageEditExecutionReport {
+            pag: None,
             base,
             adapter_path: "/private/adapter_model.safetensors".into(),
             edit_contract: EDIT_CONTRACT.into(),

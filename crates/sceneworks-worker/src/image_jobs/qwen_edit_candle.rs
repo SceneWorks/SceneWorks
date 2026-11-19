@@ -1198,6 +1198,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         return Ok(None);
                     }
                     let req = QwenEditRequest {
+                        pag: None,
                         prompt,
                         negative: negative.clone(),
                         width,

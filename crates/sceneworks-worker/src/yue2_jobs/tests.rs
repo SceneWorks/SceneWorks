@@ -309,6 +309,7 @@ impl StubYue2 {
             });
         }
         Ok(GenerationReport {
+            pag: None,
             output: (kind != "plan").then(|| {
                 GenerationOutput::Audio(gen_core::AudioTrack {
                     samples: vec![0.2, -0.2, 0.1, -0.1, 0.3, -0.3],
@@ -2349,6 +2350,7 @@ mod real_weights {
             };
             warnings.extend(truncation_warnings(&result));
             Ok(GenerationReport {
+                pag: None,
                 output: samples.map(audio),
                 artifacts: Some(record(&result, &dir)),
                 warnings,

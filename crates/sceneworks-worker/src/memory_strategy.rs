@@ -2829,6 +2829,7 @@ mod tests {
             *self.seen.lock().unwrap() = Some(selected);
             let path = selected.unwrap_or(gen_core::PrefixKvCacheMode::Prefill);
             Ok(gen_core::GenerationReport {
+                pag: None,
                 output: Some(gen_core::GenerationOutput::Images(vec![Default::default()])),
                 artifacts: None,
                 warnings: Vec::new(),
