@@ -252,16 +252,24 @@ class ExpanderTest(unittest.TestCase):
 
 
 class DraftTest(unittest.TestCase):
-    """SW-7204: every mode provisions the two block drafts after its weights; `drafts` alone."""
+    """SW-7204: a drafter-checking run (`on`, `no_fit`) provisions the two block drafts after a
+    mode's weights; `record` (the default) keeps the old footprint; `drafts` is only them."""
 
-    def test_every_mode_ends_with_both_drafts_and_drafts_is_only_them(self):
+    def test_drafts_follow_the_weights_only_for_a_drafter_check(self):
         drafts = [(repo, revision) for repo, revision, _ in provision.DRAFTS]
         for mode in provision.MODES:
-            planned = provision.plans(mode)
-            tail = [(repo, revision) for repo, revision, *_ in planned[-2:]]
-            self.assertEqual(tail, drafts, mode)
             weights = [] if mode == "drafts" else provision.weight_plans(mode)
-            self.assertEqual(len(planned), len(weights) + 2, mode)
+            for check in provision.DRAFT_CHECKS:
+                planned = provision.plans(mode, check)
+                tail = [(repo, revision) for repo, revision, *_ in planned[-2:]]
+                self.assertEqual(tail, drafts, (mode, check))
+                self.assertEqual(len(planned), len(weights) + 2, (mode, check))
+            for planned in (provision.plans(mode), provision.plans(mode, "record")):
+                if mode == "drafts":
+                    self.assertEqual([(r, v) for r, v, *_ in planned], drafts)
+                else:
+                    self.assertEqual([(r, v) for r, v, *_ in planned],
+                                     [(r, v) for r, v, *_ in weights], mode)
         for _, _, _, read, patterns, minimum in provision.draft_plans():
             self.assertEqual(patterns, list(provision.DRAFT_FILES))
             self.assertEqual(minimum, provision.DRAFT_MIN_FREE_BYTES)

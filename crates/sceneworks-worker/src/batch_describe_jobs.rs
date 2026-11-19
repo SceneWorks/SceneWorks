@@ -53,7 +53,7 @@ use super::*;
 
 #[cfg(native_lane)]
 #[path = "batch_describe_condense.rs"]
-mod condense;
+pub(crate) mod condense;
 #[cfg(native_lane)]
 use condense::{condense_fields, CondenseFuture, CondenseReply, Condensed, FitTarget};
 
@@ -1121,6 +1121,7 @@ fn emit_generation_stats(job_id: &str, phase: &str, output: &gen_core::core_llm:
 #[cfg(native_lane)]
 fn note_decode(
     tally: &crate::qwen38_block_draft::SharedDecodeTally,
+    phase: crate::qwen38_block_draft::DecodePhase,
     model: &dyn gen_core::core_llm::TextLlm,
     output: &gen_core::core_llm::TextLlmOutput,
     block_draft: Option<&crate::qwen38_block_draft::BlockDraftChoice>,
@@ -1129,6 +1130,7 @@ fn note_decode(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .note(
+            phase,
             output.decode.as_ref(),
             model.load_report().as_ref(),
             block_draft,
@@ -1220,7 +1222,8 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     model.descriptor().capabilities.supports_thinking,
                     thinking,
                 );
-                // SW-7204: the block draft with tree checking when the load kept it.
+                // SW-7204: the block draft with tree checking when the load kept it (an image
+                // request is checked linearly by the engine at the pinned inference, by name).
                 let (speculative, speculative_verify) =
                     crate::qwen38_block_draft::block_draft_speculation(
                         &model.descriptor().capabilities,
@@ -1268,7 +1271,13 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 if let Ok(output) = &generation {
                     emit_generation_stats(&job_id, "describe", output);
-                    note_decode(&tally, model, output, block_draft.as_ref());
+                    note_decode(
+                        &tally,
+                        crate::qwen38_block_draft::DecodePhase::Describe,
+                        model,
+                        output,
+                        block_draft.as_ref(),
+                    );
                 }
                 Ok(generation
                     .map(|output| output.text)
@@ -1281,8 +1290,8 @@ impl BatchDescriber for VisionCaptionerDescriber {
         true
     }
 
-    /// The Qwen3.8 27B's decode record (SW-7204): proposer, block draft and per-pass counts over
-    /// the job's generations. The Vision Captioner records none.
+    /// The Qwen3.8 27B's decode record (SW-7204): one block per phase (describe, condense) with
+    /// its proposer, block draft and per-pass counts. The Vision Captioner records none.
     fn decode_record(&self) -> Option<Value> {
         (self.model == DescribeModel::Qwen38).then(|| {
             self.decode
@@ -1348,7 +1357,13 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 if let Ok(output) = &generation {
                     emit_generation_stats(&job_id, "condense", output);
-                    note_decode(&tally, model, output, block_draft.as_ref());
+                    note_decode(
+                        &tally,
+                        crate::qwen38_block_draft::DecodePhase::Condense,
+                        model,
+                        output,
+                        block_draft.as_ref(),
+                    );
                 }
                 Ok(generation
                     .map(|output| CondenseReply {

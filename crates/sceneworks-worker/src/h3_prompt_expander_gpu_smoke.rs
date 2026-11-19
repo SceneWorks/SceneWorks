@@ -443,7 +443,12 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
     let decode = &result["executionIdentity"]["decode"];
     eprintln!("DECODE block_draft_check={} {decode}", draft_check.label());
     draft_check
-        .check(decode, draft.as_ref())
+        // A text-only expansion: it must check a tree.
+        .check(
+            decode,
+            draft.as_ref(),
+            crate::qwen38_block_draft::DraftRequest::Text,
+        )
         .unwrap_or_else(|error| panic!("block-draft check {}: {error}", draft_check.label()));
 
     Run {

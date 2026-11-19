@@ -24,9 +24,10 @@
 # the abliterated describer's own MLX tier folder (q4-full/ or q8-full/ of
 # SceneWorks/qwen3.8-27b-abliterated-mlx) and the same upstream prompt files instead.
 #
-# Both jobs also fetch the two Qwen3.8-27B block drafts (SW-7204: the DFlash2 and DSpine soft
-# co-requisites of the entry that runs), each at its pinned revision, and QWEN38_BLOCK_DRAFT = record
-# (default) | on | no_fit picks what the smoke checks about the drafter (see the workflow).
+# QWEN38_BLOCK_DRAFT = record (default) | on | no_fit picks what the smoke checks about the drafter
+# (SW-7204, see the workflow); on and no_fit also fetch the two Qwen3.8-27B block drafts (the DFlash2
+# and DSpine soft co-requisites of the entry that runs), each at its pinned revision. record keeps the
+# old footprint.
 #
 # Inputs (env): QWEN38_JOB = describer | expander, QWEN38_FRESH_HUB = true | false (default false),
 # QWEN38_EXPANDER_MODEL = minimax | abliterated (default minimax),
@@ -191,7 +192,8 @@ print(f"tier {tier}: {row['repo']}@{row['revision']} files={row['files']} reside
 PY
 fi
 
-# ---- the block drafts (SW-7204): the running entry's DFlash2 and DSpine co-requisite rows ---------
+# ---- the block drafts (SW-7204, on / no_fit only): the running entry's co-requisite rows ----------
+if [[ "$block_draft" != record ]]; then
 if [[ "$job" == expander && "$expander_model" == minimax ]]; then draft_entry=minimax_h3_image_pe
 else draft_entry=vision_describe_qwen3_8_27b; fi
 free_gb=$(( $(df -k "$hub" | awk 'NR==2 {print $4}') / 1048576 ))
@@ -231,6 +233,7 @@ for row in rows:
         free -= int(need)
     print(f"block draft: {row['repo']}@{row['revision']} ({len(expected)} files, {total} bytes) resident={not absent}")
 PY
+fi
 
 # ---- build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) -------------------------
 target="$weights_root/sceneworks-qwen38-mlx-target/$(git rev-parse HEAD)"

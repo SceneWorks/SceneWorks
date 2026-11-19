@@ -5,7 +5,10 @@
 //! drafts (DFlash2, DSpine; soft co-requisites of both entries, SW-7203) is installed at its pinned
 //! revision, the load names it in [`LoadSpec::draft_source`] at the tier's precision (the 4-bit
 //! tier runs a 4-bit draft, every other an 8-bit one), and the request asks for the block-draft
-//! proposer with tree checking whenever the loaded model advertises it.
+//! proposer with tree checking whenever the loaded model advertises it. At the pinned inference
+//! revision both engines check an image (describe) request linearly, naming why in the decode
+//! report's fallbacks; text-only requests (condense, the expander)
+//! check a tree.
 //!
 //! Memory: the engine's own load admission prices the draft beside the target (its weights at
 //! that precision, the draft cache and the tree buffers) and, when they do not fit, loads the
@@ -18,8 +21,10 @@
 //! `Speculative::Auto` resolves MTP, else prompt lookup, and never a block draft
 //! (`core_llm::resolve_speculative`), and tree checking is an explicit opt-in that `auto` never
 //! turns on. So the worker asks for `block_draft` exactly when the loaded model advertises it, and
-//! keeps `auto` otherwise. The engine's speculative monitor still demotes the proposer to plain
-//! decoding when it measures slower.
+//! keeps `auto` otherwise. With that explicit `{block_draft, depth}` request the engine's
+//! speculative monitor does NOT demote to plain decoding (its acceptance monitor is armed for
+//! `auto` requests only), so the demotion E1 requires does not apply until SW-7200's measured auto
+//! table lets the worker send `auto`. That switch is tracked on SW-7204, blocked on SW-7200.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,6 +38,12 @@ use serde_json::{json, Value};
 /// The `draftFallback` reason when no block draft is installed.
 pub(crate) const NO_DRAFT_INSTALLED: &str =
     "block draft: none installed (the DFlash2 and DSpine drafts download with the model's tiers)";
+
+/// What both engines' decode reports say (in `fallbacks`) when an image request's tree checking ran
+/// linearly at the pinned inference revision: the multimodal decode path checks linearly.
+#[cfg(test)]
+pub(crate) const TREE_MULTIMODAL_LINEAR: &str =
+    "tree verification is not available on the multimodal decode path";
 
 /// The installed block draft a Qwen3.8-27B load names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -141,13 +152,15 @@ pub(crate) fn draft_fallback(
     }
 }
 
-/// What the generations of one job decoded with, summed: the job record's `decode` block (E1).
+/// What the generations of one phase of a job (describe, condense, or one expansion) decoded with,
+/// summed: one `decode` block (E1).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DecodeTally {
     generations: u64,
-    proposer: Option<String>,
+    proposers: Vec<String>,
     draft: Option<Value>,
-    verify: Option<&'static str>,
+    tree_generations: u64,
+    linear_generations: u64,
     target_passes: u64,
     tree_passes: u64,
     rows_checked: u64,
@@ -157,8 +170,45 @@ pub(crate) struct DecodeTally {
     fallbacks: Vec<String>,
 }
 
-/// A job's tally, shared by the describer's describe and condense calls.
-pub(crate) type SharedDecodeTally = Arc<Mutex<DecodeTally>>;
+/// Which phase of a describe job a generation belongs to: the image describe, or the text-only
+/// condense. Each gets its own decode block, since their proposers and checking differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodePhase {
+    Describe,
+    Condense,
+}
+
+/// A describe job's decode blocks, one per phase.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DescribeDecode {
+    describe: DecodeTally,
+    condense: DecodeTally,
+}
+
+impl DescribeDecode {
+    /// Add one generation of `phase` ([`DecodeTally::note`]).
+    pub(crate) fn note(
+        &mut self,
+        phase: DecodePhase,
+        decode: Option<&DecodeReport>,
+        load: Option<&LoadReport>,
+        draft: Option<&BlockDraftChoice>,
+    ) {
+        match phase {
+            DecodePhase::Describe => &mut self.describe,
+            DecodePhase::Condense => &mut self.condense,
+        }
+        .note(decode, load, draft);
+    }
+
+    /// The job record's `decode` block: `{describe, condense}`, each a [`DecodeTally::record`].
+    pub(crate) fn record(&self) -> Value {
+        json!({ "describe": self.describe.record(), "condense": self.condense.record() })
+    }
+}
+
+/// A job's decode blocks, shared by the describer's describe and condense calls.
+pub(crate) type SharedDecodeTally = Arc<Mutex<DescribeDecode>>;
 
 impl DecodeTally {
     /// Add one generation: its decode report, the load report of the model that ran it, and the
@@ -174,7 +224,10 @@ impl DecodeTally {
         let Some(decode) = decode else {
             return;
         };
-        self.proposer = Some(decode.proposer.label().to_owned());
+        let proposer = decode.proposer.label().to_owned();
+        if !self.proposers.contains(&proposer) {
+            self.proposers.push(proposer);
+        }
         self.draft = decode.draft.as_ref().map(|ran| {
             json!({
                 "repo": draft.map(|d| d.repo.as_str()),
@@ -186,14 +239,14 @@ impl DecodeTally {
         });
         match &decode.tree_verify {
             Some(tree) => {
-                self.verify = Some("tree");
+                self.tree_generations += 1;
                 self.target_passes += tree.passes;
                 self.tree_passes += tree.tree_passes;
                 self.rows_checked += tree.rows_verified;
                 self.accepted_tokens += tree.accepted_tokens;
             }
             None => {
-                self.verify.get_or_insert("linear");
+                self.linear_generations += 1;
                 self.target_passes += decode.verify_steps;
                 // A linear pass checks the anchor and the drafts proposed for it.
                 self.rows_checked += decode.verify_steps + decode.proposed_tokens;
@@ -210,17 +263,31 @@ impl DecodeTally {
         }
     }
 
-    /// The `decode` block: proposer, draft (repo, revision, format, precision), target passes,
-    /// rows checked and tokens accepted (totals and per pass), demotions, and why the draft did
-    /// not run when it did not.
+    /// The `decode` block: proposer, draft (repo, revision, format, precision), verify (`tree`,
+    /// `linear`, or `mixed` when the phase's generations differ), target passes, rows checked and
+    /// tokens accepted (totals and per pass), demotions, the decode fallbacks, and why the draft
+    /// did not run when it did not. `proposer` is `mixed` when the generations ran different
+    /// proposers (all are in `proposers`).
     pub(crate) fn record(&self) -> Value {
         let per_pass =
             |count: u64| (self.target_passes > 0).then(|| count as f64 / self.target_passes as f64);
+        let proposer = match self.proposers.as_slice() {
+            [] => None,
+            [one] => Some(one.as_str()),
+            _ => Some("mixed"),
+        };
+        let verify = match (self.tree_generations, self.linear_generations) {
+            (0, 0) => None,
+            (_, 0) => Some("tree"),
+            (0, _) => Some("linear"),
+            _ => Some("mixed"),
+        };
         json!({
             "generations": self.generations,
-            "proposer": self.proposer,
+            "proposer": proposer,
+            "proposers": self.proposers,
             "draft": self.draft,
-            "verify": self.verify,
+            "verify": verify,
             "targetPasses": self.target_passes,
             "treePasses": self.tree_passes,
             "rowsChecked": self.rows_checked,
@@ -248,9 +315,22 @@ pub(crate) fn decode_record(
 /// What a real-weight smoke checks about the block drafter (SW-7204):
 /// `$SCENEWORKS_QWEN38_BLOCK_DRAFT` = `record` (the default: the decode block is recorded, nothing
 /// is asserted about it), `on` (an installed draft must run: the record names `block_draft`, the
-/// draft and its precision, tree checking, more than one accepted token per target pass, and no
-/// draft fallback) or `no_fit` (the engine's load budget is capped so the draft cannot fit beside
+/// draft and its precision, more than one accepted token per target pass, no draft fallback, and
+/// tree checking — except that an image request may check linearly when the engine names its
+/// multimodal fallback, [`DraftRequest::Image`]) or `no_fit` (the engine's load budget is capped so the draft cannot fit beside
 /// the target: the job must complete without it and its record must say why).
+/// What a checked generation sent: an image (describe) or only text (condense, the expander).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DraftRequest {
+    /// Tree checking, or linear checking with the engine's [`TREE_MULTIMODAL_LINEAR`] reason. At
+    /// the pinned inference both engines check image requests linearly; once multimodal tree
+    /// checking lands the record reports `tree` and this check accepts it unchanged.
+    Image,
+    /// Tree checking only.
+    Text,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SmokeDraftCheck {
@@ -307,11 +387,12 @@ impl SmokeDraftCheck {
         draft
     }
 
-    /// Check a job's `decode` record against this mode.
+    /// Check one phase's `decode` block against this mode.
     pub(crate) fn check(
         self,
         record: &Value,
         draft: Option<&BlockDraftChoice>,
+        request: DraftRequest,
     ) -> Result<(), String> {
         let fail = |what: &str| Err(format!("{what}: {record}"));
         match self {
@@ -337,8 +418,22 @@ impl SmokeDraftCheck {
                 ) {
                     return fail("the draft format is not named");
                 }
-                if record["verify"] != "tree" {
-                    return fail("the target did not check a tree");
+                let multimodal_linear = record["verify"] == "linear"
+                    && record["fallbacks"].as_array().is_some_and(|reasons| {
+                        reasons.iter().any(|reason| {
+                            reason
+                                .as_str()
+                                .is_some_and(|why| why.contains(TREE_MULTIMODAL_LINEAR))
+                        })
+                    });
+                let checked = match request {
+                    DraftRequest::Text => record["verify"] == "tree",
+                    DraftRequest::Image => record["verify"] == "tree" || multimodal_linear,
+                };
+                if !checked {
+                    return fail(
+                        "the target did not check a tree (nor name the multimodal fallback)",
+                    );
                 }
                 if !record["acceptedTokensPerPass"]
                     .as_f64()

@@ -11,10 +11,11 @@ five upstream `prompt/` files the catalog's `prompt` co-requisite names, each at
 revision. Only the selected tier is fetched, so a cache provisioned this way holds no other
 expander tier. `expander-abliterated-q4` / `expander-abliterated-q8` (SW-7208) is the expander run by
 the abliterated describer instead: ONE describer tier (the files its catalog row names in `q4-full/`
-or `q8-full/`) plus the same five prompt files, and no MiniMax-H3-Image-PE weights. Every mode
-also provisions the two Qwen3.8-27B block drafts (SW-7204; DFlash2 and DSpine, the soft
-co-requisites both catalog entries install with every tier), each at its pinned revision; `drafts`
-provisions only them. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
+or `q8-full/`) plus the same five prompt files, and no MiniMax-H3-Image-PE weights. With
+`SCENEWORKS_QWEN38_BLOCK_DRAFT` = `on` or `no_fit` (a validation run that checks the block drafter,
+SW-7204) a mode also provisions the two Qwen3.8-27B block drafts (DFlash2 and DSpine, the soft
+co-requisites both catalog entries install with every tier), each at its pinned revision; unset or
+`record`, a mode keeps its old footprint. `drafts` provisions only them. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
 downloading when the cache volume has less than MIN_FREE_BYTES free; checks every file's size after
@@ -239,7 +240,7 @@ def draft_expected_files(entries, repo, total, names=DRAFT_FILES):
 
 
 def draft_plans():
-    """The two block drafts every mode provisions, each in `plan`'s shape."""
+    """The two block drafts a drafter-checking mode provisions, each in `plan`'s shape."""
     return [
         (repo, revision, f"block draft {repo.split('/')[-1]}",
          lambda entries, repo=repo, total=total: draft_expected_files(entries, repo, total),
@@ -254,14 +255,19 @@ def prompt_plan():
             list(PROMPT_FILES), PROMPT_MIN_FREE_BYTES)
 
 
-def plans(mode):
-    """Every snapshot `mode` provisions, each in `plan`'s shape, then the two block drafts
-    (SW-7204): a describer mode is one snapshot; an expander tier is its Candle folder, then the
-    upstream prompt files; an abliterated expander tier is ONE describer tier folder, then the same
-    prompt files; `drafts` is the drafts alone."""
+# The `block_draft` validation inputs that need the drafts provisioned (SW-7204).
+DRAFT_CHECKS = ("on", "no_fit")
+
+
+def plans(mode, block_draft="record"):
+    """Every snapshot `mode` provisions, each in `plan`'s shape: a describer mode is one snapshot;
+    an expander tier is its Candle folder, then the upstream prompt files; an abliterated expander
+    tier is ONE describer tier folder, then the same prompt files; `drafts` is the two block drafts
+    alone. With `block_draft` `on` or `no_fit` the drafts follow a mode's weights (SW-7204)."""
     if mode == "drafts":
         return draft_plans()
-    return weight_plans(mode) + draft_plans()
+    weights = weight_plans(mode)
+    return weights + draft_plans() if block_draft in DRAFT_CHECKS else weights
 
 
 def weight_plans(mode):
@@ -292,7 +298,8 @@ def main():
     if not cache.is_absolute() or not cache.is_dir():
         raise RuntimeError(f"HF_HUB_CACHE must name an existing absolute hub directory, got {str(cache)!r}")
     mode = os.environ.get("SCENEWORKS_QWEN38_DESCRIBER_PROVISION", "").strip() or "quantised"
-    for part in plans(mode):
+    block_draft = os.environ.get("SCENEWORKS_QWEN38_BLOCK_DRAFT", "").strip() or "record"
+    for part in plans(mode, block_draft):
         provision_snapshot(cache, *part)
     return 0
 

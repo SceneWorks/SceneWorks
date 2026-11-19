@@ -9,10 +9,10 @@ name: Qwen3.8 27B describer weight provisioning
 # of the MiniMax-H3-Image prompt expander (SW-7202): its candle-q4-full/ (~17.4 GB, refuses under
 # 40 GB free) or candle-q8-full/ (~29.5 GB, under 52 GB) folder of SceneWorks/minimax-h3-image-pe,
 # plus the five upstream prompt/ files of MiniMaxAI/MiniMax-H3-Image-PE, each at its catalog
-# revision, for qwen38-describer-validation.yml `job: expander`. Every choice also provisions the
-# two Qwen3.8-27B block drafts (SW-7204: SceneWorks/qwen3.8-27b-dflash2 and
-# SceneWorks/qwen3.8-27b-dspine-b16, ~7.9 GB, refuses under 20 GB free), which both catalog entries
-# install with every tier; `tiers: drafts` provisions only them. Runs no model. Does nothing when
+# revision, for qwen38-describer-validation.yml `job: expander`. `tiers: drafts` provisions the two
+# Qwen3.8-27B block drafts (SW-7204: SceneWorks/qwen3.8-27b-dflash2 and
+# SceneWorks/qwen3.8-27b-dspine-b16, ~7.9 GB, refuses under 20 GB free) that the validation's
+# `block_draft: on|no_fit` runs need; the other choices keep their old footprint. Runs no model. Does nothing when
 # every file is already present at its published size.
 on:
   workflow_dispatch:

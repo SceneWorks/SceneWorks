@@ -258,23 +258,34 @@ fn the_smoke_modes_parse_and_record_is_the_default() {
 
 #[test]
 fn the_on_check_needs_the_draft_its_precision_a_tree_and_more_than_one_token_per_pass() {
+    use DraftRequest::{Image, Text};
     let draft = choice("q4");
     let load = LoadReport {
         draft: Some(DraftReport::resident("/hub/dflash2")),
         ..Default::default()
     };
     let ran = decode_record(Some(&tree_report()), Some(&load), Some(&draft));
-    assert_eq!(SmokeDraftCheck::On.check(&ran, Some(&draft)), Ok(()));
-    assert_eq!(SmokeDraftCheck::Record.check(&Value::Null, None), Ok(()));
+    for request in [Image, Text] {
+        assert_eq!(
+            SmokeDraftCheck::On.check(&ran, Some(&draft), request),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        SmokeDraftCheck::Record.check(&Value::Null, None, Text),
+        Ok(())
+    );
     // An 8-bit draft is not the 4-bit tier's.
     assert!(SmokeDraftCheck::On
-        .check(&ran, Some(&choice("q8")))
+        .check(&ran, Some(&choice("q8")), Text)
         .is_err());
     // One accepted token per pass or fewer is no speed-up to show.
     let mut slow = tree_report();
     slow.tree_verify.as_mut().unwrap().accepted_tokens = 10;
     let slow = decode_record(Some(&slow), Some(&load), Some(&draft));
-    assert!(SmokeDraftCheck::On.check(&slow, Some(&draft)).is_err());
+    assert!(SmokeDraftCheck::On
+        .check(&slow, Some(&draft), Text)
+        .is_err());
     // A draft that did not fit fails `on` and passes `no_fit`.
     let refused = LoadReport {
         draft: Some(DraftReport::refused(
@@ -291,12 +302,113 @@ fn the_on_check_needs_the_draft_its_precision_a_tree_and_more_than_one_token_per
         ..Default::default()
     };
     let fell_back = decode_record(Some(&alone), Some(&refused), Some(&draft));
-    assert!(SmokeDraftCheck::On.check(&fell_back, Some(&draft)).is_err());
+    assert!(SmokeDraftCheck::On
+        .check(&fell_back, Some(&draft), Image)
+        .is_err());
     assert_eq!(
-        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft)),
+        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft), Image),
         Ok(())
     );
-    assert!(SmokeDraftCheck::NoFit.check(&ran, Some(&draft)).is_err());
+    assert!(SmokeDraftCheck::NoFit
+        .check(&ran, Some(&draft), Text)
+        .is_err());
+}
+
+/// At the pinned inference an image request's tree checking runs linearly, named in the decode
+/// fallbacks: `on` accepts that for an image request only, and a text request must check a tree.
+#[test]
+fn an_image_request_may_check_linearly_only_with_the_engines_multimodal_reason() {
+    let draft = choice("q8");
+    let load = LoadReport {
+        draft: Some(DraftReport::resident("/hub/dflash2")),
+        ..Default::default()
+    };
+    let linear = |fallbacks: Vec<String>| DecodeReport {
+        proposer: ProposerKind::BlockDraft,
+        draft: Some(DecodeDraft {
+            source: "/hub/dflash2".to_owned(),
+            format: "dflash2".to_owned(),
+            precision: "q8".to_owned(),
+        }),
+        verify_steps: 10,
+        proposed_tokens: 40,
+        accepted_tokens: 18,
+        fallbacks,
+        ..Default::default()
+    };
+    let named = decode_record(
+        Some(&linear(vec![format!(
+            "speculative: {TREE_MULTIMODAL_LINEAR} (its prompt is prefilled from spliced \
+             embeddings); verified linearly"
+        )])),
+        Some(&load),
+        Some(&draft),
+    );
+    assert_eq!(named["verify"], "linear");
+    assert_eq!(
+        SmokeDraftCheck::On.check(&named, Some(&draft), DraftRequest::Image),
+        Ok(())
+    );
+    assert!(SmokeDraftCheck::On
+        .check(&named, Some(&draft), DraftRequest::Text)
+        .is_err());
+    let unnamed = decode_record(Some(&linear(Vec::new())), Some(&load), Some(&draft));
+    assert!(SmokeDraftCheck::On
+        .check(&unnamed, Some(&draft), DraftRequest::Image)
+        .is_err());
+}
+
+/// Describe and condense get their own decode blocks: an image describe checked linearly and a
+/// text condense checked as a tree are never blended.
+#[test]
+fn describe_and_condense_are_recorded_as_separate_blocks() {
+    let draft = choice("q4");
+    let load = LoadReport {
+        draft: Some(DraftReport::resident("/hub/dflash2")),
+        ..Default::default()
+    };
+    let describe = DecodeReport {
+        proposer: ProposerKind::BlockDraft,
+        verify_steps: 8,
+        proposed_tokens: 32,
+        accepted_tokens: 12,
+        ..Default::default()
+    };
+    let mut job = DescribeDecode::default();
+    job.note(
+        DecodePhase::Describe,
+        Some(&describe),
+        Some(&load),
+        Some(&draft),
+    );
+    job.note(
+        DecodePhase::Condense,
+        Some(&tree_report()),
+        Some(&load),
+        Some(&draft),
+    );
+    let record = job.record();
+    assert_eq!(record["describe"]["verify"], "linear");
+    assert_eq!(record["describe"]["targetPasses"], 8);
+    assert_eq!(record["describe"]["acceptedTokensPerPass"], 1.5);
+    assert_eq!(record["condense"]["verify"], "tree");
+    assert_eq!(record["condense"]["targetPasses"], 10);
+    assert_eq!(record["condense"]["acceptedTokensPerPass"], 3.5);
+    assert_eq!(record["condense"]["draft"]["precision"], "q4");
+
+    // A phase whose generations differ says so rather than keeping the last one.
+    let mut mixed = DecodeTally::default();
+    mixed.note(Some(&describe), Some(&load), Some(&draft));
+    let mtp = DecodeReport {
+        proposer: ProposerKind::Mtp,
+        tree_verify: Some(TreeVerifyReport::default()),
+        ..Default::default()
+    };
+    mixed.note(Some(&mtp), Some(&load), Some(&draft));
+    let mixed = mixed.record();
+    assert_eq!(mixed["proposer"], "mixed");
+    assert_eq!(mixed["proposers"], json!(["block_draft", "mtp"]));
+    assert_eq!(mixed["verify"], "mixed");
 }
 
 #[test]

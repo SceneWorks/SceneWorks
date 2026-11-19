@@ -17,9 +17,11 @@
 // describer as the model that ran.
 //
 // `SCENEWORKS_QWEN38_BLOCK_DRAFT` (SW-7204) re-checks the smoke's block-draft record: `record` (the
-// default) only carries it into the evidence; `on` requires the block draft to have run with tree
-// checking, a named draft and precision, more than one accepted token per target pass and no
-// fallback; `no_fit` requires the job to have run without the draft and to name why.
+// default) only carries it into the evidence; `on` requires the block draft to have run with a
+// named draft and precision, more than one accepted token per target pass and no fallback, and the
+// target to check a tree (the describer's image describe may instead check linearly when the engine
+// names its multimodal fallback; its condense and the expander must check a tree); `no_fit`
+// requires the job to have run without the draft and to name why.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -205,24 +207,45 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
 // What a run checks about the block drafter (SW-7204), and the record the smoke wrote.
 export const BLOCK_DRAFT_CHECKS = Object.freeze(['record', 'on', 'no_fit']);
 
-export function validateBlockDraft(blockDraft, check = 'record') {
+// What both engines name in a decode's fallbacks when an image request's tree checking ran linearly
+// (the multimodal decode path, at the pinned inference).
+export const TREE_MULTIMODAL_LINEAR = 'tree verification is not available on the multimodal decode path';
+
+// One phase's decode block. `image`: the image describe, which may check linearly when the engine
+// names the multimodal fallback (and passes unchanged once it checks a tree); otherwise (condense,
+// the expander) the target must check a tree.
+function validateDecodeBlock(decode, check, phase, image) {
+  if (check === 'on') {
+    assert.equal(decode?.proposer, 'block_draft', `${phase}: the block draft did not run`);
+    assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
+      `${phase}: the record names no pinned draft`);
+    assert(['q8', 'q4'].includes(decode.draft?.precision), `${phase}: the record names no draft precision`);
+    const multimodalLinear = decode.verify === 'linear'
+      && (decode.fallbacks ?? []).some((reason) => String(reason).includes(TREE_MULTIMODAL_LINEAR));
+    assert(decode.verify === 'tree' || (image && multimodalLinear),
+      `${phase}: the target did not check a tree${image ? ' (nor name the multimodal fallback)' : ''}`);
+    assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
+      `${phase}: accepted tokens per target pass is not above 1.0`);
+    assert.equal(decode.draftFallback, null, `${phase}: the draft fell back`);
+  } else {
+    assert.notEqual(decode?.proposer, 'block_draft', `${phase}: the draft ran although it could not fit`);
+    assert(typeof decode?.draftFallback === 'string' && decode.draftFallback.includes('beside the target'),
+      `${phase}: the record does not say the draft did not fit`);
+  }
+}
+
+// The smoke's block-draft record for `job`: the describer's `{describe, condense}` blocks, or the
+// expander's one block.
+export function validateBlockDraft(blockDraft, check = 'record', job = 'describer') {
   assert(BLOCK_DRAFT_CHECKS.includes(check), `block-draft check must be one of ${BLOCK_DRAFT_CHECKS.join(', ')}`);
   if (check === 'record') return blockDraft ?? null;
   assert.equal(blockDraft?.check, check, `the smoke ran the ${blockDraft?.check ?? 'no'} block-draft check, not ${check}`);
   const decode = blockDraft.decode;
-  if (check === 'on') {
-    assert.equal(decode?.proposer, 'block_draft', 'the block draft did not run');
-    assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
-      'the record names no pinned draft');
-    assert(['q8', 'q4'].includes(decode.draft?.precision), 'the record names no draft precision');
-    assert.equal(decode.verify, 'tree', 'the target did not check a tree');
-    assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
-      'accepted tokens per target pass is not above 1.0');
-    assert.equal(decode.draftFallback, null, 'the draft fell back');
+  if (job === 'expander') {
+    validateDecodeBlock(decode, check, 'expand', false);
   } else {
-    assert.notEqual(decode?.proposer, 'block_draft', 'the draft ran although it could not fit');
-    assert(typeof decode?.draftFallback === 'string' && decode.draftFallback.includes('beside the target'),
-      'the record does not say the draft did not fit');
+    validateDecodeBlock(decode?.describe, check, 'describe', true);
+    validateDecodeBlock(decode?.condense, check, 'condense', false);
   }
   return blockDraft;
 }
@@ -258,12 +281,16 @@ export function summary(evidence) {
     + 'measured on a shared card: card-wide, above the smoke\'s own baseline.', '');
   const result = evidence.result;
   const decode = result?.block_draft?.decode;
-  if (decode) {
-    lines.push(`Block draft (${evidence.block_draft_check ?? 'record'}): proposer \`${decode.proposer}\`, `
-      + `draft ${decode.draft ? `\`${decode.draft.repo}@${decode.draft.revision}\` ${decode.draft.format} ${decode.draft.precision}` : 'none'}, `
-      + `${decode.targetPasses} target passes, ${decode.rowsCheckedPerPass ?? 'n/a'} rows checked and `
-      + `${decode.acceptedTokensPerPass ?? 'n/a'} tokens accepted per pass`
-      + `${decode.draftFallback ? `; draft fallback: ${decode.draftFallback}` : ''}`, '');
+  // One line per decode block: the describer's describe and condense, or the expander's one.
+  const blocks = decode && (expander ? [['expand', decode]]
+    : [['describe', decode.describe], ['condense', decode.condense]].filter(([, block]) => block));
+  for (const [phase, block] of blocks || []) {
+    lines.push(`Block draft ${phase} (${evidence.block_draft_check ?? 'record'}): proposer \`${block.proposer}\`, `
+      + `draft ${block.draft ? `\`${block.draft.repo}@${block.draft.revision}\` ${block.draft.format} ${block.draft.precision}` : 'none'}, `
+      + `${block.verify ?? 'no'} checking, ${block.targetPasses} target passes, `
+      + `${block.rowsCheckedPerPass ?? 'n/a'} rows checked and `
+      + `${block.acceptedTokensPerPass ?? 'n/a'} tokens accepted per pass`
+      + `${block.draftFallback ? `; draft fallback: ${block.draftFallback}` : ''}`, '');
   }
   if (result && expander) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
@@ -315,7 +342,7 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
       ? validateExpanderResult(raw, tier, expanderModelSnapshots(expanderModel), expanderModel)
       : validateResult(raw, tier, imageSide);
     evidence.block_draft_check = blockDraft;
-    evidence.result.block_draft = validateBlockDraft(raw.block_draft, blockDraft);
+    evidence.result.block_draft = validateBlockDraft(raw.block_draft, blockDraft, job);
     evidence.result.gpu_memory = { ...evidence.result.gpu_memory, measured_on: 'shared-card' };
   } catch (error) {
     failure = error;

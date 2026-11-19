@@ -404,41 +404,62 @@ test('main validates the abliterated expander when the workflow selects it', () 
 }));
 
 // SW-7204: the block-draft record the smoke wrote, re-checked per the run's `block_draft` input.
-function blockDraft(check, overrides = {}) {
+function block(overrides = {}) {
   return {
-    check,
-    decode: {
-      proposer: 'block_draft', verify: 'tree', targetPasses: 40, rowsCheckedPerPass: 9.5,
-      acceptedTokensPerPass: 2.4, draftFallback: null,
-      draft: { repo: 'SceneWorks/qwen3.8-27b-dflash2', revision: '9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9',
-        format: 'dflash2', precision: 'q4' },
-      ...overrides,
-    },
+    proposer: 'block_draft', verify: 'tree', targetPasses: 40, rowsCheckedPerPass: 9.5,
+    acceptedTokensPerPass: 2.4, draftFallback: null, fallbacks: [],
+    draft: { repo: 'SceneWorks/qwen3.8-27b-dflash2', revision: '9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9',
+      format: 'dflash2', precision: 'q4' },
+    ...overrides,
   };
 }
+const expanderDraft = (check, overrides = {}) => ({ check, decode: block(overrides) });
+const describerDraft = (check, describe = {}, condense = {}) =>
+  ({ check, decode: { describe: block(describe), condense: block(condense) } });
+// What both engines name when an image request's tree checking ran linearly.
+const MULTIMODAL = 'speculative: tree verification is not available on the multimodal decode path (its prompt '
+  + 'is prefilled from spliced embeddings); verified linearly';
+const NO_FIT = { proposer: 'mtp', draft: null,
+  draftFallback: "draft model: its load needs an estimated 2 bytes beside the target's 9, but only 10 bytes are available" };
 
 test('the block-draft checks are record, on and no_fit, and record asserts nothing', () => {
   assert.deepEqual(BLOCK_DRAFT_CHECKS, ['record', 'on', 'no_fit']);
   assert.equal(validateBlockDraft(undefined), null);
-  assert.throws(() => validateBlockDraft(blockDraft('on'), 'sometimes'), /must be one of/);
+  assert.throws(() => validateBlockDraft(expanderDraft('on'), 'sometimes', 'expander'), /must be one of/);
 });
 
-test('an on run needs the draft, its precision, a tree and more than one token per pass', () => {
-  assert.deepEqual(validateBlockDraft(blockDraft('on'), 'on'), blockDraft('on'));
-  assert.throws(() => validateBlockDraft(blockDraft('record'), 'on'), /ran the record block-draft check/);
-  assert.throws(() => validateBlockDraft(blockDraft('on', { proposer: 'mtp' }), 'on'), /did not run/);
-  assert.throws(() => validateBlockDraft(blockDraft('on', { verify: 'linear' }), 'on'), /tree/);
-  assert.throws(() => validateBlockDraft(blockDraft('on', { acceptedTokensPerPass: 1 }), 'on'), /above 1.0/);
-  assert.throws(() => validateBlockDraft(blockDraft('on', { draftFallback: 'x' }), 'on'), /fell back/);
+test('an on expander run needs the draft, its precision, a tree and more than one token per pass', () => {
+  const on = (overrides) => () => validateBlockDraft(expanderDraft('on', overrides), 'on', 'expander');
+  assert.deepEqual(on({})(), expanderDraft('on'));
+  assert.throws(() => validateBlockDraft(expanderDraft('record'), 'on', 'expander'), /ran the record block-draft check/);
+  assert.throws(on({ proposer: 'mtp' }), /did not run/);
+  // A text-only expansion must check a tree, even with the multimodal reason.
+  assert.throws(on({ verify: 'linear', fallbacks: [MULTIMODAL] }), /did not check a tree/);
+  assert.throws(on({ acceptedTokensPerPass: 1 }), /above 1.0/);
+  assert.throws(on({ draftFallback: 'x' }), /fell back/);
 });
 
-test('a no_fit run must decode without the draft and name why', () => {
-  const fellBack = blockDraft('no_fit', {
-    proposer: 'mtp', draft: null,
-    draftFallback: "draft model: its load needs an estimated 2 bytes beside the target's 9, but only 10 bytes are available",
-  });
-  assert.deepEqual(validateBlockDraft(fellBack, 'no_fit'), fellBack);
-  assert.throws(() => validateBlockDraft(blockDraft('no_fit'), 'no_fit'), /could not fit/);
-  assert.throws(() => validateBlockDraft(blockDraft('no_fit', { proposer: 'mtp', draft: null }), 'no_fit'),
-    /did not fit/);
+test('an on describer run checks the image describe and the text condense separately', () => {
+  const on = (describe, condense) => () => validateBlockDraft(describerDraft('on', describe, condense), 'on');
+  // Tree checking in both phases (once multimodal tree checking lands) passes unchanged.
+  assert.deepEqual(on({}, {})(), describerDraft('on'));
+  // At the pinned inference the image describe checks linearly and names why: accepted.
+  assert.deepEqual(on({ verify: 'linear', fallbacks: [MULTIMODAL] }, {})(),
+    describerDraft('on', { verify: 'linear', fallbacks: [MULTIMODAL] }));
+  assert.throws(on({ verify: 'linear' }, {}), /describe: the target did not check a tree/);
+  assert.throws(on({}, { verify: 'linear', fallbacks: [MULTIMODAL] }), /condense: the target did not check a tree/);
+  assert.throws(on({ acceptedTokensPerPass: 0.9 }, {}), /describe: accepted tokens/);
+  assert.throws(on({}, { proposer: 'mtp' }), /condense: the block draft did not run/);
 });
+
+test('a no_fit run must decode without the draft in every phase and name why', () => {
+  assert.deepEqual(validateBlockDraft(expanderDraft('no_fit', NO_FIT), 'no_fit', 'expander'),
+    expanderDraft('no_fit', NO_FIT));
+  assert.deepEqual(validateBlockDraft(describerDraft('no_fit', NO_FIT, NO_FIT), 'no_fit'),
+    describerDraft('no_fit', NO_FIT, NO_FIT));
+  assert.throws(() => validateBlockDraft(expanderDraft('no_fit'), 'no_fit', 'expander'), /could not fit/);
+  assert.throws(() => validateBlockDraft(describerDraft('no_fit', NO_FIT, {}), 'no_fit'), /condense: the draft ran/);
+  assert.throws(() => validateBlockDraft(expanderDraft('no_fit', { proposer: 'mtp', draft: null }), 'no_fit',
+    'expander'), /did not fit/);
+});
+

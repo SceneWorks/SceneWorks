@@ -21,13 +21,16 @@
 //! The scene is 512x384 by default; `SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE=1536` draws the same
 //! scene at 1536x1536, so the peak of a large image can be measured.
 //!
-//! SW-7204: the describer names the installed block draft (DFlash2 / DSpine) as a job does, and the
-//! evidence records the decode block (proposer, draft, precision, target passes, rows checked and
-//! accepted tokens per pass). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires the draft to run (block
-//! draft, the tier's draft precision, tree checking, more than one accepted token per pass, no
-//! fallback); `no_fit` caps the engine's load budget so the draft cannot fit beside the target and
-//! requires the describe to complete without it, its record saying why. The reply must be valid
-//! describer JSON either way (the strict parse below).
+//! SW-7204: the describer names the installed block draft (DFlash2 / DSpine) as a job does, then
+//! condenses the described fields with the product's condense step on the same loaded model. The
+//! evidence records one decode block per phase (proposer, draft, precision, verify, target passes,
+//! rows checked and accepted tokens per pass). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires the
+//! draft to run in both phases (block draft, the tier's draft precision, more than one accepted
+//! token per pass, no fallback): the text-only condense must check a tree; the image describe must
+//! check a tree or, as both engines do at the pinned inference, check linearly and name the
+//! multimodal fallback. `no_fit` caps the engine's load budget so the draft cannot fit beside the
+//! target and requires both phases to complete without it, the record saying why. The reply must
+//! be valid describer JSON either way (the strict parse below).
 //!
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
@@ -78,15 +81,55 @@ async fn smoke_block_draft(
     (draft, cap)
 }
 
-/// The describer's decode block, checked against `check`; panics with the record when it fails.
-fn checked_decode_record(check: SmokeDraftCheck, describer: &VisionCaptionerDescriber) -> Value {
+/// Condense the described `fields` with the product's condense step (the `Fit to` rewrite a job
+/// runs on the model the describe left resident: same load, same request), then check the
+/// describer's decode blocks against `check`: the image describe ([`DraftRequest::Image`]) and the
+/// text-only condense ([`DraftRequest::Text`]). Panics with the record when a check fails.
+///
+/// The condense runs on the describer directly rather than through a one-image
+/// `run_dataset_batch_describe_job`: that job needs a stub job API, a staged dataset and an
+/// installed `Fit to` target tokenizer, none of which this smoke's runners carry. The describe and
+/// condense loads and requests are the job's own (`VisionCaptionerDescriber`).
+async fn checked_decode_record(
+    check: SmokeDraftCheck,
+    describer: &VisionCaptionerDescriber,
+    fields: &[String; DESCRIBE_FIELDS.len()],
+) -> Value {
+    use crate::batch_describe_jobs::condense::{condense_system, condense_user};
+    use crate::qwen38_block_draft::DraftRequest;
+    use sceneworks_core::dataset_batch_describe::{condense_char_bound, condense_word_target};
+    let words = condense_word_target(1024, condense_char_bound(), 0);
+    let condensed = describer
+        .condense(
+            condense_system(words),
+            condense_user(fields),
+            CancelFlag::new(),
+        )
+        .await
+        .expect("the describer stays loaded for the condense")
+        .expect("the describer condenses");
+    assert!(
+        !condensed.text.trim().is_empty(),
+        "the condensed prompt is empty"
+    );
+    eprintln!(
+        "condensed ({} tokens):\n{}",
+        condensed.generated_tokens, condensed.text
+    );
     let decode = describer
         .decode_record()
         .expect("the Qwen3.8 27B describer records its decode");
     eprintln!("DECODE block_draft_check={} {decode}", check.label());
-    check
-        .check(&decode, describer.block_draft.as_ref())
-        .unwrap_or_else(|error| panic!("block-draft check {}: {error}", check.label()));
+    for (phase, request) in [
+        ("describe", DraftRequest::Image),
+        ("condense", DraftRequest::Text),
+    ] {
+        check
+            .check(&decode[phase], describer.block_draft.as_ref(), request)
+            .unwrap_or_else(|error| {
+                panic!("block-draft check {} ({phase}): {error}", check.label())
+            });
+    }
     decode
 }
 
@@ -266,7 +309,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
-    let decode = checked_decode_record(draft_check, &describer);
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
 
     let test_fqn = std::thread::current()
         .name()
@@ -590,7 +633,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
-    let decode = checked_decode_record(draft_check, &describer);
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
     let test_fqn = std::thread::current()
         .name()
         .expect("the libtest case has an actual FQN")

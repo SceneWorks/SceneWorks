@@ -28,12 +28,15 @@ name: Qwen3.8 27B describer CUDA validation
 # The evidence must name the model that ran.
 #
 # `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter, which both
-# jobs name whenever a draft (DFlash2 / DSpine, provisioned with the tiers) is installed: `record`
-# (the default) records the decode block (proposer, draft, precision, target passes, rows checked
-# and accepted tokens per pass) and asserts nothing about it; `on` requires the draft to run with
-# tree checking at the tier's draft precision, more than one accepted token per target pass and no
-# fallback; `no_fit` caps the engine's load budget so the draft cannot fit beside the target and
-# requires the job to complete without it, its record naming why.
+# jobs name whenever a draft (DFlash2 / DSpine) is installed: `record` (the default) records the
+# decode blocks (proposer, draft, precision, verify, target passes, rows checked and accepted
+# tokens per pass; the describer's describe and condense separately) and asserts nothing about
+# them; `on` requires the draft to run at the tier's draft precision with more than one accepted
+# token per target pass and no fallback, and tree checking (the image describe may instead check
+# linearly when the engine names its multimodal fallback); `no_fit` caps the engine's load budget
+# so the draft cannot fit beside the target and requires the job to complete without it, its
+# record naming why. Only `on` / `no_fit` fetch the drafts (a fresh hub here, the MLX hub in
+# run.sh); the CUDA shared hub takes them from qwen38-describer-provision.yml `tiers: drafts`.
 on:
   workflow_dispatch:
     inputs:
@@ -192,6 +195,8 @@ jobs:
           HF_HUB_CACHE: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
           HF_HUB_OFFLINE: "0"
           SCENEWORKS_QWEN38_DESCRIBER_PROVISION: ${{ inputs.expander_model == 'abliterated' && format('expander-abliterated-{0}', inputs.tier) || format('expander-{0}', inputs.tier) }}
+          # SW-7204: a drafter-checking run (on, no_fit) also fetches the block drafts into the fresh hub.
+          SCENEWORKS_QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
           HF_HUB_DISABLE_TELEMETRY: "1"

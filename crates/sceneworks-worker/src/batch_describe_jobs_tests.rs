@@ -1574,10 +1574,16 @@ fn the_qwen38_load_names_its_block_draft_and_the_result_carries_the_decode_recor
         "decode-record".to_owned(),
     )
     .with_block_draft(Some(draft.clone()));
-    qwen.decode.lock().unwrap().note(None, None, Some(&draft));
+    qwen.decode.lock().unwrap().note(
+        crate::qwen38_block_draft::DecodePhase::Describe,
+        None,
+        None,
+        Some(&draft),
+    );
     let result = with_decode_record(batch_describe_result(&request, &[], false), &qwen);
-    assert_eq!(result["decode"]["generations"], 1);
-    assert!(result["decode"]["draftFallback"]
+    assert_eq!(result["decode"]["describe"]["generations"], 1);
+    assert_eq!(result["decode"]["condense"]["generations"], 0);
+    assert!(result["decode"]["describe"]["draftFallback"]
         .as_str()
         .is_some_and(|reason| reason.starts_with("block draft:")));
 
