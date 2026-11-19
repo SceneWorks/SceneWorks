@@ -19,9 +19,9 @@ import shutil
 import sys
 
 REPO = "SceneWorks/qwen3.8-27b-abliterated-candle"
-# PENDING-SW-7202: the revision (a 7202000…0002 PLACEHOLDER) and totals come from the inference `qwen38-full-tiers.yml`
-# (model describer, backend candle) publication report; they must equal the catalog's rows.
-REVISION = "7202000000000000000000000000000000000002"
+# The revision and totals come from the inference `qwen38-full-tiers.yml` (model describer, backend
+# candle) publication report; they must equal the catalog's rows.
+REVISION = "f76e0088020724953fd129a0004fa78bd9fee8cc"
 # Tier (the catalog row's `variant`) -> the re-host folder its row names.
 TIER_FOLDERS = {"q4": "q4-full", "q8": "q8-full"}
 # The selectors each tier's catalog row names inside its folder. A Candle tier is sharded like its
@@ -40,7 +40,7 @@ TIER_FILES = (
 )
 # Tier -> total bytes of the files its row's selectors match, as the catalog's download rows record
 # them (config/manifests/builtin.models.jsonc, `footprint.diskSizeBytes`).
-TIER_BYTES = {"q4": 17_611_498_331, "q8": 29_987_316_675}
+TIER_BYTES = {"q4": 17_589_495_082, "q8": 29_965_305_376}
 # Both tiers are ~47.6 GB; keep headroom for the volume's other tenants.
 MIN_FREE_BYTES = 70 * 10**9
 
