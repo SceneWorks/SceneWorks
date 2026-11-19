@@ -1345,6 +1345,20 @@ async function runAcceptance(env, cfg, report, signal) {
       await mkdir(d, { recursive: true });
     }
     await cp(path.join(cfg.sourceDir, "config"), path.join(state, "config"), { recursive: true });
+    for (const plan of hubPlans) {
+      for (const extra of PAG_ROUTE_MAP[plan.id]?.extraHuggingFaceRows ?? []) {
+        const loraId = typeof extra.componentId === "string" && extra.componentId.startsWith("lora:") ? extra.componentId.slice(5) : null;
+        if (!loraId) continue;
+        const receiptDir = path.join(state, "data", "loras", loraId);
+        await mkdir(receiptDir, { recursive: true });
+        await writeFile(path.join(receiptDir, ".sceneworks-download-complete.json"), JSON.stringify({
+          schemaVersion: 2,
+          repo: extra.repo,
+          snapshotRevision: extra.revision,
+          resolvedFiles: extra.files,
+        }, null, 2) + "\n");
+      }
+    }
 
     const workerId = `pag-accept-${process.pid}-${Date.now().toString(36)}`;
     const envs = childEnvironments(env, { backend: cfg.backend, state, hub, xet, workerId, metallib: built.metallib?.path });

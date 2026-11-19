@@ -465,7 +465,7 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
                 let _ = crate::load_progress::spawn_blocking(move || {
                     #[cfg(test)]
                     let _fixture_cache_root = fixture_cache_root;
-                    registered_overlay_source_claims(&settings, |claim| {
+                    registered_priority_overlay_source_claims(&settings, |claim| {
                         pending_inventory()
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -582,11 +582,12 @@ fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
 }
 
 fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSourceClaim)) {
-    // Publish lightweight built-in/user LoRA and control-overlay claims first so adapter-backed
-    // jobs become admissible on the first heartbeat instead of waiting behind multi-GiB cold
-    // encoder hashes in `STATIC_SOURCE_IDS`.
-    registered_overlay_source_claims(settings, &mut publish);
+    // Publish user/project overlays and explicitly receipted built-in LoRAs first so freshly
+    // imported or installed adapters become admissible on the first heartbeat instead of waiting
+    // behind multi-GiB unreceipted hub caches or `STATIC_SOURCE_IDS`.
+    registered_priority_overlay_source_claims(settings, &mut publish);
     external_lora_source_claims(settings, &mut publish);
+    registered_unreceipted_builtin_lora_source_claims(settings, &mut publish);
     let empty = JsonObject::new();
     for source_id in STATIC_SOURCE_IDS {
         match capture_selected_source(source_id, settings, &empty) {
@@ -619,9 +620,9 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
     }
     external_base_source_claims(settings, &mut publish);
     registered_digest_source_claims(settings, &mut publish);
-    // Re-sweep overlays before `replace_scanned` so any adapter imported mid-scan stays in
-    // `scanned` (unchanged files hit `VerifiedSourceCache` without re-reading bytes).
-    registered_overlay_source_claims(settings, publish);
+    // Re-sweep priority overlays before `replace_scanned` so any adapter imported mid-scan stays
+    // in `scanned` (unchanged files hit `VerifiedSourceCache` without re-reading bytes).
+    registered_priority_overlay_source_claims(settings, publish);
 }
 
 /// Advertise the operator's externally scanned ComfyUI base models (SW-7030,
@@ -946,7 +947,16 @@ fn registered_digest_source_claims(
     }
 }
 
-fn registered_overlay_source_claims(
+fn builtin_lora_has_download_receipt(settings: &Settings, id: &str) -> bool {
+    settings
+        .data_dir
+        .join("loras")
+        .join(crate::paths::safe_download_dir(id))
+        .join(".sceneworks-download-complete.json")
+        .is_file()
+}
+
+fn registered_priority_overlay_source_claims(
     settings: &Settings,
     mut publish: impl FnMut(PortableSourceClaim),
 ) {
@@ -955,17 +965,6 @@ fn registered_overlay_source_claims(
     }
     let mut claims = Vec::new();
     let manifests = settings.config_dir.join("manifests");
-    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
-        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        for path in builtin_lora_source_paths(settings, &lora) {
-            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
-            for claim in claims.drain(..) {
-                publish(claim);
-            }
-        }
-    }
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
     lora_manifests.extend(
         registered_projects(settings)
@@ -1023,6 +1022,45 @@ fn registered_overlay_source_claims(
                 continue;
             };
             append_registered_claim(settings, &mut claims, "control", id, None, &path);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
+        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !builtin_lora_has_download_receipt(settings, id) {
+            continue;
+        }
+        for path in builtin_lora_source_paths(settings, &lora) {
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+}
+
+fn registered_unreceipted_builtin_lora_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    if settings.config_dir.as_os_str().is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    let manifests = settings.config_dir.join("manifests");
+    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
+        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if builtin_lora_has_download_receipt(settings, id) {
+            continue;
+        }
+        for path in builtin_lora_source_paths(settings, &lora) {
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
