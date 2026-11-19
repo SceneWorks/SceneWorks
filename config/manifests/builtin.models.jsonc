@@ -16140,48 +16140,47 @@
       // `SceneWorks/qwen3.8-27b-abliterated-candle`. Exactly one q4 and one q8 row is in scope on any
       // platform.
       //
-      // The floors below were measured on the plain tiers. The full tiers hold ~2.41 GB less weight
-      // than the plain ones (17.59 vs 20.00 GB at q4 on MLX), so the plain floors over-state them and are
-      // kept as the conservative floors; the q4 floor still admits every card it admitted before.
-      //
       // MEMORY FLOORS (registry evidence.json, `mlx` / `candle` `minMemoryGbByTier`, GiB). A describe
       // job reads its tier's floor on the worker's lane and refuses before any image when the
       // worker cannot hold it. The scalar `minMemoryGb` of each lane is the bf16 floor, the
-      // conservative fallback for a tier with no row.
+      // conservative fallback for a tier with no row. The q4 and q8 floors are measured on the
+      // shipped full tiers (SW-7202, inference pin 99b92d73d): one cold describe of a 1536x1536
+      // synthetic scene per tier, model load included.
       //   candle (checked as-is against the card's free VRAM, no slack added): each floor is the
       //   smallest whole GiB that is at least BOTH the engine's own load requirement and the
       //   measured peak, so the worker never admits a load the engine then refuses. The engine
-      //   requirement is candle-llm's CUDA load admission (inference 4a36a7f, provider.rs
-      //   load_memory_estimate_as and admission.rs load_memory_requirements): the dense source
-      //   held on the device plus 25% of it, the quantised projection copy, and the 64 MiB
-      //   CUDA-graph parameter cache. A prepared tier's stored GGML blocks stay on the host while
-      //   loading, so the 25% applies only to its dense remainder (embeddings, head, norms, vision
-      //   tower: 6.06 GB); on bf16 it applies to the whole 55.6 GB payload.
-      //     q4 22 — engine 22,279,852,166 B (21,248 MiB); measured peak above baseline 21,993 MiB
-      //             at 512x384 (qwen38-describer-validation run 43604077657) and 21,995 MiB at
-      //             1536x1536 (run 43665994831): the same 21.48 GiB at both sizes. 22 GiB is
-      //             22,528 MiB. A 24 GB card (24,564 MiB total) is admitted with up to 2,036 MiB
-      //             already in use.
-      //     q8 34 — engine 35,291,474,440 B (33,657 MiB); measured peak 34,409 MiB (run
-      //             43604907453). 34 GiB is 34,816 MiB.
+      //   requirement is candle-llm's CUDA load admission (provider.rs load_memory_estimate_as and
+      //   admission.rs load_memory_requirements) at inference 99b92d73d, computed from the pinned
+      //   snapshots' safetensors headers: the dense source held on the device plus 25% of it, the
+      //   quantised copy built from the stored GGML blocks, and the 64 MiB CUDA-graph parameter
+      //   cache. A full tier stores its embedding, head and `in_proj_a`/`in_proj_b` as GGML blocks
+      //   too, so its dense source is only the vision tower and norms (0.93 GB, against 6.06 GB on
+      //   the plain tiers). The measured peak is the card's high-water above the pre-load baseline
+      //   (qwen38-describer-validation.yml on GPU-e4b79931, nvidia-smi polled every 100 ms).
+      //     q4 21 — engine 17,875,551,126 B (17,048 MiB); measured peak above baseline 21,061 MiB
+      //             (run 44464665126; 23,043 MiB peak over a 1,982 MiB baseline; 35.2 s). 21 GiB is
+      //             21,504 MiB. A 24 GB card (24,564 MiB total) is admitted with up to 3,060 MiB
+      //             already in use; the plain tier's 22 admitted up to 2,036 MiB.
+      //     q8 33 — engine 30,251,474,194 B (28,851 MiB); measured peak 32,965 MiB (run
+      //             44464684497; 34,947 MiB peak over 1,982 MiB; 45.7 s). 33 GiB is 33,792 MiB.
       //     bf16 65 — engine 69,520,866,634 B (66,300 MiB); measured peak above baseline
       //               57,121 MiB (run 43687782761) and 57,319 MiB (run 43701927797), both at
       //               1536x1536. 65 GiB is 66,560 MiB: only 260 MiB above the engine's figure, which
       //               the engine reads after this process's own CUDA context exists.
       //   `candle.measured` stays false: the floors are set by the engine's load requirement, not
       //   by a calibrated measurement, so the block cannot claim calibrated evidence.
-      //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
-      //     q4 28 — two measured describe peaks (worker footprint, dev Mac, describe through the
-      //             app): about 22 GiB on a smaller image (its size not recorded), and 25.0 on a
-      //             1536x1536 image (2026-11-14). The floor is from the larger: 25.0 / 0.9 = 27.8.
-      //     q8 41 — DERIVED, not measured: 30.15 GiB of files + the 6.38 GiB the 25.0 q4 peak
-      //             holds above its 18.62 GiB of files = 36.53; / 0.9 = 40.6
-      //     bf16 65 — UNMEASURED, derived the same way: 51.76 GiB of files + 6.38 = 58.14; / 0.9 =
-      //               64.6
+      //   mlx (total unified memory; the worker process's peak phys_footprint / 0.9, the catalog's
+      //   MLX fit rule, rounded up; qwen38-describer-mlx-validation.yml on nax-macos, the external
+      //   guard's root_lifetime_max, ri_phys_footprint):
+      //     q4 27 — 25,688,127,912 B = 23.924 GiB (run 44471737483, 177 s); / 0.9 = 26.58.
+      //     q8 40 — 38,021,601,816 B = 35.410 GiB (run 44471749511, 384 s); / 0.9 = 39.34.
+      //     bf16 66 — UNMEASURED, DERIVED: 51.76 GiB of files plus the 7.54 GiB the measured q4
+      //               peak holds above its 16.38 GiB of files (q8: 7.50 above 27.91) = 59.30;
+      //               / 0.9 = 65.9.
       //   These floors are what the worker admits from. The Model Manager's host-size quote for
       //   this entry does NOT use them: it still comes from the catalog's image-generation estimate
       //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
-      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 28).
+      //   floor on MLX (about 34 GB quoted for q4, where the worker admits from 27).
       //
       // Each row names every file the loader reads rather than a `<tier>/*` glob (which one file
       // satisfies), so a tier counts as installed only when every listed file is present in the
