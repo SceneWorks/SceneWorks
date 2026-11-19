@@ -324,3 +324,50 @@ fn shared_promptless_video_requires_authoritative_svd_facts() {
         "prompt"
     );
 }
+
+/// A model that declares a long encoder window takes prompts as long as that window, instead of the
+/// flat 4,000-character cap that refused MiniMax-H3-Image prompts its 4,096-token encoder reads in
+/// full. A model with no declared window keeps the 4,000 cap.
+#[test]
+fn image_prompt_ceiling_follows_the_declared_token_window() {
+    let h3 = facts("minimax_h3_image", "text_to_image");
+    assert_eq!(
+        sceneworks_core::image_prompt_char_limit(h3.as_object().unwrap()),
+        sceneworks_core::MAX_IMAGE_PROMPT_CHARS
+    );
+    let long = "x".repeat(10_000);
+    compare(
+        "image",
+        json!({"projectId":"p","model":"minimax_h3_image","prompt":long}),
+        h3.clone(),
+    )
+    .expect("a 10,000-character prompt fits H3-Image's 4,096-token window");
+    let over = "x".repeat(sceneworks_core::MAX_IMAGE_PROMPT_CHARS + 1);
+    assert_eq!(
+        compare(
+            "image",
+            json!({"projectId":"p","model":"minimax_h3_image","prompt":over}),
+            h3,
+        )
+        .unwrap_err()
+        .field,
+        "prompt"
+    );
+
+    let flux = facts("flux_dev", "text_to_image");
+    assert_eq!(
+        sceneworks_core::image_prompt_char_limit(flux.as_object().unwrap()),
+        sceneworks_core::MAX_PROMPT_CHARS
+    );
+    let refusal = compare(
+        "image",
+        json!({"projectId":"p","model":"flux_dev","prompt":"x".repeat(4001)}),
+        flux,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.field, "prompt");
+    assert_eq!(
+        refusal.detail,
+        "prompt must be between 1 and 4000 characters"
+    );
+}

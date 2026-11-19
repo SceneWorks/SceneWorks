@@ -99,7 +99,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "GenerationRequest.prompt",
     )
     .limits(&[
-        "apps/rust-api/src/validators.rs: 1..4000 characters; may be empty with explicit MOSS edit positive embeddings",
+        "crates/sceneworks-options: 1..image_prompt_char_limit characters (4000, or the model's image.maxPromptTokens x 4 up to 16384); may be empty with explicit MOSS edit positive embeddings",
     ])
     .applies(Predicate::Modality("image"))
     .ui("Prompt", "text"),
@@ -114,7 +114,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "GenerationRequest.prompts",
     )
     .limits(&[
-        "apps/rust-api/src/validators.rs: each prompt 1..4000 characters",
+        "crates/sceneworks-options: each prompt 1..image_prompt_char_limit characters",
         "apps/rust-api/src/generation.rs: model image.maxPromptBatchImages; prompt must equal prompts[0]; batch/count product bound",
     ])
     .applies(Predicate::ModelField("image.maxPromptBatchImages"))

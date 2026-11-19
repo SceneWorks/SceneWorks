@@ -14005,7 +14005,7 @@ async fn generation_routes_reject_invalid_payloads() {
         app.clone(),
         "POST",
         "/api/v1/image/jobs",
-        json!({ "projectId": "project-1", "prompt": "x".repeat(4001) }),
+        json!({ "projectId": "project-1", "model": "flux_schnell", "prompt": "x".repeat(sceneworks_core::MAX_IMAGE_PROMPT_CHARS + 1) }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

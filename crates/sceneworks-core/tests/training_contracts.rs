@@ -4791,18 +4791,20 @@ fn training_adapter_keys_are_validated_as_field_errors() {
     );
 }
 
-/// SW-F369: every MiniMax-H3-Image preset (text-to-image and edit) selects the Fizgig de-distill
-/// adapter by default and builds a plan that keeps the keys; blank resolves to its one version;
-/// `v2` (a Z-Image version) is a field error for this repo; and each adapter is refused on the
+/// SW-F369: every MiniMax-H3-Image preset (text-to-image and edit) selects ostris' de-distill
+/// adapter (the one ai-toolkit trains this architecture with) by default and builds a plan that
+/// keeps the keys; the Fizgig adapter stays selectable; blank resolves to each repo's one version;
+/// `v2` (a Z-Image version) is a field error for an H3 repo; and each adapter is refused on the
 /// other base's target — a de-distill LoRA for one base is noise on another.
 /// Mutations: drop the adapter from `minimax_h3_image_preset` ⇒ the preset loop goes red; drop the
 /// `target_ids` check from `validate_support` ⇒ the cross-base loop goes red; drop the H3 targets
 /// from `TRAINING_ADAPTER_TARGETS` ⇒ the plan builds go red.
 #[test]
-fn minimax_h3_image_presets_default_to_the_fizgig_training_adapter() {
+fn minimax_h3_image_presets_default_to_the_ostris_training_adapter() {
     use sceneworks_core::training::training_adapter::{
         target_supports_training_adapter, training_adapter_model,
-        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+        MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO,
+        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1, MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO,
         ZIMAGE_TURBO_TRAINING_ADAPTER_REPO,
     };
     let registry = builtin_training_targets();
@@ -4821,19 +4823,19 @@ fn minimax_h3_image_presets_default_to_the_fizgig_training_adapter() {
         for preset in presets.presets.iter().filter(|p| p.target_id == target_id) {
             let advanced = &preset.config.advanced;
             assert_eq!(
-                advanced["trainingAdapterRepo"], MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO,
+                advanced["trainingAdapterRepo"], MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO,
                 "{}",
                 preset.id
             );
             assert_eq!(advanced["trainingAdapterVersion"], "v1", "{}", preset.id);
             assert_eq!(
                 training_adapter_model(advanced).unwrap(),
-                Some(&MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1)
+                Some(&MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1)
             );
             let plan = build_plan_for_target(h3, preset.config.clone()).expect("preset plan");
             assert_eq!(
                 plan.config.advanced["trainingAdapterRepo"],
-                MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO
+                MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO
             );
             checked += 1;
         }
@@ -4855,20 +4857,29 @@ fn minimax_h3_image_presets_default_to_the_fizgig_training_adapter() {
         other => panic!("expected a field error, got {other:?}"),
     };
     let h3 = target("minimax_h3_image_lora");
-    let blank = with(h3, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, "");
-    assert_eq!(
-        training_adapter_model(&blank.advanced).unwrap(),
-        Some(&MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1)
-    );
-    for version in ["v2", "v2-default"] {
+    for (repo, model) in [
+        (
+            MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO,
+            &MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1,
+        ),
+        (
+            MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO,
+            &MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+        ),
+    ] {
+        let blank = with(h3, repo, "");
         assert_eq!(
-            field_of(build_plan_for_target(
-                h3,
-                with(h3, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO, version)
-            )),
-            "trainingAdapterVersion",
-            "{version}"
+            training_adapter_model(&blank.advanced).unwrap(),
+            Some(model)
         );
+        build_plan_for_target(h3, with(h3, repo, "v1")).expect("an H3 adapter on H3 plans");
+        for version in ["v2", "v2-default"] {
+            assert_eq!(
+                field_of(build_plan_for_target(h3, with(h3, repo, version))),
+                "trainingAdapterVersion",
+                "{repo} {version}"
+            );
+        }
     }
     let zimage = target("z_image_turbo_lora");
     for (target, repo) in [
@@ -4878,6 +4889,7 @@ fn minimax_h3_image_presets_default_to_the_fizgig_training_adapter() {
             ZIMAGE_TURBO_TRAINING_ADAPTER_REPO,
         ),
         (zimage, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO),
+        (zimage, MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO),
     ] {
         assert_eq!(
             field_of(build_plan_for_target(target, with(target, repo, "v1"))),
@@ -4921,17 +4933,50 @@ fn training_adapters_are_cataloged_at_the_loaded_revision() {
     }
     let entry = |id: &str| models.iter().find(|m| m["id"] == id).unwrap();
     let base = entry("minimax_h3_image");
-    let adapter =
-        entry(sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1.id);
     assert_eq!(base["requiresLicenseAcknowledgment"], true);
-    assert_eq!(adapter["requiresLicenseAcknowledgment"], true);
-    assert_eq!(adapter["gated"], false);
-    let notice = adapter["licenseNotice"].as_str().expect("licence notice");
-    assert!(
-        notice.contains("MiniMax-H3-Image Community License Agreement"),
-        "{notice}"
-    );
-    assert!(notice.contains("Model Derivative"), "{notice}");
+    use sceneworks_core::training::training_adapter::{
+        MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+    };
+    for id in [
+        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1.id,
+        MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1.id,
+    ] {
+        let adapter = entry(id);
+        assert_eq!(adapter["requiresLicenseAcknowledgment"], true, "{id}");
+        assert_eq!(adapter["gated"], false, "{id}");
+        let notice = adapter["licenseNotice"].as_str().expect("licence notice");
+        assert!(
+            notice.contains("MiniMax-H3-Image Community License Agreement"),
+            "{id}: {notice}"
+        );
+        assert!(notice.contains("Model Derivative"), "{id}: {notice}");
+    }
+}
+
+/// SW-F369: the MiniMax-H3-Image targets train every one of the six distilled heads equally often
+/// — ai-toolkit draws one of the six sigmas uniformly and ignores the timestep type — so they
+/// default to and advertise only the uniform, balanced draw, and the API refuses any other.
+/// Mutation: default either target back to `sigmoid` ⇒ the default assert goes red; drop the
+/// advertised list ⇒ the refusal assert goes red.
+#[test]
+fn minimax_h3_image_targets_draw_the_six_heads_uniformly() {
+    let registry = builtin_training_targets();
+    for id in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+        let target = registry.targets.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(target.defaults.advanced["timestepType"], "uniform", "{id}");
+        assert_eq!(target.defaults.advanced["timestepBias"], "balanced", "{id}");
+        assert_eq!(target.limits["timestepTypes"], json!(["uniform"]), "{id}");
+        assert_eq!(target.limits["timestepBiases"], json!(["balanced"]), "{id}");
+        build_plan_for_target(target, target.defaults.clone()).expect("the default plans");
+        let mut sigmoid = target.defaults.clone();
+        sigmoid
+            .advanced
+            .insert("timestepType".into(), json!("sigmoid"));
+        assert!(
+            build_plan_for_target(target, sigmoid).is_err(),
+            "{id}: a sigmoid draw is refused"
+        );
+    }
 }
 
 /// sc-2124: the decoded-x0 aux losses whose upstream window was `[0, 1]` — depth anchoring, the

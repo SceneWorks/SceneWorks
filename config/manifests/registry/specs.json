@@ -49806,6 +49806,50 @@
       "mlx_routed": true
     }
   },
+  "minimax_h3_image_ostris_training_adapter_v1": {
+    "evidence": {},
+    "product": {
+      "autoDownload": false,
+      "capabilities": [],
+      "componentOnly": true,
+      "downloads": [
+        {
+          "estimatedSizeBytes": 155110072,
+          "files": [
+            "minimax_h3_image_training_adapter_v1.safetensors"
+          ],
+          "footprint": {
+            "diskSizeBytes": 155110072
+          },
+          "platforms": [
+            "macos",
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "ostris/minimax_h3_training_adapter",
+          "revision": "e4e119caa391053286145e48ebbaf0e0c00293d3"
+        }
+      ],
+      "family": "minimax_h3_image_training_adapter",
+      "gated": false,
+      "id": "minimax_h3_image_ostris_training_adapter_v1",
+      "licenseNotice": "The ostris MiniMax-H3-Image de-distill training adapter is a Model Derivative of MiniMax-H3-Image, so it is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026), the same agreement as MiniMax-H3-Image itself, not by SceneWorks' own AGPL-3.0 licence. SceneWorks applies it only while training a MiniMax-H3-Image LoRA and never renders with it. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use of the model, its derivatives and their Outputs is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A), including clearly and prominently disclosing machine-generated content you publish. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): the Works and their Outputs may be used to improve only MiniMax-H3-Image or its Model Derivatives; this adapter and the LoRAs it helps train are such derivatives and inherit these terms. Read the full text under About → Licenses before downloading.",
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+      "name": "MiniMax-H3-Image Training Adapter (ostris)",
+      "paths": {
+        "model": "${HF_CACHE}/ostris/minimax_h3_training_adapter"
+      },
+      "requiresLicenseAcknowledgment": true,
+      "type": "utility",
+      "ui": {
+        "description": "ostris de-distill training adapter for MiniMax-H3-Image (rank 16, the one ai-toolkit trains this model with) — the training presets' default. Applied to MiniMax-H3-Image only while training a LoRA so it learns your subject instead of un-distilling the 6-step base into blurry, ghosted samples; removed for previews and generation - not a generation model. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "label": "MiniMax-H3-Image Training Adapter (ostris)",
+        "recommendedFor": []
+      }
+    },
+    "routes": {}
+  },
   "minimax_h3_image_pe": {
     "downloadEvidence": [
       {

@@ -333,7 +333,16 @@ describe("Image Studio batch cardinality admission", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  it("stops styled high-cardinality preflight at the first actionable budget violation", async () => {
+  // A job that stays pending until the test releases it, so a ten-million-item run sits on its
+  // first enqueue instead of walking the whole product.
+  function heldJobs() {
+    const pending = [];
+    const createImageJob = vi.fn(() => new Promise((resolve) => pending.push(resolve)));
+    const release = () => pending.splice(0).forEach((resolve, index) => resolve({ id: `held-${index}`, status: "queued" }));
+    return { createImageJob, release };
+  }
+
+  it("runs a styled high-cardinality batch with over-cap prompts shortened, not stopped", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem(
@@ -347,18 +356,26 @@ describe("Image Studio batch cardinality admission", () => {
         batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
       }),
     );
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     await render(baseContext({ createImageJob }));
+
+    const note = [...container.querySelectorAll(".batch-hint")].find((node) => node.textContent.includes("end cut off"));
+    expect(note?.textContent).toMatch(/^Batch items 1, 2, 3, 4, 5, 6, 7, 8 and \d+ more are longer than/);
+    expect(container.querySelector(".batch-warning")).toBeNull();
 
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
     await click(container.querySelector(".batch-confirm .prompt-cta"));
 
-    expect(container.querySelector(".batch-warning")?.textContent).toContain("Batch prompt 1");
-    expect(createImageJob).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
+    expect([...createImageJob.mock.calls[0][0].prompt].length).toBeLessThanOrEqual(4000);
+    await click(container.querySelector(".batch-run-progress button"));
+    await act(async () => release());
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
   });
 
-  it("makes a no-overage styled Cartesian preflight cancelable before inspecting its full product", async () => {
+  it("keeps a confirmed styled Cartesian run cancelable", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem(
@@ -372,24 +389,21 @@ describe("Image Studio batch cardinality admission", () => {
         batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
       }),
     );
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     await render(baseContext({ createImageJob }));
 
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-confirm .prompt-cta"));
 
-    // The first bounded preflight slice has yielded with the run rendered; the old
-    // synchronous walk could not expose Stop until all ten million prompts were read.
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Processed 0/10000000"));
     expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
-    expect(createImageJob).not.toHaveBeenCalled();
-
     await click(container.querySelector(".batch-run-progress button"));
-    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
-    expect(createImageJob).not.toHaveBeenCalled();
+    await act(async () => release());
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
-  it("abandons streaming preflight on project switch", async () => {
+  it("abandons a confirmed run on project switch", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
@@ -397,14 +411,15 @@ describe("Image Studio batch cardinality admission", () => {
       batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
       batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
     }));
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     const context = baseContext({ createImageJob });
     await render(context);
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-confirm .prompt-cta"));
     await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => release());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    expect(createImageJob).not.toHaveBeenCalled();
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
     expect(container.querySelector(".batch-run-progress")).toBeNull();
   });
 

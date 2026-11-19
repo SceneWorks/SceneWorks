@@ -334,6 +334,9 @@ function ladderLabel(ladder) {
 function trainingAdapterModelId(advanced) {
   const repo = String(advanced?.trainingAdapterRepo ?? "").trim();
   const version = String(advanced?.trainingAdapterVersion ?? "").trim().toLowerCase();
+  if (repo === "ostris/minimax_h3_training_adapter") {
+    return ["", "v1"].includes(version) ? "minimax_h3_image_ostris_training_adapter_v1" : null;
+  }
   if (repo === "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter") {
     return ["", "v1"].includes(version) ? "minimax_h3_image_training_adapter_v1" : null;
   }

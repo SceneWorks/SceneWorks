@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "215109e654349077df7f5e3ae5efe39f5aedb5b7",
+    "inferenceRevision": "fd91147c4069d8ad8fedace3847e01415efaedc8",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -10936,9 +10936,9 @@
             "version": 1,
             "class": "recipe",
             "classification": "recipe",
-            "applicable": false,
-            "supported": false,
-            "available": false,
+            "applicable": true,
+            "supported": true,
+            "available": true,
             "parameter_schema": {
               "version": 1,
               "phases": {
@@ -10948,7 +10948,15 @@
                 "min_steps_per_phase": 1
               }
             },
-            "parameters": null,
+            "parameters": {
+              "version": 1,
+              "phases": {
+                "type": "phase_list",
+                "required": true,
+                "min_phases": 1,
+                "min_steps_per_phase": 1
+              }
+            },
             "conflicts": [
               "pass0_reference_conditioning",
               "pass0_control_conditioning",
@@ -10971,15 +10979,8 @@
               "introduces_pass_boundary": false,
               "retains_single_pass_schedule": true
             },
-            "reasons": [
-              {
-                "code": "missing_multiphase_denoise_support",
-                "message": "route 'krea_2_raw' does not support multi-phase denoise (phases)"
-              }
-            ],
-            "inapplicability_reasons": [
-              "missing_multiphase_denoise_support"
-            ]
+            "reasons": [],
+            "inapplicability_reasons": []
           },
           "low_res_start": {
             "id": "low_res_start",
@@ -11049,13 +11050,18 @@
               {
                 "code": "missing_clean_estimate_renoise_transition",
                 "message": "route 'krea_2_raw' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
+                "code": "conflicts_with_multiphase_denoise",
+                "message": "route 'krea_2_raw' uses user-supplied multi-phase denoise (phases), which conflicts with low_res_start"
               }
             ],
             "inapplicability_reasons": [
               "missing_render_plan",
               "missing_packed_image_trajectory",
               "missing_spatial_unpack_repack",
-              "missing_clean_estimate_renoise_transition"
+              "missing_clean_estimate_renoise_transition",
+              "conflicts_with_multiphase_denoise"
             ]
           },
           "pag": {
@@ -38965,9 +38971,9 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": false,
-          "supported": false,
-          "available": false,
+          "applicable": true,
+          "supported": true,
+          "available": true,
           "parameter_schema": {
             "version": 1,
             "phases": {
@@ -38977,7 +38983,15 @@
               "min_steps_per_phase": 1
             }
           },
-          "parameters": null,
+          "parameters": {
+            "version": 1,
+            "phases": {
+              "type": "phase_list",
+              "required": true,
+              "min_phases": 1,
+              "min_steps_per_phase": 1
+            }
+          },
           "conflicts": [
             "pass0_reference_conditioning",
             "pass0_control_conditioning",
@@ -39000,15 +39014,8 @@
             "introduces_pass_boundary": false,
             "retains_single_pass_schedule": true
           },
-          "reasons": [
-            {
-              "code": "missing_multiphase_denoise_support",
-              "message": "route 'krea_2_raw' does not support multi-phase denoise (phases)"
-            }
-          ],
-          "inapplicability_reasons": [
-            "missing_multiphase_denoise_support"
-          ]
+          "reasons": [],
+          "inapplicability_reasons": []
         },
         "low_res_start": {
           "id": "low_res_start",
@@ -39078,13 +39085,18 @@
             {
               "code": "missing_clean_estimate_renoise_transition",
               "message": "route 'krea_2_raw' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
+              "code": "conflicts_with_multiphase_denoise",
+              "message": "route 'krea_2_raw' uses user-supplied multi-phase denoise (phases), which conflicts with low_res_start"
             }
           ],
           "inapplicability_reasons": [
             "missing_render_plan",
             "missing_packed_image_trajectory",
             "missing_spatial_unpack_repack",
-            "missing_clean_estimate_renoise_transition"
+            "missing_clean_estimate_renoise_transition",
+            "conflicts_with_multiphase_denoise"
           ]
         },
         "pag": {

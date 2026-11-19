@@ -7311,15 +7311,29 @@ mod tests {
         assert_eq!(resolve(&off).unwrap(), None);
     }
 
-    /// SW-F369: a MiniMax-H3-Image plan's Fizgig adapter (`v1`, or blank — the repo's only
-    /// version) maps to its installed `.safetensors` and is handed to the trainer as
-    /// `training_adapter`; missing, it is refused naming the catalog model to install; `v2` (a
-    /// Z-Image version) is refused naming the field. Mutation: drop the H3 family from
-    /// `TRAINING_ADAPTER_FAMILIES` ⇒ every resolve is a field error ⇒ red.
+    /// SW-F369: a MiniMax-H3-Image plan's adapter — ostris' (the presets' default) or Fizgig's —
+    /// (`v1`, or blank: each repo's only version) maps to its installed `.safetensors` and is
+    /// handed to the trainer as `training_adapter`; missing, it is refused naming the catalog model
+    /// to install; `v2` (a Z-Image version) is refused naming the field. Mutation: drop either H3
+    /// family from `TRAINING_ADAPTER_FAMILIES` ⇒ its resolves are field errors ⇒ red.
     #[cfg(native_lane)]
     #[test]
     fn minimax_h3_image_training_adapter_maps_to_the_installed_file() {
-        use sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1 as H3;
+        use sceneworks_core::training::training_adapter::{
+            MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1, MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+        };
+        for h3 in [
+            MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1,
+            MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+        ] {
+            minimax_h3_image_training_adapter_maps(h3);
+        }
+    }
+
+    #[cfg(native_lane)]
+    fn minimax_h3_image_training_adapter_maps(
+        h3: sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let hub = dir.path().join("cache").join("huggingface").join("hub");
         let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
@@ -7335,7 +7349,7 @@ mod tests {
                 &[&image],
             );
             let advanced = &mut value["config"]["advanced"];
-            advanced["trainingAdapterRepo"] = json!(H3.repo);
+            advanced["trainingAdapterRepo"] = json!(h3.repo);
             if let Some(version) = version {
                 advanced["trainingAdapterVersion"] = json!(version);
             }
@@ -7348,14 +7362,14 @@ mod tests {
         match resolve(&plan(Some("v1"))) {
             Err(WorkerError::InvalidPayload(message)) => {
                 assert!(
-                    message.contains(H3.id) && message.contains("not installed"),
+                    message.contains(h3.id) && message.contains("not installed"),
                     "{message}"
                 )
             }
             other => panic!("expected a not-installed refusal, got {other:?}"),
         }
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
-        let want = fake_snapshot(&hub, H3.repo, H3.revision, H3.file).join(H3.file);
+        let want = fake_snapshot(&hub, h3.repo, h3.revision, h3.file).join(h3.file);
         for version in [Some("v1"), Some(""), None] {
             let got = resolve(&plan(version))
                 .unwrap()

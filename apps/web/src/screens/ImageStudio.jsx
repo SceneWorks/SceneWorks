@@ -180,6 +180,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
+import { batchClipNotice, fitPromptToLimit, imagePromptCharLimit } from "../imagePromptLimit.js";
 import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
@@ -219,10 +220,8 @@ const BATCH_RENDER_CAP = 100;
 // under it queues in full the moment it is confirmed, and a larger run feeds in windows
 // of that size.
 const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
-// A styled Cartesian batch can be enormous even though its queue state remains bounded.
-// Yield after this many preflight prompts so the run state commits and Stop can interrupt
-// a clean (no-overage) stream before we ever reach its Cartesian suffix.
-const BATCH_PREFLIGHT_YIELD_INTERVAL = BATCH_RENDER_CAP;
+// How many resolved batch prompts the length note inspects (it is a note, not a gate).
+const BATCH_CLIP_SCAN_LIMIT = 5000;
 
 // Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
 // an unknown value) back to text_to_image so a restored studio never lands on a
@@ -2783,16 +2782,25 @@ export function ImageStudio() {
   // multiplies within each job UNLESS poses are selected, in which case each job emits one image
   // per pose (images = jobs × posePayload.length). For a structured-caption model (sc-9980) the
   // caller passes the per-prompt auto-expanded caption via `opts`.
-  const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
-    buildJobRequest({
-      promptToSend: opts.promptToSend ?? resolvedPrompt,
-      appearancePromptBatch: opts.appearancePromptBatch,
-      submitIntent: resolvedPrompt,
+  //
+  // A prose item longer than the model's prompt ceiling is shortened to fit rather than refused
+  // (`fitBatchPrompt`): the dropped tail is past what the encoder reads, and the panel lists the
+  // shortened items so the run is never stopped on length alone.
+  const promptCharLimit = imagePromptCharLimit(selectedModel);
+  const fitBatchPrompt = (text) =>
+    fitPromptToLimit(text, promptCharLimit, (candidate) => composeJobPrompt({ promptToSend: candidate }).composedPrompt);
+  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => {
+    const fitted = opts.promptToSend == null ? fitBatchPrompt(resolvedPrompt).prompt : resolvedPrompt;
+    return buildJobRequest({
+      promptToSend: opts.promptToSend ?? fitted,
+      appearancePromptBatch: opts.appearancePromptBatch?.map((text) => fitBatchPrompt(text).prompt),
+      submitIntent: fitted,
       sendStructured: opts.sendStructured ?? false,
       submitCaption: opts.submitCaption ?? caption,
       submitBackend: opts.submitBackend ?? magicPromptBackend,
       resolutionOverride: opts.resolution ?? null,
     });
+  };
 
   // The Iris post-processing plan covers what the next run renders: the Studio size for a single
   // Generate, every distinct per-prompt [WxH] size (or the Studio size) for a prompt batch (S2).
@@ -2905,6 +2913,7 @@ export function ImageStudio() {
       // string is exactly what the run submits, so the cap is measured on IT.
       styleActive: stylePreviewActive || structuredStyleActive,
       composedPrompt: styledPreviewPrompt ?? structuredStyledPrompt ?? "",
+      promptCharLimit,
       mode,
       characterId,
       // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
@@ -2934,6 +2943,7 @@ export function ImageStudio() {
       stylePreviewActive,
       structuredStyleActive,
       styledPreviewPrompt,
+      promptCharLimit,
       structuredStyledPrompt,
       mode,
       characterId,
@@ -2993,6 +3003,27 @@ export function ImageStudio() {
   );
   const portableBatchRefusal = portableBatchFeedback?.result.state === "invalid"
     ? portableBatchFeedback.result.refusal : null;
+  // The batch items `buildBatchJobRequest` shortens to the model's prompt ceiling: a note beside
+  // Run, never a gate. Bounded so a huge inline-alternation product cannot stall a render.
+  const batchClipNoticeText = useMemo(() => {
+    if (!batchMode || structuredPromptModel || batchTotal === 0) return null;
+    const items = [];
+    let total = 0;
+    let index = 0;
+    for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+      index += 1;
+      if (index > BATCH_CLIP_SCAN_LIMIT) break;
+      const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+      const { clipped } = fitPromptToLimit(cleanPrompt, promptCharLimit,
+        (candidate) => composeJobPrompt({ promptToSend: candidate }).composedPrompt);
+      if (clipped) {
+        total += 1;
+        if (items.length < 8) items.push(index);
+      }
+    }
+    return batchClipNotice({ items, total, limit: promptCharLimit, modelName: selectedModel?.name });
+  }, [batchMode, structuredPromptModel, batchTotal, batchPrompts, batchVariables, resolutionOptions,
+    promptCharLimit, composeJobPrompt, selectedModel?.name]);
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
@@ -3019,11 +3050,8 @@ export function ImageStudio() {
   batchPrompts,
   batchVariables,
   resolutionOptions,
-  composeJobPrompt,
-  stylePreviewActive,
   structuredPromptModel,
   batchJobCount,
-  BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
   token,
   buildBatchJobRequest,
@@ -3088,6 +3116,7 @@ export function ImageStudio() {
             batchError={batchError}
             batchValidity={batchValidity}
             portableBatchRefusal={portableBatchRefusal}
+            batchClipNotice={batchClipNoticeText}
             portableBatchRefusalIndex={portableBatchFeedback?.index}
             portableBatchCheckedCount={["valid", "partial"].includes(portableBatchFeedback?.result.state) ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
@@ -3552,7 +3581,7 @@ export function ImageStudio() {
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} maxChars={promptCharLimit} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 

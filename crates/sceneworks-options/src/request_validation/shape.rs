@@ -1,7 +1,9 @@
 //! Shared payload shape and cross-field policy. No database, device or filesystem access.
 use super::ValidationRefusal as ApiError;
 use crate::video_request::{classify_reference_set, ReferenceSetVerdict, VIDEO_JOB_MODES};
-use crate::{contracts::JsonObject, generation_contracts::*, MAX_PROMPT_CHARS};
+use crate::{
+    contracts::JsonObject, generation_contracts::*, MAX_IMAGE_PROMPT_CHARS, MAX_PROMPT_CHARS,
+};
 use serde::Serialize;
 use serde_json::Value;
 pub const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
@@ -108,12 +110,14 @@ pub fn validate_image_job<A: Serialize, M: Serialize>(
             .get("mossImageAdvanced")
             .and_then(|v| v.get("positive"))
             .is_some_and(|v| !v.is_null()));
+    // The model is not known yet, so this is the widest bound any model's prompt window allows;
+    // `image_prompt_char_limit` applies the selected model's own ceiling once its entry is.
     if (!positive_tensor && payload.prompt.is_empty())
-        || payload.prompt.chars().count() > MAX_PROMPT_CHARS
+        || payload.prompt.chars().count() > MAX_IMAGE_PROMPT_CHARS
     {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "prompt must be between 1 and {MAX_IMAGE_PROMPT_CHARS} characters"
+        )));
     }
     // A native prompt batch (sc-25681): every prompt obeys the single prompt's length bound. Its
     // shape against the model (declared cap, `prompt == prompts[0]`, `prompts × count`) is judged
@@ -121,11 +125,11 @@ pub fn validate_image_job<A: Serialize, M: Serialize>(
     if payload
         .prompts
         .iter()
-        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS)
+        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_IMAGE_PROMPT_CHARS)
     {
-        return Err(ApiError::bad_request(
-            "each of prompts must be between 1 and 4000 characters",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "each of prompts must be between 1 and {MAX_IMAGE_PROMPT_CHARS} characters"
+        )));
     }
     validate_image_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     // sc-26241: a FLUX 3 request names exactly one of its packages, and the publisher FP8R tier
