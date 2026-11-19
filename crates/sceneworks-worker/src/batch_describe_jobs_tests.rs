@@ -1814,7 +1814,7 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
 /// needs no reading and evicts nothing. No GPU: the generator is a unit model in a cache, and the
 /// probe reports what a 32 GiB card holding a 21.48 GiB generator would report.
 #[tokio::test]
-async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram() {
+async fn a_cold_refiner_load_evicts_the_generator_and_a_warm_load_skips_the_probe() {
     use crate::cache_thread::{CacheAccess, CacheThread};
     let stage = stage("http://127.0.0.1:9".to_owned());
     let job = qwen38_job_payload(&stage, "q4");
@@ -1841,9 +1841,10 @@ async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram
 
     // A generator left cached by an image job: dropped first, so the reading sees its memory free.
     generators.lock().unwrap().install("txt2img", ());
-    let free = qwen38_free_gb_after_eviction(CacheAccess::Cold, 0.0, evict, probe)
-        .await
-        .expect("evict and probe succeed");
+    let free =
+        crate::refine_model_cache::refiner_cold_load_free_gb(CacheAccess::Cold, 0.0, evict, probe)
+            .await
+            .expect("evict and probe succeed");
     assert_eq!(*steps.lock().unwrap(), ["evict", "probe"]);
     assert_eq!(free, Some(32.0));
     qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, free)
@@ -1854,9 +1855,10 @@ async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram
     // A warm tier reuses the resident describer: no eviction, no reading, admitted.
     steps.lock().unwrap().clear();
     generators.lock().unwrap().install("txt2img", ());
-    let free = qwen38_free_gb_after_eviction(CacheAccess::Warm, 0.0, evict, probe)
-        .await
-        .expect("warm needs nothing");
+    let free =
+        crate::refine_model_cache::refiner_cold_load_free_gb(CacheAccess::Warm, 0.0, evict, probe)
+            .await
+            .expect("warm needs nothing");
     assert_eq!(free, None);
     assert!(steps.lock().unwrap().is_empty());
     assert!(
@@ -1865,7 +1867,7 @@ async fn a_cold_qwen38_load_evicts_the_cached_generator_before_reading_free_vram
     );
 
     // A failed eviction fails the admission rather than reading a stale card.
-    let error = qwen38_free_gb_after_eviction(
+    let error = crate::refine_model_cache::refiner_cold_load_free_gb(
         CacheAccess::Cold,
         0.0,
         || async {
@@ -1904,7 +1906,7 @@ async fn a_refused_qwen38_job_leaves_the_cached_refiner_resident() {
     // The 8B's bf16 weights, as `cached_refiner_weights_gb` reads them from its safetensors.
     let eight_b_gb = 16.3;
     for (card_gb, admitted) in [(24_564.0 / 1024.0, false), (97_887.0 / 1024.0, true)] {
-        let free = qwen38_free_gb_after_eviction(
+        let free = crate::refine_model_cache::refiner_cold_load_free_gb(
             access,
             eight_b_gb,
             || async { Ok(false) },

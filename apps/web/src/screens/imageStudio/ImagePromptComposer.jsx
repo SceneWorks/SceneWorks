@@ -78,6 +78,7 @@ export function ImagePromptComposer({
   characters,
   importAsset,
   visionCaptionReady,
+  loopModel,
   visionCaptionOffers,
   modelDownloadJobs,
   setActiveView,
@@ -291,6 +292,7 @@ export function ImagePromptComposer({
                 // catalog (visionCaptionReady) through the shared ModelAvailabilityGate, not an inline
                 // error-after-click affordance. When the captioner is missing, the gate offers a download.
                 visionCaptionReady={visionCaptionReady}
+                loopModel={loopModel}
                 visionCaptionOffers={visionCaptionOffers}
                 visionCaptionDownloadJobs={modelDownloadJobs}
                 onDownloadModel={createModelDownloadJob}
@@ -465,7 +467,7 @@ export function ImagePromptComposer({
             const describeAvailable =
               mode === "text_to_image" &&
               typeof imageDescribe === "function" &&
-              (visionCaptionReady || visionCaptionOffers.length > 0);
+              (loopModel || visionCaptionReady || visionCaptionOffers.length > 0);
             const describeActive = describeAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
             // sc-24113 — Qwen-Image 2.1's OFFICIAL rewriter, offered as its own prompt tool beside
@@ -571,6 +573,7 @@ export function ImagePromptComposer({
                       errorFallback="Could not describe the image."
                       gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
                       visionCaptionReady={visionCaptionReady}
+                      loopModel={loopModel}
                       visionCaptionOffers={visionCaptionOffers}
                       visionCaptionDownloadJobs={modelDownloadJobs}
                       onDownloadModel={createModelDownloadJob}
@@ -590,6 +593,8 @@ export function ImagePromptComposer({
                       prompt={prompt}
                       refinePrompt={refinePrompt}
                       refineModel={refineModel}
+                      loopModel={loopModel}
+                      onDownloadLoopModel={createModelDownloadJob}
                       onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
                       workflow="image"
                     />

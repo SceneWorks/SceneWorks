@@ -51,6 +51,7 @@ const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
 const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 const JOY_DEFAULT_PROMPT = "You are a meticulous scene describer. Describe only what is visible.\nLABELS: ...";
 const DEFAULTS = {
+  "sensenova/SenseNova-Loop-9B": { prompt: DEFAULT_PROMPT, maxChars: 16000 },
   [VISION_CAPTION_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
   [JOY_REPO]: { prompt: JOY_DEFAULT_PROMPT, maxChars: 3000 },
   [VISION_DESCRIBE_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
@@ -784,6 +785,66 @@ describe("DatasetPromptBatchDialog", () => {
   const tierInput = (key) => document.body.querySelector(`input[name="dataset-prompt-batch-tier"][value="${key}"]`);
   const rerunButton = (itemId) =>
     [...document.body.querySelectorAll(`[data-item-id="${itemId}"] button`)].find((node) => node.textContent === "Re-run");
+
+  it.each(["failed", "canceled"])("lets a missing Loop tier retry after %s or a refused enqueue", async (status) => {
+    const entry = { ...describerWithTiers("q8"), id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B" };
+    const job = { id: "loop-download", type: "model_download", status: "queued",
+      payload: { modelId: entry.id, variant: "bf16" } };
+    context.models = [...context.models, entry];
+    context.createModelDownloadJob.mockResolvedValueOnce(null).mockResolvedValueOnce(job);
+    await render();
+    await chooseModel(entry.id);
+    await click(tierInput("bf16"));
+    await click(button("Download"));
+    expect(button("Download").disabled).toBe(false);
+    expect(document.body.textContent).toContain("Could not start the model download");
+    await click(button("Download"));
+    expect(button("queued").disabled).toBe(true);
+    context.jobs = [
+      { ...job, id: "other-tier", status: "running", payload: { ...job.payload, variant: "q8" } },
+      { ...job, status, error: "The BF16 download did not finish." },
+    ];
+    await render();
+    expect(document.body.textContent).toContain("The BF16 download did not finish");
+    expect(button("Download").disabled).toBe(false);
+    await click(button("Download"));
+    expect(context.createModelDownloadJob).toHaveBeenCalledTimes(3);
+    expect(context.createModelDownloadJob).toHaveBeenLastCalledWith(entry, { variant: "bf16" });
+  });
+
+  it("submits and saves Loop provenance at an installed tier", async () => {
+    const model = "sensenova/SenseNova-Loop-9B";
+    const entry = { ...describerWithTiers("q8"), id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B" };
+    entry.variants = entry.variants.filter((row) => row.variant !== "q4");
+    context.models = [...context.models, entry];
+    await render();
+    await chooseModel(entry.id);
+    await settle();
+    expect(tierInput("q4")).toBeNull();
+    expect(tierInput("q8").checked).toBe(true);
+    expect(trainingApi.defaultDescribePrompt).toHaveBeenLastCalledWith("t", expect.anything(), model);
+    await click(button("Describe images"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toEqual({
+      model, variant: "q8", requestedGpu: "auto",
+    });
+    await act(async () => nextPoll(snapshot("completed", [
+      described("item_a", 300, 400),
+      described("item_b", 300, 400, { failed: true, error: "Malformed JSON." }),
+    ], { model, variant: "q8" })));
+    await settle();
+    await chooseModel("vision_caption_qwen3vl_8b");
+    await click(rerunButton("item_b"));
+    await settle();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body)).toMatchObject({
+      model, variant: "q8", itemIds: ["item_b"],
+    });
+    await act(async () => nextPoll(snapshot("completed", [described("item_b", 300, 400)], { model, variant: "q8" })));
+    await settle();
+    await click(button("Save prompt batch"));
+    expect(context.createPromptBatch.mock.calls[0][0].sourceImages.map(({ model, variant }) => [model, variant]))
+      .toEqual([[model, "q8"], [model, "q8"]]);
+  });
 
   it("offers the 27B Vision Describer with a tier choice that defaults to q4 (SW-7122)", async () => {
     context.models = [...context.models, describerWithTiers("q4")];

@@ -1899,6 +1899,7 @@ async fn capture_model_slot(
         job_type,
         JobType::DatasetAnalysis | JobType::TrainingCaption
     ) && slot == "modelManifestEntries/0"
+        && model_id != sceneworks_core::loop_utility::MODEL_ID
     {
         payload
             .get("modelNameOrPath")

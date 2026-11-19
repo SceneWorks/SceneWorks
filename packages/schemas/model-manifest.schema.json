@@ -2605,6 +2605,7 @@
                     "taew2_2",
                     "vision_caption_qwen3vl_8b",
                     "vision_describe_qwen3_8_27b",
+                    "vision_sensenova_loop_9b",
                     "vitpose_plus_base",
                     "wan_2_2",
                     "wan_2_2_i2v_14b",

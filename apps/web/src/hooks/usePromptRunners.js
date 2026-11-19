@@ -12,10 +12,10 @@ export function usePromptRunners({
   // independent (no activeProject gate); throws on failure so the studio can surface
   // the message inline without clobbering the original prompt.
   const refinePrompt = useCallback(
-    ({ prompt, modelId, workflow, guide, signal }) =>
+    ({ prompt, modelId, workflow, guide, model, variant, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
-        body: { prompt, modelId, workflow, guide },
+        body: { prompt, modelId, workflow, guide, model, variant },
         // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
         // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
         // old 120 s deadline could time out a decode that was still going to succeed.
@@ -158,12 +158,12 @@ export function usePromptRunners({
   // the returned JSON with `parseVisionCaption` (aspect_ratio stripped, bboxes KEPT). C1: the image is
   // consumed only to produce the caption — it is NEVER passed to generation as img2img conditioning.
   const imageCaption = useCallback(
-    ({ sourceAssetId, sourceAssetIds, projectId, model, signal }) =>
+    ({ sourceAssetId, sourceAssetIds, projectId, model, variant, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // caption from the shared aesthetic. A single reference keeps the scalar `sourceAssetId`.
-        body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model },
+        body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model, variant },
         deadlineMs: 180000,
         resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
@@ -188,12 +188,12 @@ export function usePromptRunners({
   // text the caller drops into the prompt box. C1: the image is consumed only to produce the prompt — it
   // is NEVER passed to generation as img2img conditioning.
   const imageDescribe = useCallback(
-    ({ sourceAssetId, sourceAssetIds, projectId, model, captionStyle, signal }) =>
+    ({ sourceAssetId, sourceAssetIds, projectId, model, variant, captionStyle, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
         // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
         // prompt from the aesthetic they share. A single reference keeps the scalar `sourceAssetId`.
-        body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle },
+        body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, variant, captionStyle },
         deadlineMs: 180000,
         resolveResult: (job) => {
           const description = job.result?.refinedPrompt;

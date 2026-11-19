@@ -175,7 +175,10 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/loop_utility.rs",
+            "crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs",
+        ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::WorkerSnapshot,

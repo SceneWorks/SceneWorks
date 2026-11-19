@@ -375,6 +375,7 @@ impl QwenStrictControl {
         preview: &gen_core::PreviewSink,
     ) -> QwenFunControlRequest {
         QwenFunControlRequest {
+            pag: None,
             prompt: self.prompt.clone(),
             negative: self.negative.clone(),
             width: self.width,

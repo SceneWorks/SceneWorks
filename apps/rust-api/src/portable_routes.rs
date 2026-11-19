@@ -1114,6 +1114,27 @@ fn entries_support_route(
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
             return false;
         };
+        if id == sceneworks_core::loop_utility::MODEL_ID {
+            use sceneworks_core::loop_utility;
+            let Ok(tier) = loop_utility::tier(payload.get("variant").and_then(Value::as_str))
+            else {
+                return false;
+            };
+            let source_key = match job_type {
+                JobType::PromptRefine | JobType::DatasetBatchDescribe => "model",
+                JobType::TrainingCaption
+                    if payload.get("captioner").and_then(Value::as_str)
+                        == Some(loop_utility::CAPTIONER) =>
+                {
+                    "modelNameOrPath"
+                }
+                _ => return false,
+            };
+            return slot == "modelManifestEntries/0"
+                && payload.get(source_key).and_then(Value::as_str)
+                    == Some(loop_utility::MODEL_REPO)
+                && loop_utility::download(entry, platform, tier).is_some();
+        }
         let downloads: Vec<&Value> = ["downloads", "conditionalComponents"]
             .into_iter()
             .filter_map(|field| entry.get(field).and_then(Value::as_array))
@@ -1149,9 +1170,7 @@ fn entries_support_route(
             && !(*job_type == JobType::DatasetBatchDescribe
                 && slot == "modelManifestEntries/0"
                 && payload.get("model").is_some_and(|model| {
-                    downloads
-                        .iter()
-                        .any(|download| download.get("repo") == Some(model))
+                    downloads.iter().any(|download| download.get("repo") == Some(model))
                 }))
             // Dataset captioning selects JoyCaption by its authored repository. That selected
             // executable utility is also carried in the first auxiliary slot. A LOCAL
@@ -2294,6 +2313,65 @@ mod tests {
             "macos",
             std::path::Path::new("")
         ));
+    }
+
+    #[test]
+    fn loop_quantized_utility_route_uses_logical_identity_and_platform_tier() {
+        use sceneworks_core::loop_utility::{CAPTIONER, MODEL_ID, MODEL_REPO};
+        let entry = json!({"id": MODEL_ID, "adapter": "prompt-refine", "type": "utility", "downloads": [{
+            "provider": "huggingface", "repo": "SceneWorks/loop-test-mlx", "variant": "q4",
+            "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "files": ["q4/config.json"], "platforms": ["macos"]
+        }]});
+        let entries = [("modelManifestEntries/0".to_owned(), &entry)];
+        for (job, payload) in [
+            (
+                JobType::PromptRefine,
+                json!({"model": MODEL_REPO, "variant": "q4"}),
+            ),
+            (
+                JobType::DatasetBatchDescribe,
+                json!({"model": MODEL_REPO, "variant": "q4"}),
+            ),
+            (
+                JobType::TrainingCaption,
+                json!({
+                    "modelNameOrPath": MODEL_REPO, "captioner": CAPTIONER, "variant": "q4"
+                }),
+            ),
+        ] {
+            let payload = payload.as_object().unwrap();
+            assert!(
+                sceneworks_core::jobs_store::native_route_claims_request("mlx", &job, payload)
+                    .unwrap()
+            );
+            assert!(entries_support_route(
+                &job,
+                payload,
+                &entries,
+                "mlx",
+                "macos",
+                std::path::Path::new("")
+            ));
+            assert!(!entries_support_route(
+                &job,
+                payload,
+                &entries,
+                "candle",
+                "linux",
+                std::path::Path::new("")
+            ));
+            let mut wrong_tier = payload.clone();
+            wrong_tier.insert("variant".to_owned(), json!("q8"));
+            assert!(!entries_support_route(
+                &job,
+                &wrong_tier,
+                &entries,
+                "mlx",
+                "macos",
+                std::path::Path::new("")
+            ));
+        }
     }
 
     #[test]

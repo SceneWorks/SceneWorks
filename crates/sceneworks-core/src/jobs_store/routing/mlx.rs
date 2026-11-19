@@ -1333,16 +1333,31 @@ pub(crate) fn training_job_is_mlx_eligible_with_facts(
     true
 }
 
-/// sc-3556 routing: SceneWorks training caption jobs keep their public
-/// `captioner=joy_caption` contract while the macOS mlx worker serves them through
-/// mlx-gen's JoyCaption provider. Other/unknown captioners stay off the mlx worker.
+/// The native caption paths use either the JoyCaption provider or the Loop TextLlm.
 pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    matches!(job.job_type, JobType::TrainingCaption)
-        && job
-            .payload
-            .get("captioner")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim() == "joy_caption")
+    if job.job_type != JobType::TrainingCaption {
+        return false;
+    }
+    match job
+        .payload
+        .get("captioner")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("joy_caption") => true,
+        Some(crate::loop_utility::CAPTIONER) => {
+            let source_matches = job.payload.get("modelNameOrPath").and_then(Value::as_str)
+                == Some(crate::loop_utility::MODEL_REPO);
+            let model_free = job.payload.get("mode").and_then(Value::as_str) == Some("triggerOnly");
+            source_matches
+                && (model_free
+                    || crate::loop_utility::tier(
+                        job.payload.get("variant").and_then(Value::as_str),
+                    )
+                    .is_ok())
+        }
+        _ => false,
+    }
 }
 
 /// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "b302b90bc9da2a8e0ab7c18d256eee29ba9618ad",
+    "inferenceRevision": "e4ac8645b0d1cc28ec87d1d0b73d7b9b82543ca1",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -952,7 +952,18 @@
           "beta57",
           "linear"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 57,
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux1_dev",
@@ -995,7 +1006,18 @@
           "beta57",
           "linear"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 57,
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux1_dev_control",
@@ -1038,7 +1060,18 @@
           "beta57",
           "linear"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 57,
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_klein_9b",
@@ -1079,7 +1112,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 32,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_klein_9b_edit",
@@ -1121,7 +1165,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 32,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_klein_9b_kv_edit",
@@ -1163,7 +1218,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 32,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_dev",
@@ -1204,7 +1270,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 56,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_dev_edit",
@@ -1246,7 +1323,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 56,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux2_dev_control",
@@ -1288,7 +1376,18 @@
           "beta57",
           "flow_match_euler"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 56,
+          "block_domain": "flux2_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux3_klein",
@@ -1312,7 +1411,18 @@
           "euler"
         ],
         "schedulers": [],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 33,
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "flux3_klein_base",
@@ -1336,7 +1446,18 @@
           "euler"
         ],
         "schedulers": [],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 33,
+          "block_domain": "flux3_blocks",
+          "default_layers": [
+            19
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "ideogram_4",
@@ -1480,7 +1601,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 28,
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "krea_2_raw",
@@ -1520,7 +1652,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 28,
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "krea_2_edit",
@@ -1561,7 +1704,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 28,
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "krea_2_turbo_edit",
@@ -1602,7 +1756,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 28,
+          "block_domain": "single_stream_blocks",
+          "default_layers": [
+            14
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "krea_2_turbo_control",
@@ -1973,7 +2138,18 @@
           "lcm"
         ],
         "schedulers": [],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 50,
+          "block_domain": "dit_blocks",
+          "default_layers": [
+            25
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.6600000262260437,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "mochi_1",
@@ -2009,7 +2185,18 @@
         ],
         "supported_guidance_methods": [
           "cfg"
-        ]
+        ],
+        "pag": {
+          "num_blocks": 42,
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 2.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "moss_image_sft",
@@ -2030,7 +2217,18 @@
         ],
         "supported_guidance_methods": [
           "cfg"
-        ]
+        ],
+        "pag": {
+          "num_blocks": 42,
+          "block_domain": "layers",
+          "default_layers": [
+            20
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 2.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "pulid_flux",
@@ -2072,7 +2270,18 @@
           "beta57",
           "linear"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 57,
+          "block_domain": "flux_blocks",
+          "default_layers": [
+            28
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "qwen_image",
@@ -2113,7 +2322,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 60,
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "qwen_image_control",
@@ -2154,7 +2374,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 60,
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "qwen_image_edit",
@@ -2196,7 +2427,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 60,
+          "block_domain": "blocks",
+          "default_layers": [
+            30
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "qwen_image_2_1",
@@ -2238,7 +2480,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 32,
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "qwen_image_2_1_turbo",
@@ -2280,7 +2533,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 32,
+          "block_domain": "blocks",
+          "default_layers": [
+            16
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "sana_1600m",
@@ -2892,7 +3156,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 30,
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "z_image",
@@ -2932,7 +3207,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 30,
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "z_image_control",
@@ -2973,7 +3259,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 30,
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 1.0,
+          "recommended_scale": 1.5,
+          "max_scale": 15.0
+        }
       },
       {
         "id": "z_image_turbo_control",
@@ -3014,7 +3311,18 @@
           "ddim_uniform",
           "beta57"
         ],
-        "supported_guidance_methods": []
+        "supported_guidance_methods": [],
+        "pag": {
+          "num_blocks": 30,
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "recommended_scale": 1.2000000476837158,
+          "max_scale": 15.0
+        }
       }
     ],
     "transform_ids": [

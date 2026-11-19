@@ -1,3 +1,4 @@
+import { loopUtilityModel } from "../loopUtility.js";
 import { useAppearance } from "../hooks/useAppearance.js";
 import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js";
@@ -1185,6 +1186,7 @@ export function VideoStudio() {
             model={model}
             refinePrompt={refinePrompt}
             refineModel={refineModel}
+            loopModel={loopUtilityModel(models)}
             createModelDownloadJob={createModelDownloadJob}
             motion={motion}
             setMotion={setMotion}

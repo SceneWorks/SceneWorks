@@ -548,6 +548,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         return Ok(None);
                     }
                     let req = Flux2EditRequest {
+                        pag: None,
                         prompt: prompt.clone(),
                         negative: negative.clone(),
                         width,

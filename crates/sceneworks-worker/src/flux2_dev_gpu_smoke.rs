@@ -241,6 +241,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     .expect("load candle Flux2Edit dev");
 
     let req = Flux2EditRequest {
+        pag: None,
         prompt: env_or(
             "FLUX2_DEV_PROMPT",
             "make the person wear a bright red wizard hat",
@@ -340,6 +341,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
     .expect("load candle Flux2Control dev");
 
     let req = Flux2ControlRequest {
+        pag: None,
         prompt: env_or(
             "FLUX2_DEV_PROMPT",
             "a knight in ornate steel armor, dramatic cinematic lighting",
