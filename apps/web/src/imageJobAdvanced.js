@@ -42,6 +42,9 @@ export function buildImageJobAdvanced(state) {
     // SW-7180: Perturbed-Attention Guidance block (`{ scale, layers?, start?, stop?, adaptiveScale? }`),
     // already resolved by the studio (`null` / `undefined` when off or unsupported).
     pag,
+    // SW-6942: Two-phase low-resolution start recipe (`{ version: 1, k, scale }`), already resolved
+    // by the studio (`null` / `undefined` when off or unsupported).
+    lowResStart,
     // Step / guidance overrides.
     stepsOverride,
     guidanceOverride,
@@ -124,6 +127,7 @@ export function buildImageJobAdvanced(state) {
   return {
     ...(appearance ? { appearance, appearancePrompt: appearanceUserPrompt ?? "", appearanceNegativePrompt: appearanceUserNegative ?? "", ...(appearanceUserPromptBatch?.length ? { appearancePromptBatch: appearanceUserPromptBatch } : {}) } : {}),
     ...(pag ? { pag } : {}),
+    ...(lowResStart ? { lowResStart } : {}),
     ...(mossEdit ? {
       resolution,
       mossImage: editAdvanced.mossImage,

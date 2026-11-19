@@ -5,7 +5,13 @@ import React from "react";
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { minStepsForModel } from "../../videoModelLimits.js";
 import { showTransparencyToggle, transparencyPromptSuggestion, TRANSPARENCY_PROMPT_HINT } from "../../qwenAlpha.js";
-import { CAPTION_OVERFLOW_LABELS, H3_IMAGE_LCM_FIELDS, H3_IMAGE_SAMPLER_LABELS } from "./samplingControls.js";
+import {
+  CAPTION_OVERFLOW_LABELS,
+  H3_IMAGE_LCM_FIELDS,
+  H3_IMAGE_SAMPLER_LABELS,
+  LOW_RES_START_MAX_SCALE,
+  LOW_RES_START_MIN_SCALE,
+} from "./samplingControls.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration, upscaleFactorsForEngine } from "../../upscaleEngines.js";
 import { irisRestoreControls } from "../../irisRestore.js";
 import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
@@ -67,6 +73,10 @@ export function ImageAdvancedPanel({
   pag,
   setPag,
   pagError,
+  showLowResStart,
+  lowResStart,
+  setLowResStart,
+  lowResStartResolved,
   supportsTextStyle,
   textStyleGainConfig,
   setTextStyleGain,
@@ -393,6 +403,96 @@ export function ImageAdvancedPanel({
                       </label>
                     </div>
                   </details>
+                </div>
+              ) : null}
+              {showLowResStart ? (
+                <div className="low-res-start-controls">
+                  <label
+                    className="checkline low-res-start-toggle"
+                    title="Denoise the first K steps on a reduced latent grid, then resize and re-noise onto the full target resolution for steps K..M."
+                  >
+                    <input
+                      aria-label="Low-res start"
+                      checked={Boolean(lowResStart?.enabled)}
+                      onChange={(event) =>
+                        setLowResStart((current) => ({ ...current, enabled: event.target.checked }))
+                      }
+                      type="checkbox"
+                    />
+                    Low-res start
+                  </label>
+                  {lowResStart?.enabled ? (
+                    <div className="low-res-start-fields">
+                      <label>
+                        Low-res steps (K)
+                        <input
+                          aria-label="Low-res steps (K)"
+                          max={Math.max(1, (lowResStartResolved?.executedSteps ?? 2) - 1)}
+                          min={1}
+                          onChange={(event) =>
+                            setLowResStart((current) => ({
+                              ...current,
+                              k: event.target.value === "" ? "" : Number(event.target.value),
+                            }))
+                          }
+                          step={1}
+                          type="number"
+                          value={
+                            lowResStart?.k === "" || lowResStart?.k == null
+                              ? (lowResStartResolved?.effectiveK ?? 1)
+                              : lowResStart.k
+                          }
+                        />
+                      </label>
+                      <label>
+                        {`Phase split (${lowResStartResolved?.effectiveK ?? 1} / ${lowResStartResolved?.executedSteps ?? 0})`}
+                        <input
+                          aria-label="Low-res K / M slider"
+                          disabled={(lowResStartResolved?.executedSteps ?? 0) < 2}
+                          max={Math.max(1, (lowResStartResolved?.executedSteps ?? 2) - 1)}
+                          min={1}
+                          onChange={(event) =>
+                            setLowResStart((current) => ({
+                              ...current,
+                              k: Number(event.target.value),
+                            }))
+                          }
+                          step={1}
+                          type="range"
+                          value={Math.min(
+                            Math.max(1, Number(lowResStartResolved?.effectiveK ?? 1)),
+                            Math.max(1, (lowResStartResolved?.executedSteps ?? 2) - 1),
+                          )}
+                        />
+                        <span>{`${lowResStartResolved?.effectiveK ?? 1} / ${lowResStartResolved?.executedSteps ?? 0}`}</span>
+                      </label>
+                      <label>
+                        Low-res scale
+                        <input
+                          aria-label="Low-res scale"
+                          max={LOW_RES_START_MAX_SCALE}
+                          min={LOW_RES_START_MIN_SCALE}
+                          onChange={(event) =>
+                            setLowResStart((current) => ({
+                              ...current,
+                              scale: event.target.value === "" ? "" : Number(event.target.value),
+                            }))
+                          }
+                          step={0.05}
+                          type="number"
+                          value={lowResStart?.scale ?? 0.5}
+                        />
+                      </label>
+                      <span
+                        className="field-hint low-res-start-dimensions"
+                        data-testid="low-res-start-dimensions"
+                        role={lowResStartResolved?.error ? "alert" : "status"}
+                      >
+                        {lowResStartResolved?.error ||
+                          `Resolved grid: ${lowResStartResolved?.dimensions?.lowWidth ?? 0}×${lowResStartResolved?.dimensions?.lowHeight ?? 0} → ${lowResStartResolved?.dimensions?.fullWidth ?? 0}×${lowResStartResolved?.dimensions?.fullHeight ?? 0} (K=${lowResStartResolved?.effectiveK ?? 1} / M=${lowResStartResolved?.executedSteps ?? 0})`}
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               {supportsTextStyle ? (

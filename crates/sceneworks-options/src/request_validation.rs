@@ -144,6 +144,14 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
         {
             crate::pag::parse_pag_wire_value(raw_pag)?.to_policy_config()?;
         }
+        if let Some(raw_low_res) = payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get(crate::low_res_start::LOW_RES_START_KEY))
+            .filter(|value| !value.is_null())
+        {
+            crate::low_res_start::parse_low_res_start_wire_value(raw_low_res)?;
+        }
         match kind {
             "image" => shape::validate_image_job(&decode::<ImageJobRequest>(payload)?),
             "video" => shape::validate_video_job(&decode::<VideoJobRequest>(payload)?),
@@ -362,7 +370,7 @@ pub fn validate(
             .and_then(Value::as_str)
             .or(default_model.as_deref())
             .unwrap_or_default();
-        crate::image_sampling_controls::requested_low_res_start(advanced, entry)?;
+        crate::low_res_start::requested_low_res_start(model, payload, advanced, entry)?;
         crate::pag::requested_pag(model, advanced, entry)?;
         if matches!(kind, "image" | "video") {
             if let Some(steps) = crate::limits::requested_steps(advanced) {

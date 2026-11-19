@@ -51,6 +51,15 @@ pub fn for_model(
     let mut features = route
         .map(|route| serde_json::to_value(route).expect("serializable generator facts"))
         .unwrap_or_else(|| json!({}));
+    if let Some(route) = route {
+        for (feature_id, detail) in &route.features {
+            let applicable = detail
+                .get("applicable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            features[feature_id] = Value::Bool(applicable);
+        }
+    }
     if let Some(decoders) = model
         .get("decoders")
         .and_then(|value| value.get("byBackend"))

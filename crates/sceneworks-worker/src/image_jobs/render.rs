@@ -209,6 +209,14 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// Where the render's `GenerationReport::pag` — the Perturbed-Attention Guidance receipt that
     /// actually RAN (`pagExecutionReport`, SW-7180) — is collected for the image's provenance.
     pub(crate) pag_report: Option<&'a std::cell::RefCell<Option<gen_core::PagExecutionReport>>>,
+    /// Where the render's `GenerationReport::low_res_start` — the two-phase Low-Resolution Start
+    /// trajectory receipt (`lowResStartExecutionReport`, SW-6942) — is collected for provenance.
+    pub(crate) low_res_start_report:
+        Option<&'a std::cell::RefCell<Option<gen_core::LowResStartExecutionReport>>>,
+    /// Ordinary single-source img2img (`§6.13`) input `(source_image, strength)` for base FLUX.1
+    /// (`GenerationRequest.source_image` + `GenerationRequest.strength`), distinct from the
+    /// `Conditioning::Reference` IP-Adapter slot.
+    pub(crate) source_image: Option<&'a (Image, f32)>,
     /// Request-local completed provider report; a caller forwards it with the
     /// output instead of reading mutable generator state after another render.
     pub(crate) execution_report: Option<&'a std::cell::RefCell<Option<WorkerExecutionReport>>>,
@@ -409,6 +417,9 @@ fn render_request_on_surface(
     if let Some(sink) = surface.pag_report {
         *sink.borrow_mut() = report.pag;
     }
+    if let Some(sink) = surface.low_res_start_report {
+        *sink.borrow_mut() = report.low_res_start;
+    }
     let output = report
         .output
         .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
@@ -508,6 +519,9 @@ pub(super) fn build_render_request(
         caption_overflow: surface.controls.caption_overflow,
         h3_image_sampler: surface.controls.h3_image_sampler,
         pag: surface.controls.pag.clone(),
+        low_res_start: surface.controls.low_res_start,
+        source_image: surface.source_image.map(|(img, _)| img.clone()),
+        strength: surface.source_image.map(|(_, s)| *s),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
@@ -609,7 +623,7 @@ pub(super) fn build_hires_refinement_request(
     surface: &LaneRgbaSurface<'_>,
     cancel: &CancelFlag,
 ) -> WorkerResult<GenerationRequest> {
-    build_render_request(
+    let mut req = build_render_request(
         prompt,
         hires.width,
         hires.height,
@@ -633,7 +647,12 @@ pub(super) fn build_hires_refinement_request(
         preview,
         surface,
         cancel,
-    )
+    )?;
+    // `low_res_start` and ordinary `source_image` apply once to base pass 0 only (`FEAT-1`, `PIPE-2`).
+    req.low_res_start = None;
+    req.source_image = None;
+    req.strength = None;
+    Ok(req)
 }
 
 /// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
@@ -1099,6 +1118,9 @@ pub(super) fn generate_one_with_hires_on_surface(
     if let Some(sink) = surface.pag_report {
         sink.borrow_mut().take();
     }
+    if let Some(sink) = surface.low_res_start_report {
+        sink.borrow_mut().take();
+    }
 
     let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
         memory_strategy_context.map(|context| {
@@ -1134,6 +1156,7 @@ pub(super) fn generate_one_with_hires_on_surface(
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
     let base_execution_report = std::cell::RefCell::new(None);
+    let base_low_res_report = std::cell::RefCell::new(None);
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
         flux3_references: surface.flux3_references,
@@ -1143,6 +1166,8 @@ pub(super) fn generate_one_with_hires_on_surface(
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
         pag_report: None,
+        low_res_start_report: Some(&base_low_res_report),
+        source_image: surface.source_image,
         execution_report: Some(&base_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
@@ -1212,16 +1237,20 @@ pub(super) fn generate_one_with_hires_on_surface(
             on_progress(Progress::Upsampling { tokens, max_tokens })
         }
     };
+    let mut refine_controls = surface.controls.clone();
+    refine_controls.low_res_start = None;
     let refine_execution_report = std::cell::RefCell::new(None);
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         flux3_references: None,
         flux3_layout: None,
         output_channels: surface.output_channels,
-        controls: surface.controls.clone(),
+        controls: refine_controls,
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
         pag_report: surface.pag_report,
+        low_res_start_report: None,
+        source_image: None,
         execution_report: Some(&refine_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
@@ -1261,6 +1290,9 @@ pub(super) fn generate_one_with_hires_on_surface(
         completed_hires_report(vec![("base", base_execution), ("refine", refine_execution)])?;
     if let Some(sink) = surface.execution_report {
         *sink.borrow_mut() = Some(completed);
+    }
+    if let Some(sink) = surface.low_res_start_report {
+        *sink.borrow_mut() = base_low_res_report.take();
     }
     Ok(final_image)
 }
@@ -2166,5 +2198,203 @@ mod hires_report_tests {
             "{err:?}"
         );
         assert!(cancel_pag_sink.borrow().is_none());
+    }
+
+    #[test]
+    fn sw_6942_lane_surface_forwards_low_res_start_once_to_base_pass0_only_and_captures_receipt() {
+        type SeenPassRequest = (
+            u32,
+            u32,
+            Option<gen_core::LowResStartSpec>,
+            Option<f32>,
+            bool,
+        );
+
+        struct LowResHiresProbe {
+            descriptor: gen_core::ModelDescriptor,
+            seen_requests: std::sync::Mutex<Vec<SeenPassRequest>>,
+        }
+
+        impl LowResHiresProbe {
+            fn run_pass(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationReport> {
+                self.seen_requests.lock().unwrap().push((
+                    req.width,
+                    req.height,
+                    req.low_res_start,
+                    req.strength,
+                    req.source_image.is_some(),
+                ));
+                let total = req.steps.unwrap_or(4);
+                for current in 1..=total {
+                    on_progress(Progress::Step { current, total });
+                }
+                let mut report = gen_core::GenerationReport::from_output(
+                    gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                        width: req.width,
+                        height: req.height,
+                        pixels: vec![7; (req.width * req.height * 3) as usize],
+                    }]),
+                );
+                if let Some(spec) = req.low_res_start {
+                    let total_usize = total as usize;
+                    let resolved_plan = spec
+                        .resolve_geometry(
+                            "flux1_dev",
+                            req.width,
+                            req.height,
+                            total_usize,
+                            8,
+                            2,
+                            16,
+                            16,
+                        )
+                        .unwrap();
+                    let sigmas: Vec<f32> = (0..=total_usize)
+                        .map(|i| 1.0 - (i as f32 / (total_usize as f32)))
+                        .collect();
+                    report.low_res_start = Some(
+                        resolved_plan
+                            .execution_report(
+                                0,
+                                &sigmas,
+                                gen_core::sampling::Solver::Euler,
+                                "embedded_guidance",
+                                3.5,
+                                "base_dit",
+                                "bf16",
+                                2,
+                                1,
+                                16,
+                                64,
+                            )
+                            .unwrap(),
+                    );
+                }
+                Ok(report)
+            }
+        }
+
+        impl gen_core::Generator for LowResHiresProbe {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                &self.descriptor
+            }
+            fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn generate(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationOutput> {
+                Ok(self.run_pass(req, on_progress)?.output.unwrap())
+            }
+            fn generate_with_execution_report(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<CompletedGeneration> {
+                let report = self.run_pass(req, on_progress)?;
+                CompletedGeneration::new(
+                    report,
+                    ExecutionIdentity::provider_default(),
+                    &self.descriptor,
+                )
+            }
+        }
+
+        let probe = LowResHiresProbe {
+            descriptor: gen_core::ModelDescriptor {
+                id: "flux1_dev",
+                family: "flux1",
+                backend: "test",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                denoiser_output_latent_space: Some(&gen_core::FLUX1_LATENT_SPACE),
+                control_kinds: None,
+                encoder_contract: None,
+                required_components: &[],
+            },
+            seen_requests: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let low_res_spec = gen_core::LowResStartSpec::new(2, Some(0.5));
+        let source_img = (
+            gen_core::Image {
+                width: 64,
+                height: 64,
+                pixels: vec![1; 64 * 64 * 3],
+            },
+            0.75_f32,
+        );
+        let low_res_sink = std::cell::RefCell::new(None);
+        let exec_sink = std::cell::RefCell::new(None);
+        let out = generate_one_with_hires_on_surface(
+            &probe,
+            "a castle",
+            64,
+            64,
+            99,
+            4,
+            Some(3.5),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &PromptEnhance::default(),
+            Some(HiresFixPlan {
+                width: 128,
+                height: 128,
+                steps: 3,
+                guidance: Some(3.5),
+                true_cfg: None,
+                provider_reference_strength: 0.4,
+            }),
+            gen_core::PreviewSink::default(),
+            gen_core::PromptEnhancementSink::default(),
+            &LaneRgbaSurface {
+                controls: super::super::lane_controls::LaneRequestControls {
+                    low_res_start: Some(low_res_spec),
+                    ..Default::default()
+                },
+                source_image: Some(&source_img),
+                execution_report: Some(&exec_sink),
+                low_res_start_report: Some(&low_res_sink),
+                ..Default::default()
+            },
+            &CancelFlag::default(),
+            &mut |_| {},
+        )
+        .expect("low_res_start + hires-fix render succeeds");
+
+        assert_eq!((out.0, out.1), (128, 128));
+        let seen = probe.seen_requests.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "must execute base pass 0 and hires pass 1");
+        // Base pass 0 receives low_res_start and ordinary img2img source_image + strength:
+        assert_eq!(seen[0], (64, 64, Some(low_res_spec), Some(0.75), true));
+        // Hires refinement pass 1 runs WITHOUT low_res_start and without pass-0 source_image:
+        assert_eq!(seen[1], (128, 128, None, None, false));
+
+        // Base pass 0's low_res_start receipt is preserved onto the final surface sink:
+        let receipt = low_res_sink
+            .take()
+            .expect("base pass 0 low_res_start receipt preserved");
+        assert_eq!(receipt.k, 2);
+        assert_eq!((receipt.low_width, receipt.low_height), (32, 32));
+        assert_eq!((receipt.full_width, receipt.full_height), (64, 64));
     }
 }

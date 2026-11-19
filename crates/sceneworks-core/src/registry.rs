@@ -105,6 +105,17 @@ impl ModelSpec {
             .as_ref()
             .map(|pag| serde_json::to_value(pag).expect("serializable PAG spec"))
     }
+    /// Computed Feature availability flags (`features.low_res_start`), when the native route supports them.
+    pub fn features_value(&self) -> Option<Value> {
+        (!self.features.is_empty())
+            .then(|| serde_json::to_value(&self.features).expect("serializable features map"))
+    }
+    /// Computed Feature applicability details (`feature_details.low_res_start`), when the native route supports them.
+    pub fn feature_details_value(&self) -> Option<Value> {
+        (!self.feature_details.is_empty()).then(|| {
+            serde_json::to_value(&self.feature_details).expect("serializable feature details map")
+        })
+    }
 
     /// Author choices may change display text, visibility, product menus and valid defaults. Native
     /// routes, immutable download identities, restrictions, and evidence always come from the
@@ -145,6 +156,16 @@ impl ModelSpec {
             model["pag"] = pag;
         } else if let Some(object) = model.as_object_mut() {
             object.remove("pag");
+        }
+        if let Some(features) = self.features_value() {
+            model["features"] = features;
+        } else if let Some(object) = model.as_object_mut() {
+            object.remove("features");
+        }
+        if let Some(feature_details) = self.feature_details_value() {
+            model["feature_details"] = feature_details;
+        } else if let Some(object) = model.as_object_mut() {
+            object.remove("feature_details");
         }
         evidence::project_memory_evidence(&mut model, &Value::Object(facts))
             .expect("build-validated static model evidence projection");
@@ -305,6 +326,22 @@ pub fn project_option_route_facts(entry: &mut Value) {
             object.insert("pag".into(), pag);
         } else {
             object.remove("pag");
+        }
+        let (trusted_features, trusted_feature_details) =
+            if let Some(spec) = builtin_model_spec(&id) {
+                (spec.features_value(), spec.feature_details_value())
+            } else {
+                (None, None)
+            };
+        if let Some(features) = trusted_features {
+            object.insert("features".into(), features);
+        } else {
+            object.remove("features");
+        }
+        if let Some(feature_details) = trusted_feature_details {
+            object.insert("feature_details".into(), feature_details);
+        } else {
+            object.remove("feature_details");
         }
     }
 }

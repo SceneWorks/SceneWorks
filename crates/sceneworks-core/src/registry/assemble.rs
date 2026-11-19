@@ -146,11 +146,25 @@ pub fn assemble(
         serde_json::from_str(evidence).map_err(|e| e.to_string())?;
     let mut exports = BTreeMap::new();
     for &(backend, contents) in dumps {
-        let dump: DescriptorDump = serde_json::from_str(contents).map_err(|e| e.to_string())?;
+        let mut dump: DescriptorDump = serde_json::from_str(contents).map_err(|e| e.to_string())?;
         if dump.schema_version != 2 || dump.snapshot.backend != backend {
             return Err(format!(
                 "unsupported {backend} descriptor schema or backend"
             ));
+        }
+        for route in dump
+            .snapshot
+            .generator_capabilities
+            .iter_mut()
+            .chain(dump.snapshot.audio_generator_capabilities.iter_mut())
+        {
+            route.features.retain(|id, detail| {
+                id == "low_res_start"
+                    && detail
+                        .get("applicable")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            });
         }
         if exports.insert(backend, dump).is_some() {
             return Err(format!("duplicate {backend} descriptor"));
@@ -342,6 +356,28 @@ pub fn assemble(
         } else {
             None
         };
+        let mut features = BTreeMap::new();
+        let mut feature_details = BTreeMap::new();
+        if product.model_type == "image" && !routes.is_empty() {
+            let low_res_applicable = routes.values().all(|route| {
+                route
+                    .features
+                    .get("low_res_start")
+                    .and_then(|detail| detail.get("applicable"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            });
+            if low_res_applicable {
+                features.insert("low_res_start".to_owned(), true);
+                if let Some(detail) = routes
+                    .get("mlx")
+                    .or_else(|| routes.get("candle"))
+                    .and_then(|route| route.features.get("low_res_start"))
+                {
+                    feature_details.insert("low_res_start".to_owned(), detail.clone());
+                }
+            }
+        }
         if specs
             .insert(
                 id.clone(),
@@ -350,6 +386,8 @@ pub fn assemble(
                     routing: route_policy.for_model(&id),
                     preview_by_backend: preview.get(&id).cloned().unwrap_or_default(),
                     pag,
+                    features,
+                    feature_details,
                     routes,
                     video_routes,
                     provider_routes,

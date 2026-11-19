@@ -486,3 +486,14 @@ describe("buildImageJobAdvanced — SW-7106 MiniMax-H3-Image sampler", () => {
     expect(buildImageJobAdvanced(offState())).not.toHaveProperty("h3ImageSampler");
   });
 });
+
+// SW-6942: Two-phase low-resolution start recipe rides `advanced.lowResStart` only when enabled
+// and resolved on a participating noise-start route; disabled or non-participating routes omit it.
+describe("buildImageJobAdvanced — SW-6942 lowResStart", () => {
+  it("carries the resolved lowResStart block verbatim and omits it when disabled", () => {
+    const block = { version: 1, k: 8, scale: 0.5 };
+    expect(buildImageJobAdvanced(offState({ lowResStart: block })).lowResStart).toEqual(block);
+    expect(buildImageJobAdvanced(offState({ lowResStart: null }))).not.toHaveProperty("lowResStart");
+    expect(buildImageJobAdvanced(offState())).not.toHaveProperty("lowResStart");
+  });
+});

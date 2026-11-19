@@ -1194,6 +1194,136 @@ pub(crate) fn request_hires_pag_workspace_bytes(
     )
 }
 
+/// Canonical FLUX.1 architecture parameters for `low_res_start` transition qualification (`SW-6942`).
+pub(crate) const FLUX1_LATENT_CHANNELS: u32 = 16;
+pub(crate) const FLUX1_VAE_SPATIAL_SCALE: u32 = 8;
+pub(crate) const FLUX1_PATCH_SIZE: u32 = 2;
+pub(crate) const FLUX1_HEAD_DIM: u32 = 128;
+
+/// Maximum T5 sequence length for a first-cohort FLUX.1 route (`256` for `flux1_schnell`, `512` for
+/// `flux1_dev`). Returns `None` for non-first-cohort routes.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn flux1_t5_max_tokens(route_id: &str) -> Option<u32> {
+    match route_id {
+        "flux1_schnell" | "flux_schnell" => Some(256),
+        "flux1_dev" | "flux_dev" => Some(512),
+        _ => None,
+    }
+}
+
+/// Qualify the conservative byte bound for a first-cohort FLUX.1 (`flux1_schnell`, `flux1_dev`)
+/// `low_res_start` transition (`§6.12`, `B4`, `SW-6942`).
+///
+/// Covers:
+/// 1. Small-grid forward (`0..K` at `(low_w, low_h)`) proven bounded by `ordinary_t2i_peak_bytes`.
+/// 2. Read-only endpoint evaluation workspace at `sigma_K` proven bounded by `ordinary_t2i_peak_bytes`.
+/// 3. Solver snapshot / boundary handoff buffers (`2 * reduced_latent_fp32_bytes`).
+/// 4. Retained phase-1 conditioning/positional context (`img_ids` + RoPE cos/sin embeddings).
+/// 5. Six-buffer fp32 transition workspace ceiling (`2 * reduced_f32 + 4 * full_f32 = 4,718,592 B`
+///    at `512x512 -> 1024x1024`).
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn qualify_first_cohort_low_res_transition_bound(
+    route_id: &str,
+    ordinary_t2i_peak_bytes: u64,
+    evidence_basis: gen_core::EvidencePeakBasis,
+    plan: &gen_core::ResolvedLowResStartPlan,
+    batch: u32,
+) -> crate::WorkerResult<gen_core::LowResTransitionCoverageTrace> {
+    let t5_max_tokens = flux1_t5_max_tokens(route_id).ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(format!(
+            "{route_id}: low_res_start transition pricing is only qualified for the first cohort (flux1_schnell, flux1_dev)"
+        ))
+    })?;
+    gen_core::qualify_flux1_low_res_transition_bound(
+        ordinary_t2i_peak_bytes,
+        evidence_basis,
+        plan,
+        batch.max(1),
+        FLUX1_LATENT_CHANNELS,
+        FLUX1_VAE_SPATIAL_SCALE,
+        FLUX1_PATCH_SIZE,
+        t5_max_tokens,
+        FLUX1_HEAD_DIM,
+    )
+    .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))
+}
+
+/// Evaluate worker admission for an optional `low_res_start` plan against `budget` and `posture`
+/// (`ADM-3`, `B4`, `§6.12`, `SW-6942`).
+///
+/// - When `low_res_plan` is `None`, ordinary T2I admission is completely unchanged.
+/// - When `posture` is `LowResTransitionPricingPosture::UnqualifiedRealEvidence`, opted-in
+///   `low_res_start` is refused fail-closed with a typed `WorkerError::InvalidPayload` before
+///   loading weights, while ordinary T2I (`low_res_plan: None`) continues to admit unchanged.
+/// - Under `LowResTransitionPricingPosture::ConditionalSixBufferIncrement`, the SC-15823 Candle
+///   `flux1_dev` q4 `1024x1024` T2I fixture (`17,651,074,970 B` ordinary peak) admits at exact
+///   equality `17,655,793,562 B` (`+4,718,592 B` 6-buffer ceiling) and refuses one byte below at
+///   `17,655,793,561 B`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn evaluate_worker_low_res_transition_admission(
+    route_id: &str,
+    ordinary_t2i_peak_bytes: u64,
+    evidence_basis: gen_core::EvidencePeakBasis,
+    budget: gen_core::MemoryBudget,
+    low_res_plan: Option<&gen_core::ResolvedLowResStartPlan>,
+    batch: u32,
+    posture: &gen_core::LowResTransitionPricingPosture,
+) -> Result<gen_core::LowResTransitionAdmissionReceipt, gen_core::LowResTransitionAdmissionRefusal>
+{
+    gen_core::evaluate_low_res_transition_admission(
+        route_id,
+        ordinary_t2i_peak_bytes,
+        evidence_basis,
+        budget,
+        low_res_plan,
+        batch.max(1),
+        FLUX1_LATENT_CHANNELS,
+        FLUX1_VAE_SPATIAL_SCALE,
+        posture,
+    )
+}
+
+/// Compute the conservative incremental transition workspace bytes above the ordinary full-grid
+/// peak for an active `low_res_start` request on a first-cohort FLUX.1 route (`SW-6942`).
+///
+/// Returns `Ok(0)` when `low_res_start` is `None`, so disabled / non-participating requests
+/// preserve their exact existing admission bytes.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn low_res_start_workspace_bytes(
+    route_id: &str,
+    width: u32,
+    height: u32,
+    batch: u32,
+    executed_steps: u32,
+    low_res_start: Option<&gen_core::LowResStartSpec>,
+) -> crate::WorkerResult<u64> {
+    let Some(spec) = low_res_start else {
+        return Ok(0);
+    };
+    let resolved = spec
+        .resolve_geometry(
+            route_id,
+            width,
+            height,
+            executed_steps.max(2) as usize,
+            FLUX1_VAE_SPATIAL_SCALE,
+            FLUX1_PATCH_SIZE,
+            16,
+            256,
+        )
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
+    let trace = qualify_first_cohort_low_res_transition_bound(
+        route_id,
+        0,
+        gen_core::EvidencePeakBasis::WHOLE_REQUEST_HIGH_WATER_COPIED_TO_PHASES,
+        &resolved,
+        batch.max(1),
+    )?;
+    trace
+        .total_incremental_bytes_above_ordinary()
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2349,6 +2479,396 @@ mod corpus_replay_tests {
                 Some(&active),
             ),
             b1536
+        );
+    }
+
+    #[test]
+    fn sw_6942_b4_mem4_mem5_low_res_start_worker_admission_and_scope_lifecycle() {
+        use gen_core::{
+            AdmissionAdjustmentCandidate, EquivalentAdmissionRefusal, EvidencePeakBasis,
+            FeatureClass, LowResStartSpec, LowResTransitionAdmissionRefusal,
+            LowResTransitionPricingPosture, LowResTransitionSixBufferCeiling, MemoryBudget,
+            MemoryGeometry, MemoryPhase, MemoryRequestScope, MemoryRunOutcome, MemoryStrategy,
+            RecordedScopeLifecycleEvent, CANDLE_FLUX1_DEV_Q4_1024_CONDITIONAL_LOW_RES_PEAK_BYTES,
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+            FLUX1_LOW_RES_1024_SIX_BUFFER_CEILING_BYTES,
+        };
+
+        // 1. MEM-4: equivalent-only admission rejects TrajectoryApproximation (`low_res_start`),
+        // Diagnostic, and quant-tier changes even when they would fit a smaller budget.
+        let non_equivalent_low_res = AdmissionAdjustmentCandidate {
+            id: "auto_enable_low_res_start".into(),
+            feature_class: FeatureClass::Recipe,
+            strategy: MemoryStrategy::Resident,
+            changes_quantization_tier: false,
+            alters_recipe_trajectory: true,
+            incremental_peak_bytes: 1_000,
+        };
+        let non_equivalent_diagnostic = AdmissionAdjustmentCandidate {
+            id: "auto_enable_diagnostic".into(),
+            feature_class: FeatureClass::Diagnostic,
+            strategy: MemoryStrategy::Resident,
+            changes_quantization_tier: false,
+            alters_recipe_trajectory: false,
+            incremental_peak_bytes: 1_000,
+        };
+        let non_equivalent_quant = AdmissionAdjustmentCandidate {
+            id: "auto_downtier_q4".into(),
+            feature_class: FeatureClass::Equivalent,
+            strategy: MemoryStrategy::Resident,
+            changes_quantization_tier: true,
+            alters_recipe_trajectory: false,
+            incremental_peak_bytes: 1_000,
+        };
+        let equivalent_staged = AdmissionAdjustmentCandidate {
+            id: "staged_residency".into(),
+            feature_class: FeatureClass::Equivalent,
+            strategy: MemoryStrategy::StagedResidency,
+            changes_quantization_tier: false,
+            alters_recipe_trajectory: false,
+            incremental_peak_bytes: 10_000,
+        };
+        assert!(
+            gen_core::validate_equivalent_admission_candidate(&non_equivalent_low_res).is_err()
+        );
+        assert!(
+            gen_core::validate_equivalent_admission_candidate(&non_equivalent_diagnostic).is_err()
+        );
+        assert!(gen_core::validate_equivalent_admission_candidate(&non_equivalent_quant).is_err());
+        assert!(gen_core::validate_equivalent_admission_candidate(&equivalent_staged).is_ok());
+
+        let tight_budget = MemoryBudget {
+            total_bytes: 5_000,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        };
+        let candidates = [
+            non_equivalent_low_res,
+            non_equivalent_diagnostic,
+            non_equivalent_quant,
+            equivalent_staged,
+        ];
+        assert_eq!(
+            gen_core::select_equivalent_only_admission(tight_budget, &candidates).unwrap_err(),
+            EquivalentAdmissionRefusal::InsufficientEquivalentAdjustments {
+                effective_budget_bytes: 5_000,
+                lowest_equivalent_peak_bytes: Some(10_000),
+                forbidden_candidates_skipped: vec![
+                    "auto_enable_low_res_start".into(),
+                    "auto_enable_diagnostic".into(),
+                    "auto_downtier_q4".into(),
+                ],
+            }
+        );
+
+        let fitting_budget = MemoryBudget {
+            total_bytes: 10_000,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        };
+        let chosen =
+            gen_core::select_equivalent_only_admission(fitting_budget, &candidates).unwrap();
+        assert_eq!(chosen.id, "staged_residency");
+
+        // 2. B4 (§6.12): Six-buffer fp32 transition workspace ceiling at 512x512 -> 1024x1024
+        // (2 * 262,144 + 4 * 1,048,576 = 4,718,592 B) and exact-fit / one-byte-under witness on
+        // the SC-15823 Candle flux1_dev q4 1024x1024 T2I fixture (17,651,074,970 B ordinary peak).
+        let spec = LowResStartSpec::new(4, Some(0.5));
+        let resolved = spec
+            .resolve_geometry(
+                "flux1_dev",
+                1024,
+                1024,
+                8,
+                FLUX1_VAE_SPATIAL_SCALE,
+                FLUX1_PATCH_SIZE,
+                16,
+                256,
+            )
+            .unwrap();
+        assert_eq!((resolved.low_width, resolved.low_height), (512, 512));
+        assert_eq!((resolved.full_width, resolved.full_height), (1024, 1024));
+
+        let six_buffer = LowResTransitionSixBufferCeiling::compute(
+            &resolved,
+            1,
+            FLUX1_LATENT_CHANNELS,
+            FLUX1_VAE_SPATIAL_SCALE,
+        )
+        .unwrap();
+        assert_eq!(six_buffer.reduced_latent_fp32_bytes, 262_144);
+        assert_eq!(six_buffer.full_latent_fp32_bytes, 1_048_576);
+        assert_eq!(
+            six_buffer.total_six_buffer_ceiling_bytes,
+            FLUX1_LOW_RES_1024_SIX_BUFFER_CEILING_BYTES
+        );
+        assert_eq!(six_buffer.total_six_buffer_ceiling_bytes, 4_718_592);
+        assert_eq!(
+            CANDLE_FLUX1_DEV_Q4_1024_CONDITIONAL_LOW_RES_PEAK_BYTES,
+            17_655_793_562
+        );
+
+        let basis = EvidencePeakBasis::WHOLE_REQUEST_HIGH_WATER_COPIED_TO_PHASES;
+        let exact_receipt = evaluate_worker_low_res_transition_admission(
+            "flux1_dev",
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+            basis,
+            MemoryBudget {
+                total_bytes: 17_655_793_562,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            Some(&resolved),
+            1,
+            &LowResTransitionPricingPosture::ConditionalSixBufferIncrement,
+        )
+        .expect("exact equality 17,655,793,562 B must admit");
+        assert!(exact_receipt.low_res_active);
+        assert_eq!(exact_receipt.transition_delta_bytes, 4_718_592);
+        assert_eq!(exact_receipt.required_peak_bytes, 17_655_793_562);
+
+        let one_byte_below = evaluate_worker_low_res_transition_admission(
+            "flux1_dev",
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+            basis,
+            MemoryBudget {
+                total_bytes: 17_655_793_561,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            Some(&resolved),
+            1,
+            &LowResTransitionPricingPosture::ConditionalSixBufferIncrement,
+        )
+        .unwrap_err();
+        assert_eq!(
+            one_byte_below,
+            LowResTransitionAdmissionRefusal::ExceedsEffectiveBudget {
+                route_id: "flux1_dev".into(),
+                required_peak_bytes: 17_655_793_562,
+                effective_budget_bytes: 17_655_793_561,
+                deficit_bytes: 1,
+            }
+        );
+
+        // 3. B4 (§6.12) real-evidence fail-closed posture: when a cell only records an
+        // unclassified whole-request high-water mark without a qualified bound, opted-in
+        // `low_res_start` is refused with a typed reason before load while ordinary T2I
+        // (`low_res_plan: None`) remains completely unchanged!
+        let unqualified_refusal = evaluate_worker_low_res_transition_admission(
+            "flux1_dev",
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+            basis,
+            MemoryBudget {
+                total_bytes: 24 * 1024 * 1024 * 1024,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            Some(&resolved),
+            1,
+            &LowResTransitionPricingPosture::UnqualifiedRealEvidence,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unqualified_refusal,
+            LowResTransitionAdmissionRefusal::UnpricedTransitionIncrementsOnWholeRequestEvidence {
+                ordinary_t2i_peak_bytes: 17_651_074_970,
+                six_buffer_ceiling_bytes: 4_718_592,
+                ..
+            }
+        ));
+
+        let ordinary_unchanged = evaluate_worker_low_res_transition_admission(
+            "flux1_dev",
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+            basis,
+            MemoryBudget {
+                total_bytes: CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            None,
+            1,
+            &LowResTransitionPricingPosture::UnqualifiedRealEvidence,
+        )
+        .expect("ordinary T2I must remain completely unchanged");
+        assert!(!ordinary_unchanged.low_res_active);
+        assert_eq!(ordinary_unchanged.transition_delta_bytes, 0);
+        assert_eq!(
+            ordinary_unchanged.required_peak_bytes,
+            CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES
+        );
+
+        // 4. First-cohort (`flux1_schnell` and `flux1_dev`) conservative bound qualification:
+        assert_eq!(
+            low_res_start_workspace_bytes("flux1_dev", 1024, 1024, 1, 8, None).unwrap(),
+            0
+        );
+        for route in ["flux1_schnell", "flux1_dev"] {
+            let trace = qualify_first_cohort_low_res_transition_bound(
+                route,
+                CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+                basis,
+                &resolved,
+                1,
+            )
+            .unwrap();
+            let delta = trace.total_incremental_bytes_above_ordinary().unwrap();
+            assert!(delta > FLUX1_LOW_RES_1024_SIX_BUFFER_CEILING_BYTES);
+            assert_eq!(
+                low_res_start_workspace_bytes(route, 1024, 1024, 1, 8, Some(&spec)).unwrap(),
+                delta
+            );
+            let bounded_peak = trace.total_bounded_peak_bytes().unwrap();
+            let posture = LowResTransitionPricingPosture::QualifiedConservativeBound(trace);
+            let admitted = evaluate_worker_low_res_transition_admission(
+                route,
+                CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+                basis,
+                MemoryBudget {
+                    total_bytes: bounded_peak,
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                Some(&resolved),
+                1,
+                &posture,
+            )
+            .unwrap();
+            assert_eq!(admitted.required_peak_bytes, bounded_peak);
+            assert!(evaluate_worker_low_res_transition_admission(
+                route,
+                CANDLE_FLUX1_DEV_Q4_1024_ORDINARY_PEAK_BYTES,
+                basis,
+                MemoryBudget {
+                    total_bytes: bounded_peak - 1,
+                    committed_bytes: 0,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                Some(&resolved),
+                1,
+                &posture,
+            )
+            .is_err());
+        }
+
+        // 5. MEM-5 per-phase `RenderPhaseIdentity` scope transitions:
+        #[derive(Default)]
+        struct NoopScope;
+        impl MemoryRequestScope for NoopScope {
+            fn configure_request(
+                &mut self,
+                _: &mut gen_core::GenerationRequest,
+            ) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn enter_phase(&mut self, _: MemoryPhase) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn leave_phase(&mut self, _: MemoryPhase) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn configure_decode(
+                &mut self,
+                _: u32,
+                _: u32,
+                _: MemoryGeometry,
+            ) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn configure_attention(&mut self, _: u32) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn materialize_transformer_window(&mut self, _: u32, _: u32) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn finish(&mut self, _: MemoryRunOutcome) -> gen_core::Result<()> {
+                Ok(())
+            }
+        }
+
+        let descriptor = gen_core::ModelDescriptor {
+            id: "flux1_dev",
+            family: "flux1",
+            backend: "test",
+            modality: gen_core::Modality::Image,
+            capabilities: gen_core::Capabilities {
+                min_size: 256,
+                max_size: 2048,
+                ..Default::default()
+            },
+            denoiser_output_latent_space: Some(&gen_core::FLUX1_LATENT_SPACE),
+            control_kinds: None,
+            encoder_contract: None,
+            required_components: &[],
+        };
+        let req = gen_core::GenerationRequest {
+            prompt: "test".into(),
+            width: 1024,
+            height: 1024,
+            count: 1,
+            steps: Some(8),
+            low_res_start: Some(spec),
+            ..Default::default()
+        };
+        let plan = gen_core::RenderPlan::base_image(
+            &descriptor,
+            &req,
+            gen_core::render::PackedImagePass {
+                pixel_stride: 16,
+                token_width: 64,
+                sampler: "euler",
+                guidance: 3.5,
+                sigmas: vec![1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125, 0.0],
+                executed_steps: 8,
+                capture_sigma: 0.0,
+            },
+        )
+        .unwrap();
+        let mut scope = NoopScope;
+        let events = gen_core::trace_planned_low_res_scope_lifecycle(
+            &plan,
+            &gen_core::CancelFlag::new(),
+            &mut scope,
+            Some(4096),
+            Some((0, 1)),
+            Some((512, 128)),
+        )
+        .unwrap();
+        let entered_phases: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                RecordedScopeLifecycleEvent::EnterRenderPhase {
+                    phase,
+                    pass_index,
+                    phase_index,
+                    geometry,
+                } => Some((
+                    *phase,
+                    *pass_index,
+                    *phase_index,
+                    geometry.width,
+                    geometry.height,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            entered_phases,
+            vec![
+                (MemoryPhase::Conditioning, 0, 0, 1024, 1024),
+                (MemoryPhase::Denoise, 0, 0, 512, 512),
+                (MemoryPhase::Denoise, 0, 1, 1024, 1024),
+                (MemoryPhase::Decode, 0, 0, 1024, 1024),
+            ]
         );
     }
 }

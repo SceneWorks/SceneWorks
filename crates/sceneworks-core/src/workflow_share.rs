@@ -715,7 +715,7 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
-    allow_from("lowResStart", AdvancedShape::LowResStart, AdvancedKeySource::Server, "Versioned low-res recipe params; requires outer share v2. Execution availability is checked separately."),
+    allow("lowResStart", AdvancedShape::LowResStart, "Versioned low-res recipe params; requires outer share v2. Execution availability is checked separately."),
     allow("flux3_layout", AdvancedShape::Flux3Layout, "Authored FLUX.3 soft-guidance boxes; public row fields only, never worker provenance."),
     allow("flux3_reference_ids", AdvancedShape::StringList, "Ordered attachment-instance identities for FLUX.3 layout replay; not asset paths."),
     allow("mossImageEdit", AdvancedShape::MossImageEditOptions, "Authored native edit reference edge and cache policy, emitted and restored by Studio."),

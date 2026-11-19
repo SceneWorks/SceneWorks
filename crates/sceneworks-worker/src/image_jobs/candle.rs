@@ -785,6 +785,15 @@ async fn generate_candle_registry_stream_using(
     } else {
         None
     };
+    let flux_source_image = if edit_reference.is_none()
+        && img2img_reference.is_none()
+        && edit_refs.is_empty()
+        && !has_reference
+    {
+        super::conditioning::resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
+    } else {
+        None
+    };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
     // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the
@@ -1007,7 +1016,17 @@ async fn generate_candle_registry_stream_using(
             .map_or(1, lane_controls::NativePromptBatch::images),
         model.descriptor.capabilities.pag.as_ref(),
         lane_controls.pag.as_ref(),
-    );
+    )
+    .saturating_add(crate::execution_planner::low_res_start_workspace_bytes(
+        engine_id,
+        width,
+        height,
+        native_batch
+            .as_ref()
+            .map_or(1, lane_controls::NativePromptBatch::images),
+        steps,
+        lane_controls.low_res_start.as_ref(),
+    )?);
     // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
     // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
     // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
@@ -2377,11 +2396,13 @@ async fn generate_candle_registry_stream_using(
         let planning_guidance_method = guidance_method.clone();
         let planning_enhance = enhance.clone();
         let planning_batch = native_batch.clone();
+        let planning_flux_source_image = flux_source_image.clone();
         let planning_lane_controls = lane_controls.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
                 output_channels: rgba_output_channels,
                 controls: planning_lane_controls.clone(),
+                source_image: planning_flux_source_image.as_ref(),
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
             };
@@ -2675,6 +2696,7 @@ async fn generate_candle_registry_stream_using(
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
                         let pag_report = std::cell::RefCell::new(None);
+                        let low_res_start_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -2709,6 +2731,8 @@ async fn generate_candle_registry_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
+                                low_res_start_report: Some(&low_res_start_report),
+                                source_image: None,
                                 prompt_batch: Some(batch),
                                 render_plan: render_plans.first().and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2733,6 +2757,10 @@ async fn generate_candle_registry_stream_using(
                             &mut facts,
                             pag_report.take().as_ref(),
                         );
+                        lane_controls::record_low_res_start_execution_report(
+                            &mut facts,
+                            low_res_start_report.take().as_ref(),
+                        );
                         Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
@@ -2747,6 +2775,7 @@ async fn generate_candle_registry_stream_using(
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
                     let pag_report = std::cell::RefCell::new(None);
+                    let low_res_start_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -2799,6 +2828,8 @@ async fn generate_candle_registry_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
+                                low_res_start_report: Some(&low_res_start_report),
+                                source_image: flux_source_image.as_ref(),
                                 prompt_batch: None,
                                 render_plan: render_plans.get(index).and_then(Option::as_ref),
                                 hires_render_plan: None,
@@ -2855,6 +2886,10 @@ async fn generate_candle_registry_stream_using(
                     lane_controls::record_pag_execution_report(
                         &mut facts,
                         pag_report.take().as_ref(),
+                    );
+                    lane_controls::record_low_res_start_execution_report(
+                        &mut facts,
+                        low_res_start_report.take().as_ref(),
                     );
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(

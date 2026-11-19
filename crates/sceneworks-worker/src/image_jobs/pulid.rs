@@ -385,6 +385,9 @@ pub(super) async fn generate_pulid_flux_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_low_res_start("PuLID-FLUX")
+        .map_err(WorkerError::InvalidPayload)?;
     let pag = super::sampling::resolve_bespoke_pag(request)?;
     let flux_base = resolve_pulid_flux_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("PuLID-FLUX base (FLUX.1-dev) not found".to_owned())
