@@ -1486,6 +1486,9 @@ fn receipt_installed_requirements(models_dir: &Path) -> Vec<ExternalArtifactRequ
                     files
                         .iter()
                         .filter_map(serde_json::Value::as_str)
+                        .filter(|file| {
+                            !crate::download_receipt::is_candle_device_format_cache_path(file)
+                        })
                         .map(PathBuf::from)
                         .collect::<Vec<_>>()
                 })

@@ -160,7 +160,6 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     let frames: std::sync::Arc<std::sync::Mutex<Vec<PreviewFrame>>> = Default::default();
     let sink_frames = std::sync::Arc::clone(&frames);
     let req = QwenEditRequest {
-        pag: None,
         prompt: prompt.clone(),
         negative: negative.clone(),
         width: w,
@@ -174,6 +173,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         lightning: false,
         stage_residency: false,
         memory: None,
+        pag: None,
         cancel: cancel.clone(),
         preview: PreviewSink::new(move |frame: PreviewFrame| {
             sink_frames.lock().expect("preview frames").push(frame);
@@ -448,7 +448,6 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             pixels: vec![128u8; (w * h * 3) as usize],
         };
         let req = QwenEditRequest {
-            pag: None,
             prompt: prompt.to_owned(),
             negative: negative.to_owned(),
             width: w,
@@ -462,6 +461,7 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             lightning: false,
             stage_residency: false,
             memory: None,
+            pag: None,
             cancel: CancelFlag::new(),
             // Deliberately INERT here (sc-16962): this smoke measures VRAM occupancy across a
             // load/drop/reload cycle, and the projection's transient allocation would perturb the very

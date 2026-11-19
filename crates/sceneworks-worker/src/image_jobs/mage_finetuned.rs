@@ -486,6 +486,9 @@ pub(super) async fn generate_mage_finetuned_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_active_pag("Mage fine-tuned")
+        .map_err(WorkerError::InvalidPayload)?;
     // Require the base's shared components before any compute — a clear "install the Mage-Flow
     // Base model first" error rather than a deep load failure.
     let components = resolve_mage_finetuned_components(settings)?;
@@ -573,6 +576,7 @@ pub(super) async fn generate_mage_finetuned_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     };
 
     let sampling = super::sampling::explicit_sampling_request(request);

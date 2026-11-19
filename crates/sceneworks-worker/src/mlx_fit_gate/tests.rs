@@ -1837,6 +1837,7 @@ fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     }
 }
 
@@ -1858,6 +1859,7 @@ fn krea_raw_true_cfg_and_reference_img2img_keep_exact_public_and_provider_shapes
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     };
     let (mode, mode_key) = request_mode(&plain.mode);
     assert_eq!(mode, MemoryMode::TextToImage);
@@ -2019,6 +2021,7 @@ fn flux1_provider_overlay_is_derived_from_the_complete_load_identity() {
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     };
     for provider in ["flux1_schnell", "flux1_dev"] {
         for mode in ["text_to_image", "style_variations"] {
@@ -2858,6 +2861,7 @@ fn fixture_inputs(width: u32, height: u32) -> MlxRequestInputs {
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     }
 }
 
@@ -4039,6 +4043,7 @@ fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exac
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: 0,
     };
     assert_eq!(
         provider_request_mode("flux2_klein_9b", &public_base),
@@ -4138,6 +4143,7 @@ fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exac
                 negative_branch: false,
                 prefix_kv_cache_eligible: false,
                 reference_resources: None,
+                pag_workspace_bytes: 0,
             };
             let evaluation = evaluate_request_with_budget(
                 &generator,
@@ -4190,6 +4196,7 @@ fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exac
             negative_branch: false,
             prefix_kv_cache_eligible: false,
             reference_resources: None,
+            pag_workspace_bytes: 0,
         };
         let mut refused = plan.clone();
         refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
@@ -4324,6 +4331,7 @@ fn flux2_klein_refused_low_rank_routes_remain_executable_through_real_provider_s
                 negative_branch: false,
                 prefix_kv_cache_eligible: false,
                 reference_resources: None,
+                pag_workspace_bytes: 0,
             };
             let evaluation = evaluate_request_with_budget(
                 &generator,
@@ -16261,4 +16269,134 @@ fn the_minimax_h3_image_floor_residue_is_the_staged_regime_and_only_on_an_always
         }
     }
     assert_eq!(residue(coresident_lane), None);
+}
+
+#[test]
+fn pag_workspace_bytes_preserves_inert_admission_and_charges_active_pag_across_evidence_and_rungs()
+{
+    let bundle = fixture_bundle();
+    let generator = fixture_generator();
+    let plan = fixture_plan();
+    let base_inputs = fixture_inputs(1024, 1024);
+    let pag_surcharge = gib_to_bytes(1.5);
+    let mut pag_inputs = fixture_inputs(1024, 1024);
+    pag_inputs.pag_workspace_bytes = pag_surcharge;
+
+    // 1. Calibrated Evidence route at spacious 16 GiB budget: active PAG adds exact workspace bytes
+    let baseline_eval = evaluate_request_with_budget_using_bundle(
+        &generator,
+        &plan,
+        &base_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        fixture_budget(16.0),
+        gib_to_bytes(5.0),
+        0,
+        &[],
+        Some(&bundle),
+        None,
+    )
+    .expect("baseline calibrated request admits");
+    let pag_eval = evaluate_request_with_budget_using_bundle(
+        &generator,
+        &plan,
+        &pag_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        fixture_budget(16.0),
+        gib_to_bytes(5.0),
+        0,
+        &[],
+        Some(&bundle),
+        None,
+    )
+    .expect("spacious calibrated PAG request admits");
+    assert_eq!(
+        pag_eval.context.predicted_peak_bytes,
+        baseline_eval.context.predicted_peak_bytes + pag_surcharge,
+        "active PAG workspace bytes must add onto calibrated predicted peak"
+    );
+
+    // 2. At tight 8 GiB budget (5 GiB process limit after 3 GiB foreign reserve):
+    // inert/baseline (5.0 GiB) admits, while active PAG (6.5 GiB) refuses
+    evaluate_request_with_budget_using_bundle(
+        &generator,
+        &plan,
+        &base_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        fixture_budget(8.0),
+        gib_to_bytes(5.0),
+        0,
+        &[],
+        Some(&bundle),
+        None,
+    )
+    .expect("baseline 5 GiB cell fits 8 GiB host boundary");
+    let rejected = evaluate_request_with_budget_using_bundle(
+        &generator,
+        &plan,
+        &pag_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        fixture_budget(8.0),
+        gib_to_bytes(5.0),
+        0,
+        &[],
+        Some(&bundle),
+        None,
+    )
+    .expect_err("active PAG surcharge must push 5 GiB cell over 5 GiB process limit");
+    assert!(
+        rejected
+            .to_string()
+            .contains("smallest verified MLX host boundary"),
+        "unexpected refusal: {rejected}"
+    );
+
+    // 3. Legacy estimate ladder: active PAG adds exact workspace bytes onto estimated peak too
+    let legacy_plan = MlxRequestPlan {
+        calibration: MlxCalibrationConfig::Absent,
+        ..fixture_plan()
+    };
+    let total_peak = legacy_plan.generic_total_peak_bytes(request_geometry(&base_inputs));
+    let legacy_base = evaluate_request_with_budget_using_bundle(
+        &generator,
+        &legacy_plan,
+        &base_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(legacy_plan.engine_id),
+        fixture_budget(32.0),
+        total_peak,
+        0,
+        &[],
+        None,
+        None,
+    )
+    .expect("legacy baseline admits");
+    let legacy_pag = evaluate_request_with_budget_using_bundle(
+        &generator,
+        &legacy_plan,
+        &pag_inputs,
+        MemoryCacheState::Cold,
+        OffloadPolicy::Resident,
+        crate::execution_planner::WarmPolicyProposal::inert(legacy_plan.engine_id),
+        fixture_budget(32.0),
+        total_peak,
+        0,
+        &[],
+        None,
+        None,
+    )
+    .expect("legacy PAG admits on spacious host");
+    assert_eq!(
+        legacy_pag.context.predicted_peak_bytes,
+        legacy_base.context.predicted_peak_bytes + pag_surcharge,
+        "active PAG workspace bytes must add onto legacy estimate predicted peak"
+    );
 }

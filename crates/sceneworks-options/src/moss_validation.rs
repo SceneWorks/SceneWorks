@@ -151,7 +151,8 @@ pub fn options_schema() -> Value {
         "max_sequence_length":{"type":"integer","minimum":1,"maximum":4096,"default":4096},
         "uncond_skip_layers":{"anyOf":[{"type":"null"},layers.clone()]},
         "training_shift":{"anyOf":[{"type":"null"},{"type":"number","exclusiveMinimum":0}]},
-        "slg":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["layers","scale","start","stop"],"properties":{"layers":layers,"scale":{"type":"number","minimum":0},"start":{"type":"number","minimum":0,"maximum":1},"stop":{"type":"number","minimum":0,"maximum":1}}}]}
+        "slg":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["layers","scale","start","stop"],"properties":{"layers":layers.clone(),"scale":{"type":"number","minimum":0},"start":{"type":"number","minimum":0,"maximum":1},"stop":{"type":"number","minimum":0,"maximum":1}}}]},
+        "pag":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["scale"],"properties":{"scale":{"type":"number","minimum":0,"maximum":15},"layers":{"anyOf":[{"type":"null"},layers]},"start":{"anyOf":[{"type":"null"},{"type":"number","minimum":0,"maximum":1}]},"stop":{"anyOf":[{"type":"null"},{"type":"number","minimum":0,"maximum":1}]},"adaptive_scale":{"anyOf":[{"type":"null"},{"type":"number","minimum":0}]}}}]}
     }})
 }
 pub fn options(advanced: &JsonObject) -> Result<MossImageOptions, String> {
@@ -307,6 +308,16 @@ pub fn native_request(
         crate::image_request::default_resolution(entry).unwrap_or((1024, 1024))
     };
     let opts = options(&advanced)?;
+    let pag = if let Some(raw) = advanced.get(crate::pag::PAG_KEY).filter(|v| !v.is_null()) {
+        let cap = crate::pag::capability_from_entry(entry)
+            .map_err(|e| e.detail)?
+            .unwrap_or_else(gen_core_moss_image_policy::moss_image_pag_capability);
+        let (cfg, _) =
+            crate::pag::validate_pag_value_with_capability(raw, &cap).map_err(|e| e.detail)?;
+        Some(cfg)
+    } else {
+        None
+    };
     let mut request = MossRequest {
         prompt: payload
             .get("prompt")
@@ -326,6 +337,7 @@ pub fn native_request(
                     .unwrap_or(1) as u32,
             )?,
             moss_image: Some(opts),
+            pag,
             negative_prompt: payload
                 .get("negativePrompt")
                 .map(|v| {

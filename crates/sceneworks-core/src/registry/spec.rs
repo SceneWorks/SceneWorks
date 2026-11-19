@@ -16,6 +16,9 @@ pub struct ModelSpec {
     /// Stage-1/2 generated preview feature export, joined at build time for every public model.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub preview_by_backend: BTreeMap<String, bool>,
+    /// Perturbed-Attention Guidance capability derived from native generator descriptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pag: Option<PagSpec>,
     /// The primary image generator on each backend, retained for existing consumers.
     pub routes: BTreeMap<String, GeneratorRoute>,
     /// Video modes can select several native engines on the same backend.
@@ -129,6 +132,7 @@ pub struct ProviderRoute {
     pub generator: Option<GeneratorRoute>,
 }
 
+// Field names here are those of the shipped native runtime descriptor (snake case).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PagRouteCapability {
     pub num_blocks: u32,
@@ -140,7 +144,39 @@ pub struct PagRouteCapability {
     pub max_scale: f32,
 }
 
-// Field names here are those of the shipped native runtime descriptor (snake case).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PagSpec {
+    pub num_blocks: u32,
+    pub block_domain: String,
+    pub default_layers: Vec<u32>,
+    pub default_start: f64,
+    pub default_stop: f64,
+    pub recommended_scale: f64,
+    pub max_scale: f64,
+}
+
+fn clean_f32_as_f64(value: f32) -> f64 {
+    value
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or_else(|_| f64::from(value))
+}
+
+impl From<&PagRouteCapability> for PagSpec {
+    fn from(route: &PagRouteCapability) -> Self {
+        Self {
+            num_blocks: route.num_blocks,
+            block_domain: route.block_domain.clone(),
+            default_layers: route.default_layers.clone(),
+            default_start: clean_f32_as_f64(route.default_start),
+            default_stop: clean_f32_as_f64(route.default_stop),
+            recommended_scale: clean_f32_as_f64(route.recommended_scale),
+            max_scale: clean_f32_as_f64(route.max_scale),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeneratorRoute {
     pub id: String,

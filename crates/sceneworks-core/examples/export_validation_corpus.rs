@@ -214,6 +214,18 @@ fn main() {
             "Supra2 unsupported negative prompt",
             json!({"projectId":"p","model":"supra2_img","prompt":"tree","negativePrompt":"bad"}),
         ),
+        (
+            "FLUX PAG valid options",
+            json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"pag":{"scale":1.5,"layers":[2,5],"start":0.1,"stop":0.85}}}),
+        ),
+        (
+            "FLUX PAG out-of-range block refusal",
+            json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"pag":{"scale":1.5,"layers":[99]}}}),
+        ),
+        (
+            "Supra2 PAG unsupported refusal",
+            json!({"projectId":"p","model":"supra2_img","prompt":"tree","advanced":{"pag":{"scale":1.5}}}),
+        ),
     ] {
         add(name, "image", payload);
     }

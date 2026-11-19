@@ -506,6 +506,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
     },
     WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "attach_pag_report_to_share",
+        lane: "POST /api/v1/image/jobs — helper attaching sanitized `pagExecutionReport` onto an existing share",
+        disposition: SeamDisposition::Inert(
+            "Mutates `share.advanced` on an envelope already constructed and written by \
+             `write_image_asset` and `upscaled_workflow_share`; it constructs and writes no \
+             envelope of its own.",
+        ),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
         function: "detail_workflow_share",
         lane: "POST /api/v1/image/detail/jobs — the standalone detail pass's own envelope",
         disposition: SeamDisposition::Embeds(&[WebBuilderRef {

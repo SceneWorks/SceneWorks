@@ -155,7 +155,7 @@ pub(super) fn krea_edit_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -173,19 +173,20 @@ pub(super) fn krea_edit_generate_one(
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         Some(&memory_evaluation.context),
         on_progress,
     )
     .map_err(|error| crate::generation_error("Krea edit generation failed", error))?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea edit generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "Krea edit generator returned non-image output".to_owned(),
@@ -208,6 +209,7 @@ pub(super) async fn generate_krea_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -346,6 +348,14 @@ pub(super) async fn generate_krea_edit_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::pag_workspace_bytes(
+            width,
+            height,
+            1,
+            steps,
+            model.descriptor.capabilities.pag.as_ref(),
+            sampling_controls.pag.as_ref(),
+        ),
     };
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
@@ -368,10 +378,11 @@ pub(super) async fn generate_krea_edit_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -389,7 +400,7 @@ pub(super) async fn generate_krea_edit_stream(
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let conditioning = build_edit_conditioning(&sources);
-                    let (out_w, out_h, pixels) = krea_edit_generate_one(
+                    let (out_w, out_h, pixels, pag) = krea_edit_generate_one(
                         generator,
                         &sampling_controls,
                         &prompt,
@@ -407,6 +418,12 @@ pub(super) async fn generate_krea_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+                    if !facts.is_empty() {
+                        let _ = facts_tx
+                            .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                    }
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },
             )

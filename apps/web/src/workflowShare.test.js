@@ -574,6 +574,18 @@ function sampleValueFor(key) {
       return { intent: "a lighthouse" };
     case "h3ImageSampler":
       return { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 };
+    case "pag":
+      return { scale: 1.5, layers: [2, 5], start: 0.1, stop: 0.9 };
+    case "pagExecutionReport":
+      return {
+        scale: 1.5,
+        adaptiveScale: 0,
+        layers: [2, 5],
+        start: 0.1,
+        stop: 0.9,
+        activeSteps: 18,
+        totalSteps: 28,
+      };
     case "veda":
       return {
         enabled: true,
@@ -697,6 +709,7 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "mossImageExecutionReport",
       "mossImageSampleIndex",
       "motion",
+      "pagExecutionReport",
       "structuredPrompt",
       "systemMessage",
       "temporalUpsampleRounds",
@@ -1061,4 +1074,36 @@ describe("MOSS exported workflow replay", () => {
   expect(recipe.rawAdapterSettings.mossImage).toEqual(options);expect(recipe.rawAdapterSettings).not.toHaveProperty("mossImageExecutionReport");expect(recipe.prompt).toBe(workflow.prompt);
   expect(workflowSettingRows(workflow).find(row=>row.key==="mossImage").restored).toBe(true);expect(workflowSettingRows(workflow).find(row=>row.key==="mossImageExecutionReport").restored).toBe(false);
  });
+});
+
+describe("PAG exported workflow replay", () => {
+  it("restores authored pag options and displays pagExecutionReport without replaying it", () => {
+    const pag = { scale: 1.5, layers: [2, 5], start: 0.1, stop: 0.9, adaptiveScale: 0.25 };
+    const pagExecutionReport = {
+      scale: 1.5,
+      adaptiveScale: 0.25,
+      layers: [2, 5],
+      start: 0.1,
+      stop: 0.9,
+      activeSteps: 18,
+      totalSteps: 28,
+    };
+    const workflow = share({
+      model: "flux2_dev",
+      advanced: { pag, pagExecutionReport, steps: 28 },
+    });
+    const recipe = recipeFromWorkflowShare(workflow, report({ model: { state: "resolved", catalogId: "flux2_dev" } }));
+    expect(recipe.rawAdapterSettings.pag).toEqual(pag);
+    expect(recipe.rawAdapterSettings).not.toHaveProperty("pagExecutionReport");
+    const rows = workflowSettingRows(workflow);
+    expect(rows.find((row) => row.key === "pag")).toMatchObject({
+      label: "Perturbed-Attention Guidance",
+      restored: true,
+    });
+    expect(rows.find((row) => row.key === "pagExecutionReport")).toMatchObject({
+      label: "PAG execution receipt",
+      restored: false,
+      value: "Recorded",
+    });
+  });
 });

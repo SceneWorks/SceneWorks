@@ -1009,6 +1009,18 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
             apply_imported_sampling_surface(object, backend, &backend_routes);
         }
     }
+    if source == "comfy_ui_tree" {
+        object.remove("pag");
+    } else if let Some(pag) = routes
+        .iter()
+        .find(|route| route.operation == "generate")
+        .and_then(|route| sceneworks_core::registry::builtin_model_spec(&route.provider_id))
+        .and_then(sceneworks_core::registry::ModelSpec::pag_value)
+    {
+        object.insert("pag".to_owned(), pag);
+    } else {
+        object.remove("pag");
+    }
     project_imported_operation_surface(object, &routes);
 }
 
@@ -2611,4 +2623,63 @@ pub(crate) fn video_model_withdrawn_on_platform(
         && (matches!(model_id, "ltx_2_3_eros")
             || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
                 && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
+}
+
+#[cfg(test)]
+mod pag_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn imported_image_models_inherit_provider_pag_and_withdraw_comfy_or_non_pag_routes() {
+        let mut imported_krea = json!({
+            "id": "user_krea_merge",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "mlx": { "supported": true }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_krea);
+        assert_eq!(
+            imported_krea
+                .get("pag")
+                .and_then(|pag| pag.get("numBlocks")),
+            Some(&json!(28)),
+            "imported krea_2 transformer_file must inherit krea_2_turbo PAG metadata"
+        );
+
+        let mut imported_comfy = json!({
+            "id": "user_flux2_comfy",
+            "type": "image",
+            "family": "flux2",
+            "importSourceShape": "comfy_ui_tree",
+            "pag": { "numBlocks": 8 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_comfy);
+        assert!(
+            !imported_comfy.contains_key("pag"),
+            "ComfyUI tree imports do not run through a PAG-capable lane and must withdraw pag"
+        );
+
+        let mut imported_sdxl = json!({
+            "id": "user_sdxl_checkpoint",
+            "type": "image",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "pag": { "numBlocks": 99 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_sdxl);
+        assert!(
+            !imported_sdxl.contains_key("pag"),
+            "non-PAG families must withdraw any stale pag metadata"
+        );
+    }
 }

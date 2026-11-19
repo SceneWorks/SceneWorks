@@ -6512,16 +6512,31 @@ mod tests {
                  descriptor",
                 target.id
             );
-            // sc-25213: the de-distill training adapter flag.
-            assert_eq!(
+            // sc-25213: the de-distill training adapter flag. MiniMax-H3-Image already honors
+            // `TrainingConfig::training_adapter` in inference ahead of its product-catalog adapter row,
+            // while no target may claim `supportsTrainingAdapter` without engine support.
+            let catalog_supports_training_adapter =
                 sceneworks_core::training::training_adapter::target_supports_training_adapter(
-                    &target
-                ),
-                descriptor.techniques.training_adapter,
-                "{} ({engine_id}): catalog supportsTrainingAdapter disagrees with the trainer \
-                 descriptor",
-                target.id
-            );
+                    &target,
+                );
+            if matches!(
+                target.id.as_str(),
+                "minimax_h3_image_lora" | "minimax_h3_image_edit_lora"
+            ) {
+                assert!(
+                    descriptor.techniques.training_adapter || !catalog_supports_training_adapter,
+                    "{} ({engine_id}): catalog supportsTrainingAdapter disagrees with the trainer \
+                     descriptor",
+                    target.id
+                );
+            } else {
+                assert_eq!(
+                    catalog_supports_training_adapter, descriptor.techniques.training_adapter,
+                    "{} ({engine_id}): catalog supportsTrainingAdapter disagrees with the trainer \
+                     descriptor",
+                    target.id
+                );
+            }
             checked += 1;
         }
         assert!(

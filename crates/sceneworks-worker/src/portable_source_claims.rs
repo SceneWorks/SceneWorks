@@ -42,6 +42,7 @@ const STATIC_SOURCE_IDS: &[&str] = &[
 ];
 
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
+static OVERLAY_REFRESH_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
 static INVENTORY_SCHEDULE: OnceLock<Mutex<InventorySchedule>> = OnceLock::new();
 static CHALLENGE_ATTEMPTS: OnceLock<Mutex<BTreeMap<String, Instant>>> = OnceLock::new();
@@ -447,7 +448,34 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
     let schedule = inventory_schedule()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !scan_due(&schedule, now, hash) || INVENTORY_STARTED.load(Ordering::Acquire) {
+    let catalog_changed = schedule.catalog_hash != Some(hash);
+    if !scan_due(&schedule, now, hash) {
+        return;
+    }
+    if INVENTORY_STARTED.load(Ordering::Acquire) {
+        drop(schedule);
+        // If a LoRA or control overlay is imported while the initial cold inventory is still
+        // hashing multi-GiB auxiliary base models, publish lightweight overlay claims immediately
+        // without updating `catalog_hash` so the full scan still reconciles `scanned` afterward.
+        if catalog_changed && !OVERLAY_REFRESH_STARTED.swap(true, Ordering::AcqRel) {
+            #[cfg(test)]
+            let fixture_cache_root =
+                sceneworks_core::hf_home::test_support::CacheRootGuard::retain(&settings.data_dir);
+            tokio::spawn(async move {
+                let _ = crate::load_progress::spawn_blocking(move || {
+                    #[cfg(test)]
+                    let _fixture_cache_root = fixture_cache_root;
+                    registered_priority_overlay_source_claims(&settings, |claim| {
+                        pending_inventory()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .publish(claim);
+                    });
+                })
+                .await;
+                OVERLAY_REFRESH_STARTED.store(false, Ordering::Release);
+            });
+        }
         return;
     }
     drop(schedule);
@@ -554,6 +582,12 @@ fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
 }
 
 fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSourceClaim)) {
+    // Publish user/project overlays and explicitly receipted built-in LoRAs first so freshly
+    // imported or installed adapters become admissible on the first heartbeat instead of waiting
+    // behind multi-GiB unreceipted hub caches or `STATIC_SOURCE_IDS`.
+    registered_priority_overlay_source_claims(settings, &mut publish);
+    external_lora_source_claims(settings, &mut publish);
+    registered_unreceipted_builtin_lora_source_claims(settings, &mut publish);
     let empty = JsonObject::new();
     for source_id in STATIC_SOURCE_IDS {
         match capture_selected_source(source_id, settings, &empty) {
@@ -584,9 +618,11 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
             }
         }
     }
-    external_lora_source_claims(settings, &mut publish);
     external_base_source_claims(settings, &mut publish);
-    registered_digest_source_claims(settings, publish);
+    registered_model_digest_source_claims(settings, &mut publish);
+    // Re-sweep priority overlays before `replace_scanned` so any adapter imported mid-scan stays
+    // in `scanned` (unchanged files hit `VerifiedSourceCache` without re-reading bytes).
+    registered_priority_overlay_source_claims(settings, publish);
 }
 
 /// Advertise the operator's externally scanned ComfyUI base models (SW-7030,
@@ -826,7 +862,17 @@ pub(crate) fn registered_text_encoder_path(
     Ok(None)
 }
 
+#[cfg(test)]
 fn registered_digest_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    registered_priority_overlay_source_claims(settings, &mut publish);
+    registered_model_digest_source_claims(settings, &mut publish);
+    registered_unreceipted_builtin_lora_source_claims(settings, publish);
+}
+
+fn registered_model_digest_source_claims(
     settings: &Settings,
     mut publish: impl FnMut(PortableSourceClaim),
 ) {
@@ -909,17 +955,26 @@ fn registered_digest_source_claims(
             }
         }
     }
-    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
-        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        for path in builtin_lora_source_paths(settings, &lora) {
-            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
-            for claim in claims.drain(..) {
-                publish(claim);
-            }
-        }
+}
+
+fn builtin_lora_has_download_receipt(settings: &Settings, id: &str) -> bool {
+    settings
+        .data_dir
+        .join("loras")
+        .join(crate::paths::safe_download_dir(id))
+        .join(".sceneworks-download-complete.json")
+        .is_file()
+}
+
+fn registered_priority_overlay_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    if settings.config_dir.as_os_str().is_empty() {
+        return;
     }
+    let mut claims = Vec::new();
+    let manifests = settings.config_dir.join("manifests");
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
     lora_manifests.extend(
         registered_projects(settings)
@@ -977,6 +1032,45 @@ fn registered_digest_source_claims(
                 continue;
             };
             append_registered_claim(settings, &mut claims, "control", id, None, &path);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
+        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !builtin_lora_has_download_receipt(settings, id) {
+            continue;
+        }
+        for path in builtin_lora_source_paths(settings, &lora) {
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+}
+
+fn registered_unreceipted_builtin_lora_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    if settings.config_dir.as_os_str().is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    let manifests = settings.config_dir.join("manifests");
+    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
+        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if builtin_lora_has_download_receipt(settings, id) {
+            continue;
+        }
+        for path in builtin_lora_source_paths(settings, &lora) {
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -2191,6 +2285,27 @@ mod tests {
         assert!(registered_builtin_lora_path(&settings, "builtin_adapter", &expected).is_none());
         #[cfg(unix)]
         {
+            std::fs::remove_file(&worker_file).unwrap();
+            let blobs = hub.join("models--example--pinned-lora/blobs");
+            std::fs::create_dir_all(&blobs).unwrap();
+            let blob =
+                blobs.join("6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf");
+            std::fs::write(&blob, b"exact adapter bytes").unwrap();
+            std::os::unix::fs::symlink(
+                Path::new(
+                    "../../blobs/6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf",
+                ),
+                &worker_file,
+            )
+            .unwrap();
+            assert!(static_source_claims(&settings)
+                .iter()
+                .any(|claim| claim.source_id == id && claim.files == expected));
+            assert_eq!(
+                registered_builtin_lora_path(&settings, "builtin_adapter", &expected),
+                Some(worker_file.clone())
+            );
+
             std::fs::remove_file(&worker_file).unwrap();
             let outside = temp.path().join("outside.safetensors");
             std::fs::write(&outside, b"exact adapter bytes").unwrap();

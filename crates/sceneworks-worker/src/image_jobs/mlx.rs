@@ -800,6 +800,15 @@ pub(super) async fn generate_stream_using(
             reference_resources: flux3_references
                 .as_ref()
                 .map(|references| references.resources.clone()),
+            pag_workspace_bytes: crate::execution_planner::hires_pag_workspace_bytes(
+                width,
+                height,
+                steps,
+                hires_fix.map(|hires| (hires.width, hires.height, hires.steps)),
+                native_batch_images,
+                model.descriptor.capabilities.pag.as_ref(),
+                lane_controls.pag.as_ref(),
+            ),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -1022,6 +1031,7 @@ pub(super) async fn generate_stream_using(
         let planning_edit_refs = edit_refs.clone();
         let planning_edit_ref_alpha = edit_ref_alpha.clone();
         let planning_edit_mask = ideogram_edit_mask.clone();
+        let planning_lane_controls = lane_controls.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
                 multi_reference_alpha: &planning_edit_ref_alpha,
@@ -1031,7 +1041,7 @@ pub(super) async fn generate_stream_using(
                 } else {
                     rgba_output_channels
                 },
-                controls: lane_controls,
+                controls: planning_lane_controls.clone(),
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
             };
@@ -1107,7 +1117,7 @@ pub(super) async fn generate_stream_using(
                         gen_core::PreviewSink::default(),
                         &LaneRgbaSurface {
                             output_channels: rgba_output_channels,
-                            controls: lane_controls,
+                            controls: planning_lane_controls.clone(),
                             ..Default::default()
                         },
                         planning_cancel,
@@ -1219,6 +1229,7 @@ pub(super) async fn generate_stream_using(
                         let warnings = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
+                        let pag_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -1248,10 +1259,11 @@ pub(super) async fn generate_stream_using(
                                 flux3_references: None,
                                 flux3_layout: None,
                                 output_channels: rgba_output_channels,
-                                controls: lane_controls,
+                                controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
+                                pag_report: Some(&pag_report),
                                 prompt_batch: Some(batch),
                                 render_plan: render_plans
                                     .first()
@@ -1274,6 +1286,10 @@ pub(super) async fn generate_stream_using(
                         if let Some(report) = execution_report.take() {
                             report.insert_image_facts(&mut facts)?;
                         }
+                        lane_controls::record_pag_execution_report(
+                            &mut facts,
+                            pag_report.take().as_ref(),
+                        );
                         Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
                 );
@@ -1316,6 +1332,7 @@ pub(super) async fn generate_stream_using(
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
+                    let pag_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -1349,10 +1366,11 @@ pub(super) async fn generate_stream_using(
                                 flux3_references: flux3_references.as_ref(),
                                 flux3_layout: flux3_layout.as_ref(),
                                 output_channels: rgba_output_channels,
-                                controls: lane_controls,
+                                controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
+                                pag_report: Some(&pag_report),
                                 prompt_batch: None,
                                 render_plan: render_plans
                                     .get(index)
@@ -1412,6 +1430,10 @@ pub(super) async fn generate_stream_using(
                     if let Some(report) = execution_report.take() {
                         report.insert_image_facts(&mut facts)?;
                     }
+                    lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        pag_report.take().as_ref(),
+                    );
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(
                             flux3_references::FACT_KEY.to_owned(),

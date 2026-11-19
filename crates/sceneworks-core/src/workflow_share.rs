@@ -605,6 +605,11 @@ pub enum AdvancedShape {
     /// MiniMax-H3-Image's sampler block (SW-7106), kept as the exact wire object after the shared
     /// validator ([`crate::image_sampling_controls::requested_h3_image_sampler`]) accepts it.
     H3ImageSampler,
+    /// Perturbed-Attention Guidance request options (`{ scale, layers?, start?, stop?, adaptiveScale? }`),
+    /// validated through `sceneworks_options::pag`.
+    Pag,
+    /// Completed Perturbed-Attention Guidance provider execution receipt (`{ scale, adaptiveScale, layers, start, stop, activeSteps, totalSteps }`).
+    PagReport,
     /// Canonical MOSS request options, validated by gen-core.
     MossImageOptions,
     /// Provider receipt with local adapter paths reduced to their frozen relative filename.
@@ -750,6 +755,20 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "Authored MiniMax-H3-Image sampler (SW-7106): Euler or LCM with its noise-scale ramp and \
          clip. It changes the denoising recipe and names nothing local; a malformed or unknown \
          member drops the whole block rather than replaying a different sampler.",
+    ),
+    allow(
+        "pag",
+        AdvancedShape::Pag,
+        "Authored Perturbed-Attention Guidance controls (SW-7180): scale, zero-based block indices, \
+         normalized [start, stop) window, and adaptiveScale decay. Changes the denoising trajectory \
+         and names nothing local.",
+    ),
+    allow_from(
+        "pagExecutionReport",
+        AdvancedShape::PagReport,
+        AdvancedKeySource::Server,
+        "Completed provider Perturbed-Attention Guidance execution receipt; display provenance only, \
+         scrubbed before a new execution.",
     ),
     allow(
         "captionOverflow",
@@ -2452,6 +2471,8 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
             AdvancedShape::H3ImageSampler => sanitize_h3_image_sampler(value),
+            AdvancedShape::Pag => sceneworks_options::pag::sanitize_share_pag(value),
+            AdvancedShape::PagReport => sceneworks_options::pag::sanitize_share_pag_report(value),
             AdvancedShape::MossImageOptions => sanitize_moss_options(value),
             AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
             AdvancedShape::MossImageEditOptions => {
@@ -4718,5 +4739,78 @@ mod tests {
         let envelope = serde_json::to_value(&built).expect("serializes");
         let parsed = parse_workflow_share(&envelope).expect("parses");
         assert_eq!(parsed.prompt.as_bytes(), real.as_bytes());
+    }
+
+    #[test]
+    fn pag_and_pag_execution_report_round_trip_and_drop_malformed_shapes() {
+        let mut payload = payload_fixture();
+        payload.insert(
+            "advanced".to_owned(),
+            json!({
+                "steps": 28,
+                "pag": {
+                    "scale": 1.5,
+                    "layers": [2, 5],
+                    "start": 0.1,
+                    "stop": 0.9,
+                    "adaptive_scale": 0.25
+                },
+                "pagExecutionReport": {
+                    "scale": 1.5,
+                    "adaptiveScale": 0.25,
+                    "layers": [5, 2, 5],
+                    "start": 0.1,
+                    "stop": 0.9,
+                    "activeSteps": 18,
+                    "totalSteps": 28
+                }
+            }),
+        );
+        let built = build_workflow_share(&asset_fixture(), &payload);
+        assert_eq!(
+            built.advanced.get("pag"),
+            Some(&json!({
+                "scale": 1.5,
+                "layers": [2, 5],
+                "start": 0.1,
+                "stop": 0.9,
+                "adaptiveScale": 0.25
+            }))
+        );
+        assert_eq!(
+            built.advanced.get("pagExecutionReport"),
+            Some(&json!({
+                "scale": 1.5,
+                "adaptiveScale": 0.25,
+                "layers": [2, 5],
+                "start": 0.1,
+                "stop": 0.9,
+                "activeSteps": 18,
+                "totalSteps": 28
+            }))
+        );
+        let envelope = serde_json::to_value(&built).expect("serializes");
+        assert_eq!(parse_workflow_share(&envelope).expect("parses"), built);
+
+        let mut hostile = payload_fixture();
+        hostile.insert(
+            "advanced".to_owned(),
+            json!({
+                "pag": { "scale": 1.5, "localPath": "/Users/secret" },
+                "pagExecutionReport": {
+                    "scale": 1.5,
+                    "adaptiveScale": 0.0,
+                    "layers": [2],
+                    "start": 0.0,
+                    "stop": 1.0,
+                    "activeSteps": 10,
+                    "totalSteps": 28,
+                    "weightsPath": "/Volumes/Models/secret"
+                }
+            }),
+        );
+        let sanitized = build_workflow_share(&asset_fixture(), &hostile);
+        assert!(!sanitized.advanced.contains_key("pag"));
+        assert!(!sanitized.advanced.contains_key("pagExecutionReport"));
     }
 }

@@ -8513,6 +8513,17 @@
         "minMemoryGb": 96
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 56,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -9847,6 +9858,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -11083,6 +11105,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -12257,6 +12290,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux2_blocks",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -12741,6 +12785,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "flux3_blocks",
+      "defaultLayers": [
+        19
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 33,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -13191,6 +13246,17 @@
           "q8": 29
         }
       }
+    },
+    "pag": {
+      "blockDomain": "flux3_blocks",
+      "defaultLayers": [
+        19
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 33,
+      "recommendedScale": 1.5
     },
     "previewByBackend": {
       "candle": false,
@@ -14937,6 +15003,17 @@
         "minMemoryGb": 42
       }
     },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -16043,6 +16120,17 @@
         },
         "minMemoryGb": 42
       }
+    },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": true,
@@ -32929,6 +33017,17 @@
         "minMemoryGb": 48
       }
     },
+    "pag": {
+      "blockDomain": "single_stream_blocks",
+      "defaultLayers": [
+        14
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 28,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -35703,6 +35802,17 @@
         },
         "minMemoryGb": 48
       }
+    },
+    "pag": {
+      "blockDomain": "single_stream_blocks",
+      "defaultLayers": [
+        14
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 28,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": true,
@@ -47999,6 +48109,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "dit_blocks",
+      "defaultLayers": [
+        25
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.66,
+      "maxScale": 15.0,
+      "numBlocks": 50,
+      "recommendedScale": 1.2
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -49620,6 +49741,17 @@
         "measured": false
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 42,
+      "recommendedScale": 2.5
+    },
     "previewByBackend": {
       "candle": false,
       "mlx": false
@@ -49844,6 +49976,17 @@
       "candle": {
         "measured": false
       }
+    },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        20
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 42,
+      "recommendedScale": 2.5
     },
     "previewByBackend": {
       "candle": false,
@@ -51383,6 +51526,17 @@
         "minMemoryGb": 44
       }
     },
+    "pag": {
+      "blockDomain": "flux_blocks",
+      "defaultLayers": [
+        28
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 57,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -52179,6 +52333,17 @@
         },
         "minMemoryGb": 50
       }
+    },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
     },
     "previewByBackend": {
       "candle": true,
@@ -53211,6 +53376,17 @@
           "q8": 29
         }
       }
+    },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        16
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.5
     },
     "previewByBackend": {
       "candle": false,
@@ -54371,6 +54547,17 @@
           "q8": 28
         }
       }
+    },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        16
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 32,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": false,
@@ -55608,6 +55795,17 @@
         }
       }
     },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -56379,6 +56577,17 @@
           "provider": "qwen_image_edit"
         }
       }
+    },
+    "pag": {
+      "blockDomain": "blocks",
+      "defaultLayers": [
+        30
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 60,
+      "recommendedScale": 1.5
     },
     "previewByBackend": {
       "candle": true,
@@ -73034,6 +73243,17 @@
         "minMemoryGb": 48
       }
     },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 1.0,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.5
+    },
     "previewByBackend": {
       "candle": true,
       "mlx": true
@@ -73501,6 +73721,17 @@
         },
         "minMemoryGb": 40
       }
+    },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": true,
@@ -74618,6 +74849,17 @@
         },
         "minMemoryGb": 40
       }
+    },
+    "pag": {
+      "blockDomain": "layers",
+      "defaultLayers": [
+        15
+      ],
+      "defaultStart": 0.0,
+      "defaultStop": 0.75,
+      "maxScale": 15.0,
+      "numBlocks": 30,
+      "recommendedScale": 1.2
     },
     "previewByBackend": {
       "candle": true,

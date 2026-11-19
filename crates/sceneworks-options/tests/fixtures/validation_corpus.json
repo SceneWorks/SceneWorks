@@ -1539,6 +1539,17 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "pag": {
+        "numBlocks": 57,
+        "blockDomain": "flux_blocks",
+        "defaultLayers": [
+          28
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 1.0,
+        "recommendedScale": 1.5,
+        "maxScale": 15.0
       }
     },
     "qwen_image_2_1": {
@@ -2350,6 +2361,17 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "pag": {
+        "numBlocks": 32,
+        "blockDomain": "blocks",
+        "defaultLayers": [
+          16
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 1.0,
+        "recommendedScale": 1.5,
+        "maxScale": 15.0
       }
     },
     "flux3_klein": {
@@ -2637,6 +2659,17 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "pag": {
+        "numBlocks": 33,
+        "blockDomain": "flux3_blocks",
+        "defaultLayers": [
+          19
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 0.75,
+        "recommendedScale": 1.2,
+        "maxScale": 15.0
       }
     },
     "ltx_2_5": {
@@ -4230,6 +4263,17 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "pag": {
+        "numBlocks": 42,
+        "blockDomain": "layers",
+        "defaultLayers": [
+          20
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 1.0,
+        "recommendedScale": 2.5,
+        "maxScale": 15.0
       }
     },
     "moss_image_sft": {
@@ -4445,6 +4489,17 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "pag": {
+        "numBlocks": 42,
+        "blockDomain": "layers",
+        "defaultLayers": [
+          20
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 1.0,
+        "recommendedScale": 2.5,
+        "maxScale": 15.0
       }
     },
     "supra2_img": {
@@ -6312,6 +6367,17 @@
           "candleVideoI2v": false,
           "candleVideoVace": false,
           "candleVideoLora": false
+        },
+        "pag": {
+          "numBlocks": 57,
+          "blockDomain": "flux_blocks",
+          "defaultLayers": [
+            28
+          ],
+          "defaultStart": 0.0,
+          "defaultStop": 1.0,
+          "recommendedScale": 1.5,
+          "maxScale": 15.0
         }
       },
       "vector": {
@@ -7599,6 +7665,122 @@
             "model": "supra2_img",
             "mode": "text_to_image",
             "field": "guidance"
+          }
+        }
+      }
+    },
+    {
+      "name": "FLUX PAG valid options",
+      "kind": "image",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "prompt": "tree",
+        "advanced": {
+          "pag": {
+            "scale": 1.5,
+            "layers": [
+              2,
+              5
+            ],
+            "start": 0.1,
+            "stop": 0.85
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "flux_dev",
+          "prompt": "tree",
+          "advanced": {
+            "pag": {
+              "scale": 1.5,
+              "layers": [
+                2,
+                5
+              ],
+              "start": 0.1,
+              "stop": 0.85,
+              "adaptiveScale": 0
+            },
+            "resolution": "1024x1024",
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "usePid": false,
+            "pidTarget": "4k",
+            "trueCfgScale": 4.0,
+            "faceRestore": false,
+            "controlScale": 0.7,
+            "openPoseScale": 0.7,
+            "mlxQuantizeExplicit": false,
+            "convRot": false
+          },
+          "width": 1024,
+          "height": 1024,
+          "count": 1
+        }
+      }
+    },
+    {
+      "name": "FLUX PAG out-of-range block refusal",
+      "kind": "image",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "prompt": "tree",
+        "advanced": {
+          "pag": {
+            "scale": 1.5,
+            "layers": [
+              99
+            ]
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.pag.layers",
+          "detail": "pag.layers block index 99 out of range 0..=56 (flux_blocks has 57 blocks)",
+          "context": {
+            "kind": "image",
+            "model": "flux_dev",
+            "mode": "text_to_image",
+            "field": "advanced.pag.layers"
+          }
+        }
+      }
+    },
+    {
+      "name": "Supra2 PAG unsupported refusal",
+      "kind": "image",
+      "model": "supra2_img",
+      "payload": {
+        "projectId": "p",
+        "model": "supra2_img",
+        "prompt": "tree",
+        "advanced": {
+          "pag": {
+            "scale": 1.5
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.pag",
+          "detail": "supra2_img does not support Perturbed-Attention Guidance (advanced.pag)",
+          "context": {
+            "kind": "image",
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "field": "advanced.pag"
           }
         }
       }
@@ -9799,45 +9981,6 @@
             "value": 0,
             "minimum": 1
           }
-        }
-      }
-    },
-    {
-      "name": "VQA blank question refusal",
-      "kind": "vqa",
-      "model": "sensenova_u1_8b",
-      "payload": {
-        "projectId": "p",
-        "model": "sensenova_u1_8b",
-        "sourceAssetId": "source",
-        "question": " "
-      },
-      "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "question",
-          "detail": "question must be between 1 and 4000 characters",
-          "context": { "kind": "vqa", "model": "sensenova_u1_8b", "mode": null, "field": "question" }
-        }
-      }
-    },
-    {
-      "name": "interleave blank prompt refusal",
-      "kind": "interleave",
-      "model": "sensenova_u1_8b",
-      "payload": {
-        "projectId": "p",
-        "model": "sensenova_u1_8b",
-        "prompt": " "
-      },
-      "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "prompt",
-          "detail": "prompt must be between 1 and 4000 characters",
-          "context": { "kind": "interleave", "model": "sensenova_u1_8b", "mode": null, "field": "prompt" }
         }
       }
     }

@@ -1334,3 +1334,69 @@ fn a_prompt_carrying_a_comma_or_a_newline_still_parses() {
     assert_eq!(parsed.negative_prompt, "text, watermark, blurry");
     assert_eq!(parsed.params["Model"], "z_image_turbo");
 }
+
+#[test]
+fn embedded_png_round_trips_pag_and_pag_execution_report_alongside_valid_parameters_chunk() {
+    let share = built(
+        "a lighthouse in heavy fog",
+        "blurry",
+        json!({
+            "model": "flux2_dev",
+            "advanced": {
+                "steps": 28,
+                "sampler": "euler",
+                "guidanceScale": 4.0,
+                "pag": {
+                    "scale": 1.5,
+                    "layers": [2, 5],
+                    "start": 0.05,
+                    "stop": 0.85,
+                    "adaptiveScale": 0.25
+                },
+                "pagExecutionReport": {
+                    "scale": 1.5,
+                    "adaptiveScale": 0.25,
+                    "layers": [2, 5],
+                    "start": 0.05,
+                    "stop": 0.85,
+                    "activeSteps": 18,
+                    "totalSteps": 28
+                }
+            }
+        }),
+    );
+    let (path, bytes, _dir) = embedded_png(&share, (64, 48));
+
+    let recovered = read_workflow_chunk_file(&path)
+        .expect("reads workflow chunk")
+        .expect("workflow chunk present");
+    assert_eq!(
+        recovered.advanced["pag"],
+        json!({
+            "scale": 1.5,
+            "layers": [2, 5],
+            "start": 0.05,
+            "stop": 0.85,
+            "adaptiveScale": 0.25
+        })
+    );
+    assert_eq!(
+        recovered.advanced["pagExecutionReport"],
+        json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.25,
+            "layers": [2, 5],
+            "start": 0.05,
+            "stop": 0.85,
+            "activeSteps": 18,
+            "totalSteps": 28
+        })
+    );
+
+    let params_chunk = parameters_chunk_of(&bytes);
+    assert!(civitai_accepts_automatic_metadata(&params_chunk.text));
+    let parsed = parse_a1111(&params_chunk.text);
+    assert_eq!(parsed.params["Steps"], "28");
+    assert_eq!(parsed.params["CFG scale"], "4");
+    assert_eq!(parsed.params["Model"], "flux2_dev");
+}

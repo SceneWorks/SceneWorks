@@ -32,6 +32,8 @@ export function imageRecipeRequest(asset) {
   delete advanced.moss_image_execution_report;
   delete advanced.mossImageEditExecutionReport;
   delete advanced.moss_image_edit_execution_report;
+  delete advanced.pagExecutionReport;
+  delete advanced.pag_execution_report;
   delete advanced.mossImageSampleIndex;
   delete advanced.checkpointWeightFacts;
   delete advanced.memoryStrategy;

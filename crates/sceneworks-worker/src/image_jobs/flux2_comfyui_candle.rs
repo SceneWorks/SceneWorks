@@ -478,6 +478,9 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    request
+        .reject_active_pag("ComfyUI FLUX.2")
+        .map_err(WorkerError::InvalidPayload)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         "flux2",
