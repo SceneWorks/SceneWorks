@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory reviewed at inference revision 3dae89c9: 807 provenance candidates and 139 production-Rust crate prefixes. This pin adds first-party terminal LoRA recovery checkpoints and focused continuation/export-retry tests in the shared MLX loop and Candle flow-match driver. The provenance inventory changes only the Candle driver blob; normalized markers, production crate population, dependencies, notices and include sites are unchanged. Existing Iris, MOSS, FLUX.3 and runtime source classifications remain as reviewed at the previous pin; unclassified source areas remain open items reported by check-license-coverage.",
-  "inferenceRevision": "b302b90bc9da2a8e0ab7c18d256eee29ba9618ad",
-  "auditDigest": "3d6748fddf3a7e6efe0ef05ea535d8fcd111a23c800c03d738ecda6bb0cd7ca0",
+  "inferenceRevision": "99b92d73decf7d3df27e94f267ab74fb00970206",
+  "auditDigest": "76876ed85c61436c0c25c36585474fb80f4fa80be36322b36b40a183ddca102a",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "b302b90bc9da2a8e0ab7c18d256eee29ba9618ad",
+    "revision": "99b92d73decf7d3df27e94f267ab74fb00970206",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 811,
-    "populationSha256": "5b17a8a89ca18f9fe75718c199e1729c32f92fe97be9b5bd39bf30ebb7d37c79"
+    "populationSha256": "747bf77330c450122a8fc7c971307610f87e2890b01951ff6aded32a85766e1f"
   },
   "portedSourceAreas": [
     {
@@ -1055,7 +1055,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "b302b90bc9da2a8e0ab7c18d256eee29ba9618ad",
+    "revision": "99b92d73decf7d3df27e94f267ab74fb00970206",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 141,
     "cratePopulationSha256": "0545ba760a6cbb4cb1437c8275615223f60ffe8ac1a00a7e44507e3b99bcc5aa"
