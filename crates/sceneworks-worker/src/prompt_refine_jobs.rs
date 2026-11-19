@@ -114,22 +114,18 @@ fn resolve_max_new_tokens(
         })
 }
 
-/// The engine-built H3 expansion `request` (SW-7102) as the job runs it: it keeps its messages,
-/// sampling recipe, budget and reasoning knobs and gains this job's `cancel` flag, progress
-/// observer, KV opt-in and decode constraint, and sends `auto` checked linearly (SW-7204: the
-/// engine runs a resident block draft where it measured faster, MTP otherwise).
+/// The engine-built H3 expansion `request` (SW-7102) as the job runs it: the request
+/// [`adopt_prepared_request`] makes (the engine's messages, recipe, budget, reasoning knobs and
+/// reply schema, with this job's cancel flag, progress observer and KV opt-in), sending `auto`
+/// checked linearly (SW-7204: the engine runs a resident block draft where it measured faster,
+/// MTP otherwise).
 #[cfg(any(test, native_lane))]
 pub(crate) fn prepare_expansion_request(
-    mut request: gen_core::core_llm::TextLlmRequest,
+    request: gen_core::core_llm::TextLlmRequest,
     cancel: gen_core::core_llm::CancelFlag,
     kv_compression: gen_core::core_llm::KvCompressionPolicy,
-    emits_json: bool,
-    supports_thinking: bool,
 ) -> gen_core::core_llm::TextLlmRequest {
-    request.cancel = cancel;
-    request.progress = Some(crate::load_progress::text_observer());
-    request.kv_compression = kv_compression;
-    request.constraint = json_decode_constraint(emits_json, supports_thinking, request.thinking);
+    let mut request = adopt_prepared_request(request, cancel, kv_compression);
     (request.speculative, request.speculative_verify) =
         crate::qwen38_block_draft::expansion_speculation();
     request
@@ -1097,16 +1093,10 @@ pub(crate) async fn run_prompt_refine_job(
             let output = {
                 use gen_core::core_llm::{Content, Message, Role, Sampling, StreamEvent};
                 // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
-                // budget and reasoning knobs; it gains this job's cancel flag, progress observer,
-                // KV opt-in and decode constraint, as the request built below does.
+                // budget, reasoning knobs and reply schema; it gains this job's cancel flag,
+                // progress observer and KV opt-in, and (SW-7204) `auto` checked linearly.
                 let request = if let Some(request) = prepared_request {
-                    prepare_expansion_request(
-                        request,
-                        blocking_cancel.clone(),
-                        kv_compression,
-                        emits_json,
-                        refiner.descriptor().capabilities.supports_thinking,
-                    )
+                    prepare_expansion_request(request, blocking_cancel.clone(), kv_compression)
                 } else {
                     let mut messages = Vec::with_capacity(2);
                     if !system.trim().is_empty() {
@@ -1426,6 +1416,28 @@ fn refine_text_request(
         kv_compression,
         ..Default::default()
     }
+}
+
+/// An engine-built request (SW-7102, the MiniMax-H3-Image expansion) as this job runs it: it gains
+/// the job's cancel flag, progress observer and KV opt-in, and keeps everything the engine set —
+/// messages, sampling recipe, budget, reasoning knobs AND its decode constraint.
+///
+/// The constraint is deliberately NOT passed through [`json_decode_constraint`]. That rule drops a
+/// plain JSON mask for a thinking request; the expander's constraint is the reply's JSON schema,
+/// which the backends apply only once the reasoning block closes (and which keeps the decode from
+/// ending inside it). Dropping it left the answer unconstrained: the expander then ended inside its
+/// reasoning with no answer, or answered with a bare caption instead of the two-field object, and
+/// the job failed.
+#[cfg(any(test, native_lane))]
+pub(crate) fn adopt_prepared_request(
+    mut request: gen_core::core_llm::TextLlmRequest,
+    cancel: gen_core::core_llm::CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> gen_core::core_llm::TextLlmRequest {
+    request.cancel = cancel;
+    request.progress = Some(crate::load_progress::text_observer());
+    request.kv_compression = kv_compression;
+    request
 }
 
 /// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever

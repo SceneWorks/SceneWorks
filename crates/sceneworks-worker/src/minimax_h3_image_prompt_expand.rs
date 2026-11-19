@@ -989,8 +989,10 @@ mod tests {
             engine.clone(),
             CancelFlag::new(),
             KvCompressionPolicy::default(),
-            true,
-            true,
+        );
+        assert_eq!(
+            request.constraint, engine.constraint,
+            "the reply schema is kept"
         );
         assert_eq!(request.speculative, Some(Speculative::Auto));
         assert_eq!(request.speculative_verify, SpeculativeVerify::Linear);
@@ -1057,6 +1059,46 @@ mod tests {
         assert!(pe::PromptFiles::load_with_manifest_digest(dir.path(), &digest).is_err());
         // And the production loader refuses any tree whose manifest is not the pinned revision's.
         assert!(load_prompt_files(dir.path()).is_err());
+    }
+
+    // The expander thinks first, so the worker's general rule for thinking runs
+    // (`json_decode_constraint`: no JSON mask) must not reach its request. The engine's reply
+    // schema is what makes the backends refuse an answer that is not the two-field object, and an
+    // end of decode inside the reasoning; without it the job failed on both.
+    #[test]
+    fn the_job_runs_the_engines_reply_schema_not_the_thinking_rule() {
+        use gen_core::core_llm::{Constraint, KvCompressionPolicy, ThinkingMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let digest = synthetic_prompt_tree(dir.path());
+        let files = pe::PromptFiles::load_with_manifest_digest(dir.path(), &digest).unwrap();
+        let image = gen_core::core_llm::ImageRef::new(2, 1, vec![0; 6]).unwrap();
+        let edit = [edit_reference(image, (1920, 1080))];
+        for references in [&[][..], &edit[..]] {
+            let built = build_request(
+                &files,
+                "a harbour at dusk",
+                references,
+                &pe::AspectSelection::Adaptive,
+            )
+            .unwrap();
+            assert_eq!(built.thinking, ThinkingMode::Enabled);
+            assert!(
+                matches!(built.constraint, Some(Constraint::JsonSchema(_))),
+                "the engine constrains the reply to its schema"
+            );
+            let expected = built.constraint.clone();
+            let cancel = gen_core::core_llm::CancelFlag::new();
+            let run = crate::prompt_refine_jobs::adopt_prepared_request(
+                built,
+                cancel.clone(),
+                KvCompressionPolicy::default(),
+            );
+            assert_eq!(run.constraint, expected, "the job keeps the reply schema");
+            assert!(run.progress.is_some());
+            cancel.cancel();
+            assert!(run.cancel.is_cancelled(), "the job's cancel flag drives it");
+        }
     }
 
     #[test]

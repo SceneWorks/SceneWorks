@@ -155,6 +155,8 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
+import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
+import { isModelMissing } from "../modelMissing.js";
 import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -2066,6 +2068,19 @@ export function ImageStudio() {
   });
   const h3ExpandModel = h3Expander.model;
   const h3ExpandAvailable = h3Expander.available;
+  // In batch mode the Expand prompt tool is part of Run batch: every resolved prompt is expanded
+  // first, then the images are queued with the expansions (useImageBatchRun). Single-image
+  // generation keeps the review-and-apply control. The batch runs the saved expander model; a
+  // saved model that cannot run blocks Run batch with the same message the single control shows.
+  const h3BatchExpandOn = batchMode && h3ExpandAvailable && promptTool === "h3Expand";
+  const [h3BatchUseSizes, setH3BatchUseSizes] = useState(false);
+  const h3BatchExpandTooMany = !h3BatchExpandOn
+    ? ""
+    : typeof h3Expander.prompt !== "function"
+      ? H3_IMAGE_EXPAND_COPY.missing(false, h3ExpandModel?.name || H3_IMAGE_EXPAND_COPY.defaultModelName)
+      : batchJobCount > BATCH_EXPAND_MAX
+        ? H3_IMAGE_EXPAND_COPY.batch.tooMany(batchJobCount, BATCH_EXPAND_MAX)
+        : "";
   const imageReference = useImageReferenceStatus({
     enabled: mode === "text_to_image" && supportsImg2img,
     assetId: img2imgReferenceAssetId,
@@ -2454,6 +2469,7 @@ export function ImageStudio() {
   // to the shared request builder; exact replay tiers and MOSS components must be ready.
   function preflightError(kind) {
     if (kind === "batch" && portableBatchRefusal) return portableBatchRefusal.detail;
+    if (kind === "batch" && h3BatchExpandTooMany) return h3BatchExpandTooMany;
     if (!mossComponents.ready || mossEditError) return mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.");
     if (!selectedModelServesMode) return `Install or select a model that supports ${modeLabel} generation.`;
     if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
@@ -2990,7 +3006,7 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || ["invalid", "server-required"].includes(portableBatchFeedback?.result.state) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || ["invalid", "server-required"].includes(portableBatchFeedback?.result.state) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(h3BatchExpandTooMany) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -3019,6 +3035,20 @@ export function ImageStudio() {
   token,
   buildBatchJobRequest,
   onMagicExpand,
+  batchExpansion: h3BatchExpandOn
+    ? {
+        expandPrompt: h3Expander.prompt,
+        copy: H3_IMAGE_EXPAND_COPY,
+        modelId: model,
+        referenceAssetIds: qwenRewriteReferenceIds,
+        useSizes: h3BatchUseSizes,
+        proposedResolution: (suggestion) => h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution),
+        failureMessage: (error) =>
+          isModelMissing(h3ExpandModel, error?.message)
+            ? H3_IMAGE_EXPAND_COPY.missing(false, h3ExpandModel?.name || H3_IMAGE_EXPAND_COPY.defaultModelName)
+            : error?.message || H3_IMAGE_EXPAND_COPY.failure,
+      }
+    : null,
   createImageJob
   });
   const generateDisabled =
@@ -3149,6 +3179,11 @@ export function ImageStudio() {
             qwenRewriteModel={qwenRewriteModel}
             qwenRewritePrompt={qwenRewritePrompt}
             h3ExpandAvailable={h3ExpandAvailable}
+            h3BatchExpandOn={h3BatchExpandOn}
+            batchJobCount={batchJobCount}
+            h3BatchExpandTooMany={h3BatchExpandTooMany}
+            h3BatchUseSizes={h3BatchUseSizes}
+            setH3BatchUseSizes={setH3BatchUseSizes}
             h3ExpandModel={h3ExpandModel}
             h3ExpandPrompt={h3Expander.prompt}
             h3ExpandPicker={h3Expander.picker}

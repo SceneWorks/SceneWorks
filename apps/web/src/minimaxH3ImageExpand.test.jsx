@@ -34,6 +34,12 @@ vi.mock("./api.js", async (importOriginal) => {
   };
 });
 
+// Batch runs check each request's options before queueing it; this suite is about the expander.
+vi.mock("./portableValidation.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
+}));
+
 import { AppContext } from "./context/AppContext.js";
 import { ImageStudio } from "./screens/ImageStudio.jsx";
 import { SimpleShell } from "./simple/SimpleShell.jsx";
@@ -283,30 +289,109 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe("a lighthouse in fog");
   });
 
-  // Batch mode: the tool expands every prompt of the batch list rather than the hidden
-  // single-prompt field, and a long prompt is not refused at 4,000 characters.
-  it("expands every batch prompt and applies them to the batch list", async () => {
-    const long = `a lighthouse ${"in rolling sea fog ".repeat(300)}`.trim();
+  // Batch mode: with the Expand prompt tool selected, Run batch is one click — every resolved
+  // prompt (variables filled in, a leading [size] kept) is expanded first, then the images are
+  // queued with the expansions. The batch list itself is not changed.
+  async function settle(rounds = 6) {
+    for (let round = 0; round < rounds; round += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+  }
+
+  function saveBatch(batchPromptsText, extra = {}) {
     window.localStorage.setItem(
       "sceneworks-studio-image-project_1",
-      JSON.stringify({ model: "minimax_h3_image", batchMode: true, batchPromptsText: "a fox\na heron" }),
+      JSON.stringify({ model: "minimax_h3_image", count: 1, batchMode: true, batchPromptsText, ...extra }),
     );
+  }
+
+  it("expands every resolved batch prompt, then queues the images, in one click", async () => {
+    const long = `a lighthouse ${"in rolling sea fog ".repeat(300)}`.trim();
+    saveBatch("a fox\n[832x1216] {{tone}} heron", { batchVariableValues: { tone: ["grey", "white"] } });
+    const events = [];
+    let sequence = 0;
     const value = context([H3_IMAGE, PE], {
-      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => ({ refinedPrompt: prompt === "a fox" ? long : `Expanded ${prompt}` })),
+      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => {
+        events.push(`expand:${prompt}`);
+        return { refinedPrompt: prompt === "a fox" ? long : `Expanded ${prompt}`, rewriteSuggestion: EXPANSION.rewriteSuggestion };
+      }),
+      createImageJob: vi.fn(async (request) => {
+        events.push(`queue:${request.prompt.slice(0, 20)}`);
+        return { id: `job-${sequence++}`, status: "queued" };
+      }),
+    });
+    await render(value);
+    expect(buttonWithText(container, "Run batch · 3")).toBeTruthy();
+    await click(buttonWithText(container, "Expand prompt"));
+    expect(container.textContent).toContain(H3_IMAGE_EXPAND_COPY.batch.hint);
+    await click(buttonWithText(container, "Expand & run batch · 3"));
+    await settle();
+
+    // Every expansion finishes before the first image is queued.
+    expect(events).toEqual([
+      "expand:a fox",
+      "expand:grey heron",
+      "expand:white heron",
+      `queue:${long.slice(0, 20)}`,
+      "queue:Expanded grey heron",
+      "queue:Expanded white heron",
+    ]);
+    const queued = value.createImageJob.mock.calls.map(([request]) => request);
+    expect(queued.map((request) => [request.prompt, request.width, request.height])).toEqual([
+      [long, 2048, 2048],
+      ["Expanded grey heron", 832, 1216],
+      ["Expanded white heron", 832, 1216],
+    ]);
+    expect(long.length).toBeGreaterThan(4000);
+    expect(container.querySelector('textarea[aria-label="Batch prompts"]').value).toBe("a fox\n[832x1216] {{tone}} heron");
+    expect(container.textContent).not.toContain("between 1 and 4000 characters");
+  });
+
+  it("takes proposed sizes only on request, and does not render a prompt that failed to expand", async () => {
+    saveBatch("a fox\n[832x1216] a heron\nbroken");
+    const value = context([H3_IMAGE, PE], {
+      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => {
+        if (prompt === "broken") throw new Error("worker exploded");
+        return { refinedPrompt: `Expanded ${prompt}`, rewriteSuggestion: EXPANSION.rewriteSuggestion };
+      }),
+      createImageJob: vi.fn(async () => ({ id: `job-${Math.random()}`, status: "queued" })),
     });
     await render(value);
     await click(buttonWithText(container, "Expand prompt"));
-    expect(container.textContent).toContain(H3_IMAGE_EXPAND_COPY.batch.tileDescription);
-    await click(buttonWithText(container.querySelector(".batch-expand-control"), "Expand all 2 prompts"));
-    await act(async () => {});
-    expect(value.h3ImageExpandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox", "a heron"]);
-    expect(container.querySelector('textarea[aria-label="Batch prompts"]').value).toBe("a fox\na heron");
-    await click(buttonWithText(container, "Apply to batch"));
-    expect(container.querySelector('textarea[aria-label="Batch prompts"]').value).toBe(`${long}\nExpanded a heron`);
-    expect(long.length).toBeGreaterThan(4000);
-    // Within H3-Image's 4,096-token window: no length note, no 4,000-character refusal.
-    expect(container.textContent).not.toContain("end cut off");
-    expect(container.textContent).not.toContain("between 1 and 4000 characters");
+    await click(container.querySelector(".batch-expand-sizes input"));
+    await click(buttonWithText(container, "Expand & run batch · 3"));
+    await settle();
+
+    expect(value.createImageJob.mock.calls.map(([request]) => [request.prompt, request.width, request.height])).toEqual([
+      ["Expanded a fox", 5472, 3072],
+      ["Expanded a heron", 832, 1216],
+    ]);
+    expect(container.textContent).toContain("Prompt 3 was not expanded: worker exploded");
+    expect(container.textContent).toContain("1 failed");
+  });
+
+  it("queues nothing when stopped during expansion", async () => {
+    saveBatch("one\ntwo");
+    const value = context([H3_IMAGE, PE], {
+      h3ImageExpandPrompt: vi.fn(({ prompt, signal }) =>
+        prompt === "one"
+          ? Promise.resolve({ refinedPrompt: "Expanded one" })
+          : new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+            }),
+      ),
+    });
+    await render(value);
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(buttonWithText(container, "Expand & run batch · 2"));
+    await settle();
+    expect(container.textContent).toContain("Expanding prompt 2 of 2");
+    await click(buttonWithText(container, "Stop"));
+    await settle();
+    expect(value.createImageJob).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("2 not queued");
   });
 
   it("offers no Expand prompt tool without the expander or for another model", async () => {
@@ -526,6 +611,35 @@ describe("picking the expander model in the advanced Image Studio (SW-7208)", ()
       expect.objectContaining({ prompt: "a lighthouse in fog", expanderModelId: "vision_describe_qwen3_8_27b" }),
     );
     expect(readH3ExpanderModel()).toBe("vision_describe_qwen3_8_27b");
+  });
+
+  // Run batch expands with the same picked model as the single-prompt control.
+  it("expands a batch with the picked model", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ model: "minimax_h3_image", count: 1, batchMode: true, batchPromptsText: "a fox\na heron" }),
+    );
+    const value = context([H3_IMAGE, withPrompts(PE, "installed"), DESCRIBER], {
+      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` })),
+      createImageJob: vi.fn(async () => ({ id: `job-${Math.random()}`, status: "queued" })),
+    });
+    await render(value);
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(radio("vision_describe_qwen3_8_27b"));
+    await click(buttonWithText(container, "Expand & run batch · 2"));
+    for (let round = 0; round < 6; round += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(value.h3ImageExpandPrompt.mock.calls.map(([request]) => [request.prompt, request.expanderModelId])).toEqual([
+      ["a fox", "vision_describe_qwen3_8_27b"],
+      ["a heron", "vision_describe_qwen3_8_27b"],
+    ]);
+    expect(value.createImageJob.mock.calls.map(([request]) => request.prompt)).toEqual([
+      "Expanded a fox",
+      "Expanded a heron",
+    ]);
   });
 
   it("offers MiniMax's prompt files alone when the describer lacks them", async () => {

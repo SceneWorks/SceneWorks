@@ -148,6 +148,28 @@ describe("pollJobToCompletion (sc-8856)", () => {
     expect(settled.error.message).toBe("runtime exploded");
   });
 
+  // The worker marks a failed job with a generic status message ("Prompt refinement failed.") and
+  // records the reason in `error`; the reason is what the user needs to see.
+  it("shows the job's error ahead of its generic status message", async () => {
+    stubApi({
+      created: { id: "job-4b" },
+      pollResponses: [
+        {
+          status: "failed",
+          message: "Prompt refinement failed.",
+          error: "The MiniMax-H3-Image prompt expander returned output this build cannot read.",
+        },
+      ],
+    });
+
+    const settled = await runWithTimers(pollJobToCompletion({ ...baseArgs }));
+
+    expect(settled.ok).toBe(false);
+    expect(settled.error.message).toBe(
+      "The MiniMax-H3-Image prompt expander returned output this build cannot read.",
+    );
+  });
+
   it("throws the timeoutError once the deadline passes with no terminal status", async () => {
     // deadlineMs 3s => the loop gets ~2 polls before Date.now() crosses the deadline.
     stubApi({ created: { id: "job-5" }, pollResponses: [{ status: "running" }] });
