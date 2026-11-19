@@ -71,4 +71,19 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
   applyResolution: "Use this size",
   again: "Expand again",
   defaultModelName: "MiniMax-H3-Image Prompt Expander",
+  // Batch mode: the same expander over every prompt of the batch (BatchExpandPromptsControl).
+  batch: Object.freeze({
+    tileDescription: "MiniMax-H3-Image’s own expander, run on every prompt in the batch",
+    button: (count) => `Expand ${count === 1 ? "the prompt" : `all ${count} prompts`}`,
+    hint: "Runs MiniMax-H3-Image’s prompt expander on each prompt in the batch, one after another. You review the expansions and apply them to the batch list — nothing changes until you do, and you can undo it.",
+    skipped: (count) =>
+      `${count} prompt${count === 1 ? " uses" : "s use"} {{…}} placeholders and ${count === 1 ? "is" : "are"} left as written, since the expander would rewrite the placeholders too.`,
+    progress: (current, total) => `Expanding prompt ${current} of ${total}…`,
+    summary: (expanded, total) => `Expanded ${expanded} of ${total} prompt${total === 1 ? "" : "s"}.`,
+    reviewLabel: "Review the expansions",
+    useSizes: "Also start each prompt with its proposed size (prompts with their own [size] keep it)",
+    apply: "Apply to batch",
+    applied: (count) => `Replaced ${count} prompt${count === 1 ? "" : "s"} with the expansion.`,
+    changed: "The batch prompts changed while expanding. Expand again to use the current list.",
+  }),
 });

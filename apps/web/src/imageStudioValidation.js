@@ -9,31 +9,8 @@
 // of their inputs, so the requirement/error split is unit-testable.
 
 import { presetLoraIssues } from "./generationValidation.js";
-import { promptBudget } from "./styleComposer.js";
+import { PROMPT_MAX_CHARS, promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
-
-// `limit` lets a streaming caller stop after the first actionable violation instead
-// of retaining an entry for every member of a very large batch.
-export function batchPromptBudgetOverages(composedPrompts = [], limit = Infinity) {
-  const overages = [];
-  let index = 0;
-  for (const prompt of composedPrompts) {
-    const budget = promptBudget(prompt);
-    if (budget.over) {
-      overages.push({ item: index + 1, ...budget });
-      if (overages.length >= limit) break;
-    }
-    index += 1;
-  }
-  return overages;
-}
-
-export function batchPromptBudgetMessage(overages = []) {
-  const items = overages.map(({ item, length, max }) => `${item} (${length}/${max})`).join(", ");
-  return `Batch prompt${overages.length === 1 ? "" : "s"} ${items} exceed${
-    overages.length === 1 ? "s" : ""
-  } the character limit — shorten the prompt or pick a shorter style.`;
-}
 
 // The Iris restoration post-processing gate (sc-25683), shared by Generate and the batch Run: a
 // refused plan blocks with its reason (the request is never silently changed); a still-loading
@@ -77,6 +54,9 @@ export function imageGenerateValidation({
   // prompt, or merged into a caption, can push past 4000.
   styleActive = false,
   composedPrompt = "",
+  // The selected model's prompt ceiling (`imagePromptCharLimit`): 4000, or more for a model that
+  // declares a long encoder window (MiniMax-H3-Image reads 4,096 tokens).
+  promptCharLimit = PROMPT_MAX_CHARS,
   presetMissing = [],
   presetIncompatible = [],
   loraIncompatible = [],
@@ -119,7 +99,7 @@ export function imageGenerateValidation({
   // requirement: nothing else on the form explains why Generate is dead. The message names the actual
   // numbers and the two ways out.
   if (styleActive && composedPrompt) {
-    const budget = promptBudget(composedPrompt);
+    const budget = promptBudget(composedPrompt, promptCharLimit);
     if (budget.over) {
       issues.push(
         issue.error(
@@ -169,7 +149,6 @@ export function imageBatchValidation({
   missingKeys = [],
   groupIssues = [],
   dimensionAdvice = null,
-  promptBudgetOverages = [],
   decoderCapabilitiesPending = false,
   // The Iris restoration post-processing plan status for EVERY distinct render size of the batch
   // (each prompt's own [WxH] directive or the Studio size), else null — a batch whose prompts would
@@ -201,9 +180,6 @@ export function imageBatchValidation({
         `Give each ${groupIssues.map((group) => `{{${group.label}:…}}`).join(", ")} the same number of options to run.`,
       ),
     );
-  }
-  if (promptBudgetOverages.length) {
-    issues.push(issue.error(null, batchPromptBudgetMessage(promptBudgetOverages)));
   }
   if (decoderCapabilitiesPending) {
     issues.push(

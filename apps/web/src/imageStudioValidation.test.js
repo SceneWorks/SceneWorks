@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { issue, summarize } from "./validation/issues.js";
 import {
-  batchPromptBudgetOverages,
   imageBatchValidation,
   imageGenerateValidation,
 } from "./imageStudioValidation.js";
@@ -184,6 +183,19 @@ describe("imageGenerateValidation", () => {
       expect(summary.surfaced[0].message).toContain("shorten your prompt or pick a shorter style");
     });
 
+    // A model that declares a long encoder window (MiniMax-H3-Image: 4,096 tokens) accepts a
+    // composed prompt past 4000; the guard measures against that model's ceiling.
+    it("measures the composed prompt against the selected model's ceiling", () => {
+      const issues = imageGenerateValidation({
+        ...whole,
+        prompt: rawPrompt,
+        styleActive: true,
+        composedPrompt: overComposed,
+        promptCharLimit: 16384,
+      });
+      expect(summarize(issues).ready).toBe(true);
+    });
+
     // sc-13224: structured-caption models now DO apply the Style axis (the style is merged into the
     // caption's aesthetics), so the composed caption can push past the cap and the guard must fire.
     it("fires the budget error on a structured model when the injected caption exceeds the cap", () => {
@@ -225,7 +237,6 @@ describe("imageBatchValidation", () => {
     batchTotal: 4,
     missingKeys: [],
     groupIssues: [],
-    promptBudgetOverages: [],
   };
 
   it("passes a whole batch draft", () => {
@@ -273,52 +284,6 @@ describe("imageBatchValidation", () => {
     const summary = summarize(imageBatchValidation({ ...whole, missingKeys: ["color", "size"] }));
     expect(summary.surfaced[0].kind).toBe("error");
     expect(summary.surfaced[0].message).toBe("Fill in a value for {{color}}, {{size}} to run.");
-  });
-
-  it("blocks at 4001 Unicode scalars, allows 4000, and identifies every offending resolved item", () => {
-    const composedPrompts = [
-      "😀".repeat(PROMPT_MAX_CHARS),
-      "a".repeat(PROMPT_MAX_CHARS + 1),
-      "ok",
-      "😀".repeat(PROMPT_MAX_CHARS + 2),
-    ];
-    const overages = batchPromptBudgetOverages(composedPrompts);
-    expect(overages).toEqual([
-      { item: 2, length: 4001, max: 4000, remaining: -1, over: true },
-      { item: 4, length: 4002, max: 4000, remaining: -2, over: true },
-    ]);
-
-    const summary = summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages }));
-    expect(summary.ready).toBe(false);
-    expect(summary.surfaced[0].message).toBe(
-      "Batch prompts 2 (4001/4000), 4 (4002/4000) exceed the character limit — shorten the prompt or pick a shorter style.",
-    );
-  });
-
-  it("stops a streaming budget preflight after the first actionable overage", () => {
-    function* prompts() {
-      yield "x".repeat(PROMPT_MAX_CHARS + 1);
-      throw new Error("the preflight must not retain or inspect later violations");
-    }
-
-    expect(batchPromptBudgetOverages(prompts(), 1)).toEqual([
-      { item: 1, length: 4001, max: 4000, remaining: -1, over: true },
-    ]);
-  });
-
-  it("catches a batch item whose short raw prompt only exceeds the cap after style composition", () => {
-    const rawPrompt = "a fox";
-    const composedPrompt = composeStyledPrompt({
-      styleText: "x".repeat(PROMPT_MAX_CHARS),
-      userPrompt: rawPrompt,
-    });
-    expect([...rawPrompt].length).toBeLessThan(PROMPT_MAX_CHARS);
-    expect([...composedPrompt].length).toBeGreaterThan(PROMPT_MAX_CHARS);
-
-    const overages = batchPromptBudgetOverages([composedPrompt]);
-    expect(overages).toHaveLength(1);
-    expect(overages[0]).toMatchObject({ item: 1, length: [...composedPrompt].length, max: PROMPT_MAX_CHARS });
-    expect(summarize(imageBatchValidation({ ...whole, promptBudgetOverages: overages })).ready).toBe(false);
   });
 
   // The batch panel renders surfaced[0]; the rules must push in the same priority order the

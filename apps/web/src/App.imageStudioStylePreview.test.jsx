@@ -161,7 +161,7 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     expect(document.body.querySelector('textarea[aria-label="Prompt"]').value).toBe(hint);
   });
 
-  it("blocks a styled batch before submit and identifies every over-cap resolved item", async () => {
+  it("runs a styled batch, shortening only the over-cap items and naming them first", async () => {
     const longPrompt = "x".repeat(3500);
     window.localStorage.setItem(
       "sceneworks-studio-image-project-1",
@@ -170,17 +170,21 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
     await renderStudio();
     await selectStyle(firstStyle.name);
 
+    const note = [...document.body.querySelectorAll(".batch-hint")].find((node) =>
+      node.textContent.includes("end cut off"),
+    );
+    expect(note?.textContent).toMatch(/^Batch items 1, 3 are longer than .* \(4,000 characters\)/);
+
     const run = [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch"));
     await act(async () => {
       run.click();
     });
     await settle();
 
-    expect(createImageJob).not.toHaveBeenCalled();
-    const warning = [...document.body.querySelectorAll(".batch-warning")].find((node) =>
-      node.textContent.includes("character limit"),
-    );
-    expect(warning?.textContent).toMatch(/^Batch prompts 1 \(\d+\/4000\), 3 \(\d+\/4000\) exceed/);
+    const prompts = createImageJob.mock.calls.map(([request]) => request.prompt);
+    expect(prompts).toHaveLength(3);
+    expect(prompts.map((prompt) => [...prompt].length)).toEqual([4000, expect.any(Number), 4000]);
+    expect(prompts[1]).toContain("short");
   });
 
   it("updates live as the prompt changes, staying equal to the payload", async () => {

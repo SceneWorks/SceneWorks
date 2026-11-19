@@ -8,6 +8,7 @@ import StructuredPromptBuilder from "../../components/StructuredPromptBuilder.js
 import ReferenceCaptionPicker from "../../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../../components/BatchPromptPanel.jsx";
 import { QwenRewritePromptControl } from "../../components/QwenRewritePromptControl.jsx";
+import { BatchExpandPromptsControl } from "../../components/BatchExpandPromptsControl.jsx";
 import { Flux3LayoutEditor } from "../../components/Flux3LayoutEditor.jsx";
 import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
@@ -46,6 +47,7 @@ export function ImagePromptComposer({
   portableBatchRefusal,
   portableBatchRefusalIndex,
   portableBatchCheckedCount,
+  batchClipNotice,
   batchTotal,
   batchRun,
   batchRunProgress,
@@ -213,6 +215,9 @@ export function ImagePromptComposer({
                 ) : portableBatchCheckedCount ? (
                   <p className="batch-hint" role="status">Options checked for {portableBatchCheckedCount} requests. Live availability is checked when you run.</p>
                 ) : null}
+                {/* Items past the model's prompt ceiling run shortened rather than blocking the
+                    batch; this says which ones before the run. */}
+                {batchClipNotice ? <p className="batch-hint" role="note">{batchClipNotice}</p> : null}
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">
                     <span>
@@ -547,8 +552,9 @@ export function ImagePromptComposer({
                         <Icon.Wand size={15} /> Expand prompt
                       </span>
                       <span className="prompt-tool-desc">
-                        MiniMax-H3-Image’s own expander — a long caption plus a proposed size you
-                        can accept or ignore
+                        {batchMode
+                          ? H3_IMAGE_EXPAND_COPY.batch.tileDescription
+                          : "MiniMax-H3-Image’s own expander — a long caption plus a proposed size you can accept or ignore"}
                       </span>
                     </button>
                   ) : null}
@@ -620,7 +626,25 @@ export function ImagePromptComposer({
                     />
                   </div>
                 ) : null}
-                {h3ExpandActive ? (
+                {h3ExpandActive && batchMode ? (
+                  <div className="prompt-tool-panel">
+                    {/* Batch mode expands every prompt of the batch list, not the hidden
+                        single-prompt field. */}
+                    <BatchExpandPromptsControl
+                      copy={H3_IMAGE_EXPAND_COPY}
+                      expandModel={h3ExpandModel}
+                      expandPrompt={h3ExpandPrompt}
+                      modelId={model}
+                      onPromptsTextChange={setBatchPromptsText}
+                      projectId={activeProject?.id ?? ""}
+                      promptsText={batchPromptsText}
+                      referenceAssetIds={qwenRewriteReferenceIds}
+                      suggestedResolutionFor={(suggestion) =>
+                        h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
+                      }
+                    />
+                  </div>
+                ) : h3ExpandActive ? (
                   <div className="prompt-tool-panel">
                     <QwenRewritePromptControl
                       copy={H3_IMAGE_EXPAND_COPY}
