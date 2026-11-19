@@ -92,7 +92,7 @@ on:
         description: record (record the decode block only), on (require the block draft to run), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
         required: false
         type: choice
-        options: [record, on, no_fit]
+        options: [record, "on", no_fit]
         default: record
       tier:
         description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
