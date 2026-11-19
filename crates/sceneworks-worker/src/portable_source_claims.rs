@@ -42,6 +42,7 @@ const STATIC_SOURCE_IDS: &[&str] = &[
 ];
 
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
+static OVERLAY_REFRESH_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
 static INVENTORY_SCHEDULE: OnceLock<Mutex<InventorySchedule>> = OnceLock::new();
 static CHALLENGE_ATTEMPTS: OnceLock<Mutex<BTreeMap<String, Instant>>> = OnceLock::new();
@@ -447,7 +448,34 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
     let schedule = inventory_schedule()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !scan_due(&schedule, now, hash) || INVENTORY_STARTED.load(Ordering::Acquire) {
+    let catalog_changed = schedule.catalog_hash != Some(hash);
+    if !scan_due(&schedule, now, hash) {
+        return;
+    }
+    if INVENTORY_STARTED.load(Ordering::Acquire) {
+        drop(schedule);
+        // If a LoRA or control overlay is imported while the initial cold inventory is still
+        // hashing multi-GiB auxiliary base models, publish lightweight overlay claims immediately
+        // without updating `catalog_hash` so the full scan still reconciles `scanned` afterward.
+        if catalog_changed && !OVERLAY_REFRESH_STARTED.swap(true, Ordering::AcqRel) {
+            #[cfg(test)]
+            let fixture_cache_root =
+                sceneworks_core::hf_home::test_support::CacheRootGuard::retain(&settings.data_dir);
+            tokio::spawn(async move {
+                let _ = crate::load_progress::spawn_blocking(move || {
+                    #[cfg(test)]
+                    let _fixture_cache_root = fixture_cache_root;
+                    registered_overlay_source_claims(&settings, |claim| {
+                        pending_inventory()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .publish(claim);
+                    });
+                })
+                .await;
+                OVERLAY_REFRESH_STARTED.store(false, Ordering::Release);
+            });
+        }
         return;
     }
     drop(schedule);
@@ -554,6 +582,11 @@ fn static_source_claims(settings: &Settings) -> Vec<PortableSourceClaim> {
 }
 
 fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSourceClaim)) {
+    // Publish lightweight built-in/user LoRA and control-overlay claims first so adapter-backed
+    // jobs become admissible on the first heartbeat instead of waiting behind multi-GiB cold
+    // encoder hashes in `STATIC_SOURCE_IDS`.
+    registered_overlay_source_claims(settings, &mut publish);
+    external_lora_source_claims(settings, &mut publish);
     let empty = JsonObject::new();
     for source_id in STATIC_SOURCE_IDS {
         match capture_selected_source(source_id, settings, &empty) {
@@ -584,9 +617,11 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
             }
         }
     }
-    external_lora_source_claims(settings, &mut publish);
     external_base_source_claims(settings, &mut publish);
-    registered_digest_source_claims(settings, publish);
+    registered_digest_source_claims(settings, &mut publish);
+    // Re-sweep overlays before `replace_scanned` so any adapter imported mid-scan stays in
+    // `scanned` (unchanged files hit `VerifiedSourceCache` without re-reading bytes).
+    registered_overlay_source_claims(settings, publish);
 }
 
 /// Advertise the operator's externally scanned ComfyUI base models (SW-7030,
@@ -909,6 +944,17 @@ fn registered_digest_source_claims(
             }
         }
     }
+}
+
+fn registered_overlay_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    if settings.config_dir.as_os_str().is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    let manifests = settings.config_dir.join("manifests");
     for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
         let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
             continue;

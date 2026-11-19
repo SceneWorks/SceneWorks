@@ -1225,7 +1225,13 @@ async function longOwnedJsonExchange({ endpoint, url, api, controller }, method,
 async function submitAndVerifyOneJob({ endpoint, apiCtx, projectId, projectPath, workerId, def, plan, refs, runLabel, pagOverride, evidenceDir }) {
   const body = buildRequestBody(def, plan, projectId, refs, pagOverride);
   const posted = Date.now();
-  const response = await longOwnedJsonExchange(apiCtx, "POST", "/api/v1/image/jobs", body);
+  let response = await longOwnedJsonExchange(apiCtx, "POST", "/api/v1/image/jobs", body);
+  // A newly imported LoRA or freshly started worker publishes its overlay digest claims on the
+  // next background heartbeat; allow up to 60s for claim convergence before failing.
+  for (let retry = 0; retry < 30 && response.status === 409 && JSON.stringify(response.body ?? {}).includes("no eligible worker advertises the complete"); retry++) {
+    await delay(2000);
+    response = await longOwnedJsonExchange(apiCtx, "POST", "/api/v1/image/jobs", body);
+  }
   if (response.status >= 300 || !response.body?.id) {
     return { label: runLabel, status: "error", error: `POST /api/v1/image/jobs refused (${response.status}): ${JSON.stringify(response.body).slice(0, 1000)}` };
   }

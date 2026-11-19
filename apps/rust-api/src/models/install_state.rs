@@ -351,30 +351,50 @@ pub(super) fn backfill_current_receipt(
         .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .filter_map(|entry| {
             let repo = entry.get("repo")?.as_str()?;
+            let pinned_revision = entry
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|revision| !revision.is_empty());
             let files = string_array_field(entry, "files");
             let root = huggingface_repo_cache_path(data_dir, repo)?;
-            let snapshot = crate::huggingface_snapshot_dirs(&root).into_iter().find(|snapshot| {
-                files.iter().all(|pattern| snapshot_contains_pattern(snapshot, pattern))
-            })?;
             // Never manufacture a receipt for a torn tier: a `<tier>/*` glob matches as soon as one
             // metadata file exists, so backfilling it would record a "complete" install that cannot
-            // load. Require the tier to actually hold its weights before preserving it (sc-13076), and
-            // — for a no-`model_index` turnkey, where "holds its weights" is family-specific — to pass
-            // the shared per-tier predicate too (sc-14432).
-            if !snapshot_tier_is_loadable(&snapshot, &files, family_complete) {
-                return None;
-            }
-            let resolved = snapshot_files(&snapshot).into_iter()
-                .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
-            // Record only a file set that SATISFIES what the repo declares, never merely what was
-            // found (sc-20526). A `<tier>/*` glob and a whole-repo fetch declare no per-file claim,
-            // so the sharded-safetensors indexes IN the resolved set are the workable ground truth:
-            // every shard their `weight_map` names must be on disk. Otherwise this would mint a
-            // "complete" receipt for a tier missing ~4 GB of its text encoder (lens_turbo bf16) and
-            // that receipt would then keep the model reading installed through the usable-stale path.
-            if !listed_shard_indexes_are_complete(&snapshot, &resolved) {
-                return None;
-            }
+            // load. Require the tier to actually hold its weights before preserving it (sc-13076),
+            // pass the shared per-tier predicate for a no-`model_index` turnkey (sc-14432), and
+            // satisfy every sharded-safetensors index in the resolved set (sc-20526).
+            let resolve_snapshot = |snapshot: PathBuf| -> Option<(PathBuf, Vec<String>)> {
+                if !files
+                    .iter()
+                    .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
+                    || !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+                {
+                    return None;
+                }
+                let resolved = snapshot_files(&snapshot)
+                    .into_iter()
+                    .filter(|file| allow_pattern_matches(file, &files))
+                    .collect::<Vec<_>>();
+                (listed_shard_indexes_are_complete(&snapshot, &resolved) && !resolved.is_empty())
+                    .then_some((snapshot, resolved))
+            };
+            // Prefer the manifest-pinned snapshot revision when both it and an older cached
+            // revision are present on disk (`406265be...` sorts lexicographically before
+            // `bbf22de8...`, so taking `huggingface_snapshot_dirs` in directory order would mint a
+            // stale receipt that conflicts with portable admission's pinned revision). Fall back to
+            // any complete cached snapshot only when the pinned revision is absent.
+            let candidates = crate::huggingface_snapshot_dirs(&root);
+            let (snapshot, resolved) = pinned_revision
+                .and_then(|revision| {
+                    candidates
+                        .iter()
+                        .find(|snapshot| {
+                            snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
+                        })
+                        .cloned()
+                        .and_then(&resolve_snapshot)
+                })
+                .or_else(|| candidates.into_iter().find_map(&resolve_snapshot))?;
             // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
             // receipt makes its whole repository unserveable from the resolved cache — there is no
             // pair to compare coverage against — so a backfilled install silently dropped out of
