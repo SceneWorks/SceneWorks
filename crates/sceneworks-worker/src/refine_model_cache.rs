@@ -255,7 +255,7 @@ where
 /// The weights (GB) a cached refiner at `source` holds: the bytes of its safetensors payload, what
 /// dropping it releases. 0 when it cannot be read, so an unreadable entry is never over-credited.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn cached_refiner_weights_gb(source: &Path) -> f64 {
+fn cached_refiner_weights_gb(source: &std::path::Path) -> f64 {
     gen_core::core_llm::checkpoint_payload_bytes(source)
         .map(|bytes| bytes as f64 / (1u64 << 30) as f64)
         .unwrap_or(0.0)
