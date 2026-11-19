@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 GUARDED_RUN = ROOT / "scripts" / "ci" / "qwen38-describer-mlx" / "guarded_run.sh"
 TREE_GUARD = ROOT / "scripts" / "ci" / "iris-mlx-real-weights" / "tree_guard.py"
 LOCK = ROOT / "scripts" / "ci" / "metal_execution_lock.py"
+# tree_guard's sampling interval, read from its source so the fake child's hold follows it.
+TREE_GUARD_POLL_SECONDS = float(re.search(r"^POLL_SECONDS = ([0-9.]+)$", TREE_GUARD.read_text(), re.M).group(1))
 RUN_SH = ROOT / "scripts" / "ci" / "qwen38-describer-mlx" / "run.sh"
 TEST_NAME = "qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_mlx"
 EXPANDER_TEST_NAME = "h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_mlx"
@@ -85,9 +87,18 @@ def run(tmp_path: Path, child: list[str], cap_gib: str = "4", wall_s: str = "60"
 def test_a_passing_test_under_the_lock_and_guard_records_the_peak(tmp_path, test_name, log_name):
     # The run that failed on nax-macos (44464702617): the test passed, the guard never stopped it,
     # so the guard printed no `GUARD:` line, only its `exit=` summary.
+    #
+    # tree_guard reads the root's kernel high-water mark (`ri_lifetime_max_phys_footprint`) only
+    # while the root is alive, once per POLL_SECONDS. A child that touches its 64 MiB and exits
+    # inside one poll interval is never read after the allocation, so the recorded peak is the
+    # interpreter's start-up footprint (~8 MB). Hold the touched memory for eight poll intervals,
+    # so at least one reading lands after the allocation; the high-water mark keeps it from then on.
+    hold_s = 8 * TREE_GUARD_POLL_SECONDS
     done, out, guard, summary = run(tmp_path, fake_test(f"""
+        import time
         held = bytearray(64 << 20)
         for i in range(0, len(held), 4096): held[i] = 1
+        time.sleep({hold_s!r})
         print("running 1 test"); print({PASSED!r})
     """), test_name=test_name, log_name=log_name)
     assert done.returncode == 0, done.stdout + done.stderr
