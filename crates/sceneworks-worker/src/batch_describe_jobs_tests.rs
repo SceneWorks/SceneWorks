@@ -1743,7 +1743,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [28.0, 41.0, 65.0]), ("candle", [22.0, 34.0, 65.0])] {
+    for (lane, expect) in [("mlx", [27.0, 40.0, 66.0]), ("candle", [21.0, 33.0, 65.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -1754,7 +1754,7 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     // A tier with no row falls back to the lane's conservative bf16 floor.
     let job = qwen38_job_payload(&stage, "q4");
     let job = job.as_object().expect("payload");
-    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(65.0));
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(66.0));
     assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
 
     let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
@@ -1782,15 +1782,16 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
 
 /// The Candle floors never admit a load the engine then refuses, nor one below its measured peak:
 /// each is the smallest whole GiB at or above both candle-llm's CUDA load requirement (from the
-/// shipped snapshots' safetensors headers, inference 4a36a7f) and the measured peak above baseline.
+/// shipped snapshots' safetensors headers, inference 99b92d73d) and the measured peak above
+/// baseline (q4/q8: the full tiers, runs 44464665126 and 44464684497).
 #[test]
 fn each_candle_floor_covers_the_engine_load_requirement_and_the_measured_peak() {
     const MIB: f64 = 1024.0 * 1024.0;
     let stage = stage("http://127.0.0.1:9".to_owned());
     // (tier, engine load requirement in bytes, measured peak above baseline in MiB)
     for (tier, engine_bytes, peak_mib) in [
-        ("q4", 22_279_852_166_u64, 21_995.0),
-        ("q8", 35_291_474_440, 34_409.0),
+        ("q4", 17_875_551_126_u64, 21_061.0),
+        ("q8", 30_251_474_194, 32_965.0),
         ("bf16", 69_520_866_634, 57_319.0),
     ] {
         let job = qwen38_job_payload(&stage, tier);
@@ -1806,13 +1807,19 @@ fn each_candle_floor_covers_the_engine_load_requirement_and_the_measured_peak() 
             "{tier}: {floor_gb} GiB is not the smallest whole GiB covering {need_mib} MiB"
         );
     }
-    // A 24 GB card (24,564 MiB total) admits q4 with up to 2,036 MiB in use, never q8 or bf16.
+    // A 24 GB card (24,564 MiB total) admits q4 with up to 2,036 MiB in use (E3: every card the
+    // plain tier's floor admitted), and with up to 3,060 MiB, never q8 or bf16.
     let card = 24_564.0 / 1024.0;
     for (tier, admitted) in [("q4", true), ("q8", false), ("bf16", false)] {
         let job = qwen38_job_payload(&stage, tier);
         let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", tier);
         assert_eq!(
             qwen38_fit_refusal(tier, floor, Some(card - 2_036.0 / 1024.0)).is_ok(),
+            admitted,
+            "{tier}"
+        );
+        assert_eq!(
+            qwen38_fit_refusal(tier, floor, Some(card - 3_060.0 / 1024.0)).is_ok(),
             admitted,
             "{tier}"
         );
@@ -1830,9 +1837,10 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     let stage = stage("http://127.0.0.1:9".to_owned());
     let job = qwen38_job_payload(&stage, "q4");
     let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
-    assert_eq!(floor, Some(22.0));
-    // A 32 GiB card holding the first job's q4 model (measured 21.48 GiB) has about 10 GiB free.
-    let free_with_q4_cached = Some(32.0 - 21.48);
+    assert_eq!(floor, Some(21.0));
+    // A 32 GiB card holding the first job's q4 model (measured 21,061 MiB, 20.57 GiB) has about
+    // 11 GiB free.
+    let free_with_q4_cached = Some(32.0 - 20.57);
     let free_after_drop = Some(32.0);
 
     // The refused case the old check produced: the full floor against the free VRAM alone.
@@ -1857,15 +1865,15 @@ fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() 
     // A cold load that truly cannot fit is still refused.
     let error =
         qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
-    assert!(error.to_string().contains("needs 22.0 GB"), "{error}");
+    assert!(error.to_string().contains("needs 21.0 GB"), "{error}");
 
-    // A 24 GB card (24,564 MiB total) is admitted cold with 22,528 MiB free and refused below.
+    // A 24 GB card (24,564 MiB total) is admitted cold with 21,504 MiB free and refused below.
     qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(24_564.0 / 1024.0))
         .expect("an idle 24 GB card admits q4");
-    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_528.0 / 1024.0))
-        .expect("22,528 MiB free admits q4");
+    qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(21_504.0 / 1024.0))
+        .expect("21,504 MiB free admits q4");
     assert!(
-        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(22_527.0 / 1024.0)).is_err()
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(21_503.0 / 1024.0)).is_err()
     );
 }
 
@@ -2219,7 +2227,7 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
         .expect_err("a tier above the machine is refused");
         assert!(
             error.to_string().ends_with(
-                "The q4 tier of the Qwen3.8 27B describer needs 28.0 GB of memory, but this \
+                "The q4 tier of the Qwen3.8 27B describer needs 27.0 GB of memory, but this \
                  worker has 16.0 GB for it. Choose a smaller tier."
             ),
             "{error}"

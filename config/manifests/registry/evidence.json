@@ -45892,19 +45892,19 @@
       "minMemoryGb": 32
     },
     "mlx": {
-      "minMemoryGb": 65,
+      "minMemoryGb": 66,
       "minMemoryGbByTier": {
-        "bf16": 65,
-        "q8": 41,
-        "q4": 28
+        "bf16": 66,
+        "q8": 40,
+        "q4": 27
       }
     },
     "candle": {
       "minMemoryGb": 65,
       "minMemoryGbByTier": {
         "bf16": 65,
-        "q8": 34,
-        "q4": 22
+        "q8": 33,
+        "q4": 21
       },
       "measured": false
     }
