@@ -5405,7 +5405,8 @@ mod tests {
         .unwrap();
 
         let (_verified, cache) = scratch_cache();
-        let captured = capture_local_source_files(&cache, &link, &[hub.clone()]).unwrap();
+        let captured =
+            capture_local_source_files(&cache, &link, std::slice::from_ref(&hub)).unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(
             captured[0].relative_path,
