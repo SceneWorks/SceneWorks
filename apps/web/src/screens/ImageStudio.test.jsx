@@ -730,7 +730,13 @@ describe("ImageStudio advanced model defaults", () => {
     expect(field(container, "Guidance").value).toBe("");
     expect(field(container, "Guidance").placeholder).toBe("6.5");
 
-    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    // The model switch settles over several async steps; under a loaded run Generate can still be
+    // disabled (or the submit still in flight) a tick later, so wait for both.
+    const generateButton = () =>
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
+    await click(generateButton());
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalled());
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe("qwen_image");
     expect(payload.advanced).toMatchObject({
@@ -954,7 +960,14 @@ describe("ImageStudio text encoder selector", () => {
     expect(container.querySelector('select[aria-label="Text encoder model"]').value).toBe(
       ALTERNATE_ENCODER.id,
     );
+    // A launched recipe settles over several async steps; under a loaded run the Generate button
+    // can still be disabled (or the submit still in flight) a tick after the encoder shows, so
+    // wait for both rather than assume one tick.
+    const generateButton = () =>
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
     await generate();
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalled());
     expect(createImageJob.mock.calls[0][0].advanced.textEncoderModel).toBe(
       ALTERNATE_ENCODER.id,
     );
