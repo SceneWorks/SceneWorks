@@ -241,7 +241,6 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     .expect("load candle Flux2Edit dev");
 
     let req = Flux2EditRequest {
-        pag: None,
         prompt: env_or(
             "FLUX2_DEV_PROMPT",
             "make the person wear a bright red wizard hat",
@@ -254,6 +253,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         scheduler: None,
         scheduler_shift: None,
         guidance: 4.0,
+        pag: None,
         seed: 42,
         // No caption upsampling on this smoke — the prompt is used verbatim, matching candle-gen
         // Default and the worker's `generate_candle_flux2_edit_stream`.
@@ -341,7 +341,6 @@ fn flux2_dev_control_candle_gpu_smoke() {
     .expect("load candle Flux2Control dev");
 
     let req = Flux2ControlRequest {
-        pag: None,
         prompt: env_or(
             "FLUX2_DEV_PROMPT",
             "a knight in ornate steel armor, dramatic cinematic lighting",
@@ -354,6 +353,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         scheduler_shift: None,
         guidance: 4.0,
         control_scale: 0.75,
+        pag: None,
         seed: 42,
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,

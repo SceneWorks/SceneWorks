@@ -707,7 +707,7 @@ impl CandleStrictControl for KreaStrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         let req = self.control_request(seed, cancel, preview);
         let completed = model
             .generate_with_execution_report(&req, control, on_progress)
@@ -736,6 +736,9 @@ pub(super) async fn generate_candle_krea_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_active_pag("Krea pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     if super::artifact_resolution::wants_krea_convrot(request) {
         super::artifact_resolution::ensure_krea_convrot_base_present(api, settings, job, request)
             .await?;

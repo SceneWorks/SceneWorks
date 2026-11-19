@@ -2829,7 +2829,6 @@ mod tests {
             *self.seen.lock().unwrap() = Some(selected);
             let path = selected.unwrap_or(gen_core::PrefixKvCacheMode::Prefill);
             Ok(gen_core::GenerationReport {
-                pag: None,
                 output: Some(gen_core::GenerationOutput::Images(vec![Default::default()])),
                 artifacts: None,
                 warnings: Vec::new(),
@@ -2838,6 +2837,7 @@ mod tests {
                     cache_bytes: if path.is_cached() { 4096 } else { 0 },
                     overflow: None,
                 }),
+                pag: None,
             })
         }
     }

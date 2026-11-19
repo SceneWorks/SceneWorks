@@ -13747,6 +13747,124 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
 }
 
 #[tokio::test]
+async fn preset_pag_expands_headless_and_preserves_client_resolved_pag_off() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let z_entry = sceneworks_core::builtin_manifests::builtin_model_entry("z_image_turbo")
+        .expect("z_image_turbo builtin entry");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [z_entry] }).to_string(),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset PAG Project").await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, preset) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        json!({
+            "id": "pag_preset",
+            "name": "PAG Preset",
+            "workflow": "text_to_image",
+            "model": "z_image_turbo",
+            "defaults": {
+                "count": 1,
+                "resolution": "1024x1024",
+                "pag": { "scale": 1.5, "layers": [15] }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{preset:?}");
+
+    // 1. Headless request omitting advanced.pag inherits the preset's defaults.pag.
+    let (status, headless_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "model": "z_image_turbo",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "pag_preset"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{headless_job:?}");
+    assert_eq!(
+        headless_job["payload"]["advanced"]["pag"],
+        json!({ "scale": 1.5, "layers": [15] })
+    );
+
+    // 2. Studio client (presetLorasResolvedClientSide=true) where the user turned PAG off
+    // (omitting advanced.pag) keeps PAG absent instead of silently re-enabling defaults.pag.
+    let (status, studio_off_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "model": "z_image_turbo",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "pag_preset",
+            "presetLorasResolvedClientSide": true,
+            "loras": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{studio_off_job:?}");
+    assert!(
+        studio_off_job["payload"]["advanced"]
+            .get("pag")
+            .is_none_or(Value::is_null),
+        "client-resolved PAG-off override must not be overwritten by preset defaults.pag"
+    );
+
+    // 3. Explicit headless PAG-off ({ scale: 0 }) also overrides defaults.pag.
+    let (status, headless_off_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "model": "z_image_turbo",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "pag_preset",
+            "advanced": { "pag": { "scale": 0 } }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{headless_off_job:?}");
+    assert_eq!(
+        headless_off_job["payload"]["advanced"]["pag"],
+        json!({ "scale": 0 })
+    );
+}
+
+#[tokio::test]
 async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
     // General presets stack (epic 11949): the studio composes the full preset-stack prompt
     // client-side because the server only knows how to fold ONE recipePresetId's prefix/suffix.

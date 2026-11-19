@@ -403,7 +403,7 @@ impl CandleStrictControl for KolorsStrictControl {
         // sweeps this file, so the guard fails the moment the field appears without being fed.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         let req = KolorsControlRequest {
             prompt: self.prompt.clone(),
             negative: self.negative.clone(),
@@ -452,6 +452,9 @@ pub(super) async fn generate_candle_kolors_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_active_pag("Kolors pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     let kolors_base = resolve_kolors_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Kolors base (Kolors-diffusers) weights not found".to_owned())
     })?;

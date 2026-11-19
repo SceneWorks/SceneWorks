@@ -52,6 +52,7 @@
 //! | `count` | `Batch size` | Ours is how many images the run asked for; A1111's is the sampler's parallel batch. Near-synonyms that are not the same number. |
 //! | `advanced.controlMode` / `controlScale` | ControlNet extension fields | The ControlNet trailer is a whole sub-format with per-unit indices and model hashes. A partial emission of it reads as a full one. |
 //! | `advanced.faceRestore` | `Face restoration: CodeFormer` | A1111's field names the *engine*. Ours is a boolean and we have no engine name to give. |
+//! | `advanced.pag`, `advanced.pagExecutionReport` | nothing | Perturbed-Attention Guidance block indices and `[start, stop)` window are family-specific (`layers`, `flux_blocks`, `single_stream_blocks`, `dit_blocks`); they travel losslessly in `sceneworks:workflow` and have no standard A1111 key. |
 //! | `stylePreset`, `styleId`, `fitMode`, `mode`, `inputs[]` | nothing | No field, near or far. |
 //! | quant tier, attention kernel, GPU | nothing | Never in the envelope at all — the allow-list withholds them, so this rendering could not see them if it wanted to. |
 //!
@@ -622,5 +623,38 @@ mod tests {
             "a lighthouse in heavy fog\nSeed: 7, Model: z_image_turbo, Version: 0.8.1, software: SceneWorks"
         );
         assert_eq!(SETTINGS_PAIR_FLOOR, 3, "A1111's threshold, not ours");
+    }
+
+    #[test]
+    fn pag_preserves_strict_a1111_parameters_line_while_workflow_share_carries_pag_and_receipt() {
+        let with_receipt = envelope(serde_json::json!({
+            "seed": 42,
+            "advanced": {
+                "steps": 28,
+                "guidanceScale": 4.0,
+                "pag": { "scale": 1.5, "layers": [2, 5], "start": 0.05, "stop": 0.85, "adaptiveScale": 0.25 },
+                "pagExecutionReport": {
+                    "scale": 1.5,
+                    "adaptiveScale": 0.25,
+                    "layers": [2, 5],
+                    "start": 0.05,
+                    "stop": 0.85,
+                    "activeSteps": 18,
+                    "totalSteps": 28
+                }
+            }
+        }));
+        assert_eq!(with_receipt.advanced["pag"]["scale"], 1.5);
+        assert_eq!(
+            with_receipt.advanced["pagExecutionReport"]["activeSteps"],
+            18
+        );
+        let text = parameters_text(&with_receipt, (1, 1));
+        assert_eq!(
+            text,
+            "a lighthouse in heavy fog\nSteps: 28, CFG scale: 4, Seed: 42, Model: z_image_turbo, Version: 0.8.1, software: SceneWorks"
+        );
+        assert!(!text.contains("PAG"), "{text:?}");
+        assert!(!text.contains("pagExecutionReport"), "{text:?}");
     }
 }

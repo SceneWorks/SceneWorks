@@ -735,7 +735,32 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
 ) -> Option<KreaTurboFit> {
-    krea_turbo_fit_priced(
+    krea_turbo_fit_with_runtime_and_pag(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        reserve_gb,
+        allow_streamed_blocks,
+        runtime,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn krea_turbo_fit_with_runtime_and_pag(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
+    pag_workspace_bytes: u64,
+) -> Option<KreaTurboFit> {
+    krea_turbo_fit_priced_with_pag(
         manifest_entry,
         tier,
         width,
@@ -745,6 +770,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         allow_streamed_blocks,
         runtime,
         None,
+        pag_workspace_bytes,
     )
 }
 
@@ -753,6 +779,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
 /// `architecture_facts` block through `architecture_facts_from_contract`, sc-22667), `Some` lets
 /// a fixture grade the rung ratios with facts it states directly.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn krea_turbo_fit_priced(
     manifest_entry: &JsonObject,
     tier: &str,
@@ -763,6 +790,33 @@ pub(super) fn krea_turbo_fit_priced(
     allow_streamed_blocks: bool,
     runtime: Option<&KreaRuntimeEvidenceContext>,
     facts_override: Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
+) -> Option<KreaTurboFit> {
+    krea_turbo_fit_priced_with_pag(
+        manifest_entry,
+        tier,
+        width,
+        height,
+        budget,
+        reserve_gb,
+        allow_streamed_blocks,
+        runtime,
+        facts_override,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn krea_turbo_fit_priced_with_pag(
+    manifest_entry: &JsonObject,
+    tier: &str,
+    width: u32,
+    height: u32,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    allow_streamed_blocks: bool,
+    runtime: Option<&KreaRuntimeEvidenceContext>,
+    facts_override: Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
+    pag_workspace_bytes: u64,
 ) -> Option<KreaTurboFit> {
     use crate::memory_strategy::{self, Budget, Candidate, RequestScope, Selection};
     use gen_core::{
@@ -1483,6 +1537,31 @@ pub(super) fn krea_turbo_fit_priced(
             ),
         ));
     }
+    let resident_peak_with_pag_gb = if pag_workspace_bytes > 0 {
+        let pag_gb = pag_workspace_bytes as f64 / BYTES_PER_GIB;
+        for item in &mut evidence {
+            item.predicted_peak_bytes = item
+                .predicted_peak_bytes
+                .saturating_add(pag_workspace_bytes);
+        }
+        for (_, item) in &mut estimates {
+            item.predicted_peak_bytes = item
+                .predicted_peak_bytes
+                .saturating_add(pag_workspace_bytes);
+        }
+        for (_, item) in &mut anchor_derived {
+            item.predicted_peak_bytes = item
+                .predicted_peak_bytes
+                .saturating_add(pag_workspace_bytes);
+        }
+        for (_, phases, needed, _, _) in &mut measured {
+            phases.denoise_gb += pag_gb;
+            *needed = phases.peak_gb() + reserve_gb;
+        }
+        resident_peak_gb + pag_gb
+    } else {
+        resident_peak_gb
+    };
     let mut candidates = selections
         .iter()
         .zip(&evidence)
@@ -1551,7 +1630,7 @@ pub(super) fn krea_turbo_fit_priced(
             needed_gb,
             available_gb,
         } => Some(KreaTurboFit::Resident {
-            peak_gb: resident_peak_gb,
+            peak_gb: resident_peak_with_pag_gb,
             needed_gb: needed_gb + reserve_gb,
             selection: selected,
             admitted: admitted(needed_gb, available_gb),

@@ -4838,7 +4838,9 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "Qwen load telemetry must derive its adapter count from the resolved adapter stack"
     );
     assert!(
-        qwen_stream.contains("crate::candle_memory_strategy::evaluate_shared_image(")
+        (qwen_stream.contains("crate::candle_memory_strategy::evaluate_shared_image(")
+            || qwen_stream
+                .contains("crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag("))
             && qwen_stream.contains("qwen_shared_load_plan(")
             && !qwen_stream.contains("crate::vram_gate::load_plan("),
         "the shared selector must exclusively grant Qwen residency; the legacy gate may not select"
@@ -8309,7 +8311,7 @@ fn sc3031_ab_dump_pose() {
     let generator = zimage_control_load(weights, control_weights, quant, adapters).expect("load");
     let cancel = CancelFlag::new();
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
-    let (ow, oh, pixels, _) = zimage_control_generate_one(
+    let (ow, oh, pixels, _, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         &req.prompt,
@@ -8536,7 +8538,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels, _) = zimage_control_generate_one(
+    let (w, h, pixels, _, _) = zimage_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -8598,7 +8600,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let conditioning = build_control_conditioning(control_map, kind.clone(), 0.9, None);
         let cancel = gen_core::CancelFlag::new();
         let mut steps_seen = 0u32;
-        let (ow, oh, pixels, _) = zimage_base_control_generate_one(
+        let (ow, oh, pixels, _, _) = zimage_base_control_generate_one(
             generator.as_ref(),
             &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
@@ -8687,7 +8689,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
-    let (w, h, pixels, _) = qwen_control_generate_one(
+    let (w, h, pixels, _, _) = qwen_control_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -10076,7 +10078,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.75, None);
-    let (w, h, pixels) = flux2_control_generate_one_scoped(
+    let (w, h, pixels, _) = flux2_control_generate_one_scoped(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
@@ -11807,7 +11809,7 @@ fn flux2_edit_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = flux2_edit_generate_one(
+    let (w, h, pixels, _) = flux2_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         false,
@@ -15799,7 +15801,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels, _) = qwen_edit_generate_one(
+    let (w, h, pixels, _, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15866,7 +15868,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     };
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels, _) = qwen_edit_generate_one(
+    let (w, h, pixels, _, _) = qwen_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
@@ -15960,7 +15962,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     }];
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
-    let (w, h, pixels) = flux2_edit_generate_one(
+    let (w, h, pixels, _) = flux2_edit_generate_one(
         generator.as_ref(),
         &gen_core::GenerationRequest::default(),
         false,
@@ -16099,7 +16101,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             let cancel = gen_core::CancelFlag::new();
             let mut steps_seen = 0u32;
             eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
-            let (w, h, pixels) = flux2_edit_generate_one(
+            let (w, h, pixels, _) = flux2_edit_generate_one(
                 generator.as_ref(),
                 &gen_core::GenerationRequest::default(),
                 false,
@@ -18426,7 +18428,7 @@ fn matrix_flux2_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = flux2_control_generate_one_scoped(
+    let (_, _, pixels, _) = flux2_control_generate_one_scoped(
         generator,
         &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
@@ -18571,7 +18573,7 @@ fn matrix_zimage_turbo_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels, _) = zimage_control_generate_one(
+    let (_, _, pixels, _, _) = zimage_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18711,7 +18713,7 @@ fn matrix_zimage_base_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels, _) = zimage_base_control_generate_one(
+    let (_, _, pixels, _, _) = zimage_base_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -18853,7 +18855,7 @@ fn matrix_qwen_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels, _) = qwen_control_generate_one(
+    let (_, _, pixels, _, _) = qwen_control_generate_one(
         generator,
         &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
@@ -19481,8 +19483,8 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
 
     for (route, source, marker) in [
         ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
-        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
-        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n            gen_core::MemoryCacheState::Cold"),
+        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n            gen_core::MemoryCacheState::Cold"),
         ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
         ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
         ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),
@@ -20249,8 +20251,8 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         final_selector.contains("hires_fix.is_some(), hires_fix.is_some(),"),
         "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
     );
-    assert!(final_selector.contains("evaluate_shared_image_priced("));
-    assert!(final_selector.contains("evaluate_shared_image_priced_with_resources("));
+    assert!(final_selector.contains("evaluate_shared_image_priced_and_pag("));
+    assert!(final_selector.contains("evaluate_shared_image_priced_with_resources_and_pag("));
     assert!(final_selector.contains("Some(&references.resources)"));
     let first_mode = source
         .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
@@ -23007,7 +23009,7 @@ fn sc_8253_8278_identity_angle_ab() {
                     continue;
                 }
                 let cancel = gen_core::CancelFlag::new();
-                let (w, h, pixels) = flux2_edit_generate_one(
+                let (w, h, pixels, _) = flux2_edit_generate_one(
                     generator.as_ref(),
                     &gen_core::GenerationRequest::default(),
                     false,
@@ -23347,7 +23349,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "Flux3Reference",
             "candle.rs",
             include_str!("candle.rs"),
-            "evaluate_shared_image_priced_with_resources(",
+            "evaluate_shared_image_priced_with_resources_and_pag(",
         ),
         (
             "MossImageEdit",
@@ -23371,7 +23373,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "QwenEdit",
             "qwen_edit_candle.rs",
             include_str!("qwen_edit_candle.rs"),
-            "crate::candle_memory_strategy::evaluate_shared_image(",
+            "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(",
         ),
         (
             "KreaEdit",
@@ -23777,7 +23779,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "the FLUX.1 opting-out lane must name the shared image-memory ladder that owns admission"
     );
     assert!(
-        flux1_source.contains("candle_memory_strategy::evaluate_shared_image("),
+        flux1_source.contains("candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag("),
         "flux1_control_candle.rs must evaluate the shared image-memory ladder before its provider load"
     );
     let krea_source = CONDITIONING
@@ -29719,6 +29721,9 @@ fn candle_stream_emits_the_krea_ladder_selection() {
         .matches("crate::vram_gate::krea_turbo_fit_with_runtime(")
         .count()
         + stream
+            .matches("crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(")
+            .count()
+        + stream
             .matches("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
             .count();
     assert!(gate_calls >= 2, "the Krea gate is consulted in the stream");
@@ -29728,6 +29733,7 @@ fn candle_stream_emits_the_krea_ladder_selection() {
         .filter(|(at, _)| {
             let call = &stream[*at..];
             call.starts_with("crate::vram_gate::krea_turbo_fit_with_runtime(")
+                || call.starts_with("crate::vram_gate::krea_turbo_fit_with_runtime_and_pag(")
                 || call.starts_with("crate::vram_gate::krea_turbo_smaller_fit_with_runtime(")
         })
         .filter(|(at, _)| {
@@ -29856,11 +29862,11 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
         .count()
         + render_selectors
-            .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced_and_pag(")
             .count()
         + render_selectors
             .match_indices(
-                "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(",
+                "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(",
             )
             .count();
     assert_eq!(
@@ -31643,4 +31649,239 @@ fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
     assert_eq!(native.scheduler_shift, Some(33.375));
     assert_eq!(native.sampler.as_deref(), Some("heun"));
     assert_eq!(native.scheduler.as_deref(), Some("karras"));
+}
+
+#[test]
+fn write_image_asset_and_upscaled_share_embed_sanitized_pag_execution_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    // Post-enqueue scrubbing strips any client-supplied pagExecutionReport from the payload before
+    // the worker sees `plan.workflow_source`, while `pag` itself travels normally.
+    let mut payload = embed_payload();
+    payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert(
+            "pag".to_owned(),
+            json!({
+                "scale": 1.5,
+                "layers": [5, 2],
+                "start": 0.1,
+                "stop": 0.9,
+                "adaptiveScale": 0.25
+            }),
+        );
+    assert!(
+        payload["advanced"]
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY)
+            .is_none(),
+        "workflow_source mirrors post-enqueue scrubbing without pagExecutionReport"
+    );
+
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let mut raw_settings = stub_raw_settings(&req);
+    raw_settings.insert(
+        sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+        json!({
+            "scale": 1.5,
+            "adaptive_scale": 0.25,
+            "layers": [5, 2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }),
+    );
+
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        resolve_seed(&req, 0),
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, 100),
+        STUB_ADAPTER,
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+
+    let expected_report = json!({
+        "scale": 1.5,
+        "adaptiveScale": 0.25,
+        "layers": [2, 5],
+        "start": 0.1,
+        "stop": 0.9,
+        "activeSteps": 6,
+        "totalSteps": 8
+    });
+
+    let media = project_path.join(base_fact["mediaPath"].as_str().unwrap());
+    let base_share = sceneworks_core::workflow_png::read_workflow_chunk_file(&media)
+        .expect("the written PNG is readable")
+        .expect("it carries a workflow");
+    assert_eq!(
+        base_share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&expected_report)
+    );
+
+    let applied = json!({ "enabled": true, "engine": "real-esrgan", "factor": 2 });
+    let upscaled_share = upscaled_workflow_share(&req, &base_fact, &payload, &applied)
+        .expect("upscaled workflow share fits within recording ceiling");
+    assert_eq!(
+        upscaled_share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&expected_report)
+    );
+
+    // If PAG did not execute (or raw_settings holds an invalid/unknown-field receipt) and
+    // workflow_source was scrubbed at enqueue, neither base nor upscaled share embeds
+    // pagExecutionReport.
+    for hostile_report in [
+        json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.25,
+            "layers": [2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8,
+            "localScratchPath": "/Volumes/Private/pag.bin"
+        }),
+        json!({
+            "scale": 0.0,
+            "adaptiveScale": 0.0,
+            "layers": [],
+            "start": 0.9,
+            "stop": 0.1,
+            "activeSteps": 10,
+            "totalSteps": 8
+        }),
+    ] {
+        let mut invalid_raw_settings = stub_raw_settings(&req);
+        invalid_raw_settings.insert(
+            sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+            hostile_report,
+        );
+        let invalid_fact = write_image_asset(
+            &plan,
+            0,
+            resolve_seed(&req, 0),
+            req.width,
+            req.height,
+            stub_rgb8(req.width, req.height, 100),
+            STUB_ADAPTER,
+            invalid_raw_settings,
+            &project_path,
+        )
+        .unwrap();
+        let invalid_media = project_path.join(invalid_fact["mediaPath"].as_str().unwrap());
+        let invalid_share = sceneworks_core::workflow_png::read_workflow_chunk_file(&invalid_media)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !invalid_share
+                .advanced
+                .contains_key(sceneworks_core::options::pag::PAG_REPORT_KEY),
+            "base share must drop invalid or unknown-field pagExecutionReport values"
+        );
+        let invalid_upscaled =
+            upscaled_workflow_share(&req, &invalid_fact, &payload, &applied).unwrap();
+        assert!(
+            !invalid_upscaled
+                .advanced
+                .contains_key(sceneworks_core::options::pag::PAG_REPORT_KEY),
+            "upscaled share must drop invalid or unknown-field pagExecutionReport values"
+        );
+    }
+}
+
+#[cfg(native_lane)]
+#[test]
+fn write_upscaled_asset_embeds_pag_execution_report_in_png_workflow_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let config_dir = dir.path().join("config");
+    let settings = settings_with_config_dir(&config_dir);
+
+    let mut payload = embed_payload();
+    payload
+        .get_mut("advanced")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert(
+            "pag".to_owned(),
+            json!({ "scale": 1.5, "layers": [2, 5], "start": 0.1, "stop": 0.9 }),
+        );
+    let req = ImageRequest::from_resolved(&payload, &payload).unwrap();
+    let plan = ImagePlan::with_count(&req, req.count, workflow_source(&settings, &payload));
+    let mut raw_settings = stub_raw_settings(&req);
+    raw_settings.insert(
+        sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
+        json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.0,
+            "layers": [5, 2],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }),
+    );
+
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        resolve_seed(&req, 0),
+        req.width,
+        req.height,
+        stub_rgb8(req.width, req.height, 100),
+        STUB_ADAPTER,
+        raw_settings,
+        &project_path,
+    )
+    .unwrap();
+    let upscaled =
+        image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([12, 34, 56]));
+    let upscaled_fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        None,
+        "real-esrgan",
+        2,
+        0.0,
+        None,
+        &project_path,
+    )
+    .unwrap();
+
+    let upscaled_media = project_path.join(upscaled_fact["mediaPath"].as_str().unwrap());
+    let share = sceneworks_core::workflow_png::read_workflow_chunk_file(&upscaled_media)
+        .expect("the upscaled PNG is readable")
+        .expect("it carries a workflow");
+    assert_eq!(
+        share
+            .advanced
+            .get(sceneworks_core::options::pag::PAG_REPORT_KEY),
+        Some(&json!({
+            "scale": 1.5,
+            "adaptiveScale": 0.0,
+            "layers": [2, 5],
+            "start": 0.1,
+            "stop": 0.9,
+            "activeSteps": 6,
+            "totalSteps": 8
+        }))
+    );
 }

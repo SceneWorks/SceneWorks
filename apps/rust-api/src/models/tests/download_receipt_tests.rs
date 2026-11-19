@@ -2998,3 +2998,39 @@ fn scail2_shared_variants_are_installable_off_macos_and_advertise_admitted_candl
         "the pre-admission product wording must not contradict the reviewed Candle routes"
     );
 }
+
+#[test]
+fn backfill_prefers_manifest_pinned_revision_over_lexicographically_earlier_stale_snapshot() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path();
+    let repo = "SceneWorks/flux2-klein-9b-kv-mlx";
+    let stale_rev = "406265beebe141024a06e24038c3713cf7af87d8";
+    let pinned_rev = "bbf22de8d654789de3b177632d2e283cc4f77729";
+    let repo_cache = huggingface_repo_cache_path(data_dir, repo).unwrap();
+    for rev in [stale_rev, pinned_rev] {
+        let q4 = repo_cache.join("snapshots").join(rev).join("q4");
+        std::fs::create_dir_all(&q4).unwrap();
+        std::fs::write(q4.join("transformer.safetensors"), b"weights").unwrap();
+    }
+    let model = json!({
+        "id": "flux2_klein_9b_kv",
+        "family": "flux2-klein",
+        "downloads": [{
+            "provider": "huggingface",
+            "repo": repo,
+            "revision": pinned_rev,
+            "variant": "q4",
+            "default": true,
+            "files": ["q4/*"]
+        }]
+    });
+    let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+    assert!(state.installed);
+    let marker = data_dir
+        .join("models")
+        .join(safe_download_dir(repo))
+        .join(".sceneworks-download-complete.json");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(receipt["snapshotRevision"], json!(pinned_rev));
+}

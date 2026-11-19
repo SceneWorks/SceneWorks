@@ -1,9 +1,23 @@
 //! Shared installation-receipt identity and write coordination.
+pub use gen_core::CANDLE_DEVICE_FORMAT_CACHE_DIR;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::Path;
+
+/// Whether a snapshot-relative path lives under Candle's derived `.candle-device-format-v1`
+/// packed-weight sidecar cache (`SC-16096`).
+///
+/// When a Hugging Face snapshot is writable, `candle-gen` materializes `<hash>.q4_1.safetensors`
+/// projection sidecars inside a hidden `.candle-device-format-v1/` subdirectory alongside the
+/// canonical transformer weights. Those derived cache files are never part of the pinned upstream
+/// closure and must not be recorded in or enforced from install receipts.
+pub fn is_candle_device_format_cache_path(relative_path: &str) -> bool {
+    relative_path
+        .split(['/', '\\'])
+        .any(|segment| segment == CANDLE_DEVICE_FORMAT_CACHE_DIR)
+}
 
 /// Serialize receipt read/modify/write across discovery and the download worker.
 pub fn lock(managed: &Path) -> io::Result<crate::file_lock::FileLock> {
@@ -36,7 +50,10 @@ pub fn recover_revision(receipt: &Value, repo_root: &Path) -> Option<String> {
         .as_array()?
         .iter()
         .map(Value::as_str)
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .filter(|file| !is_candle_device_format_cache_path(file))
+        .collect::<Vec<_>>();
     if files.is_empty()
         || files
             .iter()
@@ -275,5 +292,31 @@ mod tests {
         fs::write(snapshot.join("model.safetensors"), b"changed weights").unwrap();
         assert_eq!(recover_revision(&receipt, temp.path()), None);
         assert_eq!(receipt["artifactTreeStamp"], stamp);
+    }
+
+    #[test]
+    fn candle_device_format_cache_paths_are_detected_and_ignored_during_revision_recovery() {
+        assert!(is_candle_device_format_cache_path(
+            "q4/transformer/.candle-device-format-v1/abc123.q4_1.safetensors"
+        ));
+        assert!(is_candle_device_format_cache_path(
+            r"q4\transformer\.candle-device-format-v1\abc123.q4_1.safetensors"
+        ));
+        assert!(!is_candle_device_format_cache_path(
+            "q4/transformer/diffusion_pytorch_model.safetensors"
+        ));
+
+        let temp = tempfile::tempdir().unwrap();
+        let _snapshot = seed(temp.path(), REV);
+        let receipt = json!({
+            "resolvedFiles": [
+                "model.safetensors",
+                "q4/transformer/.candle-device-format-v1/ephemeral.q4_1.safetensors"
+            ]
+        });
+        assert_eq!(
+            recover_revision(&receipt, temp.path()).as_deref(),
+            Some(REV)
+        );
     }
 }

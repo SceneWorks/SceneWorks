@@ -539,6 +539,8 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
                 image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
                 image_raw_settings.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+                image_raw_settings.remove(lane_controls::PAG_EXECUTION_REPORT_KEY);
+                image_raw_settings.remove(sceneworks_core::options::pag::PAG_REPORT_SNAKE_KEY);
                 flux3_references::merge_image_facts(
                     &mut image_raw_settings,
                     pending_image_facts.remove(&index),

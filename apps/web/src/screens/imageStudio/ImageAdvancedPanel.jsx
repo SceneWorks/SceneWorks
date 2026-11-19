@@ -63,6 +63,10 @@ export function ImageAdvancedPanel({
   h3ImageSampler,
   setH3ImageSampler,
   h3ImageSamplerError,
+  pagCapability,
+  pag,
+  setPag,
+  pagError,
   supportsTextStyle,
   textStyleGainConfig,
   setTextStyleGain,
@@ -320,6 +324,76 @@ export function ImageAdvancedPanel({
                     </>
                   ) : null}
                 </>
+              ) : null}
+              {pagCapability ? (
+                <div className="pag-controls">
+                  <label>
+                    PAG scale
+                    <input
+                      aria-label="PAG scale"
+                      onChange={(event) => setPag((current) => ({ ...current, scale: event.target.value }))}
+                      placeholder="0 (Off)"
+                      step="any"
+                      type="number"
+                      value={pag.scale}
+                    />
+                    <span className="field-hint" role={pagError ? "alert" : undefined}>
+                      {pagError ||
+                        `Recommended: ${pagCapability.recommendedScale} · default blocks [${pagCapability.defaultLayers.join(", ")}] · window [${pagCapability.defaultStart}, ${pagCapability.defaultStop})`}
+                    </span>
+                  </label>
+                  <details className="pag-advanced">
+                    <summary>Advanced PAG overrides</summary>
+                    <div className="pag-advanced-grid">
+                      <label>
+                        PAG blocks
+                        <input
+                          aria-label="PAG blocks"
+                          onChange={(event) => setPag((current) => ({ ...current, layers: event.target.value }))}
+                          placeholder={`Default (${pagCapability.defaultLayers.join(", ")})`}
+                          type="text"
+                          value={pag.layers}
+                        />
+                        <span className="field-hint">
+                          {`0..${pagCapability.numBlocks - 1} (${pagCapability.blockDomain})`}
+                        </span>
+                      </label>
+                      <label>
+                        PAG adaptive scale
+                        <input
+                          aria-label="PAG adaptive scale"
+                          onChange={(event) => setPag((current) => ({ ...current, adaptiveScale: event.target.value }))}
+                          placeholder="0"
+                          step="any"
+                          type="number"
+                          value={pag.adaptiveScale}
+                        />
+                      </label>
+                      <label>
+                        PAG window start
+                        <input
+                          aria-label="PAG window start"
+                          onChange={(event) => setPag((current) => ({ ...current, start: event.target.value }))}
+                          placeholder={String(pagCapability.defaultStart)}
+                          step="any"
+                          type="number"
+                          value={pag.start}
+                        />
+                      </label>
+                      <label>
+                        PAG window stop
+                        <input
+                          aria-label="PAG window stop"
+                          onChange={(event) => setPag((current) => ({ ...current, stop: event.target.value }))}
+                          placeholder={String(pagCapability.defaultStop)}
+                          step="any"
+                          type="number"
+                          value={pag.stop}
+                        />
+                      </label>
+                    </div>
+                  </details>
+                </div>
               ) : null}
               {supportsTextStyle ? (
                 <label className="text-style-gain">

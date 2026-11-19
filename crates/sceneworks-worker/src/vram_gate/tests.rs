@@ -5204,3 +5204,111 @@ fn the_retained_credit_is_reduced_by_what_the_cap_clipped() {
     );
     assert!(credited.free_gb <= 32.0);
 }
+
+#[test]
+fn pag_workspace_bytes_preserves_inert_krea_fit_and_charges_active_pag_denoise_headroom() {
+    let manifest = krea_fit_manifest_with_unfittable_resident();
+    let runtime = KreaRuntimeEvidenceContext::verified_for_test("q4");
+    let budget = Some(VramBudget {
+        free_gb: 24.0,
+        total_gb: 24.0,
+    });
+    let base_fit = krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true).expect("base fit");
+    let inert_fit = krea_turbo_fit_with_runtime_and_pag(
+        &manifest,
+        "q4",
+        1024,
+        1024,
+        budget,
+        KREA_FIXTURE_RESERVE_GB,
+        true,
+        Some(&runtime),
+        0,
+    )
+    .expect("inert PAG fit");
+    let (
+        KreaTurboFit::Fits {
+            phases: base_phases,
+            admitted: base_admitted,
+            ..
+        },
+        KreaTurboFit::Fits {
+            phases: inert_phases,
+            admitted: inert_admitted,
+            ..
+        },
+    ) = (base_fit, inert_fit)
+    else {
+        panic!("expected baseline and inert PAG to fit");
+    };
+    assert_eq!(inert_phases.denoise_gb, base_phases.denoise_gb);
+    assert_eq!(inert_admitted.needed_gb, base_admitted.needed_gb);
+
+    let pag_bytes = (3.0 * BYTES_PER_GIB) as u64;
+    let active_fit = krea_turbo_fit_with_runtime_and_pag(
+        &manifest,
+        "q4",
+        1024,
+        1024,
+        budget,
+        KREA_FIXTURE_RESERVE_GB,
+        true,
+        Some(&runtime),
+        pag_bytes,
+    )
+    .expect("active PAG fit");
+    let KreaTurboFit::Fits {
+        phases: active_phases,
+        admitted: active_admitted,
+        ..
+    } = active_fit
+    else {
+        panic!("expected active PAG to fit on 24 GB card, got {active_fit:?}");
+    };
+    assert!(
+        (active_phases.denoise_gb - (base_phases.denoise_gb + 3.0)).abs() < 1e-6,
+        "denoise phase must charge exact 3.0 GiB PAG workspace: base={} active={}",
+        base_phases.denoise_gb,
+        active_phases.denoise_gb
+    );
+    assert!(
+        active_admitted.needed_gb > base_admitted.needed_gb,
+        "admitted peak must grow when PAG is active: base={} active={}",
+        base_admitted.needed_gb,
+        active_admitted.needed_gb
+    );
+
+    // Tight 19.0 GB budget where baseline fits an optimized rung (see line 5112), while +6 GiB PAG rejects
+    let tight = Some(VramBudget {
+        free_gb: 19.0,
+        total_gb: 19.0,
+    });
+    assert!(matches!(
+        krea_turbo_fit_with_runtime_and_pag(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            tight,
+            KREA_FIXTURE_RESERVE_GB,
+            true,
+            Some(&runtime),
+            0,
+        ),
+        Some(KreaTurboFit::Fits { .. })
+    ));
+    assert!(matches!(
+        krea_turbo_fit_with_runtime_and_pag(
+            &manifest,
+            "q4",
+            1024,
+            1024,
+            tight,
+            KREA_FIXTURE_RESERVE_GB,
+            true,
+            Some(&runtime),
+            (6.0 * BYTES_PER_GIB) as u64,
+        ),
+        Some(KreaTurboFit::Reject { .. })
+    ));
+}

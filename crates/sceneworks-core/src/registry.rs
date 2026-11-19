@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 mod spec;
 #[cfg(test)]
 pub(crate) use spec::GeneratorRoute;
-pub use spec::{supports_hires_fix, ModelSpec, RoutePolicy};
+pub use spec::{supports_hires_fix, ModelSpec, PagSpec, RoutePolicy};
 #[allow(dead_code)]
 // Build-time parser validates the serialized policy; runtime reads that projection.
 mod memory_route_policy;
@@ -99,6 +99,13 @@ impl ModelSpec {
                 .any(|engine| engine.supports_lora);
         serde_json::json!({"videoMlxRouted":mlx,"candleVideoRouted":candle,"candleVideoI2v":i2v,"candleVideoVace":vace,"candleVideoLora":lora})
     }
+    /// Capability-driven Perturbed-Attention Guidance metadata, when the native route supports it.
+    pub fn pag_value(&self) -> Option<Value> {
+        self.pag
+            .as_ref()
+            .map(|pag| serde_json::to_value(pag).expect("serializable PAG spec"))
+    }
+
     /// Author choices may change display text, visibility, product menus and valid defaults. Native
     /// routes, immutable download identities, restrictions, and evidence always come from the
     /// static spec. Credentials, install observations and physical bindings are added by their host.
@@ -134,6 +141,11 @@ impl ModelSpec {
             );
         }
         model["optionRouteFacts"] = self.option_route_facts();
+        if let Some(pag) = self.pag_value() {
+            model["pag"] = pag;
+        } else if let Some(object) = model.as_object_mut() {
+            object.remove("pag");
+        }
         evidence::project_memory_evidence(&mut model, &Value::Object(facts))
             .expect("build-validated static model evidence projection");
         model
@@ -235,10 +247,15 @@ mod parity_contract_tests;
 #[cfg(test)]
 mod tests;
 
-/// Replace reserved routing facts with compiled policy; imported/user rows cannot grant lanes.
+/// Replace reserved routing and capability facts with compiled policy; imported/user rows cannot
+/// forge lanes or native Perturbed-Attention Guidance support.
 pub fn project_option_route_facts(entry: &mut Value) {
-    let id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
-    let facts = crate::jobs_store::video_route_facts(id);
+    let id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let facts = crate::jobs_store::video_route_facts(&id);
     if let Some(object) = entry.as_object_mut() {
         if facts.mlx || facts.candle {
             object.insert(
@@ -251,6 +268,43 @@ pub fn project_option_route_facts(entry: &mut Value) {
             );
         } else {
             object.remove("optionRouteFacts");
+        }
+        let trusted_pag = if let Some(spec) = builtin_model_spec(&id) {
+            spec.pag_value()
+        } else if object.get("type").and_then(Value::as_str) == Some("image") {
+            let family = object
+                .get("family")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let source = object
+                .get("importSourceShape")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if matches!(
+                source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory"
+            ) && !family.is_empty()
+            {
+                ["mlx", "candle"]
+                    .into_iter()
+                    .flat_map(|backend| {
+                        crate::jobs_store::imported_provider_routes(backend, family)
+                    })
+                    .find(|route| route.source == source && route.operation == "generate")
+                    .and_then(|route| builtin_model_spec(&route.provider_id))
+                    .and_then(ModelSpec::pag_value)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(pag) = trusted_pag {
+            object.insert("pag".into(), pag);
+        } else {
+            object.remove("pag");
         }
     }
 }

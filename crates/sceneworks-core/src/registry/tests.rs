@@ -45,6 +45,9 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
             // The trusted route projection is added before measured evidence in the
             // effective builtin manifest; it is not an author-owned manifest field.
             once["optionRouteFacts"] = spec.option_route_facts();
+            if let Some(pag) = spec.pag_value() {
+                once["pag"] = pag;
+            }
         }
         project_builtin_memory_evidence(&mut once).unwrap();
         let mut twice = once.clone();
@@ -592,4 +595,258 @@ fn router_policy_and_preview_feature_export_cover_every_builtin() {
         .cloned()
         .collect();
     assert_eq!(legacy, non_builtin);
+}
+
+#[test]
+fn pag_capability_projects_across_all_six_target_families_aliases_and_pulid_without_hardcoding() {
+    let expected = [
+        // MOSS-Image
+        (
+            "moss_image_base",
+            42,
+            "layers",
+            vec![20],
+            0.0,
+            1.0,
+            2.5,
+            15.0,
+        ),
+        (
+            "moss_image_sft",
+            42,
+            "layers",
+            vec![20],
+            0.0,
+            1.0,
+            2.5,
+            15.0,
+        ),
+        // MiniMax-H3-Image
+        (
+            "minimax_h3_image",
+            50,
+            "dit_blocks",
+            vec![25],
+            0.0,
+            0.66,
+            1.2,
+            15.0,
+        ),
+        // Krea 2 (T2I + Kontext edit share the krea_2_raw and krea_2_turbo product entries)
+        (
+            "krea_2_raw",
+            28,
+            "single_stream_blocks",
+            vec![14],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "krea_2_turbo",
+            28,
+            "single_stream_blocks",
+            vec![14],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        // Z-Image + alias (z_image_edit routes to z_image_turbo)
+        ("z_image", 30, "layers", vec![15], 0.0, 1.0, 1.5, 15.0),
+        (
+            "z_image_turbo",
+            30,
+            "layers",
+            vec![15],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        ("z_image_edit", 30, "layers", vec![15], 0.0, 0.75, 1.2, 15.0),
+        // FLUX.1, FLUX.2, FLUX 3 + aliases + PuLID
+        ("flux_dev", 57, "flux_blocks", vec![28], 0.0, 1.0, 1.5, 15.0),
+        (
+            "flux_schnell",
+            57,
+            "flux_blocks",
+            vec![28],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        (
+            "pulid_flux_dev",
+            57,
+            "flux_blocks",
+            vec![28],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "flux2_dev",
+            56,
+            "flux2_blocks",
+            vec![28],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "flux2_klein_9b",
+            32,
+            "flux2_blocks",
+            vec![20],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        (
+            "flux2_klein_9b_kv",
+            32,
+            "flux2_blocks",
+            vec![20],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        (
+            "flux2_klein_9b_true_v2",
+            32,
+            "flux2_blocks",
+            vec![20],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        (
+            "flux3_klein",
+            33,
+            "flux3_blocks",
+            vec![19],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+        (
+            "flux3_klein_base",
+            33,
+            "flux3_blocks",
+            vec![19],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        // Qwen-Image + alias
+        ("qwen_image", 60, "blocks", vec![30], 0.0, 1.0, 1.5, 15.0),
+        (
+            "qwen_image_edit_2511",
+            60,
+            "blocks",
+            vec![30],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "qwen_image_edit_2511_lightning",
+            60,
+            "blocks",
+            vec![30],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "qwen_image_2_1",
+            32,
+            "blocks",
+            vec![16],
+            0.0,
+            1.0,
+            1.5,
+            15.0,
+        ),
+        (
+            "qwen_image_2_1_turbo",
+            32,
+            "blocks",
+            vec![16],
+            0.0,
+            0.75,
+            1.2,
+            15.0,
+        ),
+    ];
+
+    for (id, num_blocks, domain, layers, start, stop, rec_scale, max_scale) in expected {
+        let spec = builtin_model_spec(id).unwrap_or_else(|| panic!("missing builtin {id}"));
+        let pag = spec
+            .pag
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} must project PAG capability"));
+        assert_eq!(pag.num_blocks, num_blocks, "{id} numBlocks");
+        assert_eq!(pag.block_domain, domain, "{id} blockDomain");
+        assert_eq!(pag.default_layers, layers, "{id} defaultLayers");
+        assert_eq!(pag.default_start, start, "{id} defaultStart");
+        assert_eq!(pag.default_stop, stop, "{id} defaultStop");
+        assert_eq!(pag.recommended_scale, rec_scale, "{id} recommendedScale");
+        assert_eq!(pag.max_scale, max_scale, "{id} maxScale");
+
+        let projected = spec.project(Some(&json!({
+            "pag": { "numBlocks": 999, "blockDomain": "forged", "defaultLayers": [0], "defaultStart": 0.0, "defaultStop": 1.0, "recommendedScale": 9.9, "maxScale": 99.0 }
+        })));
+        assert_eq!(
+            projected["pag"],
+            json!({
+                "numBlocks": num_blocks,
+                "blockDomain": domain,
+                "defaultLayers": layers,
+                "defaultStart": start,
+                "defaultStop": stop,
+                "recommendedScale": rec_scale,
+                "maxScale": max_scale,
+            }),
+            "{id} projected PAG metadata must ignore user overrides"
+        );
+    }
+
+    // MiniMax-H3-Image stays CFG-free / negative-prompt-free while advertising PAG.
+    let h3 = builtin_model_spec("minimax_h3_image")
+        .unwrap()
+        .project(None);
+    assert_eq!(h3["image"]["supportsGuidance"], json!(false));
+    assert_eq!(h3["image"]["supportsNegativePrompt"], json!(false));
+
+    // Non-PAG models and non-image modalities omit `pag` and scrub forged user `pag`.
+    for unsupported in [
+        "sdxl",
+        "iris_3b",
+        "supra2_img",
+        "instantid_realvisxl",
+        "ltx_2_5",
+        "acestep_v15_turbo",
+    ] {
+        let spec = builtin_model_spec(unsupported)
+            .unwrap_or_else(|| panic!("missing builtin {unsupported}"));
+        assert!(spec.pag.is_none(), "{unsupported} must not advertise PAG");
+        let projected = spec.project(None);
+        assert!(
+            projected.get("pag").is_none(),
+            "{unsupported} projected pag"
+        );
+    }
 }

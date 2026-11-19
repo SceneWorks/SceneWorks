@@ -336,6 +336,8 @@ pub(super) fn mlx_raw_settings_for_bundle(
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
     // Worker-owned too (epic 25899): only the image's own render report adds the record back.
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(lane_controls::PAG_EXECUTION_REPORT_KEY);
+    raw.remove(sceneworks_core::options::pag::PAG_REPORT_SNAKE_KEY);
     raw.remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
     raw.remove("moss_image_edit_execution_report");
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
@@ -572,10 +574,33 @@ pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::Gen
         scheduler,
         scheduler_shift,
         guidance,
+        pag: request.resolved_pag().ok().flatten(),
         negative_prompt: (!request.negative_prompt.trim().is_empty())
             .then(|| request.negative_prompt.clone()),
         ..Default::default()
     }
+}
+
+/// Validate `advanced.pag` for a bespoke worker lane before weight loading, returning the resolved
+/// [`gen_core::PagConfig`] (`None` when omitted) or a typed `InvalidPayload` refusal.
+#[cfg(any(native_lane, test))]
+pub(super) fn resolve_bespoke_pag(
+    request: &ImageRequest,
+) -> WorkerResult<Option<gen_core::PagConfig>> {
+    request
+        .resolved_pag()
+        .map_err(crate::WorkerError::InvalidPayload)
+}
+
+/// [`resolve_bespoke_pag`] validated directly against a linked provider's [`gen_core::PagCapability`].
+#[cfg(any(native_lane, test))]
+pub(super) fn resolve_bespoke_pag_with_capability(
+    request: &ImageRequest,
+    capability: Option<&gen_core::PagCapability>,
+) -> WorkerResult<Option<gen_core::PagConfig>> {
+    request
+        .resolved_pag_with_capability(capability)
+        .map_err(crate::WorkerError::InvalidPayload)
 }
 
 #[cfg(test)]

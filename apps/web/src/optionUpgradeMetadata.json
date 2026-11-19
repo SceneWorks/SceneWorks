@@ -2,6 +2,14 @@
   "aliases": [
     {
       "aliases": [
+        "adaptive_scale"
+      ],
+      "key": "adaptiveScale",
+      "location": "advanced.pag",
+      "numeric": true
+    },
+    {
+      "aliases": [
         "timestepShift"
       ],
       "key": "schedulerShift",
@@ -21,6 +29,14 @@
         "moss_image_edit_execution_report"
       ],
       "key": "mossImageEditExecutionReport",
+      "location": "advanced",
+      "numeric": false
+    },
+    {
+      "aliases": [
+        "pag_execution_report"
+      ],
+      "key": "pagExecutionReport",
       "location": "advanced",
       "numeric": false
     },

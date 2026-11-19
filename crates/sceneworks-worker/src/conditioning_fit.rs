@@ -121,6 +121,9 @@ pub(crate) struct ConditioningFootprint {
     pub(crate) base_bytes: u64,
     /// On-disk bytes of the overlay network(s) held co-resident with the base.
     pub(crate) overlay_bytes: u64,
+    /// Additional co-resident transient workspace bytes (such as active PAG scratch). Defaults to
+    /// `0` so weights-only callers stay unchanged.
+    pub(crate) workspace_bytes: u64,
 }
 
 impl ConditioningFootprint {
@@ -164,12 +167,24 @@ impl ConditioningFootprint {
                 .into_iter()
                 .map(crate::weights_source::path_weight_bytes)
                 .sum(),
+            workspace_bytes: 0,
         }
     }
 
-    /// Total resident on-disk bytes (base + overlay).
-    fn total_bytes(&self) -> u64 {
+    /// Add active transient workspace bytes (such as PAG scratch) on top of the weights floor.
+    pub(crate) fn with_workspace_bytes(mut self, workspace_bytes: u64) -> Self {
+        self.workspace_bytes = self.workspace_bytes.saturating_add(workspace_bytes);
+        self
+    }
+
+    /// Resident on-disk weights (base + overlay) before any active workspace scratch.
+    fn weight_bytes(&self) -> u64 {
         self.base_bytes.saturating_add(self.overlay_bytes)
+    }
+
+    /// Total required bytes (base + overlay + active workspace).
+    fn total_bytes(&self) -> u64 {
+        self.weight_bytes().saturating_add(self.workspace_bytes)
     }
 }
 
@@ -227,8 +242,8 @@ pub(crate) fn pid_paths(pid: Option<&gen_core::PidWeights>) -> Vec<&Path> {
 /// [`crate::fit_gate::mochi_needed_gb`]'s `weight_bytes == 0` arm. A gate that blocks without evidence
 /// is a regression, not a safety net.
 pub(crate) fn conditioning_floor_gb(footprint: &ConditioningFootprint) -> Option<f64> {
-    let total = footprint.total_bytes();
-    (total > 0).then(|| total as f64 / BYTES_PER_GIB + HEADROOM_GB)
+    (footprint.weight_bytes() > 0)
+        .then(|| footprint.total_bytes() as f64 / BYTES_PER_GIB + HEADROOM_GB)
 }
 
 /// The outcome of the conditioning admission check. Reported by [`decide`] so the caller can log the
@@ -293,6 +308,14 @@ fn too_big_error(
     // A lane whose conditioning adds no second CHECKPOINT (Z-Image identity-init reconditions the base
     // rather than overlaying a network) has nothing to price separately, and printing "the 0.0 GB
     // identity-init" would read as a bug and offer a lever that does not exist. Say what is true instead.
+    let workspace_suffix = if footprint.workspace_bytes > 0 {
+        format!(
+            "{} GB active workspace and headroom",
+            round_gb(footprint.workspace_bytes as f64 / BYTES_PER_GIB)
+        )
+    } else {
+        "headroom".to_owned()
+    };
     let (what, breakdown, lever) = if footprint.overlay_bytes > 0 {
         (
             format!(
@@ -301,7 +324,7 @@ fn too_big_error(
             ),
             format!(
                 "the {base} GB base model and the {overlay_gb} GB {overlay} are held co-resident, \
-                 plus headroom",
+                 plus {workspace_suffix}",
                 base = round_gb(footprint.base_bytes as f64 / BYTES_PER_GIB),
                 overlay_gb = round_gb(footprint.overlay_bytes as f64 / BYTES_PER_GIB),
                 overlay = footprint.overlay_label,
@@ -312,7 +335,7 @@ fn too_big_error(
         (
             format!("{} ({})", footprint.model_label, footprint.overlay_label),
             format!(
-                "{base} GB of base weights held resident, plus headroom",
+                "{base} GB of base weights held resident, plus {workspace_suffix}",
                 base = round_gb(footprint.base_bytes as f64 / BYTES_PER_GIB),
             ),
             "render without conditioning".to_owned(),
@@ -383,6 +406,7 @@ pub(crate) fn admit(
                 available_gb,
                 base_gb = footprint.base_bytes as f64 / BYTES_PER_GIB,
                 overlay_gb = footprint.overlay_bytes as f64 / BYTES_PER_GIB,
+                workspace_gb = footprint.workspace_bytes as f64 / BYTES_PER_GIB,
                 "candle conditioning fit-gate: admitted — the co-resident base + overlay weights fit \
                  free VRAM. This is a FLOOR, not a measured peak: the denoise and VAE-decode \
                  transients are unpriced (no overlay cell has been measured), so a marginal render can \
@@ -407,6 +431,7 @@ mod tests {
             overlay_label: "strict-pose ControlNet branch",
             base_bytes,
             overlay_bytes,
+            workspace_bytes: 0,
         }
     }
 
@@ -538,6 +563,7 @@ mod tests {
             base_bytes: 6 * GIB,
             // ~0.8 GiB — the real order of magnitude for `ip-adapter-plus_sdxl_vit-h.safetensors`.
             overlay_bytes: 858_993_459,
+            workspace_bytes: 0,
         };
         let error = admit(&decide(&f, budget(1.0)), &f, "0").expect_err("must reject");
         let message = error.to_string();
@@ -691,5 +717,38 @@ mod tests {
         std::fs::write(&two, vec![0u8; 768]).expect("write");
         let f = ConditioningFootprint::from_paths("m", "overlay", &base, &[&one, &two]);
         assert_eq!(f.overlay_bytes, 1024);
+        assert_eq!(f.workspace_bytes, 0);
+    }
+
+    #[test]
+    fn workspace_bytes_charge_active_scratch_and_leave_weights_only_unchanged() {
+        let base_only = footprint(20 * GIB, 7 * GIB);
+        assert_eq!(
+            conditioning_floor_gb(&base_only.clone().with_workspace_bytes(0)),
+            conditioning_floor_gb(&base_only)
+        );
+        let with_workspace = base_only.clone().with_workspace_bytes(GIB);
+        let base_floor = conditioning_floor_gb(&base_only).unwrap();
+        let workspace_floor = conditioning_floor_gb(&with_workspace).unwrap();
+        assert!(
+            (workspace_floor - base_floor - 1.0).abs() < 1e-9,
+            "workspace bytes must increase floor by 1.0 GiB: {workspace_floor} vs {base_floor}"
+        );
+        assert!(matches!(
+            decide(&base_only, budget(29.5)),
+            ConditioningFit::Fits { .. }
+        ));
+        let fit = decide(&with_workspace, budget(29.5));
+        assert!(matches!(fit, ConditioningFit::TooBig { .. }));
+        let message = admit(&fit, &with_workspace, "0")
+            .expect_err("workspace overflow must reject")
+            .to_string();
+        assert!(message.contains("1.0 GB active workspace"), "{message}");
+
+        // Active workspace alone without weight evidence still admits as NoWeightEvidence.
+        assert_eq!(
+            conditioning_floor_gb(&footprint(0, 0).with_workspace_bytes(GIB)),
+            None
+        );
     }
 }

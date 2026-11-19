@@ -242,6 +242,14 @@ pub(super) fn zimage_base_control_load(
     load_control_engine(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
 }
 
+type BespokeGeneratedOne = (
+    u32,
+    u32,
+    Vec<u8>,
+    gen_core::generator::ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+);
+
 /// Generate one strict-pose image: the pre-built `conditioning` (the required `Control` plus an optional
 /// identity `Reference`, assembled by the shared [`build_control_conditioning`] driver) drives the
 /// Fun-Controlnet-Union branch. Z-Image-Turbo is guidance-distilled (no CFG / negative).
@@ -258,7 +266,7 @@ pub(super) fn zimage_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
+) -> WorkerResult<BespokeGeneratedOne> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -274,12 +282,19 @@ pub(super) fn zimage_control_generate_one(
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("control generation failed", error))?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels, completed.execution))
+            Ok((
+                image.width,
+                image.height,
+                image.pixels,
+                completed.execution,
+                pag,
+            ))
         }
         _ => Err(WorkerError::Engine(
             "control generator returned non-image output".to_owned(),
@@ -325,6 +340,7 @@ pub(super) async fn generate_zimage_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (sc-2328 / sc-3146) — OPT-IN escape hatch, off by default. The
     // Fun-Controlnet-Union pose head denoises the pose FROM NOISE, so seeding from a reference
@@ -447,7 +463,7 @@ pub(super) async fn generate_zimage_control_stream(
                         control_scale,
                         identity_init,
                     );
-                    let (out_w, out_h, pixels, execution) = zimage_control_generate_one(
+                    let (out_w, out_h, pixels, execution, pag) = zimage_control_generate_one(
                         generator,
                         &sampling_controls,
                         &prompt,
@@ -465,6 +481,7 @@ pub(super) async fn generate_zimage_control_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished pose against the cached source embedding (sc-4410). The strict-
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
@@ -528,7 +545,7 @@ pub(super) fn zimage_base_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
+) -> WorkerResult<BespokeGeneratedOne> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -548,12 +565,19 @@ pub(super) fn zimage_base_control_generate_one(
         .map_err(|error| {
             crate::generation_error("base Z-Image control generation failed", error)
         })?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("base Z-Image control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels, completed.execution))
+            Ok((
+                image.width,
+                image.height,
+                image.pixels,
+                completed.execution,
+                pag,
+            ))
         }
         _ => Err(WorkerError::Engine(
             "base Z-Image control generator returned non-image output".to_owned(),
@@ -611,6 +635,7 @@ pub(super) async fn generate_zimage_base_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling_controls = super::sampling::explicit_sampling_request(request);
     // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
     // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
@@ -735,7 +760,7 @@ pub(super) async fn generate_zimage_base_control_stream(
                         control_scale,
                         identity_init,
                     );
-                    let (out_w, out_h, pixels, execution) = zimage_base_control_generate_one(
+                    let (out_w, out_h, pixels, execution, pag) = zimage_base_control_generate_one(
                         generator,
                         &sampling_controls,
                         &prompt,
@@ -755,6 +780,7 @@ pub(super) async fn generate_zimage_base_control_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished pose against the cached source embedding (sc-4410). The strict-
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores

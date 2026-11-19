@@ -290,6 +290,13 @@ export const ADVANCED_PREFILL = {
   captionOverflow: { label: "Long prompts", prefill: PREFILL_CONTROL },
   // SW-7106 — MiniMax-H3-Image's sampler block; restores its Sampler control.
   h3ImageSampler: { label: "Sampler (MiniMax-H3-Image)", prefill: PREFILL_CONTROL },
+  // SW-7180 — Perturbed-Attention Guidance controls and provider execution receipt.
+  pag: { label: "Perturbed-Attention Guidance", prefill: PREFILL_CONTROL },
+  pagExecutionReport: {
+    label: "PAG execution receipt",
+    prefill: PREFILL_NONE,
+    detail: "Recorded provenance belongs to the exported image. A new generation computes its own receipt.",
+  },
   steps: { label: "Steps", prefill: PREFILL_CONTROL },
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },

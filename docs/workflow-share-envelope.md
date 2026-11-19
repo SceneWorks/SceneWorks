@@ -407,6 +407,8 @@ smuggled under a scalar key.
 | `cfgInterval` | `NumberPair` | Classifier-free-guidance interval `[start, end]` in model time (Iris-3B). Any other shape is dropped. |
 | `captionOverflow` | `Scalar` | Caption-overflow policy (`warn` / `error` / `silent`) for an over-long prompt (Iris-3B). |
 | `h3ImageSampler` | `H3ImageSampler` | MiniMax-H3-Image's sampler: `{"sampler": "lcm", "sNoise", "sNoiseEnd", "noiseClipStd"}` (or `{"sampler": "euler"}`), validated as one closed object; a malformed or unknown member drops the block. New MiniMax-H3-Image jobs send LCM `1.1 / 0.9 / 0` explicitly (the default since 2026-11-12). A shared job recorded without the block ran Euler, so it applies as Euler. |
+| `pag` | `Pag` | Perturbed-Attention Guidance controls: `{"scale", "layers"?, "start"?, "stop"?, "adaptiveScale"?}`, validated as one closed object; malformed or unknown members drop the block. |
+| `pagExecutionReport` | `PagReport` | Completed provider Perturbed-Attention Guidance execution receipt (`{"scale", "adaptiveScale", "layers", "start", "stop", "activeSteps", "totalSteps"}`). Imported receipts are display provenance only; replay discards them and computes a new receipt. |
 | `steps` | `Scalar` | Step-count override. |
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
@@ -891,6 +893,7 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs/moss.rs` | `write_moss_tensor_companion` | Embeds — writes the bounded portable workflow companion for each MOSS sampled-latent output. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `upscaled_workflow_share` | Embeds — the inline-upscale sub-step's envelope: the generation payload with the applied pass overlaid. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
+| `crates/sceneworks-worker/src/image_jobs.rs` | `attach_pag_report_to_share` | Inert — attaches the sanitized `pagExecutionReport` onto an envelope already constructed and written by `write_image_asset` and `upscaled_workflow_share`; it constructs and writes no envelope of its own. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_upscale_workflow_share` | Embeds — the standalone upscale job's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_restore_workflow_share` | Embeds — the standalone Iris restoration job's envelope (sc-25683). |

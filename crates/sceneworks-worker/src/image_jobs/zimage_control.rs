@@ -515,7 +515,7 @@ impl CandleStrictControl for ZImageStrictControl {
         // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         // `guidance` + `negative_prompt` drive the base-mode real-CFG denoise; the distilled Turbo path
         // ignores both (single cond forward), so a `None`/value is inert there. We always forward the
         // resolved base values — they only take effect when `base = true` in the loaded `ZImageControl`.
@@ -570,6 +570,9 @@ pub(super) async fn generate_candle_zimage_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_active_pag("Candle Z-Image pose control")
+        .map_err(WorkerError::InvalidPayload)?;
     let is_base = is_zimage_base_model(&request.model);
     let engine_id = if is_base {
         ZIMAGE_CTRL_BASE_ENGINE_ID

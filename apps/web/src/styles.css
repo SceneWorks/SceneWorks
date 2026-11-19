@@ -9048,8 +9048,33 @@ input.dataset-name-input.boxed:focus {
 
 /* The checkbox itself must never shrink away inside the flex row. */
 .advanced-panel .prompt-field,
-.advanced-panel .lora-picker {
+.advanced-panel .lora-picker,
+.advanced-panel .pag-controls {
   grid-column: 1 / -1;
+}
+
+.pag-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.pag-advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+
+.pag-advanced > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.pag-advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .guidance-strip,

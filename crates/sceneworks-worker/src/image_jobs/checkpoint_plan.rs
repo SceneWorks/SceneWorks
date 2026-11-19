@@ -3,6 +3,8 @@ use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 use super::krea_imported::imported_model_quant;
 use super::krea_imported::resolve_krea_imported_base_tier;
+#[cfg(target_os = "macos")]
+use super::krea_imported::KREA_IMPORTED_DEFAULT_STEPS;
 use super::krea_multiphase::request_has_multiphase;
 use super::mage_finetuned::resolve_mage_finetuned_components;
 #[cfg(not(target_os = "macos"))]
@@ -21,7 +23,6 @@ use super::stream::start_cached_gen_stream_after_cold_admission;
 use super::stream::start_cached_gen_stream_with_request_state;
 #[cfg(not(target_os = "macos"))]
 use super::stream::ColdLoadAdmission;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::stream::GenEvent;
 use super::stream::GeneratedImage;
 use super::CancelFlag;
@@ -2031,6 +2032,16 @@ pub(super) fn checkpoint_plan_memory_inputs(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::request_pag_workspace_bytes(
+            request,
+            request.width,
+            request.height,
+            1,
+            resolved_checkpoint_plan_u32(request, "steps")
+                .map(|steps| steps.clamp(1, 100))
+                .unwrap_or(KREA_IMPORTED_DEFAULT_STEPS),
+            None,
+        ),
     }
 }
 
@@ -2069,10 +2080,15 @@ pub(super) async fn generate_checkpoint_plan_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let resolved_pag = super::sampling::resolve_bespoke_pag_with_capability(
+        request,
+        sources.descriptor.capabilities.pag.as_ref(),
+    )?;
     let (quant, quant_bits) =
         imported_model_quant(request, &sources.descriptor, "Checkpoint plan")?;
     let (width, height) = (request.width, request.height);
-    let prototype = checkpoint_plan_generation_request(request);
+    let mut prototype = checkpoint_plan_generation_request(request);
+    prototype.pag = resolved_pag;
     let steps = prototype.steps;
     let guidance = prototype.guidance;
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);
@@ -2138,7 +2154,9 @@ pub(super) async fn generate_checkpoint_plan_stream(
                              on_progress: &mut dyn FnMut(Progress),
                              negative_prompt: Option<String>,
                              checkpoint_id: &str|
-          -> WorkerResult<Option<GeneratedImage>> {
+          -> WorkerResult<
+        Option<(GeneratedImage, Option<gen_core::PagExecutionReport>)>,
+    > {
         if cancel.is_cancelled() {
             return Ok(None);
         }
@@ -2158,13 +2176,13 @@ pub(super) async fn generate_checkpoint_plan_stream(
         };
         // The same seam every request-scoped MLX lane generates through: the selected memory
         // strategy plus its run context. On candle both are `None` and this is the plain call.
-        let output = match crate::memory_strategy::generate_with_scope(
+        let report = match crate::memory_strategy::generate_with_scope_report(
             model,
             &mut generation,
             context,
             on_progress,
         ) {
-            Ok(output) => output,
+            Ok(report) => report,
             // A poisoned process keeps its fatal class even when cancellation raced it.
             Err(error @ gen_core::Error::ProcessPoisoned(_)) => {
                 return Err(super::render::generation_error(
@@ -2180,14 +2198,15 @@ pub(super) async fn generate_checkpoint_plan_stream(
                 ));
             }
         };
-        match output {
-            GenerationOutput::Images(mut images) => {
+        let pag = report.pag;
+        match report.output {
+            Some(GenerationOutput::Images(mut images)) => {
                 let image = images.pop().ok_or_else(|| {
                     WorkerError::Engine(format!(
                         "Checkpoint plan {checkpoint_id:?} produced no image"
                     ))
                 })?;
-                Ok(Some((seed, image.width, image.height, image.pixels)))
+                Ok(Some(((seed, image.width, image.height, image.pixels), pag)))
             }
             _ => Err(WorkerError::Engine(format!(
                 "Checkpoint plan {checkpoint_id:?} returned non-image output"
@@ -2211,10 +2230,11 @@ pub(super) async fn generate_checkpoint_plan_stream(
               cancel| {
             let mut request_cache_state = initial_cache_state;
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -2231,7 +2251,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     let _request_memory_limit = evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                    generate_one(
+                    let Some((generated, pag)) = generate_one(
                         model,
                         seed,
                         prompt,
@@ -2242,7 +2262,19 @@ pub(super) async fn generate_checkpoint_plan_stream(
                         on_progress,
                         negative_prompt.clone(),
                         &checkpoint_id,
-                    )
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    let mut pag_facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut pag_facts, pag.as_ref());
+                    if !pag_facts.is_empty() {
+                        let _ = facts_tx.blocking_send(GenEvent::ImageFacts {
+                            index,
+                            facts: pag_facts,
+                        });
+                    }
+                    Ok(Some(generated))
                 },
             )
         },
@@ -2268,8 +2300,8 @@ pub(super) async fn generate_checkpoint_plan_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
-                    let generated = generate_one(
+                move |index, (seed, prompt), preview, on_progress| {
+                    let Some((generated, pag)) = generate_one(
                         model,
                         seed,
                         prompt,
@@ -2280,27 +2312,36 @@ pub(super) async fn generate_checkpoint_plan_stream(
                         on_progress,
                         negative_prompt.clone(),
                         &checkpoint_id,
-                    )?;
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    let mut pag_facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut pag_facts, pag.as_ref());
+                    if !pag_facts.is_empty() {
+                        let _ = facts_tx.blocking_send(GenEvent::ImageFacts {
+                            index,
+                            facts: pag_facts,
+                        });
+                    }
                     // A plan-backed imported checkpoint reaches the same runtime handle as the
                     // bespoke imported-Krea route, so publish the handle's post-load receipt through
                     // the same event seam. The consumer applies this measured fact set to the image
                     // event that follows, replacing the honest pre-load `no-runtime-receipt` fallback.
-                    if generated.is_some() {
-                        if let Some(facts) =
-                            crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                                &manifest_entry_for_facts,
-                                checkpoint_path_for_facts.as_deref(),
-                                model.checkpoint_weight_facts(),
-                            )
-                        {
-                            let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                                facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
-                                    &facts,
-                                ),
-                            });
-                        }
+                    if let Some(facts) =
+                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                            &manifest_entry_for_facts,
+                            checkpoint_path_for_facts.as_deref(),
+                            model.checkpoint_weight_facts(),
+                        )
+                    {
+                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
+                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
+                                &facts,
+                            ),
+                        });
                     }
-                    Ok(generated)
+                    Ok(Some(generated))
                 },
             )
         },
