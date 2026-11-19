@@ -471,6 +471,7 @@ impl CandleStrictControl for Flux2StrictControl {
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
         let req = Flux2ControlRequest {
+            pag: None,
             prompt: self.prompt.clone(),
             width: self.width,
             height: self.height,

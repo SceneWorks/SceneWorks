@@ -261,6 +261,24 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    let source = payload.model.as_deref().map(str::trim);
+    if source == Some(sceneworks_core::loop_utility::MODEL_REPO) {
+        if !is_vision_task && !matches!(task, None | Some("refine")) {
+            return Err(ApiError::bad_request(
+                "This prompt task cannot use SenseNova-Loop-9B.",
+            ));
+        }
+        let tier = sceneworks_core::loop_utility::tier(payload.variant.as_deref())
+            .map_err(ApiError::bad_request)?;
+        crate::loop_utility::ensure_tier_installed(&state, tier).await?;
+        job_payload.insert("model".to_owned(), json!(source));
+        job_payload.insert("variant".to_owned(), json!(tier));
+    } else if payload.variant.is_some() {
+        return Err(ApiError::bad_request(
+            "This prompt model has no selectable tier.",
+        ));
+    }
+
     if is_h3_expand {
         prepare_h3_image_expand(&state, &payload, &mut job_payload).await?;
     }

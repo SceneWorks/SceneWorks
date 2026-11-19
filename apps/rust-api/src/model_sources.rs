@@ -448,7 +448,9 @@ pub(crate) async fn ensure_runtime_model_sources(
             continue;
         };
         if is_repository {
-            if *job_type == JobType::TrainingCaption
+            if value == sceneworks_core::loop_utility::MODEL_REPO {
+                ids.push(sceneworks_core::loop_utility::MODEL_ID.to_owned());
+            } else if *job_type == JobType::TrainingCaption
                 && key == "modelNameOrPath"
                 && (!looks_like_huggingface_repository(value)
                     || app_managed_utility_path_exists(&state.settings.data_dir, value))

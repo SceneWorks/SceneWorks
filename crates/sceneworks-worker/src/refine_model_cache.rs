@@ -216,6 +216,77 @@ pub(crate) async fn refiner_admission_access(
         .map_err(|_| WorkerError::Engine(REFINE_SEAM_MESSAGES.worker_dropped.to_owned()))
 }
 
+/// The free VRAM (GB) a cold Candle load is checked against. The cached image/video generator is
+/// evicted first (as the depth, training and image admissions do), then `probe_budget` reads the
+/// card, and `refiner_credit_gb` (the weights of a different cached refiner, which the load's own
+/// evict-before-load drops) is added, capped at the card's total. The refiner itself is not
+/// evicted here, so a job this check refuses leaves it resident. A warm tier is reused and needs
+/// no reading, so nothing is evicted for it. The evict and the probe are injected so the order is
+/// testable without a GPU.
+#[cfg(native_lane)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) async fn refiner_cold_load_free_gb<Evict, Probe>(
+    access: crate::cache_thread::CacheAccess,
+    refiner_credit_gb: f64,
+    evict_generator: impl FnOnce() -> Evict,
+    probe_budget: impl FnOnce() -> Probe,
+) -> WorkerResult<Option<f64>>
+where
+    Evict: std::future::Future<Output = WorkerResult<bool>>,
+    Probe: std::future::Future<Output = WorkerResult<Option<crate::fit_gate::VramBudget>>>,
+{
+    if access == crate::cache_thread::CacheAccess::Warm {
+        return Ok(None);
+    }
+    if evict_generator().await? {
+        tracing::info!(
+            event = "refiner_admission_evicted_cached_generator",
+            "Text model admission evicted the cached generator before reading free VRAM"
+        );
+    }
+    Ok(probe_budget()
+        .await?
+        .map(|budget| crate::fit_gate::with_reclaimable(budget, refiner_credit_gb).free_gb))
+}
+
+/// The weights (GB) a cached refiner at `source` holds: the bytes of its safetensors payload, what
+/// dropping it releases. 0 when it cannot be read, so an unreadable entry is never over-credited.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn cached_refiner_weights_gb(source: &std::path::Path) -> f64 {
+    gen_core::core_llm::checkpoint_payload_bytes(source)
+        .map(|bytes| bytes as f64 / (1u64 << 30) as f64)
+        .unwrap_or(0.0)
+}
+
+/// Query the same cache key execution will use. A warm refiner needs no new memory.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn candle_refiner_budget(
+    spec: &LoadSpec,
+    requirements: &ModelRequirements,
+    gpu_id: &str,
+) -> WorkerResult<(cache_thread::CacheAccess, Option<f64>)> {
+    let (access, cached) = refiner_admission_access(spec, requirements).await?;
+    let credit_gb = cached.as_deref().map_or(0.0, cached_refiner_weights_gb);
+    let gpu_id = gpu_id.to_owned();
+    let available = refiner_cold_load_free_gb(
+        access,
+        credit_gb,
+        crate::generator_cache::evict_cached_generator,
+        || async move {
+            crate::load_progress::spawn_blocking(move || {
+                crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
+            })
+            .await
+            .map_err(|error| crate::task_join_error("refiner VRAM probe", error))
+        },
+    )
+    .await?;
+    Ok((access, available))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

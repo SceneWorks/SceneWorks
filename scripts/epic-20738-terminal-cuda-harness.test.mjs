@@ -253,9 +253,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys), plus sw7104's MiniMax-H3-Image tiers (157 keys) , SW-F369's MiniMax-H3-Image training adapter (158 keys), the MiniMax-H3-Image-PE bf16 tier (159 keys) and the retired Qwen3.6-27B film planner listing removed (158 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
-  // digest.
+  // digest. SW-F373 adds only the three SenseNova-Loop-9B listings, and the retired Qwen3.6-27B film planner listing is removed (161 keys).
   assert.equal(current.downloadEvidenceSha256,
-    "a73669dabec5ca8090818da2e0d1c64cde30942f0d838be0c3a8933635469cc2");
+    "763683c3e46cd385743af1d152f9950235da4564bbc585ddcb7a37b971864506");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

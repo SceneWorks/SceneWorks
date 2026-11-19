@@ -160,6 +160,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     let frames: std::sync::Arc<std::sync::Mutex<Vec<PreviewFrame>>> = Default::default();
     let sink_frames = std::sync::Arc::clone(&frames);
     let req = QwenEditRequest {
+        pag: None,
         prompt: prompt.clone(),
         negative: negative.clone(),
         width: w,
@@ -447,6 +448,7 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             pixels: vec![128u8; (w * h * 3) as usize],
         };
         let req = QwenEditRequest {
+            pag: None,
             prompt: prompt.to_owned(),
             negative: negative.to_owned(),
             width: w,

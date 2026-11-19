@@ -258,6 +258,10 @@ pub(super) async fn parse_refine_request(
                 .unwrap_or(describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER);
             crate::batch_describe_jobs::qwen38_describer_weights_dir(settings, tier)?
         }
+        None if model == sceneworks_core::loop_utility::MODEL_REPO => {
+            thinking_mode = gen_core::core_llm::ThinkingMode::Disabled;
+            crate::loop_utility::weights_dir(settings, payload).await?
+        }
         None => resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?,
     };
     let mut h3_expand = None;

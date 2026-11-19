@@ -1,3 +1,5 @@
+import { LOOP_UTILITY_NAME, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
+import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 // Shared reference-image → prompt picker (epic 8203, sc-8208).
 //
 // Factored out of StructuredPromptBuilder so BOTH reference-image flows share one
@@ -45,6 +47,7 @@ export default function ReferenceCaptionPicker({
   gateDescription = "Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt.",
   // Reference-image caption gate (sc-8110).
   visionCaptionReady = true,
+  loopModel,
   visionCaptionOffers = [],
   visionCaptionDownloadJobs = [],
   onDownloadModel,
@@ -62,6 +65,10 @@ export default function ReferenceCaptionPicker({
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [moodBoardIds, setMoodBoardIds] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [useLoop, setUseLoop] = useState(false);
+  const [loopVariant, setLoopVariant] = useState(null);
+  const selectedTier = loopUtilityTier(loopModel, loopVariant);
+  const selectedReady = useLoop ? loopTierInstalled(loopModel, selectedTier) : visionCaptionReady;
   const [error, setError] = useState("");
 
   // The extra mood-board picks, minus the primary (it is already the first image) and capped. This is
@@ -89,7 +96,7 @@ export default function ReferenceCaptionPicker({
   });
 
   async function handleCaption() {
-    if (typeof onCaption !== "function" || !referenceAssetId || busy) return;
+    if (typeof onCaption !== "function" || !referenceAssetId || busy || !selectedReady) return;
     setBusy(true);
     setError("");
     try {
@@ -98,7 +105,7 @@ export default function ReferenceCaptionPicker({
       const arg = moodBoardExtras.length > 0
         ? [referenceAssetId, ...moodBoardExtras]
         : referenceAssetId;
-      const result = await onCaption(arg);
+      const result = useLoop ? await onCaption(arg, selectedTier) : await onCaption(arg);
       if (result) {
         onApply(result);
       } else {
@@ -113,8 +120,24 @@ export default function ReferenceCaptionPicker({
 
   return (
     <div className="structured-reference">
+      {loopModel || useLoop ? (
+        <label>
+          Caption model
+          <select disabled={busy} value={useLoop ? "loop" : "default"} onChange={(event) => {
+            setUseLoop(event.target.value === "loop");
+            setError("");
+          }}>
+            <option value="default">Vision Captioner (Qwen3-VL-8B)</option>
+            <option value="loop">{LOOP_UTILITY_NAME}</option>
+          </select>
+        </label>
+      ) : null}
+      {useLoop ? (
+        <LoopUtilityTier model={loopModel} tier={selectedTier} disabled={busy}
+          onChange={(tier) => { setLoopVariant(tier); setError(""); }} onDownload={onDownloadModel} />
+      ) : null}
       <ModelAvailabilityGate
-        ready={visionCaptionReady}
+        ready={useLoop || visionCaptionReady}
         title={gateTitle}
         description={gateDescription}
         offers={visionCaptionOffers}
@@ -141,7 +164,7 @@ export default function ReferenceCaptionPicker({
             synthesizes ONE prompt/caption from the aesthetic they share. Only once a primary is chosen
             (it is the first image). The extras come from the project library (the primary picker keeps
             import/characters). Capped at moodBoardMax − 1 extras; the server enforces the same ceiling. */}
-        {showMoodBoard && referenceAssetId ? (
+        {selectedReady && (showMoodBoard || useLoop) && referenceAssetId ? (
           <AssetPickerField
             assets={referenceAssets.filter((asset) => asset.id !== referenceAssetId)}
             buttonLabel="Add mood-board images"
@@ -156,7 +179,7 @@ export default function ReferenceCaptionPicker({
         {/* Describe → prompt (epic 8203): the vision captioner turns the picked reference (or the whole
             mood board) into prompt text. img2img reference-guidance is a SEPARATE prompt-tool tile now
             (sc-10195), so this component is purely describe + mood board. */}
-        {visionCaptionReady ? (
+        {selectedReady ? (
           <button
             type="button"
             className="secondary-action"

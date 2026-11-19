@@ -1,3 +1,4 @@
+import { loopUtilityModel } from "../loopUtility.js";
 import { useAppearance } from "../hooks/useAppearance.js";
 import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
@@ -309,6 +310,7 @@ export function ImageStudio() {
     () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
     [models],
   );
+  const loopModel = loopUtilityModel(models);
   // Vision-captioner catalog entry (sc-8107) — drives the reference-image caption flow (sc-8108).
   const visionModel = useMemo(
     () => models.find((entry) => entry.id === VISION_CAPTION_MODEL_ID),
@@ -3042,6 +3044,7 @@ export function ImageStudio() {
             characters={characters}
             importAsset={importAsset}
             visionCaptionReady={visionCaptionReady}
+            loopModel={loopModel}
             visionCaptionOffers={visionCaptionOffers}
             modelDownloadJobs={modelDownloadJobs}
             setActiveView={setActiveView}

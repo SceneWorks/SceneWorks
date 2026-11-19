@@ -311,6 +311,7 @@ impl FluxIpRequests {
         cancel: &gen_core::CancelFlag,
     ) -> IpAdapterFluxRequest {
         IpAdapterFluxRequest {
+            pag: None,
             prompt,
             width: self.width,
             height: self.height,

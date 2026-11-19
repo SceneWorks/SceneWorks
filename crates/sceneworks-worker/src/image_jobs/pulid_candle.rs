@@ -338,6 +338,7 @@ impl PulidRequests {
         cancel: &gen_core::CancelFlag,
     ) -> PulidFluxRequest {
         PulidFluxRequest {
+            pag: None,
             prompt,
             width: self.width,
             height: self.height,

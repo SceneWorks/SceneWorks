@@ -229,6 +229,7 @@ apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support:
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::prepare_selected_adapters
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::run_training_execution_observing_request
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::test_support::with_acceptance_execution_claim
+apps/rust-api/src/tests/sensenova_product_acceptance.rs sceneworks_worker::Settings
 apps/rust-api/src/tests/support.rs sceneworks_worker::Settings
 apps/rust-api/src/tests/support.rs sceneworks_worker::Settings::hermetic_for_test
 apps/rust-api/src/tests/training.rs sceneworks_worker::training_resume_stem

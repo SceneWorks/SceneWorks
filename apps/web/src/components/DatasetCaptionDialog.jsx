@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { LOOP_CAPTIONER, LOOP_UTILITY_NAME, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
+import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 import { Modal } from "./Modal.jsx";
 import { captionModes, captionTriggerWordsError } from "../training/joyCaptionPrompts.js";
 
@@ -29,6 +31,8 @@ export function DatasetCaptionDialog({
   onDownloadModel,
   modelSizeLabel = "",
   modelName = "JoyCaption",
+  loopModel,
+  onDownloadLoopModel,
 }) {
   const single = scope?.type === "item";
   const flagged = scope?.type === "flagged";
@@ -45,6 +49,9 @@ export function DatasetCaptionDialog({
         ? "Re-caption all"
         : "Caption missing";
   const joy = settings.captioner === "joy_caption";
+  const loop = settings.captioner === LOOP_CAPTIONER;
+  const native = joy || loop;
+  const loopTier = loopUtilityTier(loopModel, settings.variant);
   // Caption mode (sc-24829): trigger-only runs no captioner, so its model/sampling controls and
   // the missing-model block do not apply; subject-only uses the worker's own prompt, so the
   // prompt-shaping controls (type, length, name, prompt, extra options) do not apply.
@@ -63,9 +70,10 @@ export function DatasetCaptionDialog({
   }, [modelMissing]);
 
   // Trigger words (sc-24829) apply in every mode; out-of-limit input blocks Run (E6).
-  const triggerWordsError = joy ? captionTriggerWordsError(settings.triggerWords) : "";
+  const triggerWordsError = native ? captionTriggerWordsError(settings.triggerWords) : "";
   const modelBlocked = joy && usesCaptioner && modelMissing;
-  const blockRun = modelBlocked || Boolean(triggerWordsError);
+  const blockRun = modelBlocked || (loop && usesCaptioner && !loopTierInstalled(loopModel, loopTier))
+    || Boolean(triggerWordsError);
 
   async function handleDownloadModel() {
     if (typeof onDownloadModel !== "function") return;
@@ -97,6 +105,7 @@ export function DatasetCaptionDialog({
           Method
           <select onChange={(event) => onChange("captioner", event.target.value)} value={settings.captioner}>
             <option value="joy_caption">Joy Caption</option>
+            {loopModel || loop ? <option value={LOOP_CAPTIONER}>{LOOP_UTILITY_NAME}</option> : null}
             <option value="metadata">Metadata fallback</option>
           </select>
         </label>
@@ -129,7 +138,7 @@ export function DatasetCaptionDialog({
           </div>
         ) : null}
 
-        {joy ? (
+        {native ? (
           <label>
             Mode
             <select onChange={(event) => onChange("mode", event.target.value)} value={mode}>
@@ -141,7 +150,7 @@ export function DatasetCaptionDialog({
             </select>
           </label>
         ) : null}
-        {joy ? (
+        {native ? (
           <label>
             Trigger words
             <input
@@ -159,13 +168,13 @@ export function DatasetCaptionDialog({
             )}
           </label>
         ) : null}
-        {joy && mode === "subjectOnly" ? (
+        {native && mode === "subjectOnly" ? (
           <p className="dataset-caption-mode-note">
             Describes only what changes between images (clothing, expression, pose, accessories) and leaves out the
             background and fixed identity traits. Trigger words are still added to each caption.
           </p>
         ) : null}
-        {joy && mode === "triggerOnly" ? (
+        {native && mode === "triggerOnly" ? (
           <>
             <p className="dataset-caption-mode-note">
               Each image’s caption becomes exactly its trigger words. No captioning model runs.
@@ -179,12 +188,15 @@ export function DatasetCaptionDialog({
           </>
         ) : null}
 
-        {joy && usesCaptioner ? (
+        {native && usesCaptioner ? (
           <>
-            <label>
+            {loop ? (
+              <LoopUtilityTier model={loopModel} tier={loopTier} disabled={running}
+                onChange={(value) => onChange("variant", value)} onDownload={onDownloadLoopModel} />
+            ) : <label>
               Model
               <input onChange={(event) => onChange("modelNameOrPath", event.target.value)} value={settings.modelNameOrPath} />
-            </label>
+            </label>}
             <label>
               GPU
               <select onChange={(event) => onChange("requestedGpu", event.target.value)} value={settings.requestedGpu}>

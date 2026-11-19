@@ -56,6 +56,37 @@ describe("RefinePromptControl", () => {
     expect(refinePrompt).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["image", "video"])("reviews a Loop rewrite at the selected tier in %s", async (workflow) => {
+    const refinePrompt = vi.fn(async () => "A revised fox prompt");
+    const onApply = vi.fn();
+    const download = vi.fn(async () => ({ id: "download" }));
+    render(<RefinePromptControl autoStart={workflow === "image"} prompt="a fox" modelId="target"
+      workflow={workflow} refinePrompt={refinePrompt} onApply={onApply}
+      loopModel={{ id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B", variants: [
+        { variant: "q4", installState: "installed" }, { variant: "bf16", installState: "missing" },
+      ] }} onDownloadLoopModel={download} />);
+    const choose = async (index, value) => act(async () => {
+      const select = container.querySelectorAll("select")[index];
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(refinePrompt).not.toHaveBeenCalled();
+    await choose(0, "loop");
+    await choose(1, "bf16");
+    expect(refineButton(container).disabled).toBe(true);
+    expect(container.textContent).toContain("save a Hugging Face token");
+    await act(async () => buttonByText(container, "Download").click());
+    expect(download).toHaveBeenCalledWith(expect.objectContaining({ id: "vision_sensenova_loop_9b" }), { variant: "bf16" });
+    await choose(1, "q4");
+    await act(async () => refineButton(container).click());
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      model: "sensenova/SenseNova-Loop-9B", variant: "q4", modelId: "target", workflow,
+    }));
+    expect(onApply).not.toHaveBeenCalled();
+    await act(async () => buttonByText(container, "Apply").click());
+    expect(onApply).toHaveBeenCalledWith("A revised fox prompt");
+  });
+
   it("disables the button when the prompt is empty", () => {
     render(<RefinePromptControl prompt="   " guidePath="/prompt-guides/z.md" modelId="z" workflow="image" refinePrompt={vi.fn()} onApply={vi.fn()} />);
     expect(refineButton(container).disabled).toBe(true);

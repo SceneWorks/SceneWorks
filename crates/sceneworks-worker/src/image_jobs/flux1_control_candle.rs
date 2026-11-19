@@ -364,6 +364,7 @@ impl Flux1StrictControl {
         preview: &gen_core::PreviewSink,
     ) -> Flux1ControlRequest {
         Flux1ControlRequest {
+            pag: None,
             prompt: self.prompt.clone(),
             width: self.width,
             height: self.height,

@@ -209,9 +209,10 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // (ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter@f1a45475…): 158 keys; every prior row is unchanged.
 // The MiniMax-H3-Image-PE bf16 tier is published and pinned (SceneWorks/minimax-h3-image-pe@7c0e818c…):
 // 159 keys; every prior row is unchanged.
+// SW-F373 adds three SenseNova-Loop-9B listings. The 159 prior rows and Illustrious file lists match.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "a73669dabec5ca8090818da2e0d1c64cde30942f0d838be0c3a8933635469cc2";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "763683c3e46cd385743af1d152f9950235da4564bbc585ddcb7a37b971864506";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

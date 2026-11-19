@@ -13,6 +13,9 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+#[path = "sensenova_product_acceptance.rs"]
+mod sensenova_product;
+
 type Result<T> = std::result::Result<T, String>;
 fn require(ok: bool, message: impl Into<String>) -> Result<()> {
     if ok {
@@ -44,8 +47,15 @@ fn save(root: &Path, name: &str, value: &Value) -> Result<()> {
     .map_err(|e| e.to_string())
 }
 
+struct CancelOnPost {
+    route: String,
+    message: Option<&'static str>,
+    cancel_url: String,
+}
+
 #[derive(Clone, Default)]
 struct HttpLedger {
+    cancel_after_post: Arc<Mutex<Option<CancelOnPost>>>,
     sequence: Arc<AtomicU64>,
     rows: Arc<Mutex<Vec<Value>>>,
 }
@@ -63,7 +73,7 @@ async fn record_http(
     let bytes = to_bytes(body, 16 * 1024 * 1024)
         .await
         .expect("bounded owned request");
-    let request_value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let mut request_value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let response = next
         .run(axum::extract::Request::from_parts(
             parts,
@@ -74,8 +84,46 @@ async fn record_http(
     let output = to_bytes(body, 32 * 1024 * 1024)
         .await
         .expect("bounded owned response");
-    let response_value: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
+    let mut response_value: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
+    // The controller uploads these summaries. The API and worker still receive the original bytes.
+    if let Some(request) = request_value.as_object_mut() {
+        request.remove("portableProofKey");
+        request.remove("capability");
+        request.remove("executionClaimCapability");
+    }
+    if let Some(response) = response_value.as_object_mut() {
+        response.remove("executionClaimCapability");
+    }
     ledger.rows.lock().expect("HTTP ledger").push(json!({"sequence":sequence,"receivedUnixMs":received,"completedUnixMs":now(),"method":method,"route":route,"request":request_value,"requestBodySha256":sha(&bytes),"response":response_value,"responseBodySha256":sha(&output),"httpStatus":parts.status.as_u16()}));
+    // Issue the user cancel after the selected worker POST commits and before its handler continues.
+    let cancel_url = {
+        let mut pending = ledger.cancel_after_post.lock().unwrap();
+        if method == "POST"
+            && parts.status.is_success()
+            && pending.as_ref().is_some_and(|trigger| {
+                trigger.route == route
+                    && trigger
+                        .message
+                        .is_none_or(|message| request_value["message"] == message)
+            })
+        {
+            pending.take().map(|trigger| trigger.cancel_url)
+        } else {
+            None
+        }
+    };
+    if let Some(url) = cancel_url {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
     axum::response::Response::from_parts(parts, Body::from(output))
 }
 struct Api {
@@ -758,11 +806,25 @@ async fn run(case: &str) {
     assert_eq!(std::env::var("HF_HUB_OFFLINE").as_deref(), Ok("1"));
     assert_eq!(std::env::var("TRANSFORMERS_OFFLINE").as_deref(), Ok("1"));
     #[cfg(target_os = "macos")]
-    assert_eq!(
-        std::env::var("LOAD_PROGRESS_MAC_GO").as_deref(),
-        Ok("true"),
-        "Michael's explicit GPU go required"
-    );
+    if case.starts_with("sensenova_") {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("self-hosted")
+        );
+        let runner = if std::env::var("LOAD_PROGRESS_MAC_GO").as_deref() == Ok("true") {
+            "nax-macos"
+        } else {
+            "nax-macos-2"
+        };
+        assert_eq!(std::env::var("RUNNER_NAME").as_deref(), Ok(runner));
+    } else {
+        assert_eq!(
+            std::env::var("LOAD_PROGRESS_MAC_GO").as_deref(),
+            Ok("true"),
+            "Michael's explicit GPU go required"
+        );
+    }
     let provenance: Value = serde_json::from_str(include_str!(
         "../../../../config/inference-third-party-source.json"
     ))
@@ -791,7 +853,17 @@ async fn run(case: &str) {
     let state = temp.keep();
     settings.host_os = std::env::consts::OS.into();
     super::moss_training_acceptance::seed_acceptance_manifests(&settings).unwrap();
-    let app = create_app(settings.clone()).unwrap();
+    let app = if case.starts_with("sensenova_") {
+        let tier = case.split('_').nth(1).unwrap();
+        let ledger = sensenova_product::publisher_metadata(tier, &root)
+            .await
+            .unwrap();
+        let (app, state) = create_app_with_state(settings.clone()).unwrap();
+        sensenova_product::configure_metadata(&state, ledger);
+        app
+    } else {
+        create_app(settings.clone()).unwrap()
+    };
     let tap = ledger.clone();
     let app = app.layer(axum::middleware::from_fn(move |request, next| {
         record_http(tap.clone(), request, next)
@@ -809,7 +881,11 @@ async fn run(case: &str) {
     let api = Api {
         client: reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(if case.starts_with("sensenova_") {
+                900
+            } else {
+                30
+            }))
             .build()
             .unwrap(),
         url: url.clone(),
@@ -820,7 +896,9 @@ async fn run(case: &str) {
         } else {
             "moss_image_sft"
         };
-        receipt["weights"] = snapshot_inventory(&settings, model)?;
+        if !case.starts_with("sensenova_") {
+            receipt["weights"] = snapshot_inventory(&settings, model)?;
+        }
         receipt["statePath"] = json!(state);
         let gpu = if cfg!(target_os = "macos") {
             "mlx".to_owned()
@@ -841,6 +919,19 @@ async fn run(case: &str) {
             )
             .await?;
         let project = field(&project, "id")?;
+        if let Some(tier) = case.strip_prefix("sensenova_") {
+            let tier = tier.strip_suffix("_product").unwrap_or(tier);
+            return sensenova_product::exercise(
+                &api,
+                &worker,
+                &ledger,
+                &root,
+                project,
+                tier,
+                &mut receipt,
+            )
+            .await;
+        }
         let submitted = submit(&api, &root, project, case).await?;
         receipt["submittedJob"] = submitted.clone();
         save(&root, "receipt.json", &receipt)?;
@@ -908,6 +999,24 @@ async fn run(case: &str) {
     receipt["finishedUnixMs"] = json!(now());
     save(&root, "receipt.json", &receipt).unwrap();
     assert_eq!(receipt["status"], "passed", "{}", receipt["failure"]);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "SW-7189 dedicated SenseNova real-weight product acceptance"]
+async fn sensenova() {
+    let case = std::env::var("LOAD_PROGRESS_CASE").unwrap();
+    assert!(matches!(
+        case.as_str(),
+        "sensenova_q4" | "sensenova_q8" | "sensenova_bf16" | "sensenova_bf16_product"
+    ));
+    #[cfg(target_os = "windows")]
+    assert!(
+        std::env::var("SW_CI_CUDA_EXECUTION_ACTIVE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|pid| pid > 0),
+        "physical GPU1 execution supervisor required"
+    );
+    run(&case).await;
 }
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

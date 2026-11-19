@@ -139,6 +139,7 @@ import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-til
 import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?url&no-inline";
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?url&no-inline";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?url&no-inline";
+import senseNovaLoopApache20 from "../../../desktop/licenses/sensenova-loop-9b/Apache-2.0.txt?url&no-inline";
 import qwen38DescriberApache20 from "../../../desktop/licenses/qwen3.8-27b-describer/Apache-2.0.txt?url&no-inline";
 import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?url&no-inline";
 // DWPose (sc-17634): mmpose's OWN LICENSE file, not the stock Apache text — it carries the
@@ -293,6 +294,7 @@ const DOCUMENT_URL = {
   "pid-nvidia-license": pidNVIDIALicense,
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
+  "sensenova-loop-9b-apache": senseNovaLoopApache20,
   "qwen3.8-27b-describer-apache": qwen38DescriberApache20,
   "seedvr2-apache": seedvr2Apache20,
   "dwpose-apache": dwposeApache20,

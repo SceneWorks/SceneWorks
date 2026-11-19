@@ -310,6 +310,7 @@ mod credentials;
 use credentials::{delete_credential, list_credentials, set_credential};
 mod preferences;
 use preferences::{get_ui_preferences, set_ui_preferences};
+mod loop_utility;
 mod prompts;
 use prompts::create_prompt_refine_job;
 // On-demand "compare image to another" likeness tool (epic 4406, sc-4415): enqueues a
