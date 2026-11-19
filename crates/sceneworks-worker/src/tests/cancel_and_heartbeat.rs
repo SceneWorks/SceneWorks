@@ -1410,6 +1410,53 @@ async fn heartbeat_while_blocking_keeps_worker_live_through_a_long_pass() {
     );
 }
 
+/// A resumed multi-shard download verifies each already-present shard with its own
+/// `heartbeat_while_blocking` call, back to back. Each shard of a Wan2.2 14B snapshot hashed in ~3s,
+/// under the 5-15s heartbeat interval; when every call restarted its own clock and skipped the
+/// immediate tick, none of them ever fired, so the job posted "Verifying ... integrity" progress
+/// every 3s while sending no heartbeat, and the stale sweep interrupted it exactly 90s after its
+/// claim (job_85aafcb0..., 4 attempts). The cadence must carry across calls: a run of sub-interval
+/// tasks that together outlast one interval has to heartbeat.
+#[tokio::test]
+async fn heartbeat_while_blocking_keeps_cadence_across_back_to_back_short_tasks() {
+    let (base_url, beats) = spawn_heartbeat_counting_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5; // progress_report_interval floor
+    // The last-sent clock is process-wide per worker id; keep this test's clock its own.
+    settings.worker_id = "worker-back-to-back-verify".to_owned();
+    let api = ApiClient::new(&settings);
+
+    // The worker's own heartbeat (claim / last progress tick) starts the cadence.
+    crate::heartbeat(
+        &api,
+        &settings,
+        sceneworks_core::contracts::WorkerStatus::Busy,
+        Some("job-1"),
+    )
+        .await
+        .expect("seed heartbeat posts");
+    let seeded = beats.load(Ordering::SeqCst);
+
+    // Five ~1.3s shard hashes: each is well under the 5s interval, together ~6.5s.
+    for _ in 0..5 {
+        let task = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(1_300));
+            Ok::<(), WorkerError>(())
+        });
+        heartbeat_while_blocking(&api, &settings, "job-1", "test shard verify", task)
+            .await
+            .expect("each shard verify returns its Ok result");
+    }
+
+    assert!(
+        beats.load(Ordering::SeqCst) > seeded,
+        "a run of sub-interval verifies outlasting one interval must heartbeat (got {} after the \
+         seed's {seeded})",
+        beats.load(Ordering::SeqCst)
+    );
+}
+
 /// A managed model import's staging copy is one checkpoint-sized await with no progress of its own.
 /// Run under `with_job_heartbeat`, a region that outlasts one heartbeat interval must still beat:
 /// the H3 terminal campaign's ~2 minute copy was swept to `interrupted` without it.

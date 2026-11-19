@@ -478,11 +478,18 @@ pub(crate) async fn heartbeat_while_blocking<R: Send + 'static>(
     task: tokio::task::JoinHandle<WorkerResult<R>>,
 ) -> WorkerResult<R> {
     let mut task = task;
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
+    let period = progress_report_interval(settings);
+    let now = tokio::time::Instant::now();
+    // Schedule the first beat one period after the worker's LAST heartbeat, not one period after
+    // this call. Callers run this in loops — one call per shard when verifying a resumed
+    // multi-shard download — and a per-call clock that each sub-interval hash resets never fires:
+    // a Wan2.2 14B verify of ~3s shards posted progress every 3s yet sent no heartbeat, and the
+    // sweep interrupted it exactly 90s after its claim. An overdue beat fires immediately; a
+    // recent one is not repeated, so a lone fast hash still costs no redundant POST.
+    let first = crate::last_heartbeat_sent(&settings.worker_id)
+        .map_or(now + period, |sent| (sent + period).max(now));
+    let mut interval = tokio::time::interval_at(first, period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // A tokio interval's first tick is immediate; consume it so a sub-interval task (a small
-    // file's fast hash) resolves without firing a redundant heartbeat POST.
-    interval.tick().await;
     loop {
         tokio::select! {
             result = &mut task => {
