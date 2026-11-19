@@ -2997,26 +2997,7 @@ label {
   gap: 8px;
 }
 
-/* Batch-mode prompt expansion (BatchExpandPromptsControl): every batch prompt's expansion in one
-   scrollable, read-only list; edits happen in the batch list after Apply. */
-.batch-expand-preview ol {
-  max-height: 320px;
-  overflow-y: auto;
-  margin: 8px 0 0;
-  padding-left: 24px;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.batch-expand-preview li + li {
-  margin-top: 8px;
-}
-
-.batch-expand-failures {
-  margin: 0;
-  padding-left: 18px;
-}
-
+/* Batch-mode prompt expansion: the Expand prompt tool's panel when it runs as part of Run batch. */
 .batch-expand-sizes {
   display: flex;
   align-items: center;

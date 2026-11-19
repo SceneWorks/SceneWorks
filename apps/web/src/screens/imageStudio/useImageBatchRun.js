@@ -28,6 +28,9 @@ export function useImageBatchRun({
   token = "",
   buildBatchJobRequest,
   onMagicExpand,
+  // MiniMax-H3-Image batch expansion (the Expand prompt tool, on in batch mode), or null:
+  // { expandPrompt, copy, modelId, referenceAssetIds, useSizes, proposedResolution, failureMessage }.
+  batchExpansion = null,
   createImageJob
 }) {
   const batchObservedJobsRef = useRef(new Map());
@@ -93,6 +96,55 @@ export function useImageBatchRun({
     }
   }
 
+  // Expand every resolved prompt with MiniMax-H3-Image's expander, one job after another. A
+  // prompt whose expansion fails is recorded as a failed batch item (with the reason) and not
+  // rendered; Stop ends the phase and queues nothing. Returns the items to render.
+  async function expandBatchItems(entries, owner, stopped) {
+    const { expandPrompt, copy, modelId, referenceAssetIds, useSizes, proposedResolution, failureMessage } = batchExpansion;
+    const ready = [];
+    const progress = (done) => {
+      const current = batchRunRef.current;
+      if (current) replaceBatchRun({ ...current, expanding: { done, total: entries.length } });
+    };
+    progress(0);
+    for (let index = 0; index < entries.length; index += 1) {
+      if (stopped()) return [];
+      const item = entries[index];
+      if (!item.prompt.trim()) {
+        ready.push(item);
+        progress(index + 1);
+        continue;
+      }
+      try {
+        const result = await expandPrompt({
+          prompt: item.prompt.trim(),
+          modelId,
+          projectId: owner.projectId,
+          sourceAssetIds: referenceAssetIds,
+          signal: owner.controller.signal,
+        });
+        if (stopped()) return [];
+        const expanded = String(result?.refinedPrompt ?? "").trim();
+        if (!expanded) throw new Error("The prompt expander returned an empty prompt.");
+        // The proposed size is opt-in, and a prompt's own [size] always wins.
+        const size = useSizes && !item.resolution ? /^(\d+)x(\d+)$/.exec(proposedResolution(result?.rewriteSuggestion) || "") : null;
+        ready.push({
+          prompt: expanded,
+          resolution: size ? { width: Number(size[1]), height: Number(size[2]) } : item.resolution,
+        });
+      } catch (error) {
+        if (stopped() || error?.name === "AbortError") return [];
+        const current = batchRunRef.current;
+        if (!current) return [];
+        replaceBatchRun(recordBatchEnqueueFailure(current, 1, copy.batch.failed(index + 1, failureMessage(error))));
+      }
+      progress(index + 1);
+    }
+    const current = batchRunRef.current;
+    if (current) replaceBatchRun({ ...current, expanding: null });
+    return ready;
+  }
+
   // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
@@ -130,12 +182,19 @@ export function useImageBatchRun({
     // into one job of up to `promptBatchSize` prompts; every other model keeps one job per prompt.
     // The job's own `count` (a preset stack may override the studio's), so prompts × count fits.
     const size = promptBatchSize(selectedModel, buildBatchJobRequest("").count);
-    function* chunks() {
-      let chunk = [];
+    function* resolvedItems() {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        const item = parsePromptResolution(entry.prompt, resolutionOptions);
+        yield parsePromptResolution(entry.prompt, resolutionOptions);
+      }
+    }
+    // Prompt expansion runs to the end BEFORE the first image job is queued, so the expander and
+    // the image model each load once rather than alternating per prompt.
+    const items = batchExpansion ? await expandBatchItems([...resolvedItems()], owner, stopped) : resolvedItems();
+    function* chunks() {
+      let chunk = [];
+      for (const item of items) {
         if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
           yield chunk;
           chunk = [];
@@ -236,8 +295,8 @@ export function useImageBatchRun({
       }
     }
     const current = batchRunRef.current;
-    if (current && !stopped()) replaceBatchRun({ ...current, submitting: false });
-    else if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false });
+    if (current && !stopped()) replaceBatchRun({ ...current, submitting: false, expanding: null });
+    else if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false, expanding: null });
   }
 
   // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
