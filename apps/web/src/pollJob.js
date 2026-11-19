@@ -71,7 +71,9 @@ export async function pollJobToCompletion({
       return resolveResult(job);
     }
     if (errorStatuses.has(job.status)) {
-      throw new Error(job.message || job.error || failureError);
+      // `error` is the failure's reason; `message` is the job's status line, which for a failed
+      // utility job is only a generic "… failed." (the reason would otherwise never reach the UI).
+      throw new Error(job.error || job.message || failureError);
     }
   }
   throw new Error(timeoutError);
