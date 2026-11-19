@@ -4,9 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::core_llm::{
-    DecodeDraft, DecodeReport, DraftReport, LoadReport, LoadSpec, ProposerCapabilities,
-    ProposerKind, Quantize, Speculative, SpeculativeProposer, SpeculativeVerify,
-    TextLlmCapabilities, TreeVerifyCapabilities, TreeVerifyReport,
+    DecodeDraft, DecodeReport, DraftReport, LoadReport, LoadSpec, ProposerKind, Quantize,
+    Speculative, SpeculativeVerify, TreeVerifyReport, AUTO_BLOCK_DRAFT_NOT_ADMITTED,
 };
 use sceneworks_core::dataset_batch_describe::{
     qwen38_block_draft_rows, QWEN38_27B_BLOCK_DRAFT_REPOS, QWEN38_27B_DESCRIBER_MODEL_ID,
@@ -56,7 +55,7 @@ fn no_installed_draft_names_none_and_says_so() {
         None
     );
     assert_eq!(
-        draft_fallback(None, None).as_deref(),
+        draft_fallback(None, None, None).as_deref(),
         Some(NO_DRAFT_INSTALLED)
     );
 }
@@ -130,34 +129,38 @@ fn the_load_names_the_draft_at_its_precision() {
     }
 }
 
+/// Every describe, condense and expansion request sends the product's option checked linearly:
+/// `auto` on the Qwen3.8-27B (the describer's and the expander's), never an explicit block draft
+/// and never tree checking, whatever the loaded model advertises.
 #[test]
-fn an_advertised_block_draft_runs_with_tree_checking_else_the_products_option() {
-    let mut caps = TextLlmCapabilities::default();
+fn every_request_sends_auto_checked_linearly() {
+    // The Qwen3.8 27B describer's option is `auto` (`DescribeModel::speculative`).
     assert_eq!(
-        block_draft_speculation(&caps, Some(Speculative::Auto)),
+        request_speculation(Some(Speculative::Auto)),
         (Some(Speculative::Auto), SpeculativeVerify::Linear)
     );
-    caps.speculative.push(ProposerCapabilities {
-        proposer: SpeculativeProposer::BlockDraft,
-        max_depth: 15,
-        recommended_depth: 4,
-    });
-    // Advertised but no tree verification: linear checking.
     assert_eq!(
-        block_draft_speculation(&caps, Some(Speculative::Auto)),
-        (
-            Some(Speculative::proposer(SpeculativeProposer::BlockDraft, 4)),
-            SpeculativeVerify::Linear
-        )
+        expansion_speculation(),
+        (Some(Speculative::Auto), SpeculativeVerify::Linear)
     );
-    caps.tree_verify = Some(TreeVerifyCapabilities { max_rows: 16 });
-    assert_eq!(
-        block_draft_speculation(&caps, None),
-        (
-            Some(Speculative::proposer(SpeculativeProposer::BlockDraft, 4)),
-            SpeculativeVerify::Tree { max_rows: 16 }
-        )
-    );
+    // The other describers keep the backend default, also checked linearly.
+    assert_eq!(request_speculation(None), (None, SpeculativeVerify::Linear));
+}
+
+/// What `auto` ran a resident block draft as: one linear pass per anchor.
+fn linear_draft_report(precision: &str) -> DecodeReport {
+    DecodeReport {
+        proposer: ProposerKind::BlockDraft,
+        draft: Some(DecodeDraft {
+            source: "/hub/dflash2".to_owned(),
+            format: "dflash2".to_owned(),
+            precision: precision.to_owned(),
+        }),
+        verify_steps: 10,
+        proposed_tokens: 40,
+        accepted_tokens: 18,
+        ..Default::default()
+    }
 }
 
 fn tree_report() -> DecodeReport {
@@ -256,35 +259,41 @@ fn the_smoke_modes_parse_and_record_is_the_default() {
     assert!(SmokeDraftCheck::parse("yes").is_err());
 }
 
+/// `on` where `auto` prefers the draft: the record must name the draft at the tier's precision,
+/// checked linearly, with more than one accepted token per target pass and no fallback.
 #[test]
-fn the_on_check_needs_the_draft_its_precision_a_tree_and_more_than_one_token_per_pass() {
-    use DraftRequest::{Image, Text};
+fn the_on_check_needs_the_draft_its_precision_linear_checking_and_more_than_one_token_per_pass() {
     let draft = choice("q4");
     let load = LoadReport {
         draft: Some(DraftReport::resident("/hub/dflash2")),
         ..Default::default()
     };
-    let ran = decode_record(Some(&tree_report()), Some(&load), Some(&draft));
-    for request in [Image, Text] {
-        assert_eq!(
-            SmokeDraftCheck::On.check(&ran, Some(&draft), request),
-            Ok(())
-        );
-    }
+    let ran = decode_record(Some(&linear_draft_report("q4")), Some(&load), Some(&draft));
+    assert_eq!(ran["proposer"], "block_draft");
+    assert_eq!(ran["verify"], "linear");
+    assert_eq!(ran["targetPasses"], 10);
+    assert_eq!(ran["rowsChecked"], 50);
+    assert_eq!(ran["acceptedTokensPerPass"], 1.8);
+    assert_eq!(SmokeDraftCheck::On.check(&ran, Some(&draft), true), Ok(()));
     assert_eq!(
-        SmokeDraftCheck::Record.check(&Value::Null, None, Text),
+        SmokeDraftCheck::Record.check(&Value::Null, None, true),
         Ok(())
     );
     // An 8-bit draft is not the 4-bit tier's.
     assert!(SmokeDraftCheck::On
-        .check(&ran, Some(&choice("q8")), Text)
+        .check(&ran, Some(&choice("q8")), true)
+        .is_err());
+    // Tree checking is never requested, so a tree record fails `on`.
+    let tree = decode_record(Some(&tree_report()), Some(&load), Some(&draft));
+    assert!(SmokeDraftCheck::On
+        .check(&tree, Some(&draft), true)
         .is_err());
     // One accepted token per pass or fewer is no speed-up to show.
-    let mut slow = tree_report();
-    slow.tree_verify.as_mut().unwrap().accepted_tokens = 10;
+    let mut slow = linear_draft_report("q4");
+    slow.accepted_tokens = 10;
     let slow = decode_record(Some(&slow), Some(&load), Some(&draft));
     assert!(SmokeDraftCheck::On
-        .check(&slow, Some(&draft), Text)
+        .check(&slow, Some(&draft), true)
         .is_err());
     // A draft that did not fit fails `on` and passes `no_fit`.
     let refused = LoadReport {
@@ -303,63 +312,96 @@ fn the_on_check_needs_the_draft_its_precision_a_tree_and_more_than_one_token_per
     };
     let fell_back = decode_record(Some(&alone), Some(&refused), Some(&draft));
     assert!(SmokeDraftCheck::On
-        .check(&fell_back, Some(&draft), Image)
+        .check(&fell_back, Some(&draft), true)
         .is_err());
     assert_eq!(
-        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft), Image),
+        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft), true),
         Ok(())
     );
     assert!(SmokeDraftCheck::NoFit
-        .check(&ran, Some(&draft), Text)
+        .check(&ran, Some(&draft), true)
         .is_err());
 }
 
-/// At the pinned inference an image request's tree checking runs linearly, named in the decode
-/// fallbacks: `on` accepts that for an image request only, and a text request must check a tree.
+/// `on` where `auto` keeps MTP (Candle/CUDA, an unmeasured tier): the draft loads but must not
+/// run, and the target checks linearly.
 #[test]
-fn an_image_request_may_check_linearly_only_with_the_engines_multimodal_reason() {
+fn the_on_check_requires_mtp_where_auto_does_not_prefer_the_draft() {
     let draft = choice("q8");
     let load = LoadReport {
         draft: Some(DraftReport::resident("/hub/dflash2")),
         ..Default::default()
     };
-    let linear = |fallbacks: Vec<String>| DecodeReport {
-        proposer: ProposerKind::BlockDraft,
-        draft: Some(DecodeDraft {
-            source: "/hub/dflash2".to_owned(),
-            format: "dflash2".to_owned(),
-            precision: "q8".to_owned(),
-        }),
+    let mtp = DecodeReport {
+        proposer: ProposerKind::Mtp,
         verify_steps: 10,
-        proposed_tokens: 40,
-        accepted_tokens: 18,
-        fallbacks,
+        proposed_tokens: 20,
+        accepted_tokens: 15,
         ..Default::default()
     };
-    let named = decode_record(
-        Some(&linear(vec![format!(
-            "speculative: {TREE_MULTIMODAL_LINEAR} (its prompt is prefilled from spliced \
-             embeddings); verified linearly"
-        )])),
-        Some(&load),
-        Some(&draft),
-    );
-    assert_eq!(named["verify"], "linear");
+    let kept_mtp = decode_record(Some(&mtp), Some(&load), Some(&draft));
+    assert_eq!(kept_mtp["draftFallback"], Value::Null);
     assert_eq!(
-        SmokeDraftCheck::On.check(&named, Some(&draft), DraftRequest::Image),
+        SmokeDraftCheck::On.check(&kept_mtp, Some(&draft), false),
         Ok(())
     );
+    let ran = decode_record(Some(&linear_draft_report("q8")), Some(&load), Some(&draft));
     assert!(SmokeDraftCheck::On
-        .check(&named, Some(&draft), DraftRequest::Text)
+        .check(&ran, Some(&draft), false)
         .is_err());
-    let unnamed = decode_record(Some(&linear(Vec::new())), Some(&load), Some(&draft));
     assert!(SmokeDraftCheck::On
-        .check(&unnamed, Some(&draft), DraftRequest::Image)
+        .check(&kept_mtp, Some(&draft), true)
         .is_err());
 }
 
-/// Describe and condense get their own decode blocks: an image describe checked linearly and a
-/// text condense checked as a tree are never blended.
+/// When a request's own memory withdraws `auto`'s block draft, the engine resolves `auto` again
+/// without it and names why; the record's `draftFallback` carries that reason.
+#[test]
+fn a_draft_auto_withdrew_for_the_requests_memory_is_recorded_with_the_engines_reason() {
+    let draft = choice("q4");
+    let load = LoadReport {
+        draft: Some(DraftReport::resident("/hub/dflash2")),
+        ..Default::default()
+    };
+    let withdrawn = DecodeReport {
+        proposer: ProposerKind::Mtp,
+        verify_steps: 10,
+        proposed_tokens: 20,
+        accepted_tokens: 14,
+        fallbacks: vec![AUTO_BLOCK_DRAFT_NOT_ADMITTED.to_owned()],
+        ..Default::default()
+    };
+    let record = decode_record(Some(&withdrawn), Some(&load), Some(&draft));
+    assert_eq!(record["proposer"], "mtp");
+    assert_eq!(record["draft"], Value::Null);
+    assert_eq!(record["draftFallback"], AUTO_BLOCK_DRAFT_NOT_ADMITTED);
+    assert_eq!(record["fallbacks"], json!([AUTO_BLOCK_DRAFT_NOT_ADMITTED]));
+    assert!(SmokeDraftCheck::On
+        .check(&record, Some(&draft), true)
+        .is_err());
+}
+
+/// `auto_runs_draft` follows the engine's recorded decision for the draft's format on this
+/// backend: MLX prefers a DFlash2 draft on the q4 and q8 tiers; Candle/CUDA never does; a draft
+/// whose config names no block-draft format, or an unrecorded tier, keeps MTP.
+#[test]
+fn auto_runs_the_draft_where_the_engine_recorded_it_faster() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut draft = choice("q4");
+    draft.dir = dir.path().to_path_buf();
+    assert!(!auto_runs_draft(&draft, "q4"), "no config.json");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"architectures": ["DFlash2DraftModel"]}"#,
+    )
+    .unwrap();
+    let mlx = cfg!(target_os = "macos");
+    assert_eq!(auto_runs_draft(&draft, "q4"), mlx);
+    assert_eq!(auto_runs_draft(&draft, "q8"), mlx);
+    assert!(!auto_runs_draft(&draft, "bf16"));
+}
+
+/// Describe and condense get their own decode blocks: their generations are never blended.
 #[test]
 fn describe_and_condense_are_recorded_as_separate_blocks() {
     let draft = choice("q4");
@@ -383,7 +425,7 @@ fn describe_and_condense_are_recorded_as_separate_blocks() {
     );
     job.note(
         DecodePhase::Condense,
-        Some(&tree_report()),
+        Some(&linear_draft_report("q4")),
         Some(&load),
         Some(&draft),
     );
@@ -391,9 +433,9 @@ fn describe_and_condense_are_recorded_as_separate_blocks() {
     assert_eq!(record["describe"]["verify"], "linear");
     assert_eq!(record["describe"]["targetPasses"], 8);
     assert_eq!(record["describe"]["acceptedTokensPerPass"], 1.5);
-    assert_eq!(record["condense"]["verify"], "tree");
+    assert_eq!(record["condense"]["verify"], "linear");
     assert_eq!(record["condense"]["targetPasses"], 10);
-    assert_eq!(record["condense"]["acceptedTokensPerPass"], 3.5);
+    assert_eq!(record["condense"]["acceptedTokensPerPass"], 1.8);
     assert_eq!(record["condense"]["draft"]["precision"], "q4");
 
     // A phase whose generations differ says so rather than keeping the last one.

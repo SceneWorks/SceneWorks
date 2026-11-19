@@ -41,9 +41,11 @@
 //!
 //! SW-7204: the job names the installed block draft (DFlash2 / DSpine, provisioned with the tier)
 //! and its result's `executionIdentity.decode` records the proposer, draft, precision, target
-//! passes, rows checked and accepted tokens per pass. `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires
-//! the draft to run (block draft, the tier's draft precision, tree checking, more than one
-//! accepted token per pass, no fallback); `no_fit` caps the engine's load budget so the draft
+//! passes, rows checked and accepted tokens per pass. The expansion sends `speculative: auto`,
+//! checked linearly. `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires the draft to load and be admitted,
+//! checked linearly; where `auto` prefers it (MLX q4/q8, SW-7200) it must run (block draft, the
+//! tier's draft precision, more than one accepted token per pass), and elsewhere `auto` must keep
+//! its MTP head; `no_fit` caps the engine's load budget so the draft
 //! cannot fit beside the target and requires the job to complete without it, its record saying
 //! why. The default `record` records it and asserts nothing about it.
 //!
@@ -442,13 +444,11 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
     );
     let decode = &result["executionIdentity"]["decode"];
     eprintln!("DECODE block_draft_check={} {decode}", draft_check.label());
+    let auto_runs_draft = draft
+        .as_ref()
+        .is_some_and(|draft| crate::qwen38_block_draft::auto_runs_draft(draft, tier));
     draft_check
-        // A text-only expansion: it must check a tree.
-        .check(
-            decode,
-            draft.as_ref(),
-            crate::qwen38_block_draft::DraftRequest::Text,
-        )
+        .check(decode, draft.as_ref(), auto_runs_draft)
         .unwrap_or_else(|error| panic!("block-draft check {}: {error}", draft_check.label()));
 
     Run {

@@ -139,10 +139,11 @@ impl DescribeModel {
     }
 
     /// The speculative option this model's describe and condense requests carry. The Qwen3.8
-    /// 27B asks for `auto`: its native MTP head runs, and the engine's monitor demotes it to plain
-    /// decoding when it measures slower (on CUDA the q8 tier keeps it — t=0.4 + JSON 50.4 vs 39.4
-    /// tok/s plain — and the q4 tier drops it under the JSON constraint). `None` keeps the
-    /// backend's default for the other describers.
+    /// 27B asks for `auto`: the engine runs a resident block draft on MLX's q4 and q8 tiers (where
+    /// SW-7200 measured it faster than MTP) and its native MTP head otherwise, and its monitor
+    /// demotes either to plain decoding when it measures slower (on CUDA the q8 tier keeps MTP —
+    /// t=0.4 + JSON 50.4 vs 39.4 tok/s plain — and the q4 tier drops it under the JSON
+    /// constraint). `None` keeps the backend's default for the other describers.
     pub(crate) fn speculative(self) -> Option<gen_core::core_llm::Speculative> {
         match self {
             Self::Qwen38 => Some(gen_core::core_llm::Speculative::Auto),
@@ -1222,13 +1223,10 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     model.descriptor().capabilities.supports_thinking,
                     thinking,
                 );
-                // SW-7204: the block draft with tree checking when the load kept it (an image
-                // request is checked linearly by the engine at the pinned inference, by name).
+                // SW-7204: the product's option (`auto` on the Qwen3.8 27B: the engine runs a
+                // resident block draft where it measured faster), checked linearly.
                 let (speculative, speculative_verify) =
-                    crate::qwen38_block_draft::block_draft_speculation(
-                        &model.descriptor().capabilities,
-                        product_speculative,
-                    );
+                    crate::qwen38_block_draft::request_speculation(product_speculative);
                 let request = TextLlmRequest {
                     progress: Some(crate::load_progress::text_observer()),
                     messages: vec![
@@ -1320,10 +1318,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
             format!("{name} load failed"),
             move |model| -> WorkerResult<Result<CondenseReply, String>> {
                 let (speculative, speculative_verify) =
-                    crate::qwen38_block_draft::block_draft_speculation(
-                        &model.descriptor().capabilities,
-                        product_speculative,
-                    );
+                    crate::qwen38_block_draft::request_speculation(product_speculative);
                 let request = TextLlmRequest {
                     progress: Some(crate::load_progress::text_observer()),
                     messages: vec![Message::system(system), Message::user(user)],

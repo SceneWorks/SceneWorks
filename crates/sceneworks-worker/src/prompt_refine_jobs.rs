@@ -1056,12 +1056,10 @@ pub(crate) async fn run_prompt_refine_job(
                         refiner.descriptor().capabilities.supports_thinking,
                         request.thinking,
                     );
-                    // SW-7204: the block draft with tree checking when the load kept it.
+                    // SW-7204: `auto`, checked linearly (the engine runs a resident block draft
+                    // where it measured faster, MTP otherwise).
                     (request.speculative, request.speculative_verify) =
-                        crate::qwen38_block_draft::block_draft_speculation(
-                            &refiner.descriptor().capabilities,
-                            request.speculative,
-                        );
+                        crate::qwen38_block_draft::expansion_speculation();
                     request
                 } else {
                     let mut messages = Vec::with_capacity(2);

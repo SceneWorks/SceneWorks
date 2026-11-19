@@ -24,12 +24,13 @@ name: Qwen3.8 27B describer MLX validation
 # 2026-11-18. Switch the default back to `nax-macos-2` (`rw-llm`) once its new drive is fitted.
 #
 # `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter, which both
-# jobs name whenever a draft (DFlash2 / DSpine) is installed: `record` (the default) records the
-# decode blocks (proposer, draft, precision, verify, target passes, rows checked and accepted
-# tokens per pass; the describer's describe and condense separately) and asserts nothing about
-# them; `on` requires the draft to run at the tier's draft precision with more than one accepted
-# token per target pass and no fallback, and tree checking (the image describe may instead check
-# linearly when the engine names its multimodal fallback); `no_fit` caps the engine's load budget
+# jobs name whenever a draft (DFlash2 / DSpine) is installed; every request sends `speculative:
+# auto`, checked linearly. `record` (the default) records the decode blocks (proposer, draft,
+# precision, verify, target passes, rows checked and accepted tokens per pass; the describer's
+# describe and condense separately) and asserts nothing about them; `on` requires the draft to load
+# and be admitted, and where `auto` prefers it (MLX q4/q8, SW-7200) to run at the tier's draft
+# precision with more than one accepted token per target pass (elsewhere `auto` must keep MTP);
+# `no_fit` caps the engine's load budget
 # so the draft cannot fit beside the target and requires the job to complete without it, its
 # record naming why. Only `on` / `no_fit` fetch the drafts (run.sh).
 on:
@@ -89,7 +90,7 @@ on:
         options: [minimax, abliterated]
         default: minimax
       block_draft:
-        description: record (record the decode block only), on (require the block draft to run), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
+        description: record (record the decode block only), on (require the block draft to load; where auto prefers it, MLX q4/q8, require it to run), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
         required: false
         type: choice
         options: [record, "on", no_fit]

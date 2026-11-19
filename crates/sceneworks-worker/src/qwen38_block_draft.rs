@@ -4,46 +4,38 @@
 //! Both products load a Qwen3.8-27B tier through the refine cache. When one of the catalog's block
 //! drafts (DFlash2, DSpine; soft co-requisites of both entries, SW-7203) is installed at its pinned
 //! revision, the load names it in [`LoadSpec::draft_source`] at the tier's precision (the 4-bit
-//! tier runs a 4-bit draft, every other an 8-bit one), and the request asks for the block-draft
-//! proposer with tree checking whenever the loaded model advertises it. At the pinned inference
-//! revision both engines check an image (describe) request linearly, naming why in the decode
-//! report's fallbacks; text-only requests (condense, the expander)
-//! check a tree.
+//! tier runs a 4-bit draft, every other an 8-bit one).
+//!
+//! Every describe, condense and expansion request sends `speculative: auto`, checked linearly
+//! ([`request_speculation`]). Since SW-7200 the engine's `auto` chooses the proposer from measured
+//! decisions (`core_llm::AUTO_BLOCK_DRAFT_DECISIONS`): on MLX it runs a resident block draft ahead
+//! of the native MTP head on the q4 and q8 tiers, where the paths campaign measured it faster; on
+//! Candle/CUDA (block draft measured slower there) and on unmeasured tiers it keeps MTP. Only
+//! `auto` arms the engine's acceptance monitor, which demotes a proposer to plain decoding on a
+//! request where it measures slower. Tree checking is never requested: it measured slower than
+//! linear checking on both backends (MLX 0.67-1.18x plain against linear 1.6-2.1x; CUDA
+//! 0.45-0.70x).
 //!
 //! Memory: the engine's own load admission prices the draft beside the target (its weights at
-//! that precision, the draft cache and the tree buffers) and, when they do not fit, loads the
-//! target alone and names the refusal in its load report. The tier is never refused for the
-//! draft's sake: the worker's tier floor prices the target only. The request then runs the model's
-//! `speculative: auto` plan (its native MTP head), and the job record says why the draft did not
-//! run.
-//!
-//! Why the request names `block_draft` instead of `auto`: at the pinned inference revision
-//! `Speculative::Auto` resolves MTP, else prompt lookup, and never a block draft
-//! (`core_llm::resolve_speculative`), and tree checking is an explicit opt-in that `auto` never
-//! turns on. So the worker asks for `block_draft` exactly when the loaded model advertises it, and
-//! keeps `auto` otherwise. With that explicit `{block_draft, depth}` request the engine's
-//! speculative monitor does NOT demote to plain decoding (its acceptance monitor is armed for
-//! `auto` requests only), so the demotion E1 requires does not apply until SW-7200's measured auto
-//! table lets the worker send `auto`. That switch is tracked on SW-7204, blocked on SW-7200.
+//! that precision and the draft cache) and, when they do not fit, loads the target alone and names
+//! the refusal in its load report. The tier is never refused for the draft's sake: the worker's
+//! tier floor prices the target only. When a request's own memory refuses `auto`'s block draft, the
+//! engine resolves `auto` again without it (MTP) and names
+//! [`AUTO_BLOCK_DRAFT_NOT_ADMITTED`](gen_core::core_llm::AUTO_BLOCK_DRAFT_NOT_ADMITTED). Either way
+//! the job record says why the draft did not run.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gen_core::core_llm::{
-    DecodeReport, LoadReport, LoadSpec, Quantize, Speculative, SpeculativeProposer,
-    SpeculativeVerify, TextLlmCapabilities,
+    DecodeReport, LoadReport, LoadSpec, Quantize, Speculative, SpeculativeVerify,
+    AUTO_BLOCK_DRAFT_NOT_ADMITTED,
 };
 use serde_json::{json, Value};
 
 /// The `draftFallback` reason when no block draft is installed.
 pub(crate) const NO_DRAFT_INSTALLED: &str =
     "block draft: none installed (the DFlash2 and DSpine drafts download with the model's tiers)";
-
-/// What both engines' decode reports say (in `fallbacks`) when an image request's tree checking ran
-/// linearly at the pinned inference revision: the multimodal decode path checks linearly.
-#[cfg(test)]
-pub(crate) const TREE_MULTIMODAL_LINEAR: &str =
-    "tree verification is not available on the multimodal decode path";
 
 /// The installed block draft a Qwen3.8-27B load names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -109,45 +101,42 @@ pub(crate) fn with_block_draft(mut spec: LoadSpec, draft: Option<&BlockDraftChoi
     spec
 }
 
-/// The speculative option and verify layout a request on a model with `capabilities` carries:
-/// the block draft with tree checking (at the advertised row bound) when the loaded model
-/// advertises it, else `otherwise` (the product's own option) verified linearly.
-pub(crate) fn block_draft_speculation(
-    capabilities: &TextLlmCapabilities,
-    otherwise: Option<Speculative>,
+/// The speculative option and verify layout a describe, condense or expansion request carries: the
+/// product's option (`auto` for every Qwen3.8-27B request, so the engine picks the proposer and its
+/// monitor can demote it; `None` keeps the backend default for the other describers), always
+/// checked linearly.
+pub(crate) fn request_speculation(
+    product: Option<Speculative>,
 ) -> (Option<Speculative>, SpeculativeVerify) {
-    // INTERIM: the worker names `block_draft` explicitly instead of sending `auto`, because at the
-    // pinned inference revision `auto` never resolves to a block draft. This stays until SW-7200's
-    // measured AUTO_BLOCK_DRAFT_DECISIONS table lands and `auto` chooses the proposer itself; then
-    // the request should send `auto`. Tree checking stays an explicit request either way: per
-    // SW-F328, `auto` never turns on `SpeculativeVerify::Tree`.
-    match capabilities.proposer(SpeculativeProposer::BlockDraft) {
-        Some(cap) => (
-            Some(Speculative::proposer(
-                SpeculativeProposer::BlockDraft,
-                cap.recommended_depth.max(1),
-            )),
-            capabilities
-                .tree_verify
-                .map_or(SpeculativeVerify::Linear, |tree| SpeculativeVerify::Tree {
-                    max_rows: tree.max_rows,
-                }),
-        ),
-        None => (otherwise, SpeculativeVerify::Linear),
-    }
+    (product, SpeculativeVerify::Linear)
 }
 
-/// Why the block draft did not run on a load: none installed, or the engine refused it at load
-/// (it did not fit beside the target, or its config does not match), from the load report.
+/// The speculative option a Qwen3.8-27B prompt expansion (MiniMax-H3-Image-PE or the abliterated
+/// describer, both Qwen3.8-27B) carries: `auto`, checked linearly.
+pub(crate) fn expansion_speculation() -> (Option<Speculative>, SpeculativeVerify) {
+    request_speculation(Some(Speculative::Auto))
+}
+
+/// Why the block draft did not run: none installed, the engine refused it at load (it did not fit
+/// beside the target, or its config does not match; from the load report), or the request's own
+/// memory withdrew `auto`'s block draft (the decode report's
+/// [`AUTO_BLOCK_DRAFT_NOT_ADMITTED`] fallback).
 pub(crate) fn draft_fallback(
     draft: Option<&BlockDraftChoice>,
     load: Option<&LoadReport>,
+    decode: Option<&DecodeReport>,
 ) -> Option<String> {
     let Some(_) = draft else {
         return Some(NO_DRAFT_INSTALLED.to_owned());
     };
     match load.and_then(|load| load.draft.as_ref()) {
-        Some(report) => report.refusal.clone(),
+        Some(report) => report.refusal.clone().or_else(|| {
+            decode?
+                .fallbacks
+                .iter()
+                .find(|reason| reason.contains(AUTO_BLOCK_DRAFT_NOT_ADMITTED))
+                .cloned()
+        }),
         None => Some("block draft: the engine reported no draft for this load".to_owned()),
     }
 }
@@ -220,7 +209,7 @@ impl DecodeTally {
         draft: Option<&BlockDraftChoice>,
     ) {
         self.generations += 1;
-        self.draft_fallback = draft_fallback(draft, load);
+        self.draft_fallback = draft_fallback(draft, load, decode);
         let Some(decode) = decode else {
             return;
         };
@@ -312,25 +301,30 @@ pub(crate) fn decode_record(
     tally.record()
 }
 
-/// What a real-weight smoke checks about the block drafter (SW-7204):
-/// `$SCENEWORKS_QWEN38_BLOCK_DRAFT` = `record` (the default: the decode block is recorded, nothing
-/// is asserted about it), `on` (an installed draft must run: the record names `block_draft`, the
-/// draft and its precision, more than one accepted token per target pass, no draft fallback, and
-/// tree checking — except that an image request may check linearly when the engine names its
-/// multimodal fallback, [`DraftRequest::Image`]) or `no_fit` (the engine's load budget is capped so the draft cannot fit beside
-/// the target: the job must complete without it and its record must say why).
-/// What a checked generation sent: an image (describe) or only text (condense, the expander).
+/// Whether `auto` runs the installed `draft` beside a `tier` target on this smoke's backend (MLX on
+/// macOS, Candle/CUDA elsewhere): the engine's own measured decision for the draft's format
+/// (`core_llm::auto_block_draft_decision`, SW-7200). `false` when the draft's `config.json` names
+/// no block-draft format or nothing is recorded (`auto` then keeps MTP).
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DraftRequest {
-    /// Tree checking, or linear checking with the engine's [`TREE_MULTIMODAL_LINEAR`] reason. At
-    /// the pinned inference both engines check image requests linearly; once multimodal tree
-    /// checking lands the record reports `tree` and this check accepts it unchanged.
-    Image,
-    /// Tree checking only.
-    Text,
+pub(crate) fn auto_runs_draft(draft: &BlockDraftChoice, tier: &str) -> bool {
+    use gen_core::core_llm::{auto_block_draft_decision, BlockDraftFormat, DecodeBackend};
+    let backend = if cfg!(target_os = "macos") {
+        DecodeBackend::Mlx
+    } else {
+        DecodeBackend::CandleCuda
+    };
+    BlockDraftFormat::of_dir(&draft.dir)
+        .and_then(|format| auto_block_draft_decision(backend, format, tier))
+        .is_some_and(|decision| decision.prefer)
 }
 
+/// What a real-weight smoke checks about the block drafter (SW-7204):
+/// `$SCENEWORKS_QWEN38_BLOCK_DRAFT` = `record` (the default: the decode block is recorded, nothing
+/// is asserted about it), `on` (an installed draft must load and be admitted, checked linearly;
+/// where `auto` prefers it ([`auto_runs_draft`]) the record must name `block_draft`, the draft and
+/// its precision and more than one accepted token per target pass, and elsewhere `auto` must keep
+/// its MTP head with the draft unused) or `no_fit` (the engine's load budget is capped so the draft
+/// cannot fit beside the target: the job must complete without it and its record must say why).
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SmokeDraftCheck {
@@ -387,12 +381,13 @@ impl SmokeDraftCheck {
         draft
     }
 
-    /// Check one phase's `decode` block against this mode.
+    /// Check one phase's `decode` block against this mode. `auto_runs_draft` is whether `auto`
+    /// prefers the installed draft here ([`auto_runs_draft`]).
     pub(crate) fn check(
         self,
         record: &Value,
         draft: Option<&BlockDraftChoice>,
-        request: DraftRequest,
+        auto_runs_draft: bool,
     ) -> Result<(), String> {
         let fail = |what: &str| Err(format!("{what}: {record}"));
         match self {
@@ -401,6 +396,18 @@ impl SmokeDraftCheck {
                 let Some(draft) = draft else {
                     return fail("no block draft is installed");
                 };
+                if !record["draftFallback"].is_null() {
+                    return fail("the draft fell back");
+                }
+                if record["verify"] != "linear" {
+                    return fail("the target did not check linearly");
+                }
+                if !auto_runs_draft {
+                    if record["proposer"] == "block_draft" || !record["draft"].is_null() {
+                        return fail("auto ran the block draft where it keeps MTP");
+                    }
+                    return Ok(());
+                }
                 if record["proposer"] != "block_draft" {
                     return fail("the proposer is not block_draft");
                 }
@@ -418,31 +425,11 @@ impl SmokeDraftCheck {
                 ) {
                     return fail("the draft format is not named");
                 }
-                let multimodal_linear = record["verify"] == "linear"
-                    && record["fallbacks"].as_array().is_some_and(|reasons| {
-                        reasons.iter().any(|reason| {
-                            reason
-                                .as_str()
-                                .is_some_and(|why| why.contains(TREE_MULTIMODAL_LINEAR))
-                        })
-                    });
-                let checked = match request {
-                    DraftRequest::Text => record["verify"] == "tree",
-                    DraftRequest::Image => record["verify"] == "tree" || multimodal_linear,
-                };
-                if !checked {
-                    return fail(
-                        "the target did not check a tree (nor name the multimodal fallback)",
-                    );
-                }
                 if !record["acceptedTokensPerPass"]
                     .as_f64()
                     .is_some_and(|per_pass| per_pass > 1.0)
                 {
                     return fail("accepted tokens per target pass is not above 1.0");
-                }
-                if !record["draftFallback"].is_null() {
-                    return fail("the draft fell back");
                 }
                 Ok(())
             }
