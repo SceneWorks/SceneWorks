@@ -393,6 +393,23 @@ pub fn validate(
                     .map_err(ValidationRefusal::bad_request)?;
                 let resolved = resolved_values(kind, payload, entry);
                 let request: ImageJobRequest = decode(&resolved)?;
+                let prompt_limit = crate::image_prompt_char_limit(entry);
+                if request.prompt.chars().count() > prompt_limit {
+                    return Err(ValidationRefusal::new(
+                        "prompt",
+                        format!("prompt must be between 1 and {prompt_limit} characters"),
+                    ));
+                }
+                if request
+                    .prompts
+                    .iter()
+                    .any(|prompt| prompt.chars().count() > prompt_limit)
+                {
+                    return Err(ValidationRefusal::new(
+                        "prompts",
+                        format!("each of prompts must be between 1 and {prompt_limit} characters"),
+                    ));
+                }
                 let hi = crate::image_request::HiresFixInput {
                     hires_fix: &request.hires_fix,
                     upscale: &request.upscale,
