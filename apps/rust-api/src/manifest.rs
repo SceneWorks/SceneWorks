@@ -292,8 +292,36 @@ pub(crate) async fn load_manifest_entries(
             path.display()
         ))
     })?;
+    let entries = parse_manifest_entries(path, &payload, field)?;
+    state
+        .manifest_cache
+        .lock()
+        .insert(cache_key, entries.clone());
+    Ok(entries)
+}
+
+/// A manifest's raw text, or `None` when the file does not exist (which
+/// [`load_manifest_entries`] reads as no entries).
+pub(crate) async fn read_manifest_payload(path: &FsPath) -> Result<Option<String>, ApiError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ApiError::internal(format!(
+            "Failed to load manifest {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// The entries under `field` of a manifest's raw text, exactly as [`load_manifest_entries`] reads
+/// them (model manifests are version-normalized first).
+pub(crate) fn parse_manifest_entries(
+    path: &FsPath,
+    payload: &str,
+    field: &str,
+) -> Result<Vec<Value>, ApiError> {
     let mut manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(&payload)).map_err(|error| {
+        serde_json::from_str(&strip_jsonc_comments(payload)).map_err(|error| {
             ApiError::internal(format!(
                 "Failed to parse manifest {}: {error}",
                 path.display()
@@ -303,16 +331,11 @@ pub(crate) async fn load_manifest_entries(
         sceneworks_core::model_manifest_version::normalize_user_model_manifest(&mut manifest)
             .map_err(ApiError::bad_request)?;
     }
-    let entries = manifest
+    Ok(manifest
         .get(field)
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
-    state
-        .manifest_cache
-        .lock()
-        .insert(cache_key, entries.clone());
-    Ok(entries)
+        .unwrap_or_default())
 }
 
 pub(crate) fn metadata_modified_ns(metadata: &std::fs::Metadata) -> u128 {
