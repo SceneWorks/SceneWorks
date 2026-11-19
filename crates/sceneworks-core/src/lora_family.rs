@@ -770,6 +770,26 @@ pub fn canonical_lora_family(family: &str) -> String {
 /// the reverse, so a genuinely wrong download/import is still a confident mismatch.
 fn detected_base_architecture_satisfies_declared(declared: &str, detected: &str) -> bool {
     extra_compatible_lora_families(declared).contains(&detected)
+        || training_adapter_base_family(declared) == Some(detected)
+}
+
+/// The base architecture a catalog training-adapter family is a LoRA *for*. A de-distill
+/// training adapter (the frozen LoRA a trainer applies to a step-distilled base while
+/// training) is a genuine LoRA over that base's modules, so [`detect_model_family`] correctly
+/// reports the base — e.g. ostris' Z-Image-Turbo adapter's `diffusion_model.layers.{i}.attention.*`
+/// keys read as `z-image`. The catalog keeps a family of its own for these utilities so no
+/// family-keyed gate (pickers, tier/repo resolution, LoRA compatibility, training bases)
+/// mistakes one for a Z-Image model, which is why this is NOT expressed through
+/// [`extra_compatible_lora_families`]. Without it, every download of the adapter fails with
+/// "appear to be z-image, but the catalog declared family zimage_training_adapter".
+/// `declared` must already be canonical. Directional like its caller: base weights satisfy a
+/// declared adapter family; an adapter family never satisfies a declared base.
+fn training_adapter_base_family(declared: &str) -> Option<&'static str> {
+    match declared {
+        "zimage-training-adapter" => Some(crate::model_family::Z_IMAGE),
+        "minimax-h3-image-training-adapter" => Some(crate::model_family::MINIMAX_H3_IMAGE),
+        _ => None,
+    }
 }
 
 fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
@@ -6750,6 +6770,50 @@ mod tests {
             reconcile_detected_family(Some("flux2-klein".to_owned()), Some("flux".to_owned()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn reconcile_detected_family_accepts_training_adapter_base_architecture() {
+        // A de-distill training adapter is a LoRA over its base, so its weights detect as the
+        // base family; the catalog's own adapter family must still reconcile (and stay the
+        // adapter family) rather than fail the download as a mismatch.
+        for (declared, detected, kept) in [
+            (
+                "zimage_training_adapter",
+                "z-image",
+                "zimage-training-adapter",
+            ),
+            (
+                "minimax_h3_image_training_adapter",
+                "minimax-h3-image",
+                "minimax-h3-image-training-adapter",
+            ),
+        ] {
+            assert_eq!(
+                reconcile_detected_family(Some(declared.to_owned()), Some(detected.to_owned()))
+                    .unwrap()
+                    .as_deref(),
+                Some(kept),
+                "declared {declared:?} vs detected {detected:?}"
+            );
+        }
+        // Directional, and tied to the adapter's own base: a declared base is not satisfied by
+        // an adapter, and an adapter is not satisfied by some other architecture.
+        assert!(reconcile_detected_family(
+            Some("z-image".to_owned()),
+            Some("zimage_training_adapter".to_owned())
+        )
+        .is_err());
+        assert!(reconcile_detected_family(
+            Some("zimage_training_adapter".to_owned()),
+            Some("qwen-image".to_owned())
+        )
+        .is_err());
+        assert!(reconcile_detected_family(
+            Some("minimax_h3_image_training_adapter".to_owned()),
+            Some("minimax-h3".to_owned())
+        )
+        .is_err());
     }
 
     fn iris_header(metadata: Value) -> Value {
