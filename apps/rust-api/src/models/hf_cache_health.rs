@@ -593,7 +593,7 @@ pub(super) fn torn_shard_indexes_in(snapshot: &FsPath, files: &[String]) -> Vec<
 /// [`snapshot_contains_pattern`]'s glob branch — a `._model.safetensors` sidecar would
 /// otherwise satisfy a required `*.safetensors` pattern, reporting a model installed
 /// while its real weights file is absent (SceneWorks#1333).
-pub(super) fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
+pub(crate) fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
     let mut output = Vec::new();
     let mut stack = vec![snapshot.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -602,7 +602,19 @@ pub(super) fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            if entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                && entry.file_name()
+                    == sceneworks_core::download_receipt::CANDLE_DEVICE_FORMAT_CACHE_DIR
+            {
+                // Candle's packed-weight opener writes derived GGML projection sidecars under a
+                // non-symlinked `.candle-device-format-v1/` directory when the snapshot is
+                // writable (SC-16096). Excluding that cache directory keeps derived sidecars out
+                // of backfilled `resolvedFiles` and prevents torn weight directories from falsely
+                // satisfying `*.safetensors` checks.
+                continue;
+            } else if path.is_dir() {
                 stack.push(path);
             } else if is_hidden_file(&path) {
                 continue;

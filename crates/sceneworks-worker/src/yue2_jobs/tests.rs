@@ -324,6 +324,8 @@ impl StubYue2 {
             }),
             warnings,
             prefix_kv_cache: None,
+            pag: None,
+            low_res_start: None,
         })
     }
 }
@@ -2353,6 +2355,8 @@ mod real_weights {
                 artifacts: Some(record(&result, &dir)),
                 warnings,
                 prefix_kv_cache: None,
+                pag: None,
+                low_res_start: None,
             })
         }
     }

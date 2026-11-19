@@ -1899,6 +1899,7 @@ async fn capture_model_slot(
         job_type,
         JobType::DatasetAnalysis | JobType::TrainingCaption
     ) && slot == "modelManifestEntries/0"
+        && model_id != sceneworks_core::loop_utility::MODEL_ID
     {
         payload
             .get("modelNameOrPath")
@@ -3521,7 +3522,10 @@ fn capture_receipted_local_files(
                 .map(str::to_owned)
                 .ok_or_else(|| incomplete("completed model receipt contains a non-string file"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|file| !sceneworks_core::download_receipt::is_candle_device_format_cache_path(file))
+        .collect::<Vec<_>>();
     let mut selected = BTreeSet::new();
     for selector in selectors {
         let matched = receipt_files
@@ -3909,10 +3913,18 @@ fn capture_local_source_files(
     source: &Path,
     allowed_roots: &[PathBuf],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
-    let source = confine_artifact_path(source, allowed_roots)
+    let canonical = confine_artifact_path(source, allowed_roots)
         .map_err(|error| incomplete(error.to_string()))?;
+    let logical_source = preserve_confined_file_name(source, &canonical, allowed_roots);
     let mut selected = Vec::new();
-    collect_source_files(cache, &source, &source, allowed_roots, &mut selected, 0)?;
+    collect_source_files(
+        cache,
+        &logical_source,
+        &logical_source,
+        allowed_roots,
+        &mut selected,
+        0,
+    )?;
     if selected.is_empty() {
         return Err(incomplete(
             "selected local model source has no regular files",
@@ -3920,6 +3932,36 @@ fn capture_local_source_files(
     }
     selected.sort();
     Ok(selected)
+}
+
+/// Preserve the loader-visible filename when `source` is an extension-bearing symlink inside a
+/// confined root whose canonical target is an extensionless content-addressed blob (the standard
+/// Hugging Face hub `snapshots/<rev>/<name>.<ext> -> ../../blobs/<oid>` layout on Unix). Worker
+/// inventory and rebinding (`builtin_lora_source_paths`, `loadable_confined_lora_path`, and
+/// `selected_text_encoder_root_and_files`) retain that snapshot filename, and mlx-rs requires the
+/// `.safetensors` extension at load time.
+fn preserve_confined_file_name(
+    source: &Path,
+    canonical: &Path,
+    allowed_roots: &[PathBuf],
+) -> PathBuf {
+    if !canonical.is_file() || canonical.extension().is_some() || source.extension().is_none() {
+        return canonical.to_path_buf();
+    }
+    let (Some(parent), Some(file_name)) = (source.parent(), source.file_name()) else {
+        return canonical.to_path_buf();
+    };
+    if sceneworks_core::model_artifacts::ArtifactFile::new(file_name).is_err() {
+        return canonical.to_path_buf();
+    }
+    let Ok(confined_parent) = confine_artifact_path(parent, allowed_roots) else {
+        return canonical.to_path_buf();
+    };
+    let candidate = confined_parent.join(file_name);
+    match std::fs::canonicalize(&candidate) {
+        Ok(resolved) if resolved == canonical => candidate,
+        _ => canonical.to_path_buf(),
+    }
 }
 
 async fn capture_local_source_files_offloaded(
@@ -4795,6 +4837,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn candle_device_format_cache_is_excluded_from_backfill_and_receipted_admission() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, pinned, mut download) = receipted_install(&state, b"trusted");
+        download["files"] = json!(["*"]);
+        let snapshot = path.parent().unwrap();
+        let sidecar_dir = snapshot
+            .join("q4/transformer")
+            .join(sceneworks_core::download_receipt::CANDLE_DEVICE_FORMAT_CACHE_DIR);
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar_rel = format!(
+            "q4/transformer/{}/deadbeef.q4_1.safetensors",
+            sceneworks_core::download_receipt::CANDLE_DEVICE_FORMAT_CACHE_DIR
+        );
+        std::fs::write(snapshot.join(&sidecar_rel), b"derived-sidecar").unwrap();
+
+        let walked = crate::models::snapshot_files(snapshot);
+        assert_eq!(walked, vec!["model.safetensors".to_owned()]);
+
+        let fixture = pinned.clone();
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| fixture.clone()));
+
+        let receipt_path = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir("owner/hash-once"))
+            .join(".sceneworks-download-complete.json");
+        let mut receipt: Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["resolvedFiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(sidecar_rel));
+        std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+
+        let member = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("derived .candle-device-format-v1 sidecars in receipts must self-heal");
+        assert_eq!(member.files, pinned);
+
+        std::fs::write(snapshot.join("q4/transformer/rogue.safetensors"), b"rogue").unwrap();
+        receipt["resolvedFiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("q4/transformer/rogue.safetensors"));
+        std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("non-cache extra files in receipts must still fail closed");
+        assert!(error.detail.contains("files differ from the pinned source"));
+    }
+
+    #[tokio::test]
     async fn receipted_install_is_hashed_once_while_its_stamp_is_unchanged() {
         let _hf_cache = crate::tests::support::isolate_hf_cache();
         let root = tempfile::tempdir().unwrap();
@@ -5278,6 +5377,53 @@ mod tests {
         assert!(
             error.contains("outside every managed root"),
             "escaping link must stay refused: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hf_blob_symlink_file_keeps_loader_filename_and_stay_confined() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let hub = root.path().join("hub");
+        let repo_root = hub.join("models--conradlocke--krea2-identity-edit");
+        let blobs = repo_root.join("blobs");
+        let snapshot = repo_root
+            .join("snapshots")
+            .join("89e9e7a200000000000000000000000000000000");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let blob = blobs.join("6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf");
+        std::fs::write(&blob, b"krea2 identity edit adapter bytes").unwrap();
+        let link = snapshot.join("krea2_identity_edit_v1_2.safetensors");
+        symlink(
+            Path::new(
+                "../../blobs/6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf",
+            ),
+            &link,
+        )
+        .unwrap();
+
+        let (_verified, cache) = scratch_cache();
+        let captured =
+            capture_local_source_files(&cache, &link, std::slice::from_ref(&hub)).unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].relative_path,
+            PathBuf::from("krea2_identity_edit_v1_2.safetensors"),
+            "HF snapshot->blob symlink must freeze the loader-visible .safetensors filename"
+        );
+        assert_eq!(captured[0].size_bytes, 33);
+
+        // An outside symlink pointing inward into a managed blob must not spoof its filename.
+        let outside = tempfile::tempdir().unwrap();
+        let spoof = outside.path().join("spoofed.safetensors");
+        symlink(&blob, &spoof).unwrap();
+        let fallback = capture_local_source_files(&cache, &spoof, &[hub]).unwrap();
+        assert_eq!(
+            fallback[0].relative_path,
+            PathBuf::from("6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf")
         );
     }
 

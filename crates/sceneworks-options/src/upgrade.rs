@@ -273,6 +273,8 @@ pub fn strip_machine_decisions(payload: &mut Map<String, Value>) {
             "moss_image_execution_report",
             "mossImageEditExecutionReport",
             "moss_image_edit_execution_report",
+            "pagExecutionReport",
+            "pag_execution_report",
             "mossImageSampleIndex",
             "promptEnhancement",
         ] {

@@ -38,17 +38,17 @@ on:
         required: true
         type: string
       case:
-        description: One bounded job, or cuda_all for the three sequential CUDA jobs sharing one build
+        description: SenseNova q4/bf16_product exercises all tools, q8/bf16 runs the cold batch only; cuda_all shares one build
         required: true
         type: choice
-        options: [image_mlx, image_cuda, audio, training, cuda_all, ort_cpu]
+        options: [image_mlx, image_cuda, audio, training, cuda_all, ort_cpu, sensenova_q4, sensenova_q8, sensenova_bf16, sensenova_bf16_product]
       backend:
-        description: MLX requires Mac go; CUDA preserves GPU1; cpu accepts only ort_cpu
+        description: Legacy MLX requires dev Mac go; SenseNova defaults to secondary, mac_go selects primary; CUDA preserves GPU1; cpu accepts only ort_cpu
         required: true
         type: choice
         options: [cuda, mlx, cpu]
       hf_hub_cache:
-        description: Absolute provisioned HF hub for GPU cases; unused by ort_cpu (no downloads)
+        description: Absolute HF hub for GPU cases; missing published SenseNova q4/q8 files are provisioned on execution
         required: false
         type: string
       build_only:
@@ -65,7 +65,7 @@ permissions:
   contents: read
 jobs:
   accept:
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || inputs.backend == 'cpu' && fromJSON('["self-hosted","Windows","X64","cuda"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    runs-on: ${{ inputs.backend == 'mlx' && startsWith(inputs.case, 'sensenova_') && !inputs.mac_go && fromJSON('["self-hosted","macOS","ARM64","rw-llm"]') || inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || inputs.backend == 'cpu' && fromJSON('["self-hosted","Windows","X64","cuda"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 180
     concurrency:
       # Distinct pending requests must remain queued; preserve the existing physical GPU1 binding.
@@ -100,7 +100,7 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Require selected CUDA dispatch before native setup
@@ -189,7 +189,7 @@ jobs:
           if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (node scripts/load-progress-acceptance.mjs)
       - name: Retain progress POSTs, output identities and failure evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: load-progress-${{ inputs.backend }}-${{ inputs.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Aggregate child evidence is retained without uploading case state or build targets.

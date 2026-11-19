@@ -333,7 +333,16 @@ describe("Image Studio batch cardinality admission", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  it("stops styled high-cardinality preflight at the first actionable budget violation", async () => {
+  // A job that stays pending until the test releases it, so a ten-million-item run sits on its
+  // first enqueue instead of walking the whole product.
+  function heldJobs() {
+    const pending = [];
+    const createImageJob = vi.fn(() => new Promise((resolve) => pending.push(resolve)));
+    const release = () => pending.splice(0).forEach((resolve, index) => resolve({ id: `held-${index}`, status: "queued" }));
+    return { createImageJob, release };
+  }
+
+  it("runs a styled high-cardinality batch with over-cap prompts shortened, not stopped", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem(
@@ -347,18 +356,26 @@ describe("Image Studio batch cardinality admission", () => {
         batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
       }),
     );
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     await render(baseContext({ createImageJob }));
+
+    const note = [...container.querySelectorAll(".batch-hint")].find((node) => node.textContent.includes("end cut off"));
+    expect(note?.textContent).toMatch(/^Batch items 1, 2, 3, 4, 5, 6, 7, 8 and \d+ more are longer than/);
+    expect(container.querySelector(".batch-warning")).toBeNull();
 
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
     await click(container.querySelector(".batch-confirm .prompt-cta"));
 
-    expect(container.querySelector(".batch-warning")?.textContent).toContain("Batch prompt 1");
-    expect(createImageJob).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
+    expect([...createImageJob.mock.calls[0][0].prompt].length).toBeLessThanOrEqual(4000);
+    await click(container.querySelector(".batch-run-progress button"));
+    await act(async () => release());
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
   });
 
-  it("makes a no-overage styled Cartesian preflight cancelable before inspecting its full product", async () => {
+  it("keeps a confirmed styled Cartesian run cancelable", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem(
@@ -372,24 +389,21 @@ describe("Image Studio batch cardinality admission", () => {
         batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
       }),
     );
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     await render(baseContext({ createImageJob }));
 
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-confirm .prompt-cta"));
 
-    // The first bounded preflight slice has yielded with the run rendered; the old
-    // synchronous walk could not expose Stop until all ten million prompts were read.
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Processed 0/10000000"));
     expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
-    expect(createImageJob).not.toHaveBeenCalled();
-
     await click(container.querySelector(".batch-run-progress button"));
-    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
-    expect(createImageJob).not.toHaveBeenCalled();
+    await act(async () => release());
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
-  it("abandons streaming preflight on project switch", async () => {
+  it("abandons a confirmed run on project switch", async () => {
     const values = Array.from({ length: 10 }, (_, index) => String(index));
     const keys = ["a", "b", "c", "d", "e", "f", "g"];
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
@@ -397,14 +411,15 @@ describe("Image Studio batch cardinality admission", () => {
       batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
       batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
     }));
-    const createImageJob = vi.fn();
+    const { createImageJob, release } = heldJobs();
     const context = baseContext({ createImageJob });
     await render(context);
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-confirm .prompt-cta"));
     await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => release());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    expect(createImageJob).not.toHaveBeenCalled();
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
     expect(container.querySelector(".batch-run-progress")).toBeNull();
   });
 
@@ -2416,6 +2431,61 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
     );
     await click(plainTab);
   }
+
+  const LOOP_MODEL = {
+    id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B", type: "utility",
+    variants: [{ variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" }],
+  };
+
+  async function selectLoopReference() {
+    await act(async () => {
+      const modelSelect = document.body.querySelector(".structured-reference select");
+      modelSelect.value = "loop";
+      modelSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      const tierSelect = document.body.querySelectorAll(".structured-reference select")[1];
+      tierSelect.value = "q8";
+      tierSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click(buttonByText("Select reference image"));
+    await click(document.body.querySelector(".asset-picker-card"));
+    await click(buttonByText("Use Selection"));
+  }
+
+  it("selects Loop, reports an invalid JSON caption, and keeps grounded boxes on retry", async () => {
+    const imageCaption = vi.fn()
+      .mockResolvedValueOnce("The reply is malformed.")
+      .mockResolvedValueOnce(VISION_REPLY);
+    await render(baseContext({ imageModels: [IDEOGRAM], models: [LOOP_MODEL], assets: [REF_ASSET], imageCaption }));
+    await openPlainTab();
+    await selectLoopReference();
+    await click(buttonByText("✨ Generate JSON from image"));
+    expect(document.body.querySelector(".structured-reference [role=alert]").textContent).toMatch(/json/i);
+    expect(document.body.querySelector('[aria-label="Caption preview"]')).toBeNull();
+    await click(buttonByText("✨ Generate JSON from image"));
+    expect(imageCaption).toHaveBeenCalledTimes(2);
+    for (const [arg] of imageCaption.mock.calls) {
+      expect(arg).toMatchObject({ sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8" });
+    }
+    expect(document.body.querySelector('[aria-label="Caption preview"]').textContent).toContain("100");
+  });
+
+  it.each([[undefined, "A fox sits in the snow."], ["tags", "fox, sitting, snow"]])(
+    "selects Loop and preserves the target's %s description style", async (captionStyle, text) => {
+      const imageDescribe = vi.fn(async () => text);
+      await render(baseContext({ imageModels: [{ ...Z_IMAGE, captionStyle }], models: [LOOP_MODEL], assets: [REF_ASSET], imageDescribe }));
+      const tile = [...document.body.querySelectorAll(".prompt-tool-title")]
+        .find((element) => element.textContent.trim() === "Prompt from image");
+      await click(tile.closest("button"));
+      await selectLoopReference();
+      await click(buttonByText("✨ Describe image"));
+      expect(imageDescribe).toHaveBeenCalledWith(expect.objectContaining({
+        sourceAssetId: REF_ASSET.id, model: "sensenova/SenseNova-Loop-9B", variant: "q8", captionStyle,
+      }));
+      expect(document.body.querySelector('textarea[aria-label="Prompt"]').value).toBe(text);
+    },
+  );
 
   it("shows the reference-image flow for Ideogram 4 in text-to-image mode", async () => {
     await render(

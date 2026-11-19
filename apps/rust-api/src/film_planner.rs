@@ -1729,7 +1729,10 @@ mod tests {
             Duration::from_millis(1),
             Duration::from_millis(5),
         )
-        .with_planner_model(Some("Qwen/Qwen3.6-27B".to_owned()), "enabled");
+        .with_planner_model(
+            Some(sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO.to_owned()),
+            "enabled",
+        );
         let error = llm
             .complete(LlmRequest {
                 task: Some(FILM_PLAN_TASK.to_owned()),

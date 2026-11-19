@@ -596,9 +596,10 @@ mod tests {
         assert!(!is_pending_artifact_download(&nvfp4));
         for tier in ["bf16", "q8", "q4"] {
             let row = model_download_for_variant(&value, tier).expect("converted row");
-            // bf16 is still unpublished; the macOS q8/q4 rows are the fully quantized `q8-full/` /
-            // `q4-full/` packs (SW-7202) pinned to their publication revision.
-            assert_eq!(is_pending_artifact_download(&row), tier == "bf16", "{tier}");
+            // Every converted tier is published and pinned to a hub revision. bf16 is the dense
+            // `bf16/` snapshot; the macOS q8/q4 rows are the fully quantized `q8-full/` / `q4-full/`
+            // packs (SW-7202) pinned to their publication revision.
+            assert!(!is_pending_artifact_download(&row), "{tier}");
             let expected = if tier == "bf16" {
                 tier.to_owned()
             } else {

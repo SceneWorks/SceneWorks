@@ -881,6 +881,59 @@ async fn an_older_fuller_revision_badges_the_qwen38_tier_as_an_update_not_instal
     assert_eq!(entry["updateAvailable"], true, "{entry}");
 }
 
+/// The Video Editor's native film planner runs the SAME 27B download, never a second 27B model: a
+/// film-plan refine job names the describer's repository, freezes the tier this host installed as
+/// `variant` (here q8, the only one), and binds that tier's row on every route. With no tier
+/// installed it freezes none, leaving the worker's "not installed" refusal to explain it.
+#[tokio::test]
+async fn the_native_film_planner_runs_on_the_installed_qwen38_tier() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    use sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let _hub = private_hub(&state);
+    let plan = json!({
+        "prompt": "Return a film plan JSON object.",
+        "task": "film_plan",
+        "workflow": "video",
+        "model": NATIVE_FILM_PLANNER_REPO,
+        "modelId": "minimax_h3",
+        "thinkingMode": "enabled"
+    });
+    assert_eq!(NATIVE_FILM_PLANNER_REPO, QWEN38_27B_DESCRIBER_REPO);
+
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", plan.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("variant").is_none(), "{job}");
+
+    seed_qwen38_tier(&state.settings.data_dir, "q8");
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", plan).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["variant"], "q8");
+    assert_eq!(job["payload"]["model"], NATIVE_FILM_PLANNER_REPO);
+    let job_id = job["id"].as_str().expect("job id");
+    for (backend, platform, repo) in [
+        ("mlx", "macos", QWEN38_27B_DESCRIBER_MLX_REPO),
+        ("candle", "linux", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+        ("candle", "windows", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+    ] {
+        let (bound_repo, revision, variant, files) =
+            bound_describer_source(&state, job_id, backend, platform);
+        assert_eq!(
+            (bound_repo.as_str(), variant.as_str()),
+            (repo, "q8"),
+            "{backend}:{platform}"
+        );
+        assert_eq!(revision, qwen38_tier_row(platform, "q8")["revision"]);
+        assert!(
+            !files.is_empty() && files.iter().all(|file| file.starts_with("q8-full/")),
+            "{backend}:{platform} {files:?}"
+        );
+    }
+}
+
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
 /// message that names the tier and what to do. Another installed tier does not stand in for it.
 #[tokio::test]
@@ -1419,4 +1472,230 @@ async fn an_installed_describer_is_admitted_offline_once_its_download_recorded_t
     offline();
     let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+}
+
+#[tokio::test]
+async fn loop_utility_routes_bind_only_the_selected_installed_snapshot() {
+    use sceneworks_core::loop_utility::{CAPTIONER, MODEL_ID, MODEL_REPO};
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableJobBinding, PortableSourceIdentity,
+    };
+    const REV: &str = "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6";
+    let temp_dir = tempfile::tempdir().unwrap();
+    serve_builtin_models(&temp_dir, &[MODEL_ID]);
+    let (app, project, dataset, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let batch =
+        format!("/api/v1/projects/{project}/training/datasets/{dataset}/batch-describe-jobs");
+    let captions = format!("/api/v1/projects/{project}/training/datasets/{dataset}/caption-jobs");
+
+    let entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(MODEL_ID)
+            .unwrap()
+            .clone(),
+    );
+    let row = sceneworks_core::loop_utility::download(&entry, "macos", "bf16").unwrap();
+    let files = row["files"].as_array().unwrap();
+    let hub = huggingface_repo_cache_path(&state.settings.data_dir, MODEL_REPO).unwrap();
+    let stale_revision = "dddddddddddddddddddddddddddddddddddddddd";
+    let stale = hub.join("snapshots").join(stale_revision);
+    std::fs::create_dir_all(hub.join("refs")).unwrap();
+    std::fs::write(hub.join("refs/main"), stale_revision).unwrap();
+    let managed =
+        state.settings.data_dir.join("models").join(
+            sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(MODEL_REPO),
+        );
+    for root in [&stale, &managed] {
+        std::fs::create_dir_all(root).unwrap();
+        for file in files {
+            std::fs::write(root.join(file.as_str().unwrap()), "fixture").unwrap();
+        }
+    }
+    std::fs::write(managed.join(".sceneworks-download-complete.json"), "{}").unwrap();
+    assert!(crate::models::installed_variant_keys(&entry, &state.settings.data_dir).is_empty());
+    #[cfg(target_os = "macos")]
+    {
+        let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        let model = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == MODEL_ID)
+            .unwrap();
+        let variant = model["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .unwrap();
+        assert_eq!(model["installState"], "missing");
+        assert_eq!(variant["installState"], "missing");
+    }
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({
+            "model": MODEL_REPO, "variant": "bf16"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({"model": MODEL_REPO, "variant": "unsupported"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "model": MODEL_REPO, "prompt": "The fox in snow"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+    let (status, model_free) = request(
+        app.clone(),
+        "POST",
+        &captions,
+        json!({
+            "captioner": CAPTIONER, "modelNameOrPath": MODEL_REPO, "mode": "triggerOnly",
+            "triggerWords": ["sample-trigger"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{model_free}");
+    assert!(model_free["payload"].get("variant").is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(model_free["id"].as_str().unwrap())
+        .unwrap()
+        .is_none());
+
+    let snapshot = hub.join("snapshots").join(REV);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    for file in files {
+        std::fs::write(snapshot.join(file.as_str().unwrap()), "fixture").unwrap();
+    }
+    let required = snapshot.join("config.json");
+    std::fs::write(&required, "").unwrap();
+    assert!(crate::models::installed_variant_keys(&entry, &state.settings.data_dir).is_empty());
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        &batch,
+        json!({
+            "model": MODEL_REPO, "variant": "bf16"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    std::fs::write(required, "fixture").unwrap();
+    assert_eq!(
+        crate::models::installed_variant_keys(&entry, &state.settings.data_dir),
+        ["bf16"]
+    );
+    #[cfg(target_os = "macos")]
+    {
+        // A real model-download job invalidates the catalog when the worker reports completion.
+        state.model_catalog_cache.invalidate();
+        let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        let model = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == MODEL_ID)
+            .unwrap();
+        let variant = model["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .unwrap();
+        assert_eq!(model["installState"], "installed");
+        assert_eq!(variant["installState"], "installed");
+        assert_eq!(
+            std::fs::canonicalize(variant["installedPath"].as_str().unwrap()).unwrap(),
+            snapshot.canonicalize().unwrap(),
+        );
+    }
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project}/assets"),
+        "Reference.png",
+        "image/png",
+        &png_rgb(16, 8, 42),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+
+    for (route, body) in [
+        (
+            batch.as_str(),
+            json!({"model": MODEL_REPO, "variant": "bf16"}),
+        ),
+        (
+            captions.as_str(),
+            json!({"captioner": CAPTIONER, "modelNameOrPath": MODEL_REPO,
+            "variant": "bf16", "mode": "subjectOnly", "triggerWords": ["example"]}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "task": "image_caption", "sourceAssetId": asset["id"], "projectId": project}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "task": "image_describe", "captionStyle": "tags", "sourceAssetId": asset["id"], "projectId": project}),
+        ),
+        (
+            "/api/v1/prompts/refine",
+            json!({"model": MODEL_REPO, "variant": "bf16",
+            "modelId": "target-render-model", "workflow": "video", "prompt": "The fox in snow"}),
+        ),
+    ] {
+        let (status, job) = request(app.clone(), "POST", route, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{route} {body}: {job}");
+        let source_key = if route == captions {
+            "modelNameOrPath"
+        } else {
+            "model"
+        };
+        assert_eq!(job["payload"][source_key], MODEL_REPO);
+        assert_eq!(job["payload"]["variant"], "bf16");
+        let binding: PortableJobBinding = serde_json::from_value(
+            state
+                .jobs_store
+                .portable_model_binding(job["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let model = &binding.select_route("mlx", "macos").unwrap().models[0];
+        assert_eq!(model.model_id, MODEL_ID);
+        assert_eq!(
+            binding.select_route("candle", "windows").is_ok(),
+            sceneworks_core::loop_utility::download(&entry, "windows", "bf16").is_some(),
+        );
+        let PortableSourceIdentity::Revision { identity } = &model.members[0].source else {
+            panic!("utility source did not freeze the exact tier");
+        };
+        assert_eq!(
+            (
+                &*identity.repository,
+                &*identity.revision,
+                &*identity.variant
+            ),
+            (MODEL_REPO, REV, "bf16")
+        );
+    }
 }

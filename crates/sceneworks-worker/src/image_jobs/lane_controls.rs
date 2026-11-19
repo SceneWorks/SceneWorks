@@ -28,15 +28,34 @@ pub(crate) const ADAPTER_APPLY_KEY: &str = "adapterApply";
 /// overflow}` — see `docs/observability.md`. The same key the job result summarises
 /// (`super::job_prefix_kv_cache_records`), so the two cannot drift.
 pub(crate) const PREFIX_KV_CACHE_KEY: &str = super::PREFIX_KV_CACHE_RESULT_KEY;
+/// `rawAdapterSettings` key of the completed Perturbed-Attention Guidance receipt (SW-7180).
+pub(crate) const PAG_EXECUTION_REPORT_KEY: &str = sceneworks_core::options::pag::PAG_REPORT_KEY;
 
 /// The resolved request controls one generic-lane render carries onto its `GenerationRequest`.
 /// `Default` is "the engine's own" for every field — what every model that declares none sends.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LaneRequestControls {
     pub(crate) cfg_interval: Option<(f32, f32)>,
     pub(crate) caption_overflow: Option<CaptionOverflowPolicy>,
     /// MiniMax-H3-Image's sampler block (SW-7106), from `advanced.h3ImageSampler`.
     pub(crate) h3_image_sampler: Option<gen_core::h3_image::H3ImageSampler>,
+    /// Perturbed-Attention Guidance policy (SW-7180), from `advanced.pag`.
+    pub(crate) pag: Option<gen_core::PagConfig>,
+}
+
+/// Record a provider's completed [`gen_core::PagExecutionReport`] into per-image facts under
+/// `pagExecutionReport`. Nothing is written when PAG did not execute (`None`).
+pub(crate) fn record_pag_execution_report(
+    facts: &mut JsonObject,
+    pag: Option<&gen_core::PagExecutionReport>,
+) {
+    let Some(report) = pag else {
+        return;
+    };
+    let wire = sceneworks_core::options::pag::PagExecutionReportWire::from(report);
+    if let Ok(value) = serde_json::to_value(wire) {
+        facts.insert(PAG_EXECUTION_REPORT_KEY.to_owned(), value);
+    }
 }
 
 /// Record the sampler the render ACTUALLY runs under `advanced.h3ImageSampler` (SW-7106), even when
@@ -184,10 +203,14 @@ pub(crate) fn resolve_lane_request_controls(
             guidance.unwrap_or(1.0)
         )));
     }
+    let pag = request
+        .resolved_pag_with_capability(caps.pag.as_ref())
+        .map_err(WorkerError::InvalidPayload)?;
     Ok(LaneRequestControls {
         cfg_interval,
         caption_overflow: caption_overflow.map(engine_policy),
         h3_image_sampler,
+        pag,
     })
 }
 
@@ -604,6 +627,7 @@ mod tests {
                 cfg_interval: Some((0.25, 0.75)),
                 caption_overflow: Some(CaptionOverflowPolicy::Error),
                 h3_image_sampler: None,
+                pag: None,
             }
         );
         let none = resolve_lane_request_controls(
@@ -990,5 +1014,89 @@ mod tests {
         )
         .await;
         assert_eq!(identities[0].sha256.as_deref(), Some(cached.as_str()));
+    }
+
+    #[test]
+    fn pag_controls_resolve_against_descriptor_capability_and_record_execution_receipt() {
+        let mut caps = honouring();
+        caps.pag = Some(gen_core::PagCapability {
+            num_blocks: 8,
+            block_domain: std::borrow::Cow::Borrowed("joint_blocks"),
+            default_layers: vec![2, 5],
+            default_start: 0.05,
+            default_stop: 0.85,
+            recommended_scale: 1.5,
+            max_scale: 10.0,
+        });
+        let manifest_with_pag = json!({
+            "id": "flux2_dev",
+            "type": "image",
+            "pag": {
+                "numBlocks": 8,
+                "blockDomain": "joint_blocks",
+                "defaultLayers": [2, 5],
+                "defaultStart": 0.05,
+                "defaultStop": 0.85,
+                "recommendedScale": 1.5,
+                "maxScale": 10.0
+            }
+        });
+        let req = request(
+            json!({ "pag": { "scale": 1.5, "layers": [2, 7] } }),
+            "",
+            manifest_with_pag.clone(),
+        );
+        let resolved = resolve_lane_request_controls(&req, &caps, Some(4.0), None).unwrap();
+        assert_eq!(
+            resolved.pag,
+            Some(gen_core::PagConfig {
+                scale: 1.5,
+                layers: Some(vec![2, 7]),
+                start: None,
+                stop: None,
+                adaptive_scale: None,
+            })
+        );
+
+        // Provider without PAG capability refuses active PAG
+        let unsupported = resolve_lane_request_controls(&req, &honouring(), Some(4.0), None)
+            .expect_err("provider without pag capability must refuse");
+        assert!(unsupported
+            .to_string()
+            .contains("Perturbed-Attention Guidance"));
+
+        // Out-of-bounds layer refused against live descriptor
+        let mut tighter_caps = caps.clone();
+        tighter_caps.pag.as_mut().unwrap().num_blocks = 6;
+        let out_of_bounds =
+            resolve_lane_request_controls(&req, &tighter_caps, Some(4.0), None).unwrap_err();
+        assert!(out_of_bounds.to_string().contains("pag.layers"));
+
+        // Execution receipt records camelCase report and omits inactive report
+        let mut facts = crate::JsonObject::new();
+        record_pag_execution_report(
+            &mut facts,
+            Some(&gen_core::PagExecutionReport {
+                scale: 1.5,
+                adaptive_scale: 0.25,
+                layers: vec![2, 7],
+                start: 0.05,
+                stop: 0.85,
+                active_steps: 18,
+                total_steps: 28,
+            }),
+        );
+        assert_eq!(
+            facts.get(PAG_EXECUTION_REPORT_KEY),
+            Some(&json!({
+                "scale": 1.5,
+                "adaptiveScale": 0.25,
+                "layers": [2, 7],
+                "start": 0.05,
+                "stop": 0.85,
+                "activeSteps": 18,
+                "totalSteps": 28
+            }))
+        );
     }
 }

@@ -283,6 +283,32 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe("a lighthouse in fog");
   });
 
+  // Batch mode: the tool expands every prompt of the batch list rather than the hidden
+  // single-prompt field, and a long prompt is not refused at 4,000 characters.
+  it("expands every batch prompt and applies them to the batch list", async () => {
+    const long = `a lighthouse ${"in rolling sea fog ".repeat(300)}`.trim();
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ model: "minimax_h3_image", batchMode: true, batchPromptsText: "a fox\na heron" }),
+    );
+    const value = context([H3_IMAGE, PE], {
+      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => ({ refinedPrompt: prompt === "a fox" ? long : `Expanded ${prompt}` })),
+    });
+    await render(value);
+    await click(buttonWithText(container, "Expand prompt"));
+    expect(container.textContent).toContain(H3_IMAGE_EXPAND_COPY.batch.tileDescription);
+    await click(buttonWithText(container.querySelector(".batch-expand-control"), "Expand all 2 prompts"));
+    await act(async () => {});
+    expect(value.h3ImageExpandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox", "a heron"]);
+    expect(container.querySelector('textarea[aria-label="Batch prompts"]').value).toBe("a fox\na heron");
+    await click(buttonWithText(container, "Apply to batch"));
+    expect(container.querySelector('textarea[aria-label="Batch prompts"]').value).toBe(`${long}\nExpanded a heron`);
+    expect(long.length).toBeGreaterThan(4000);
+    // Within H3-Image's 4,096-token window: no length note, no 4,000-character refusal.
+    expect(container.textContent).not.toContain("end cut off");
+    expect(container.textContent).not.toContain("between 1 and 4000 characters");
+  });
+
   it("offers no Expand prompt tool without the expander or for another model", async () => {
     await render(context([H3_IMAGE, withState("minimax_h3_image_pe", "missing")]));
     expect(buttonWithText(container, "Expand prompt")).toBeUndefined();

@@ -153,7 +153,7 @@ const FROZEN_LEGACY_EVIDENCE_KEYS = new Set(FROZEN_LEGACY_EVIDENCE_AUTHORITIES.m
   ({ repo, legacyRevision }) => claimKey(repo, legacyRevision),
 ));
 
-const STORY_REF_PATTERN = /^sc-\d+$/;
+const STORY_REF_PATTERN = /^(?:sc|SW)-\d+$/;
 
 // Known, TRACKED zero-matches. Not a licence — a debt with an owner.
 //
@@ -206,7 +206,15 @@ export const KNOWN_ZERO_MATCHES = [];
 // redirected catalog sources hard-fail unless a new live owner and explicit rationale are added
 // here. Whole-repo downloads (files: []) make no selective pattern claim: FLUX 3 keeps its real
 // gated/credential declaration, but needs no pattern-evidence row or orphan selective waiver.
-export const KNOWN_REPO_CONDITIONS = [];
+export const KNOWN_REPO_CONDITIONS = [
+  {
+    kind: "evidence-gated",
+    repo: "sensenova/SenseNova-Loop-9B",
+    revision: "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6",
+    story: "SW-7187",
+    reason: "The official optional BF16 checkpoint requires a Hugging Face account with repository access. The model picker links to the access page and explains how to save the token. Quantized downloads use separate public artifacts.",
+  },
+];
 
 const REPO_CONDITION_KINDS = new Set(["evidence-gated", "evidence-repo-id-mismatch"]);
 
@@ -341,7 +349,7 @@ function indexWaivers({ waivers, keyOf, describe, malformedKind, duplicateKind, 
     if (!STORY_REF_PATTERN.test(waiver?.story ?? "")) {
       fail(
         malformedKind,
-        `${where}  waiver story must look like sc-NNNN, got ${JSON.stringify(waiver?.story ?? null)}`,
+        `${where}  waiver story must look like sc-NNNN or SW-NNNN, got ${JSON.stringify(waiver?.story ?? null)}`,
       );
       continue;
     }

@@ -58,6 +58,9 @@ pub(super) fn receipt_file_sets(
                 .as_array()?
                 .iter()
                 .filter_map(Value::as_str)
+                .filter(|file| {
+                    !sceneworks_core::download_receipt::is_candle_device_format_cache_path(file)
+                })
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             let revision = entry
@@ -348,30 +351,50 @@ pub(super) fn backfill_current_receipt(
         .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .filter_map(|entry| {
             let repo = entry.get("repo")?.as_str()?;
+            let pinned_revision = entry
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|revision| !revision.is_empty());
             let files = string_array_field(entry, "files");
             let root = huggingface_repo_cache_path(data_dir, repo)?;
-            let snapshot = crate::huggingface_snapshot_dirs(&root).into_iter().find(|snapshot| {
-                files.iter().all(|pattern| snapshot_contains_pattern(snapshot, pattern))
-            })?;
             // Never manufacture a receipt for a torn tier: a `<tier>/*` glob matches as soon as one
             // metadata file exists, so backfilling it would record a "complete" install that cannot
-            // load. Require the tier to actually hold its weights before preserving it (sc-13076), and
-            // — for a no-`model_index` turnkey, where "holds its weights" is family-specific — to pass
-            // the shared per-tier predicate too (sc-14432).
-            if !snapshot_tier_is_loadable(&snapshot, &files, family_complete) {
-                return None;
-            }
-            let resolved = snapshot_files(&snapshot).into_iter()
-                .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
-            // Record only a file set that SATISFIES what the repo declares, never merely what was
-            // found (sc-20526). A `<tier>/*` glob and a whole-repo fetch declare no per-file claim,
-            // so the sharded-safetensors indexes IN the resolved set are the workable ground truth:
-            // every shard their `weight_map` names must be on disk. Otherwise this would mint a
-            // "complete" receipt for a tier missing ~4 GB of its text encoder (lens_turbo bf16) and
-            // that receipt would then keep the model reading installed through the usable-stale path.
-            if !listed_shard_indexes_are_complete(&snapshot, &resolved) {
-                return None;
-            }
+            // load. Require the tier to actually hold its weights before preserving it (sc-13076),
+            // pass the shared per-tier predicate for a no-`model_index` turnkey (sc-14432), and
+            // satisfy every sharded-safetensors index in the resolved set (sc-20526).
+            let resolve_snapshot = |snapshot: PathBuf| -> Option<(PathBuf, Vec<String>)> {
+                if !files
+                    .iter()
+                    .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
+                    || !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+                {
+                    return None;
+                }
+                let resolved = snapshot_files(&snapshot)
+                    .into_iter()
+                    .filter(|file| allow_pattern_matches(file, &files))
+                    .collect::<Vec<_>>();
+                (listed_shard_indexes_are_complete(&snapshot, &resolved) && !resolved.is_empty())
+                    .then_some((snapshot, resolved))
+            };
+            // Prefer the manifest-pinned snapshot revision when both it and an older cached
+            // revision are present on disk (`406265be...` sorts lexicographically before
+            // `bbf22de8...`, so taking `huggingface_snapshot_dirs` in directory order would mint a
+            // stale receipt that conflicts with portable admission's pinned revision). Fall back to
+            // any complete cached snapshot only when the pinned revision is absent.
+            let candidates = crate::huggingface_snapshot_dirs(&root);
+            let (snapshot, resolved) = pinned_revision
+                .and_then(|revision| {
+                    candidates
+                        .iter()
+                        .find(|snapshot| {
+                            snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
+                        })
+                        .cloned()
+                        .and_then(&resolve_snapshot)
+                })
+                .or_else(|| candidates.into_iter().find_map(&resolve_snapshot))?;
             // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
             // receipt makes its whole repository unserveable from the resolved cache — there is no
             // pair to compare coverage against — so a backfilled install silently dropped out of
@@ -474,6 +497,14 @@ pub(super) fn flux3_selected_snapshot(
     sceneworks_worker::flux3_receipted_snapshot(data_dir, repo, revision, model_id)
 }
 
+fn loop_selected_snapshot(data_dir: &FsPath, repo: &str, row: &Value) -> Option<PathBuf> {
+    let revision = row.get("revision").and_then(Value::as_str)?;
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .discover_snapshot(repo, Some(revision))
+        .ok()
+        .map(|(_, path)| path)
+}
+
 // Runtime readiness is separate from whole-repository download completion. A readable DiT is
 // not a usable FLUX 3 bundle when its bundled encoder or an indexed shard is absent. Other
 // families retain their existing cache policy; this card selects only its exact repo/revision.
@@ -485,6 +516,25 @@ pub(super) fn model_cache_health_for_download(
     files: &[String],
     data_dir: &FsPath,
 ) -> Option<HuggingFaceCacheHealth> {
+    if model_id == sceneworks_core::loop_utility::MODEL_ID {
+        let row = download?;
+        let Some(snapshot) = loop_selected_snapshot(data_dir, repo, row) else {
+            return Some(HuggingFaceCacheHealth {
+                installed: false,
+                incomplete: false,
+                missing_files: Vec::new(),
+            });
+        };
+        let missing = sceneworks_core::loop_utility::missing_snapshot_files(row, &snapshot)
+            .unwrap_or_else(|| {
+                vec!["The pinned tier does not enumerate its required files".to_owned()]
+            });
+        return Some(if missing.is_empty() {
+            HuggingFaceCacheHealth::installed()
+        } else {
+            HuggingFaceCacheHealth::missing(missing)
+        });
+    }
     if !is_flux3_runtime_model(model_id) {
         return cache_path.map(|root| huggingface_cache_health(root, files));
     }
@@ -628,6 +678,7 @@ pub(super) fn install_state_for(
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
         let mut tier_dependencies_missing = false;
+        let mut loop_snapshot_path = None;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
@@ -646,6 +697,13 @@ pub(super) fn install_state_for(
                 let torn = variants
                     .iter()
                     .find(|variant| variant.cache_incomplete && !variant.installed);
+                if model_id == sceneworks_core::loop_utility::MODEL_ID {
+                    loop_snapshot_path = variants
+                        .iter()
+                        .find(|variant| variant.installed)
+                        .or(torn)
+                        .and_then(|variant| variant.installed_path.as_ref().map(PathBuf::from));
+                }
                 let incomplete = torn.is_some();
                 // Report the torn tier's missing files so the model-level repair knows what to re-fetch,
                 // even though a sibling tier is complete (`any_installed`).
@@ -724,6 +782,7 @@ pub(super) fn install_state_for(
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
         let stale_files_present = !is_flux3_runtime_model(model_id)
+            && model_id != sceneworks_core::loop_utility::MODEL_ID
             && !cache_installed
             && receipt_file_sets.iter().any(|receipt| {
                 receipt_files_present(
@@ -775,6 +834,8 @@ pub(super) fn install_state_for(
             } else {
                 None
             }
+        } else if model_id == sceneworks_core::loop_utility::MODEL_ID {
+            loop_snapshot_path
         } else if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
         } else {
@@ -1580,7 +1641,9 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
                 .to_owned();
             let files = string_array_field(entry, "files");
             let cache_path = huggingface_repo_cache_path(data_dir, &repo);
-            let cache_health = superseded_revision_tier_cache_health(data_dir, entry, &files)
+            let loop_model = model_id == sceneworks_core::loop_utility::MODEL_ID;
+            let cache_health = (!loop_model)
+                .then(|| superseded_revision_tier_cache_health(data_dir, entry, &files)).flatten()
                 .or_else(|| {
                     is_pin_exact_model(model_id)
                         .then(|| pinned_tier_cache_health(entry, data_dir))
@@ -1610,11 +1673,16 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
             // installed after any single tier's download (sc-9909). Require the tier's own files to
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            // FLUX 3: the shared receipt resolver already judged this root. A pin-exact model:
-            // only the pinned snapshot, judged above, is what the job loads.
-            let managed_installed = !is_flux3_runtime_model(model_id)
-                && !is_pin_exact_model(model_id)
-                && managed_tier_installed(&managed_path, &files);
+            // FLUX 3: the shared receipt resolver already judged this root. A pin-exact model
+            // (or the Loop utility): only the pinned snapshot, judged above, is what the job loads.
+            let managed_installed = if loop_model
+                || is_flux3_runtime_model(model_id)
+                || is_pin_exact_model(model_id)
+            {
+                false
+            } else {
+                managed_tier_installed(&managed_path, &files)
+            };
             let mut installed = cache_installed || managed_installed;
 
             // sc-13513: the coarse `<tier>/*` glob (and the managed presence check) is satisfied by ANY
@@ -1720,7 +1788,9 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
                 }
             }
 
-            let installed_path = if is_flux3_runtime_model(model_id) {
+            let installed_path = if loop_model {
+                loop_selected_snapshot(data_dir, &repo, entry)
+            } else if is_flux3_runtime_model(model_id) {
                 if cache_installed || (cache_incomplete && !managed_installed) {
                     flux3_selected_snapshot(data_dir, &repo, Some(entry), model_id)
                 } else if managed_installed {

@@ -502,6 +502,249 @@ impl ExternalLibraryBindingStore {
         Ok(!self.installed_evidence_closures()?.is_empty())
     }
 
+    /// Deliberate, user-CONFIRMED replacement of the model source library: the library was wiped or
+    /// replaced (a reformatted drive, a new disk at the same path) and only some of the recorded
+    /// models are on it now.
+    ///
+    /// [`Self::relocate_binding`] refuses that library — it is missing installed models — and the
+    /// identity probe refuses the old binding, so without this the operator has no way out. This is
+    /// the explicit exit: it adopts the chosen root's physical identity and DEMOTES every recorded
+    /// closure that root does not fully carry. Demotion is the honest state, not a loss: those bytes
+    /// are not on the library any more, so the model resolves `Incomplete` (present library,
+    /// unsatisfied closure) and its download path is reachable again instead of a dead-end prompt.
+    ///
+    /// What it writes, and what it never touches:
+    /// * the binding ledger → the new root's canonical path and physical identity;
+    /// * the validated-closure ledger → pruned to the closures the new root fully carries, so a
+    ///   demoted receipt-less legacy closure stops claiming "installed" on this or any later library;
+    /// * download receipts → NEVER written, for present and absent models alike. A receipt is
+    ///   rewritten by the next download of that model; until then an absent model's receipt only
+    ///   makes a later STRICT relocation stricter (it is listed again for the same confirmation),
+    ///   never more permissive.
+    ///
+    /// Only two authorities ever reach this, and neither is a passive read:
+    /// [`bind_or_probe_validated`](Self::bind_or_probe_validated) and availability resolution still
+    /// never replace a binding. The operator either confirmed it after seeing
+    /// [`Self::validate_replacement`]'s list of models that will need re-downloading, or SceneWorks
+    /// itself just completed a download into the bound location
+    /// ([`Self::rebind_after_completed_download`]). No layout is required — an emptied library is
+    /// exactly the case being recovered.
+    pub fn replace_binding(
+        &self,
+        library_root: &Path,
+    ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(LibraryRelocationError::Failed)?;
+        self.replace_binding_unlocked(library_root, None)
+    }
+
+    /// [`Self::replace_binding`], only if the plan computed under the exclusive lock is EXACTLY
+    /// the one the operator approved — the same models kept, the same models demoted, on the same
+    /// physical directory. If the library changed while the confirmation was open (the drive was
+    /// swapped again, a download landed), it refuses with
+    /// [`LibraryRelocationRejection::ReplacementPlanChanged`] carrying the new plan, so the
+    /// operator re-confirms instead of authorising a replacement they were never shown.
+    pub fn replace_binding_approved(
+        &self,
+        library_root: &Path,
+        approved: &LibraryReplacementPlan,
+    ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(LibraryRelocationError::Failed)?;
+        self.replace_binding_unlocked(library_root, Some(approved))
+    }
+
+    /// A SceneWorks download of `downloaded` into `library_root` just completed. If the binding
+    /// records this SAME location but a different physical directory now occupies it — the drive
+    /// was reformatted or replaced, and the user is re-downloading into it — the completed download
+    /// is the proof the binding was missing: SceneWorks itself just wrote that model onto the volume
+    /// now at the user's configured library. Re-bind to it, demoting every recorded install no
+    /// longer on it, exactly as a confirmed [`Self::replace_binding`] would.
+    ///
+    /// Returns the applied plan, or `None` when there was nothing to do. Deliberately narrow:
+    /// * no binding yet → `None` (the first resolution binds, as it always has);
+    /// * the bound library is available, disconnected or unreadable → `None`;
+    /// * the bound library is a DIFFERENT location → `None`: moving the library is an explicit
+    ///   relocation (it also rewrites the shell's `HF_HOME` and needs a restart), never a download
+    ///   side effect;
+    /// * the downloaded closure does not validate at the root → `None`: only bytes that are really
+    ///   there count as proof.
+    pub fn rebind_after_completed_download(
+        &self,
+        library_root: &Path,
+        downloaded: &[ExternalArtifactRequirement],
+    ) -> Result<Option<LibraryReplacementPlan>, ExternalLibraryError> {
+        let _lock = self.lock_exclusive()?;
+        let Some(binding) = self.read_unlocked()? else {
+            return Ok(None);
+        };
+        if probe_binding(library_root, &binding).status
+            != ExternalLibraryProbeStatus::IdentityMismatch
+        {
+            return Ok(None);
+        }
+        let configured = absolute_lexical(library_root)?;
+        let canonical = std::fs::canonicalize(library_root)?;
+        if configured != binding.configured_path && canonical != binding.canonical_path {
+            return Ok(None);
+        }
+        if validate_requirements_at_root(&canonical, downloaded).is_err() {
+            return Ok(None);
+        }
+        let (_, plan) = self
+            .replace_binding_unlocked(library_root, None)
+            .map_err(|error| match error {
+                LibraryRelocationError::Failed(error) => error,
+                LibraryRelocationError::Rejected(rejection) => {
+                    ExternalLibraryError(format!("library re-bind refused: {rejection:?}"))
+                }
+            })?;
+        self.remember_validated_closure_unlocked(downloaded)?;
+        Ok(Some(plan))
+    }
+
+    fn replace_binding_unlocked(
+        &self,
+        library_root: &Path,
+        approved: Option<&LibraryReplacementPlan>,
+    ) -> Result<(ExternalLibraryBinding, LibraryReplacementPlan), LibraryRelocationError> {
+        let checked = self.check_replacement_unlocked(library_root, approved)?;
+        let binding = ExternalLibraryBinding {
+            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+            configured_path: absolute_lexical(library_root)
+                .map_err(LibraryRelocationError::Failed)?,
+            canonical_path: checked.canonical,
+            physical_identity: checked.identity,
+            bound_at: now_seconds().map_err(LibraryRelocationError::Failed)?,
+        };
+        // Binding FIRST. If the ledger prune below then fails, the stale ledger only keeps demoted
+        // closures demanding presence — stricter, never more permissive. The reverse order could
+        // strip legacy install evidence while the old binding still stood.
+        self.write_unlocked(&binding)
+            .map_err(LibraryRelocationError::Failed)?;
+        if checked.retained_ledger_closures.len() != checked.ledger_closure_count {
+            self.write_validated_closures_unlocked(checked.retained_ledger_closures)
+                .map_err(LibraryRelocationError::Failed)?;
+        }
+        Ok((binding, checked.plan))
+    }
+
+    /// Every check [`Self::replace_binding`] makes, with nothing written: the plan the operator must
+    /// confirm (which recorded models stay installed, which will need re-downloading).
+    pub fn validate_replacement(
+        &self,
+        library_root: &Path,
+    ) -> Result<LibraryReplacementPlan, LibraryRelocationError> {
+        let _lock = self.lock_shared().map_err(LibraryRelocationError::Failed)?;
+        self.check_replacement_unlocked(library_root, None)
+            .map(|checked| checked.plan)
+    }
+
+    /// [`Self::validate_replacement`] that also refuses, with the new plan, when it no longer
+    /// matches `approved` — so a client learns of the change before either durable write.
+    pub fn validate_replacement_approved(
+        &self,
+        library_root: &Path,
+        approved: &LibraryReplacementPlan,
+    ) -> Result<LibraryReplacementPlan, LibraryRelocationError> {
+        let _lock = self.lock_shared().map_err(LibraryRelocationError::Failed)?;
+        self.check_replacement_unlocked(library_root, Some(approved))
+            .map(|checked| checked.plan)
+    }
+
+    fn check_replacement_unlocked(
+        &self,
+        library_root: &Path,
+        approved: Option<&LibraryReplacementPlan>,
+    ) -> Result<CheckedReplacement, LibraryRelocationError> {
+        let canonical_before = canonical_library_directory(library_root)?;
+        let identity_before = physical_identity(&canonical_before).map_err(|error| {
+            LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
+                detail: error.0,
+            })
+        })?;
+        let ledger = self
+            .read_validated_closures_unlocked()
+            .map_err(LibraryRelocationError::Failed)?;
+        let evidence = self
+            .installed_evidence_closures()
+            .map_err(LibraryRelocationError::Failed)?;
+        let present = |closure: &Vec<ExternalArtifactRequirement>| {
+            validate_requirements_shape(closure).is_ok()
+                && closure.iter().all(|requirement| {
+                    matches!(
+                        requirement_presence_at_root(&canonical_before, requirement),
+                        RequirementPresence::Present
+                    )
+                })
+        };
+        let mut retained = std::collections::BTreeSet::new();
+        let mut absent = std::collections::BTreeSet::new();
+        for closure in &evidence {
+            let repository = closure
+                .iter()
+                .find(|requirement| requirement.is_primary)
+                .or_else(|| closure.first())
+                .map(|requirement| requirement.repository.clone());
+            let Some(repository) = repository else {
+                continue;
+            };
+            if present(closure) {
+                retained.insert(repository);
+            } else {
+                absent.insert(repository);
+            }
+        }
+        // A repository that still proves itself through ANOTHER closure (its other quant tier,
+        // typically) stays installed; only that closure's variant is demoted, which is the same
+        // judgement strict relocation makes for deleted-tier drift. Listing it as "will need
+        // re-downloading" would tell the operator a model is gone that still loads.
+        let demoted: Vec<String> = absent.difference(&retained).cloned().collect();
+        let ledger_closure_count = ledger.len();
+        let retained_ledger_closures: Vec<_> = ledger
+            .into_iter()
+            .filter(|closure| present(closure))
+            .collect();
+
+        // Same TOCTOU discipline as relocation: the closure walk can race an unmount or a remount
+        // of a different volume at the same path, and the plan must describe the volume bound.
+        let canonical_after = canonical_library_directory(library_root)?;
+        let identity_after = physical_identity(&canonical_after).map_err(|error| {
+            LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
+                detail: error.0,
+            })
+        })?;
+        if !relocation_identity_held(
+            &canonical_before,
+            &canonical_after,
+            &identity_before,
+            &identity_after,
+        ) {
+            return Err(LibraryRelocationError::Failed(ExternalLibraryError(
+                "external model library changed while it was being validated".to_owned(),
+            )));
+        }
+        let plan = LibraryReplacementPlan {
+            library_identity: identity_before.clone(),
+            retained_repositories: retained.into_iter().collect(),
+            demoted_repositories: demoted,
+        };
+        if approved.is_some_and(|approved| approved != &plan) {
+            return Err(LibraryRelocationError::Rejected(
+                LibraryRelocationRejection::ReplacementPlanChanged { plan },
+            ));
+        }
+        Ok(CheckedReplacement {
+            canonical: canonical_before,
+            identity: identity_before,
+            plan,
+            ledger_closure_count,
+            retained_ledger_closures,
+        })
+    }
+
     fn check_relocation_unlocked(
         &self,
         library_root: &Path,
@@ -662,18 +905,25 @@ impl ExternalLibraryBindingStore {
         let closure = canonical_requirement_closure(requirements);
         if !closures.contains(&closure) {
             closures.push(closure);
-            closures.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
-            let ledger = ValidatedExternalClosures {
-                schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
-                closures,
-            };
-            let mut bytes = serde_json::to_vec_pretty(&ledger)
-                .map_err(|error| ExternalLibraryError(error.to_string()))?;
-            bytes.push(b'\n');
-            atomic_write(&self.validated_closures_path(), &bytes)
-                .map_err(|error| ExternalLibraryError(error.to_string()))?;
+            self.write_validated_closures_unlocked(closures)?;
         }
         Ok(())
+    }
+
+    fn write_validated_closures_unlocked(
+        &self,
+        mut closures: Vec<Vec<ExternalArtifactRequirement>>,
+    ) -> Result<(), ExternalLibraryError> {
+        closures.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+        let ledger = ValidatedExternalClosures {
+            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+            closures,
+        };
+        let mut bytes = serde_json::to_vec_pretty(&ledger)
+            .map_err(|error| ExternalLibraryError(error.to_string()))?;
+        bytes.push(b'\n');
+        atomic_write(&self.validated_closures_path(), &bytes)
+            .map_err(|error| ExternalLibraryError(error.to_string()))
     }
 
     fn read_unlocked(&self) -> Result<Option<ExternalLibraryBinding>, ExternalLibraryError> {
@@ -924,6 +1174,9 @@ pub enum LibraryRelocationRejection {
     HubDirectoryExpected,
     /// The volume's durable physical identity could not be read, so no binding can be written.
     IdentityUnavailable { detail: String },
+    /// A confirmed replacement no longer matches the plan the operator approved: the library
+    /// changed while the confirmation was open. Carries the current plan to confirm instead.
+    ReplacementPlanChanged { plan: LibraryReplacementPlan },
 }
 
 /// Relocation failures split into "the operator can fix this by choosing differently"
@@ -942,6 +1195,30 @@ impl std::fmt::Display for LibraryRelocationError {
             Self::Failed(error) => formatter.write_str(&error.0),
         }
     }
+}
+
+/// What a confirmed library replacement ([`ExternalLibraryBindingStore::replace_binding`]) keeps
+/// and what it demotes, by primary repository. The desktop prompt renders `demoted_repositories` as
+/// "these models will need re-downloading" BEFORE the operator confirms, so the swap is never
+/// silent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LibraryReplacementPlan {
+    /// The physical directory the plan was computed on. Part of what the operator approves: the
+    /// same lists on a different volume are a different replacement.
+    pub library_identity: ExternalLibraryPhysicalIdentity,
+    /// Recorded models the chosen library fully carries; they stay installed.
+    pub retained_repositories: Vec<String>,
+    /// Recorded models the chosen library does not carry; they become not-installed.
+    pub demoted_repositories: Vec<String>,
+}
+
+struct CheckedReplacement {
+    canonical: PathBuf,
+    identity: ExternalLibraryPhysicalIdentity,
+    plan: LibraryReplacementPlan,
+    ledger_closure_count: usize,
+    retained_ledger_closures: Vec<Vec<ExternalArtifactRequirement>>,
 }
 
 /// A validated relocation choice: the Hugging Face hub root SceneWorks binds, plus the `HF_HOME`
@@ -1209,6 +1486,9 @@ fn receipt_installed_requirements(models_dir: &Path) -> Vec<ExternalArtifactRequ
                     files
                         .iter()
                         .filter_map(serde_json::Value::as_str)
+                        .filter(|file| {
+                            !crate::download_receipt::is_candle_device_format_cache_path(file)
+                        })
                         .map(PathBuf::from)
                         .collect::<Vec<_>>()
                 })

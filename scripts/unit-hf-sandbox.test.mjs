@@ -62,7 +62,11 @@ test("launcher forwards CPU-child output and nonzero exit while only its descend
 const text = name => readFileSync(path.join(root, name), "utf8");
 const selected = {
   ".github/workflows/check.yml": ["python -m pytest -q tests/ -m \"not e2e and not parity\" --strict-markers", "npm run rust:check", "node scripts/scaffold-test-selection.mjs --portable", "node scripts/scaffold-test-selection.mjs --history"],
-  ".github/workflows/macos-mlx.yml": ["cargo test -p sceneworks-memory-adapter --features mlx", "cargo test -- --skip nax_16bit_sdpa_is_correct"],
+  ".github/workflows/macos-mlx.yml": [
+    "cargo test -p sceneworks-memory-adapter --features mlx",
+    "cargo test -p sceneworks-worker -p sceneworks-rust-worker --features sceneworks-worker/test-support -- --skip nax_16bit_sdpa_is_correct",
+    "cargo test -p sceneworks-rust-api -p sceneworks-core -p sceneworks-image-quality -p sceneworks-mcp -p sceneworks-options",
+  ],
   ".github/workflows/windows-candle.yml": ["cargo test -p sceneworks-worker --features backend-candle", "cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%"],
 };
 test("only declared ordinary unit steps use the child sandbox, never ignored real-weight or calibration commands", () => {

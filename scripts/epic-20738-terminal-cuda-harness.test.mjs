@@ -250,12 +250,14 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // sc-26234's whole-repo FLUX 3 entry adds no selective row; main's honest evidence re-record
   // and digest are retained. The Illustrious
   // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
-  // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys), plus sw7104's MiniMax-H3-Image tiers (157 keys) and SW-F369's MiniMax-H3-Image training adapter (158 keys). The Illustrious
+  // Supra2-IMG components (150 keys), plus SW-7119's Qwen3.8 27B describer upstream, MLX and Candle re-host listings (153 keys), plus sw7104's MiniMax-H3-Image tiers (157 keys) , SW-F369's MiniMax-H3-Image training adapter (158 keys), the MiniMax-H3-Image-PE bf16 tier (159 keys) and the retired Qwen3.6-27B film planner listing removed (158 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
-  // digest.
+  // digest. SW-F373 adds only the three SenseNova-Loop-9B listings, and the retired Qwen3.6-27B film planner listing is removed (161 keys).
+  // SW-F369 adds ostris' MiniMax-H3-Image training adapter listing (162 keys).
+  // SW-7203 adds the two Qwen3.8-27B block-draft listings and SW-7202 re-pins three tier listings (164 keys).
   assert.equal(current.downloadEvidenceSha256,
-    "07cb6222a07a213d828eb1e3e5ba775f3da90c6c427fd178922be24d4bac9109");
+    "f118dec4dd40af01df8e6a1d7659b14b64e8c04acd3a3c2ccde8fff0a1af906a");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

@@ -91,7 +91,7 @@ pub(crate) fn bind_ideogram_cache_execution(
 /// request, and it is added rung-for-rung (`execution_planner::plan_prefix_kv_cache`): the shed
 /// ladder picks the rung exactly as before, and the cache is taken only when that rung also fits it.
 /// `None` is exactly [`evaluate_shared_image`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn evaluate_shared_image_priced(
     engine_id: &'static str,
     model_id: &str,
@@ -114,7 +114,56 @@ pub(crate) fn evaluate_shared_image_priced(
     prefix_kv_cache_surcharge: Option<u64>,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    evaluate_shared_image_priced_with_resources(
+    evaluate_shared_image_priced_and_pag(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        prefix_kv_cache_surcharge,
+        0,
+        sdxl_endpoints,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_image_priced_and_pag(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
+    pag_workspace_bytes: u64,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_priced_with_resources_and_pag(
         engine_id,
         model_id,
         spec,
@@ -135,12 +184,13 @@ pub(crate) fn evaluate_shared_image_priced(
         cache_state,
         prefix_kv_cache_surcharge,
         None,
+        pag_workspace_bytes,
         sdxl_endpoints,
     )
 }
 
 /// Reference-aware admission; facts originate only in the owned-asset resolver.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn evaluate_shared_image_priced_with_resources(
     engine_id: &'static str,
     model_id: &str,
@@ -162,6 +212,59 @@ pub(crate) fn evaluate_shared_image_priced_with_resources(
     cache_state: MemoryCacheState,
     prefix_kv_cache_surcharge: Option<u64>,
     reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_priced_with_resources_and_pag(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        prefix_kv_cache_surcharge,
+        reference_resources,
+        0,
+        sdxl_endpoints,
+    )
+}
+
+/// Reference- and PAG-aware admission; facts originate only in the owned-asset resolver and
+/// capability-verified PAG planner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_image_priced_with_resources_and_pag(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    pag_workspace_bytes: u64,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     // Resolve the backend-owned bound before contract derivation or any fit decision. A provider
@@ -190,6 +293,7 @@ pub(crate) fn evaluate_shared_image_priced_with_resources(
         prefix_kv_cache_surcharge,
         reference_resources,
         reference_workspace_bytes,
+        pag_workspace_bytes,
         sdxl_endpoints,
     )
 }
@@ -237,6 +341,7 @@ pub(crate) fn evaluate_shared_image(
         None,
         None,
         0,
+        0,
         None,
     )
 }
@@ -264,6 +369,7 @@ pub(super) fn evaluate_shared_image_dispatch(
     prefix_kv_cache_surcharge: Option<u64>,
     reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
     reference_workspace_bytes: u64,
+    pag_workspace_bytes: u64,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let (contract_override, provider_overlay_override, provider_mode_override) =
@@ -355,6 +461,7 @@ pub(super) fn evaluate_shared_image_dispatch(
         prefix_kv_cache_surcharge,
         reference_resources,
         reference_workspace_bytes,
+        pag_workspace_bytes,
         sdxl_endpoints,
     )
 }
@@ -426,6 +533,7 @@ pub(crate) fn sdxl_provider_overlay(spec: &LoadSpec) -> Option<String> {
 /// Shared-selector entry point for a bespoke Candle provider whose exact contract is built from
 /// caller-provisioned paths rather than the registered provider catalog.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn evaluate_shared_bespoke_image(
     engine_id: &'static str,
     model_id: &str,
@@ -446,6 +554,53 @@ pub(crate) fn evaluate_shared_bespoke_image(
     cache_state: MemoryCacheState,
     contract: gen_core::MemoryProviderContract,
     request_evidence_revision: &'static str,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_bespoke_image_with_pag(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        contract,
+        request_evidence_revision,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_bespoke_image_with_pag(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    contract: gen_core::MemoryProviderContract,
+    request_evidence_revision: &'static str,
+    pag_workspace_bytes: u64,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let expected_revision = match engine_id {
         "pulid_flux" => crate::memory_route_registry::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
@@ -490,7 +645,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
     } else {
         overlay.map(str::to_owned)
     };
-    evaluate_shared_image_inner(
+    evaluate_shared_image_inner_priced_with_resources(
         engine_id,
         model_id,
         spec,
@@ -514,10 +669,16 @@ pub(crate) fn evaluate_shared_bespoke_image(
         Some(contract),
         Some(request_evidence_revision),
         None,
+        None,
+        None,
+        0,
+        pag_workspace_bytes,
+        None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn evaluate_shared_image_inner(
     engine_id: &'static str,
     model_id: &str,
@@ -573,6 +734,7 @@ pub(super) fn evaluate_shared_image_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn evaluate_shared_image_inner_priced(
     engine_id: &'static str,
     model_id: &str,
@@ -627,6 +789,7 @@ pub(super) fn evaluate_shared_image_inner_priced(
         prefix_kv_cache_surcharge,
         None,
         0,
+        0,
         sdxl_endpoints,
     )
 }
@@ -659,6 +822,7 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
     prefix_kv_cache_surcharge: Option<u64>,
     reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
     reference_workspace_bytes: u64,
+    pag_workspace_bytes: u64,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let Some(registered_revision) =
@@ -985,15 +1149,13 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
     // every complete candidate exactly once, after receipt overlay normalization and phase-law
     // synthesis but BEFORE selector grading. Keeping the source evidence objects charged also
     // keeps selected-context and warm-alternative peak reporting identical to the demand graded.
-    account_for_runtime_overlay_bytes(
-        std::slice::from_mut(&mut resident),
-        reference_workspace_bytes,
-    );
-    account_for_runtime_overlay_bytes(&mut verified, reference_workspace_bytes);
+    let extra_workspace_bytes = reference_workspace_bytes.saturating_add(pag_workspace_bytes);
+    account_for_runtime_overlay_bytes(std::slice::from_mut(&mut resident), extra_workspace_bytes);
+    account_for_runtime_overlay_bytes(&mut verified, extra_workspace_bytes);
     for candidate in &mut synthesized {
         account_for_runtime_overlay_bytes(
             std::slice::from_mut(&mut candidate.evidence),
-            reference_workspace_bytes,
+            extra_workspace_bytes,
         );
     }
     if let Some(pair) = sdxl_endpoints {

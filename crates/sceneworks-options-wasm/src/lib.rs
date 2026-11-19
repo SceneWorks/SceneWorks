@@ -58,7 +58,7 @@ pub fn validate_request_json(kind: &str, payload_json: &str, entry_json: &str) -
         let payload = payload
             .as_object()
             .expect("request upgrade preserves object");
-        match sceneworks_options::request_validation::resolve(kind, &payload, &entry) {
+        match sceneworks_options::request_validation::resolve(kind, payload, &entry) {
             Ok(resolved) => Ok(json!({ "ok": true, "resolved": resolved })),
             Err(refusal) => Err(serde_json::to_value(refusal).expect("serializable refusal")),
         }

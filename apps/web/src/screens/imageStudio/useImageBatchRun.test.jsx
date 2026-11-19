@@ -24,9 +24,7 @@ it("continues the committed project's batch while a different project render sus
       jobs: [], jobAction: project === "A" ? cancelA : cancelB, BATCH_ACTIVE_JOB_LIMIT: 10,
       preflightError: () => "", setBatchError: () => {}, batchTotal: 2, BATCH_RENDER_CAP: 100,
       setBatchConfirmPending: () => {}, batchPrompts: ["one", "two"], batchVariables: {},
-      resolutionOptions: [], composeJobPrompt: ({ promptToSend }) => ({ composedPrompt: promptToSend }),
-      stylePreviewActive: false, structuredPromptModel: false, batchJobCount: 2,
-      BATCH_PREFLIGHT_YIELD_INTERVAL: 100, selectedModel: null,
+      resolutionOptions: [], structuredPromptModel: false, batchJobCount: 2, selectedModel: null,
       buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }), onMagicExpand: () => {}, createImageJob });
     if (project === "B" && !ready) throw pending;
     return <button onClick={() => { running = runBatch(); }}>Run</button>;
@@ -68,9 +66,7 @@ it("stops before enqueue when request 257 receives a typed refusal", async () =>
       BATCH_ACTIVE_JOB_LIMIT: 300, preflightError: () => "", setBatchError: vi.fn(),
       batchTotal: 260, BATCH_RENDER_CAP: 1000, setBatchConfirmPending: vi.fn(),
       batchPrompts: prompts, batchVariables: {}, resolutionOptions: [],
-      composeJobPrompt: ({ promptToSend }) => ({ composedPrompt: promptToSend }),
-      stylePreviewActive: false, structuredPromptModel: false, batchJobCount: 260,
-      BATCH_PREFLIGHT_YIELD_INTERVAL: 100, selectedModel: null,
+      structuredPromptModel: false, batchJobCount: 260, selectedModel: null,
       buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }),
       onMagicExpand: vi.fn(), createImageJob,
     }));

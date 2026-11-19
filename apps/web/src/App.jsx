@@ -421,8 +421,8 @@ export function App() {
   // action to resume but with exactly the same two-write ordering and undo.
   const modelLibraryRelocator = useMemo(
     () => ({
-      validate: (path) => validateModelLibrary(token, path),
-      adopt: (path) => relocateModelLibrary(token, path),
+      validate: (path, options) => validateModelLibrary(token, path, options),
+      adopt: (path, options) => relocateModelLibrary(token, path, options),
       // Durable persistence of a relocated library is desktop state: the API hands back the exact
       // HF_HOME the shell must store, in the same field, file and normalization as the first-run
       // storage step. Returns an undo so the gate can restore the previous location if the
@@ -451,6 +451,11 @@ export function App() {
             "The current model library location could not be read, so nothing was changed.",
           );
         }
+        // Already persisted (a reformatted or replaced drive re-bound in place): nothing to write.
+        // Compared against the shell's PERSISTED location, never the running API's: after an
+        // unapplied relocation ("Later") the two differ, and re-adopting the running library
+        // must still put the persisted copy back.
+        if (before?.hfHome === target.hfHome) return () => {};
         await tauriInvoke("set_model_library", { path: target.hfHome });
         return () => tauriInvoke("set_model_library", { path: previous });
       },
@@ -477,6 +482,43 @@ export function App() {
   // that comes back while the user is choosing a folder must not resume the submission behind a
   // modal OS dialog the user cannot see past.
   const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
+  // What the user is told once the prompt's relocation is adopted. A re-bind of the library this
+  // process already reads is in effect now (the gate resumed the blocked action), so there is no
+  // restart to disclose, only which models now need downloading again. Any other location applies
+  // after a restart, as before.
+  // `refreshModels` comes from `useModelsAndLoras` further down; a ref lets the adoption handler
+  // reach it without reordering the hooks.
+  const refreshModelsRef = useRef(null);
+  const settleModelLibraryAdoption = useCallback(
+    (adopted) => {
+      if (!adopted) return;
+      const demoted = adopted.replacement?.demotedRepositories ?? [];
+      const redownload = demoted.length
+        ? ` ${demoted.length} ${demoted.length === 1 ? "model is" : "models are"} no longer on it and must be downloaded again: ${demoted.join(", ")}.`
+        : "";
+      if (adopted.restartRequired === false) {
+        // In effect now: the server rebuilt its catalog, so the client's copy must follow, or a
+        // demoted model keeps its stale "Ready" row and the re-download the notice asks for is
+        // unreachable until a reload.
+        refreshModelsRef.current?.().catch(() => {});
+        pushNotice(
+          "general",
+          `SceneWorks is using the model library at ${adopted.libraryRoot ?? adopted.hfHome} again.${redownload}`,
+        );
+        return;
+      }
+      if (!adopted.hfHome) return;
+      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
+      // disclosure says so. The Settings path below has no submission to drop.
+      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.${redownload}`,
+      );
+    },
+    [pushNotice],
+  );
   const chooseModelLibraryLocation = useCallback(async () => {
     if (!isDesktopShell) return;
     setModelLibraryPickerOpen(true);
@@ -487,18 +529,21 @@ export function App() {
       setModelLibraryPickerOpen(false);
     }
     if (!picked) return;
-    const adopted = await modelLibraryGate.relocate(picked);
-    if (adopted?.hfHome) {
-      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
-      // disclosure says so. The Settings path below has no submission to drop.
-      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
-      // The notice outlives the dialog, so "Later" still leaves the reason visible.
-      pushNotice(
-        "general",
-        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
-      );
-    }
-  }, [modelLibraryGate, pushNotice]);
+    settleModelLibraryAdoption(await modelLibraryGate.relocate(picked));
+  }, [modelLibraryGate, settleModelLibraryAdoption]);
+  // "Use the library at this location": the configured library is present but is not the one
+  // SceneWorks recorded (the drive was reformatted or replaced). The same guarded relocation as a
+  // picked folder, so anything the library lacks still stops at the confirmation first.
+  const useCurrentModelLibrary = useCallback(
+    async (libraryPath) => {
+      if (!isDesktopShell || !libraryPath) return;
+      settleModelLibraryAdoption(await modelLibraryGate.relocate(libraryPath));
+    },
+    [modelLibraryGate, settleModelLibraryAdoption],
+  );
+  const confirmModelLibraryReplacement = useCallback(async () => {
+    settleModelLibraryAdoption(await modelLibraryGate.confirmReplacement());
+  }, [modelLibraryGate, settleModelLibraryAdoption]);
   // Settings → Storage → Model library → Change…: the same relocation (validate, persist, re-bind,
   // undo on failure) and the same restart disclosure as the prompt, with no blocked action. Resolves
   // to the adopted target, `null` when the picker was dismissed; rejects with the user-facing
@@ -830,6 +875,9 @@ export function App() {
     setJobs,
     setActiveView,
   });
+  useEffect(() => {
+    refreshModelsRef.current = refreshModels;
+  }, [refreshModels]);
 
   const { setPersonTracks, refreshPersonTracks, context: personTracksContext } = usePersonTracks({
     token,
@@ -1468,12 +1516,17 @@ export function App() {
   // disturbs the shell it renders in.
   const modelLibraryOverlays = (
     <>
-      {["blocked", "retrying", "relocating"].includes(modelLibraryState?.status) ? (
+      {["blocked", "retrying", "relocating", "confirmingReplacement"].includes(
+        modelLibraryState?.status,
+      ) ? (
         <ModelLibraryDialog
           autoProbePaused={modelLibraryPickerOpen}
           canRelocate={isDesktopShell}
           onCancel={modelLibraryGate.cancel}
+          onCancelReplacement={modelLibraryGate.cancelReplacement}
+          onConfirmReplacement={confirmModelLibraryReplacement}
           onRelocate={chooseModelLibraryLocation}
+          onUseCurrentLibrary={useCurrentModelLibrary}
           onRetry={modelLibraryGate.retry}
           state={modelLibraryState}
         />

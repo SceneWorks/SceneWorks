@@ -56,6 +56,7 @@ pub mod jobs_store;
 pub mod jsonc;
 pub mod license_acknowledgments;
 pub mod limits;
+pub mod loop_utility;
 pub mod lora_family;
 pub mod lora_url;
 pub mod managed_checkpoint_variants;
@@ -123,7 +124,7 @@ pub const HEALTH_ROUTE: &str = "/health";
 /// It lives here rather than in rust-api because pre-dispatch validators outside that crate
 /// (`film_plan`, sc-22710) must refuse a prompt the enqueue route would refuse; a hand-copied
 /// number turns an actionable pre-flight diagnostic into a 400 at enqueue when the two drift.
-pub use sceneworks_options::MAX_PROMPT_CHARS;
+pub use sceneworks_options::{image_prompt_char_limit, MAX_IMAGE_PROMPT_CHARS, MAX_PROMPT_CHARS};
 
 /// Stdout sentinel for remote worker-restart (epic 4484 story 12). The API process
 /// doesn't supervise the desktop's GPU worker, so `POST /api/v1/worker/restart` prints

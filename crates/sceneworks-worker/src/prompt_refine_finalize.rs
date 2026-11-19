@@ -59,7 +59,7 @@ pub(super) async fn finalize_refine_job(
             output.usage.generated_tokens,
             max_new_tokens,
         );
-        let result = refine_failure_result(
+        let mut result = refine_failure_result(
             output.thinking.as_deref(),
             &model,
             backend,
@@ -69,6 +69,7 @@ pub(super) async fn finalize_refine_job(
             max_new_tokens,
             kv_cache,
         );
+        record_loop_tier(job, &model, &mut result);
         let mut progress = refine_progress(
             JobStatus::Failed,
             ProgressStage::Failed,
@@ -81,24 +82,12 @@ pub(super) async fn finalize_refine_job(
         update_job(api, &job.id, progress).await?;
         return Ok(());
     }
-    // sc-8105: the image-caption path validates the cleaned reply is a schema-valid Ideogram caption
-    // (carries `compositional_deconstruction`) and KEEPS the element bboxes (no stripping). A malformed
-    // reply is handled like an empty one — a clear engine error the caller surfaces (mirroring the
-    // magic-prompt malformed-output handling, where a non-caption reply also fails downstream).
-    if task == RefineTask::ImageCaption {
-        let parsed = serde_json::from_str::<Value>(&refined).map_err(|error| {
-            WorkerError::Engine(format!(
-                "The image-caption model returned output that is not valid JSON: {error}"
-            ))
-        })?;
-        if !sceneworks_core::ideogram_caption::is_caption(&parsed) {
-            return Err(WorkerError::Engine(
-                "The image-caption model returned JSON that is not a valid Ideogram caption \
-                 (missing the `compositional_deconstruction` section)."
-                    .to_owned(),
-            ));
-        }
-    }
+    // Image captions keep grounded boxes and report an unreadable reply as an engine error.
+    let refined = if task == RefineTask::ImageCaption {
+        prepare_image_caption(refined, &model)?
+    } else {
+        refined
+    };
     // sc-24113: a Qwen rewrite's reply is a JSON object, not the prompt. Parse it HERE so the job
     // result carries what the UI actually needs — the rewritten prompt as plain editable text in the
     // usual `refinedPrompt` slot, plus a separate `rewriteSuggestion` block for the aspect-ratio
@@ -181,6 +170,7 @@ pub(super) async fn finalize_refine_job(
         max_new_tokens,
         kv_cache,
     );
+    record_loop_tier(job, &model, &mut result);
     if let Some(block) = rewrite_suggestion {
         result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
     }
@@ -219,6 +209,20 @@ pub(super) async fn finalize_refine_job(
     )
     .await?;
     Ok(())
+}
+
+// Keep the selected source tier next to the executed model and backend.
+fn record_loop_tier(job: &JobSnapshot, model: &str, result: &mut JsonObject) {
+    if model == sceneworks_core::loop_utility::MODEL_REPO {
+        if let (Some(tier), Some(identity)) = (
+            job.payload.get("variant"),
+            result
+                .get_mut("executionIdentity")
+                .and_then(Value::as_object_mut),
+        ) {
+            identity.insert("variant".to_owned(), tier.clone());
+        }
+    }
 }
 
 #[cfg(test)]

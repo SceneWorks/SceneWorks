@@ -4,8 +4,8 @@ use sceneworks_core::film_compile::{CompiledPlan, PlannerExecutionRecord};
 use sceneworks_core::film_plan::{PlanDiagnostic, ProductionPlan};
 use sceneworks_core::film_planner::{DurationWindow, ProductionBrief, RequiredBeat};
 use sceneworks_core::film_workspace::{
-    parse_film_script, FilmBriefDocument, FilmRenderRegime, QWEN36_FILM_PLANNER_MODEL_ID,
-    QWEN36_FILM_PLANNER_REPO,
+    parse_film_script, FilmBriefDocument, FilmRenderRegime, NATIVE_FILM_PLANNER_MODEL_ID,
+    NATIVE_FILM_PLANNER_REPO,
 };
 
 use crate::film_harness::{ControllerLease, HarnessError, HttpTransport};
@@ -126,6 +126,32 @@ struct FilmPlannerProviderAvailability {
     detail: String,
 }
 
+/// The Qwen3.8 27B tier the native film planner runs on this host: the first tier installed for
+/// this platform in the describer's own order (q4, q8, bf16), so a host that installed the model
+/// for dataset describing plans with that same download. `None` when no tier is installed.
+pub(crate) async fn native_planner_tier(
+    state: &AppState,
+) -> Result<Option<&'static str>, ApiError> {
+    let entry =
+        crate::models::resolve_model_manifest_entry(state, NATIVE_FILM_PLANNER_MODEL_ID).await?;
+    Ok(installed_native_planner_tier(
+        &entry,
+        &state.settings.data_dir,
+    ))
+}
+
+fn installed_native_planner_tier(
+    entry: &Value,
+    data_dir: &std::path::Path,
+) -> Option<&'static str> {
+    let mut host = entry.clone();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let installed = crate::models::installed_variant_keys(&host, data_dir);
+    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_TIERS
+        .into_iter()
+        .find(|tier| installed.iter().any(|variant| variant == tier))
+}
+
 pub(crate) async fn parse_film_draft_script(
     State(state): State<AppState>,
     Path((project_id, draft_id)): Path<(String, String)>,
@@ -153,14 +179,21 @@ pub(crate) async fn film_planner_availability(
     Path((_project_id, _draft_id)): Path<(String, String)>,
 ) -> Result<Json<FilmPlannerAvailability>, ApiError> {
     let catalog = crate::models::model_catalog(&state).await?;
+    let native_tier = native_planner_tier(&state).await?;
     let row = |id: &str| catalog.iter().find(|entry| entry["id"] == id);
     let provider = |provider, label, model_id, detail: &str| {
         let entry = row(model_id);
-        let install_state = entry
+        let mut install_state = entry
             .and_then(|entry| entry.get("installState"))
             .and_then(Value::as_str)
             .unwrap_or("missing")
             .to_owned();
+        // The native planner is usable when ANY of its tiers is installed for this platform: the
+        // catalog's model-level state follows the default tier, but a host that installed only q8
+        // (or bf16) for describing plans with that tier.
+        if model_id == NATIVE_FILM_PLANNER_MODEL_ID && native_tier.is_some() {
+            install_state = "installed".to_owned();
+        }
         FilmPlannerProviderAvailability {
             provider,
             label,
@@ -183,13 +216,22 @@ pub(crate) async fn film_planner_availability(
                 "prompt_refiner",
                 "Built-in prompt refiner",
                 "prompt_refine_anubis_8b",
-                "Default local planner. It does not require Qwen3.6-27B.",
+                "Default local planner. It does not require Qwen3.8-27B.",
             ),
             provider(
                 "native",
-                "Qwen3.6-27B",
-                QWEN36_FILM_PLANNER_MODEL_ID,
-                "Optional large native planner. Select and install it explicitly before use.",
+                "Qwen3.8-27B",
+                NATIVE_FILM_PLANNER_MODEL_ID,
+                &match native_tier {
+                    Some(tier) => format!(
+                        "Optional large native planner. Uses the installed {tier} tier of the \
+                         Qwen3.8-27B model shared with Create Prompt Batch from Dataset."
+                    ),
+                    None => "Optional large native planner. It shares the Qwen3.8-27B model \
+                             with Create Prompt Batch from Dataset; install it explicitly before \
+                             use."
+                        .to_owned(),
+                },
             ),
             FilmPlannerProviderAvailability {
                 provider: "openai_compatible",
@@ -305,10 +347,10 @@ pub(crate) async fn start_film_planning(
     };
     if draft.planning.provider == "native" {
         let selected = draft.planning.model_id.as_deref().unwrap_or_default();
-        if selected != QWEN36_FILM_PLANNER_MODEL_ID {
-            return Err(ApiError::bad_request(
-                "The native film planner currently supports only film_planner_qwen3_6_27b",
-            ));
+        if selected != NATIVE_FILM_PLANNER_MODEL_ID {
+            return Err(ApiError::bad_request(format!(
+                "The native film planner currently supports only {NATIVE_FILM_PLANNER_MODEL_ID}"
+            )));
         }
     }
 
@@ -350,24 +392,17 @@ pub(crate) async fn start_film_planning(
         updated_at: now,
     };
 
-    if draft.planning.provider == "native" {
-        let catalog = crate::models::model_catalog(&state).await?;
-        let installed = catalog.iter().any(|entry| {
-            entry["id"] == QWEN36_FILM_PLANNER_MODEL_ID && entry["installState"] == "installed"
-        });
-        if !installed {
-            operation.status = "failed".to_owned();
-            operation.stage = "unavailable".to_owned();
-            operation.findings.push(PlanDiagnostic::plan(
-                "planning.model",
-                "Qwen3.6-27B is not installed. Install the optional Film Planner model explicitly, or select the built-in prompt refiner.",
-            ));
-            operation.detail =
-                Some("The draft and its current shot plan were not changed.".to_owned());
-            persist_operation(&root, &operation).await?;
-            drop(lease);
-            return Ok((StatusCode::ACCEPTED, Json(operation)));
-        }
+    if draft.planning.provider == "native" && native_planner_tier(&state).await?.is_none() {
+        operation.status = "failed".to_owned();
+        operation.stage = "unavailable".to_owned();
+        operation.findings.push(PlanDiagnostic::plan(
+            "planning.model",
+            "Qwen3.8-27B is not installed. Install it explicitly (it is shared with Create Prompt Batch from Dataset), or select the built-in prompt refiner.",
+        ));
+        operation.detail = Some("The draft and its current shot plan were not changed.".to_owned());
+        persist_operation(&root, &operation).await?;
+        drop(lease);
+        return Ok((StatusCode::ACCEPTED, Json(operation)));
     }
 
     let external_credential = if let Some(connection) = external_connection.as_ref() {
@@ -655,7 +690,7 @@ pub(crate) async fn apply_film_planning_candidate(
 fn planner_identity(provider: &str) -> Result<(Option<&'static str>, &'static str), ApiError> {
     match provider {
         "prompt_refiner" => Ok((None, "TheDrummer/Anubis-Mini-8B-v1")),
-        "native" => Ok((Some(QWEN36_FILM_PLANNER_MODEL_ID), QWEN36_FILM_PLANNER_REPO)),
+        "native" => Ok((Some(NATIVE_FILM_PLANNER_MODEL_ID), NATIVE_FILM_PLANNER_REPO)),
         other => Err(ApiError::bad_request(format!(
             "Unsupported planning provider {other:?}; choose prompt_refiner or native"
         ))),
@@ -1199,8 +1234,8 @@ mod tests {
             stage: "generating".to_owned(),
             progress: Some(0.25),
             provider: "native".to_owned(),
-            planner_model_id: Some(QWEN36_FILM_PLANNER_MODEL_ID.to_owned()),
-            planner_model: QWEN36_FILM_PLANNER_REPO.to_owned(),
+            planner_model_id: Some(NATIVE_FILM_PLANNER_MODEL_ID.to_owned()),
+            planner_model: NATIVE_FILM_PLANNER_REPO.to_owned(),
             video_model_id: draft.production_plan.model.id.clone(),
             thinking_mode: "enabled".to_owned(),
             max_repair_rounds: 1,

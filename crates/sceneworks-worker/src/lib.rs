@@ -603,6 +603,8 @@ pub mod voice_register;
 // resample / stored-seg-mask load, so the mask-port-vs-Python parity test runs on the
 // Linux CI lane. Its masks are consumed only by the macOS Wan-VACE path in `video_jobs`,
 // so off macOS the items are otherwise unused (the parity tests still build + run).
+#[cfg(native_lane)]
+mod loop_utility;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod person_replace;
 #[cfg(all(feature = "test-support", native_lane))]
@@ -2167,6 +2169,34 @@ pub(crate) async fn heartbeat(
     heartbeat_with_reason(api, settings, status, current_job_id, None).await
 }
 
+/// When this process last sent a heartbeat for each worker id. Keepalive wrappers schedule against
+/// it so a run of short wrapped tasks keeps the worker's real cadence: before this, every
+/// [`progress::heartbeat_while_blocking`] call started a fresh interval and skipped its immediate
+/// tick, so a loop of sub-interval hashes (verifying a resumed Wan2.2 14B download's shards, ~3s
+/// each) never heartbeated at all and was swept exactly 90s after its claim.
+static LAST_HEARTBEAT_SENT: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, tokio::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+fn last_heartbeat_sent_map() -> &'static std::sync::Mutex<HashMap<String, tokio::time::Instant>> {
+    LAST_HEARTBEAT_SENT.get_or_init(Default::default)
+}
+
+pub(crate) fn note_heartbeat_sent(worker_id: &str) {
+    last_heartbeat_sent_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(worker_id.to_owned(), tokio::time::Instant::now());
+}
+
+pub(crate) fn last_heartbeat_sent(worker_id: &str) -> Option<tokio::time::Instant> {
+    last_heartbeat_sent_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(worker_id)
+        .copied()
+}
+
 /// [`heartbeat`] plus the `status_reason` a [`WorkerStatus::Unhealthy`] worker carries
 /// (sc-16260) — the host-side remedy, so the Queue screen can explain a stalled queue.
 ///
@@ -2213,12 +2243,15 @@ pub(crate) async fn heartbeat_with_reason(
     }
     match outcome {
         Ok(_) => {
+            note_heartbeat_sent(&settings.worker_id);
             if let Some((generation, _)) = portable_claims {
                 portable_source_claims::mark_inventory_published(&settings.worker_id, generation);
             }
             Ok(())
         }
         Err(WorkerError::Http(error)) => {
+            // Attempted on schedule: the cadence continues from here and the next tick retries.
+            note_heartbeat_sent(&settings.worker_id);
             emit_event_value(
                 Level::ERROR,
                 json!({

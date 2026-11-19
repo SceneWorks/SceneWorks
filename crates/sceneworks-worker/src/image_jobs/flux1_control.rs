@@ -233,6 +233,7 @@ fn flux1_control_request(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         ..Default::default()
     }
 }
@@ -246,8 +247,12 @@ pub(super) fn flux1_control_generate_one(
     plan: &gen_core::RenderPlan,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(Image, ExecutionIdentity)> {
-    super::render::generate_planned_single_image(
+) -> WorkerResult<(
+    Image,
+    ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+)> {
+    super::render::generate_planned_single_image_with_pag(
         generator,
         &mut request,
         plan,
@@ -377,7 +382,7 @@ pub(super) fn flux1_control_render_for_test(
         spec,
         &request,
     )?;
-    let (image, _) = flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})?;
+    let (image, _, _) = flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})?;
     Ok((image.width, image.height, image.pixels))
 }
 
@@ -401,6 +406,7 @@ pub(super) async fn generate_flux1_dev_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
 
     let weights_dir = resolve_weights_dir(request, settings)?
@@ -532,6 +538,14 @@ pub(super) async fn generate_flux1_dev_control_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::pag_workspace_bytes(
+            width,
+            height,
+            1,
+            steps,
+            model.descriptor.capabilities.pag.as_ref(),
+            sampling.pag.as_ref(),
+        ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX1_DEV_CONTROL_ENGINE_ID,
@@ -663,14 +677,19 @@ pub(super) async fn generate_flux1_dev_control_stream(
                         preview,
                         &cancel,
                     );
-                    let (image, execution) = flux1_control_generate_one(
+                    let (image, execution, pag) = flux1_control_generate_one(
                         generator,
                         request,
                         &render_plan,
                         Some(&memory_evaluation),
                         on_progress,
                     )?;
-                    if !super::render::send_execution_report(&report_tx, index, execution)? {
+                    if !super::render::send_execution_and_pag_report(
+                        &report_tx,
+                        index,
+                        execution,
+                        pag.as_ref(),
+                    )? {
                         return Ok(None);
                     }
                     let (out_w, out_h, pixels) = (image.width, image.height, image.pixels);

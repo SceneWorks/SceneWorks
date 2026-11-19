@@ -322,6 +322,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let flux2_base = resolve_flux2_edit_candle_base(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2 base not found".to_owned()))?;
     if !flux2_edit_candle_mode(request) {
@@ -336,6 +337,29 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     // requests before sequential offload/decode/attention/block choices are evaluated. Siblings
     // remain executable through the resident legacy path, but use `Ungateable` evidence so code
     // sharing cannot falsely certify entry-specific CUDA calibration.
+    let is_dev = is_flux2_edit_candle_dev(&request.model);
+    let steps = flux2_edit_candle_steps(
+        request,
+        if is_dev {
+            FLUX2_EDIT_CANDLE_DEV_STEPS
+        } else {
+            FLUX2_EDIT_CANDLE_DEFAULT_STEPS
+        },
+    );
+    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
+    // references are loaded/fit so a 2K tier sizes the effective base and the edit references land at THAT
+    // base (references + latent stay aligned). `use_pid`/`with_pid` stay paired below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request, width, height, 1, steps, None,
+    );
     if request.model != "flux2_klein_9b" {
         let evidence = match request.model.as_str() {
             "flux2_klein_9b_kv" => CandleBaseEvidence::Ungateable(
@@ -352,23 +376,11 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             &flux2_base,
             "FLUX.2 edit",
             evidence,
-            adapter_source_bytes,
+            adapter_source_bytes.saturating_add(pag_workspace_bytes),
             false,
         )
         .await?;
     }
-    let is_dev = is_flux2_edit_candle_dev(&request.model);
-    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
-    // references are loaded/fit so a 2K tier sizes the effective base and the edit references land at THAT
-    // base (references + latent stay aligned). `use_pid`/`with_pid` stay paired below.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    let use_pid = pid_weights.is_some();
-    let (width, height) = pid_effective_dims(
-        request.width,
-        request.height,
-        use_pid,
-        pid_output_tier(request),
-    );
     let references = load_flux2_edit_references(request, project_path, settings, width, height)?;
 
     // Since sc-10222 `flux2_base` is the RESOLVED tier subdir (`q4/`/`q8/`/`bf16/`), so the tier the
@@ -412,32 +424,37 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         tier,
         adapter_source_bytes,
     );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-        memory_provider,
-        &request.model,
-        &strategy_spec,
-        candle_certified_artifact_path(memory_provider, settings, &flux2_base, tier),
-        &request.model_manifest_entry,
-        tier,
-        &request.mode,
-        None,
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-            reference_count: references.len() as u32,
-        },
-        true,
-        use_pid,
-        false,
-        false,
-        raw_budget,
-        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-        predicted_peak,
-        adapter_source_bytes,
-        gen_core::MemoryCacheState::Cold,
-    )?;
+    let memory_evaluation =
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
+            memory_provider,
+            &request.model,
+            &strategy_spec,
+            candle_certified_artifact_path(memory_provider, settings, &flux2_base, tier),
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            None,
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: references.len() as u32,
+            },
+            true,
+            use_pid,
+            false,
+            false,
+            raw_budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+            predicted_peak,
+            adapter_source_bytes,
+            gen_core::MemoryCacheState::Cold,
+            None,
+            None,
+            pag_workspace_bytes,
+            None,
+        )?;
     if request.model == "flux2_klein_9b" && memory_evaluation.is_none() {
         return Err(WorkerError::InvalidPayload(
             "no exact verified memory strategy fits this FLUX.2 Klein reference request".to_owned(),
@@ -450,14 +467,6 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         .as_ref()
         .map(|evaluation| evaluation.context.clone());
     let sampling = super::sampling::explicit_sampling_request(request);
-    let steps = flux2_edit_candle_steps(
-        request,
-        if is_dev {
-            FLUX2_EDIT_CANDLE_DEV_STEPS
-        } else {
-            FLUX2_EDIT_CANDLE_DEFAULT_STEPS
-        },
-    );
     let guidance = flux2_edit_candle_guidance(
         request,
         if is_dev {
@@ -557,6 +566,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         scheduler: sampling.scheduler.clone(),
                         scheduler_shift: sampling.scheduler_shift,
                         guidance,
+                        pag: sampling.pag.clone(),
                         seed: seed as u64,
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
@@ -615,6 +625,10 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                     facts.insert(
                         "workerExecutionReport".into(),
                         serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    super::lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        completed.generation.pag.as_ref(),
                     );
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out.width, out.height, out.pixels)))

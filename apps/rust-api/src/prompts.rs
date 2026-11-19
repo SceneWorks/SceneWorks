@@ -185,6 +185,16 @@ pub(crate) async fn create_prompt_refine_job(
             .filter(|value| !value.is_empty())
         {
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+            // The native planner is the shared Qwen3.8 27B checkpoint, whose tiers are separate
+            // downloads. Freeze the installed tier as `variant` BEFORE admission binds the job's
+            // sources — the same request vocabulary the dataset describe job uses — so the source
+            // admitted is the tier the worker loads. No tier installed leaves the worker's "not
+            // installed" refusal to explain it.
+            if model == sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO {
+                if let Some(tier) = crate::film_planning::native_planner_tier(&state).await? {
+                    job_payload.insert("variant".to_owned(), Value::String(tier.to_owned()));
+                }
+            }
         }
         if let Some(thinking_mode) = payload
             .thinking_mode
@@ -249,6 +259,24 @@ pub(crate) async fn create_prompt_refine_job(
                 Value::String(aspect_ratio.trim().to_owned()),
             );
         }
+    }
+
+    let source = payload.model.as_deref().map(str::trim);
+    if source == Some(sceneworks_core::loop_utility::MODEL_REPO) {
+        if !is_vision_task && !matches!(task, None | Some("refine")) {
+            return Err(ApiError::bad_request(
+                "This prompt task cannot use SenseNova-Loop-9B.",
+            ));
+        }
+        let tier = sceneworks_core::loop_utility::tier(payload.variant.as_deref())
+            .map_err(ApiError::bad_request)?;
+        crate::loop_utility::ensure_tier_installed(&state, tier).await?;
+        job_payload.insert("model".to_owned(), json!(source));
+        job_payload.insert("variant".to_owned(), json!(tier));
+    } else if payload.variant.is_some() {
+        return Err(ApiError::bad_request(
+            "This prompt model has no selectable tier.",
+        ));
     }
 
     if is_h3_expand {

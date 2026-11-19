@@ -127,6 +127,9 @@ import minimaxH3ImageQwenApache20 from "../../../desktop/licenses/minimax-h3-ima
 import minimaxH3ImagePeNotice from "../../../desktop/licenses/minimax-h3-image-pe/NOTICE.txt?url&no-inline";
 // MiniMax-H3-Image training adapter (SW-F369): its own §III.4 NOTICE; the agreement is MiniMax-H3-Image's.
 import minimaxH3ImageTrainingAdapterNotice from "../../../desktop/licenses/minimax-h3-image-training-adapter/NOTICE.txt?url&no-inline";
+// ostris' MiniMax-H3-Image training adapter (SW-F369): its repo publishes no NOTICE, so this is the
+// §III.4 notice SceneWorks writes for it; the agreement is MiniMax-H3-Image's.
+import minimaxH3ImageOstrisTrainingAdapterNotice from "../../../desktop/licenses/minimax-h3-image-ostris-training-adapter/NOTICE.txt?url&no-inline";
 import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?url&no-inline";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?url&no-inline";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?url&no-inline";
@@ -139,6 +142,7 @@ import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-til
 import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?url&no-inline";
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?url&no-inline";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?url&no-inline";
+import senseNovaLoopApache20 from "../../../desktop/licenses/sensenova-loop-9b/Apache-2.0.txt?url&no-inline";
 import qwen38DescriberApache20 from "../../../desktop/licenses/qwen3.8-27b-describer/Apache-2.0.txt?url&no-inline";
 import qwen38DspineApache20 from "../../../desktop/licenses/qwen3.8-27b-dspine-draft/Apache-2.0.txt?url&no-inline";
 import qwen38Dflash2Apache20 from "../../../desktop/licenses/qwen3.8-27b-dflash2-draft/Apache-2.0.txt?url&no-inline";
@@ -283,6 +287,7 @@ const DOCUMENT_URL = {
   "minimax-h3-image-qwen-apache": minimaxH3ImageQwenApache20,
   "minimax-h3-image-pe-notice": minimaxH3ImagePeNotice,
   "minimax-h3-image-training-adapter-notice": minimaxH3ImageTrainingAdapterNotice,
+  "minimax-h3-image-ostris-training-adapter-notice": minimaxH3ImageOstrisTrainingAdapterNotice,
   "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
@@ -295,6 +300,7 @@ const DOCUMENT_URL = {
   "pid-nvidia-license": pidNVIDIALicense,
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
+  "sensenova-loop-9b-apache": senseNovaLoopApache20,
   "qwen3.8-27b-describer-apache": qwen38DescriberApache20,
   "qwen3.8-27b-dspine-apache": qwen38DspineApache20,
   "qwen3.8-27b-dflash2-apache": qwen38Dflash2Apache20,

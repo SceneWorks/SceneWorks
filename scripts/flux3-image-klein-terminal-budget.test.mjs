@@ -452,7 +452,11 @@ test('fixed Tokio security update binds exact old/new sources locks receipts and
     .replace('version = "1.53.1"','version = "1.53.3"')
     .replace('checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"','checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"'));
   const liveLock=await readFile(path.join(sourceRoot,'Cargo.lock'),'utf8');
-  assert.match(liveLock,/name = "tokio"\nversion = "1\.53\.3"/,'the live lock retains the fixed Tokio release');
+  // The live lock may move past the fix (routine dependency bumps); it must never fall below it.
+  const liveTokio=liveLock.match(/name = "tokio"\nversion = "(\d+)\.(\d+)\.(\d+)"/);
+  assert.ok(liveTokio,'the live lock pins Tokio');
+  const [major,minor,patch]=liveTokio.slice(1).map(Number);
+  assert.ok(major>1||(major===1&&(minor>53||(minor===53&&patch>=3))),'the live lock retains the fixed Tokio release (>= 1.53.3)');
   assert.equal(validateCandleDependencySecurityLocks(oldBytes,nextBytes),true);
   await mkdir(path.dirname(f.authorization.previousCargoLock.path));await writeFile(f.authorization.previousCargoLock.path,oldBytes);
   assert.equal(await verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root),await realpath(path.dirname(f.authorization.previousCargoLock.path)));

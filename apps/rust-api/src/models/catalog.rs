@@ -1009,6 +1009,18 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
             apply_imported_sampling_surface(object, backend, &backend_routes);
         }
     }
+    if source == "comfy_ui_tree" {
+        object.remove("pag");
+    } else if let Some(pag) = routes
+        .iter()
+        .find(|route| route.operation == "generate")
+        .and_then(|route| sceneworks_core::registry::builtin_model_spec(&route.provider_id))
+        .and_then(sceneworks_core::registry::ModelSpec::pag_value)
+    {
+        object.insert("pag".to_owned(), pag);
+    } else {
+        object.remove("pag");
+    }
     project_imported_operation_surface(object, &routes);
 }
 
@@ -2130,24 +2142,112 @@ pub(super) fn group_model_catalog_work_items(
 /// Built-in + user model manifest entries merged by id, with NO platform filtering — the raw
 /// authored catalog. [`load_model_catalog_inputs`] narrows `downloads` to the running OS on top of
 /// this; [`license_acknowledgment_repo_index`] deliberately reads it unfiltered, because a licence
-/// requirement must not depend on which OS is asking. Both manifest reads are mtime/size-cached
-/// (`load_manifest_entries`), so the second consumer costs a stat and a clone.
+/// requirement must not depend on which OS is asking. Both read one content-addressed merge
+/// ([`merged_model_manifest`]), so the second consumer costs two file reads and a clone.
 pub(crate) async fn merged_model_manifest_entries(
     state: &AppState,
 ) -> Result<(Vec<Value>, std::collections::HashSet<String>), ApiError> {
+    let merged = merged_model_manifest(state).await?;
+    Ok((merged.merged.clone(), merged.user_model_ids.clone()))
+}
+
+/// The registry merge of the builtin and user model manifests: everything in a catalog read that
+/// depends on the two manifest files and on nothing else.
+pub(crate) struct MergedModelManifest {
+    /// Builtin entries alone, through the registry: the decoder/engine providers that user and
+    /// trained rows inherit from.
+    pub(crate) builtin_providers: Vec<Value>,
+    /// Builtin + user entries merged by id through the registry.
+    pub(crate) merged: Vec<Value>,
+    pub(crate) user_model_ids: std::collections::HashSet<String>,
+    /// Builtin manifest ids plus every merged id the compiled registry owns.
+    pub(crate) builtin_model_ids: std::collections::HashSet<String>,
+}
+
+/// Both model manifests' raw text, `None` for a file that does not exist.
+#[derive(PartialEq, Eq)]
+struct MergedModelManifestKey {
+    builtin: Option<String>,
+    user: Option<String>,
+}
+
+/// Process-wide memo of [`MergedModelManifest`], addressed by the manifests' exact CONTENT.
+///
+/// The merge projects every row through the compiled registry and its memory evidence. That costs
+/// far more than reading the manifests (most of a warm `GET /models` in a debug build), yet its
+/// only inputs are the two manifest texts and data compiled into this binary, so equal text always
+/// merges to an equal result. Every read still reads both files and compares them byte for byte,
+/// so there is no staleness window at all: an edit through the API or by hand is a miss on the very
+/// next read, with no reliance on mtime granularity. Nothing install-, library- or host-dependent
+/// is held here; `retain_models_for_os`, install state and availability still run per read or per
+/// snapshot build.
+///
+/// Process-wide rather than per `AppState` because the content key makes sharing exact: states
+/// serving the same manifest text (the shipped catalog, in practice) share one merge. A handful of
+/// entries is plenty; a production process serves one manifest pair.
+static MERGED_MODEL_MANIFESTS: std::sync::LazyLock<Mutex<MergedModelManifestMemo>> =
+    std::sync::LazyLock::new(Default::default);
+/// Least-recently-used first.
+type MergedModelManifestMemo = VecDeque<(MergedModelManifestKey, Arc<MergedModelManifest>)>;
+const MERGED_MODEL_MANIFEST_LIMIT: usize = 4;
+
+pub(crate) async fn merged_model_manifest(
+    state: &AppState,
+) -> Result<Arc<MergedModelManifest>, ApiError> {
     let manifest_dir = state.settings.config_dir.join("manifests");
-    let builtin =
-        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
-    let user =
-        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let builtin_path = manifest_dir.join("builtin.models.jsonc");
+    let user_path = manifest_dir.join("user.models.jsonc");
+    let key = MergedModelManifestKey {
+        builtin: crate::manifest::read_manifest_payload(&builtin_path).await?,
+        user: crate::manifest::read_manifest_payload(&user_path).await?,
+    };
+    {
+        let mut memo = MERGED_MODEL_MANIFESTS.lock();
+        if let Some(index) = memo.iter().position(|(cached, _)| *cached == key) {
+            let entry = memo.remove(index).expect("position is in bounds");
+            let merged = entry.1.clone();
+            memo.push_back(entry);
+            return Ok(merged);
+        }
+    }
+
+    let parse = |path: &FsPath, payload: &Option<String>| match payload {
+        Some(payload) => crate::manifest::parse_manifest_entries(path, payload, "models"),
+        None => Ok(Vec::new()),
+    };
+    let builtin = parse(&builtin_path, &key.builtin)?;
+    let user = parse(&user_path, &key.user)?;
     let user_model_ids = user
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
-    Ok((
-        merge_model_entries_with_registry(builtin, user),
+    let mut builtin_model_ids = builtin
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    let builtin_providers = merge_model_entries_with_registry(builtin.clone(), Vec::new());
+    let merged = merge_model_entries_with_registry(builtin, user);
+    for model in &merged {
+        if let Some(id) = model.get("id").and_then(Value::as_str) {
+            if sceneworks_core::registry::builtin_model_spec(id).is_some() {
+                builtin_model_ids.insert(id.to_owned());
+            }
+        }
+    }
+    let merged = Arc::new(MergedModelManifest {
+        builtin_providers,
+        merged,
         user_model_ids,
-    ))
+        builtin_model_ids,
+    });
+    let mut memo = MERGED_MODEL_MANIFESTS.lock();
+    // A concurrent miss on the same text may have published first; both results are equal.
+    memo.retain(|(cached, _)| *cached != key);
+    memo.push_back((key, merged.clone()));
+    while memo.len() > MERGED_MODEL_MANIFEST_LIMIT {
+        memo.pop_front();
+    }
+    Ok(merged)
 }
 
 pub(super) async fn load_model_catalog_inputs(
@@ -2161,32 +2261,15 @@ pub(super) async fn load_model_catalog_inputs(
     ),
     ApiError,
 > {
-    let manifest_dir = state.settings.config_dir.join("manifests");
-    let builtin =
-        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
-    let user =
-        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
-    let user_model_ids = user
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect::<std::collections::HashSet<_>>();
-    let decoder_providers = merge_model_entries_with_registry(builtin.clone(), Vec::new());
-    let mut builtin_model_ids = builtin
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
-        .collect::<std::collections::HashSet<_>>();
-    let mut models = merge_model_entries_with_registry(builtin, user);
-    for model in &models {
-        if let Some(id) = model.get("id").and_then(Value::as_str) {
-            if sceneworks_core::registry::builtin_model_spec(id).is_some() {
-                builtin_model_ids.insert(id.to_owned());
-            }
-        }
-    }
+    let manifest = merged_model_manifest(state).await?;
+    let decoder_providers = &manifest.builtin_providers;
+    let user_model_ids = manifest.user_model_ids.clone();
+    let builtin_model_ids = manifest.builtin_model_ids.clone();
+    let mut models = manifest.merged.clone();
     // A trained checkpoint (Iris full export) takes its generation surface from its engine's entry
     // on every read, never from a registration-time snapshot.
     for model in &mut models {
-        crate::iris_training::overlay_trained_checkpoint_surface(model, &decoder_providers)?;
+        crate::iris_training::overlay_trained_checkpoint_surface(model, decoder_providers)?;
     }
     retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
@@ -2194,7 +2277,7 @@ pub(super) async fn load_model_catalog_inputs(
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
     // size, and the frontend all agree on the right repo (sc-3240).
     for model in &mut models {
-        inherit_provider_decoder_downloads(model, &decoder_providers);
+        inherit_provider_decoder_downloads(model, decoder_providers);
         if model.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
             retain_downloads_for_os(model, std::env::consts::OS);
         }
@@ -2540,4 +2623,63 @@ pub(crate) fn video_model_withdrawn_on_platform(
         && (matches!(model_id, "ltx_2_3_eros")
             || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
                 && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
+}
+
+#[cfg(test)]
+mod pag_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn imported_image_models_inherit_provider_pag_and_withdraw_comfy_or_non_pag_routes() {
+        let mut imported_krea = json!({
+            "id": "user_krea_merge",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "mlx": { "supported": true }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_krea);
+        assert_eq!(
+            imported_krea
+                .get("pag")
+                .and_then(|pag| pag.get("numBlocks")),
+            Some(&json!(28)),
+            "imported krea_2 transformer_file must inherit krea_2_turbo PAG metadata"
+        );
+
+        let mut imported_comfy = json!({
+            "id": "user_flux2_comfy",
+            "type": "image",
+            "family": "flux2",
+            "importSourceShape": "comfy_ui_tree",
+            "pag": { "numBlocks": 8 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_comfy);
+        assert!(
+            !imported_comfy.contains_key("pag"),
+            "ComfyUI tree imports do not run through a PAG-capable lane and must withdraw pag"
+        );
+
+        let mut imported_sdxl = json!({
+            "id": "user_sdxl_checkpoint",
+            "type": "image",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "pag": { "numBlocks": 99 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        apply_imported_provider_surface(&mut imported_sdxl);
+        assert!(
+            !imported_sdxl.contains_key("pag"),
+            "non-PAG families must withdraw any stale pag metadata"
+        );
+    }
 }

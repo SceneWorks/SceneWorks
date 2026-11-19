@@ -45716,7 +45716,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "0000000000000000000000000000000000000000",
+        "revision": "7c0e818cc31e72839227237cc8c1cf18c4de5dbb",
         "variant": "bf16",
         "files": [
           "bf16/*"
@@ -45821,11 +45821,6 @@
       "minMemoryGb": 64
     }
   },
-  "film_planner_qwen3_6_27b": {
-    "model": {
-      "minMemoryGb": 96
-    }
-  },
   "qwen_image_2_1_pe_t2i": {
     "model": {
       "minMemoryGb": 32
@@ -45885,6 +45880,22 @@
   "vision_caption_qwen3vl_8b": {
     "model": {
       "minMemoryGb": 64
+    }
+  },
+  "vision_sensenova_loop_9b": {
+    "mlx": {
+      "minMemoryGbByTier": {
+        "q4": 20,
+        "q8": 26,
+        "bf16": 38
+      }
+    },
+    "candle": {
+      "minMemoryGbByTier": {
+        "q4": 10,
+        "q8": 14,
+        "bf16": 21
+      }
     }
   },
   "vision_describe_qwen3_8_27b": {

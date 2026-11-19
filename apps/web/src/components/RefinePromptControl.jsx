@@ -1,3 +1,5 @@
+import { LOOP_UTILITY_NAME, loopPromptSource, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
+import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import { fetchPromptGuide } from "../promptGuides.js";
@@ -33,12 +35,20 @@ export function RefinePromptControl({
   onApply,
   refineModel,
   onDownloadRefineModel,
+  loopModel,
+  onDownloadLoopModel,
   // When true (the Image Studio prompt-tools tile), run the refine as soon as the control
   // mounts and hide the standalone trigger button — the tile is the trigger, so the panel
   // goes straight to the suggested rewrite. Default off keeps the inline button for callers
   // that render this control persistently (e.g. Video Studio).
   autoStart = false,
 }) {
+  const [useLoop, setUseLoop] = useState(false);
+  const [loopVariant, setLoopVariant] = useState(null);
+  const selectedTier = loopUtilityTier(loopModel, loopVariant);
+  const source = loopPromptSource(useLoop ? selectedTier : null);
+  const sourceReady = !useLoop || loopTierInstalled(loopModel, selectedTier);
+
   const [status, setStatus] = useState("idle"); // idle | loading | review | error
   const [refined, setRefined] = useState("");
   const [error, setError] = useState("");
@@ -48,13 +58,13 @@ export function RefinePromptControl({
 
   const trimmed = (prompt ?? "").trim();
   const portableFeedback = usePortableFeedback(
-    "promptRefine", { prompt: trimmed, modelId, workflow }, null, Boolean(trimmed),
+    "promptRefine", { prompt: trimmed, modelId, workflow, ...source }, null, Boolean(trimmed),
   );
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const busy = status === "loading";
-  const disabled = busy || !trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function";
+  const disabled = !sourceReady || busy || !trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function";
 
-  const modelMissing = status === "error" && isModelMissing(refineModel, error);
+  const modelMissing = !useLoop && status === "error" && isModelMissing(refineModel, error);
   const installState = refineModel?.installState;
 
   // When the refinement model finishes downloading (a catalog refresh flips its
@@ -76,14 +86,14 @@ export function RefinePromptControl({
 
   // Start once after the current draft passes server validation.
   useEffect(() => {
-    if (autoStart && !autoStarted.current && trimmed && typeof refinePrompt === "function" && !portableFeedbackBlocks(portableFeedback)) {
+    if (autoStart && !loopModel && !useLoop && !autoStarted.current && trimmed && typeof refinePrompt === "function" && !portableFeedbackBlocks(portableFeedback)) {
       autoStarted.current = true;
       handleRefine();
     }
   });
 
   async function handleRefine() {
-    if (!trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function") return;
+    if (disabled) return;
     refineControllerRef.current?.abort();
     const controller = new AbortController();
     refineControllerRef.current = controller;
@@ -104,7 +114,7 @@ export function RefinePromptControl({
           guide = "";
         }
       }
-      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide, signal });
+      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide, signal, ...source });
       if (signal.aborted) {
         return;
       }
@@ -143,6 +153,24 @@ export function RefinePromptControl({
 
   return (
     <div className="refine-control">
+      {loopModel || useLoop ? (
+        <label>
+          Refinement model
+          <select disabled={busy} value={useLoop ? "loop" : "default"} onChange={(event) => {
+            setUseLoop(event.target.value === "loop");
+            setStatus("idle");
+            setError("");
+          }}>
+            <option value="default">{modelName}</option>
+            <option value="loop">{LOOP_UTILITY_NAME}</option>
+          </select>
+        </label>
+      ) : null}
+      {useLoop ? (
+        <LoopUtilityTier model={loopModel} tier={selectedTier} disabled={busy}
+          onChange={(tier) => { setLoopVariant(tier); setStatus("idle"); setError(""); }}
+          onDownload={onDownloadLoopModel} />
+      ) : null}
       {/* With autoStart the tile is the trigger, so hide the button while refining/reviewing —
           it reappears (as a re-run) only once the user keeps the original or an error needs a retry. */}
       {autoStart && (status === "loading" || status === "review") ? null : (

@@ -182,6 +182,9 @@ pub fn resolve_describe_tier(
     model: Option<&str>,
     tier: Option<&str>,
 ) -> Result<Option<&'static str>, String> {
+    if model.map(str::trim) == Some(crate::loop_utility::MODEL_REPO) {
+        return crate::loop_utility::tier(tier).map(Some);
+    }
     let tier = tier.map(str::trim).filter(|tier| !tier.is_empty());
     if !is_qwen38_27b_describer(model) {
         return match tier {

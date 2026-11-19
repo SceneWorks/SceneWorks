@@ -609,6 +609,7 @@ fn completed_receipt_for(
         output_kind: MossImageOutputKind::Images,
         component_dtypes,
         adapter_reports,
+        pag: None,
     })
     .unwrap()
 }
@@ -940,6 +941,7 @@ impl Generator for Probe {
                 .collect(),
             reference_max_edge: inputs.reference_max_edge,
             use_kv_cache: inputs.use_kv_cache,
+            pag: None,
         });
         if advanced.output == MossImageOutputKind::Latents {
             Ok(MossImageAdvancedOutput::Latents {

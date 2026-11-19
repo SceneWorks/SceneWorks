@@ -690,9 +690,11 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
 
     draft["originalScript"] = json!(source);
     draft["structuredBrief"] = parsed;
+    // A draft saved while the separate Qwen3.6-27B planner existed names its retired id; it is
+    // read as the shared Qwen3.8-27B planner and saved back under the current id.
     draft["planning"] = json!({
         "provider": "native",
-        "modelId": "film_planner_qwen3_6_27b",
+        "modelId": sceneworks_core::film_workspace::LEGACY_QWEN36_FILM_PLANNER_MODEL_ID,
         "thinkingMode": "enabled",
         "refinePrompts": false
     });
@@ -706,6 +708,10 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["planning"]["modelId"],
+        sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_MODEL_ID
+    );
 
     let (status, operation) = request(
         app.clone(),
@@ -721,7 +727,10 @@ async fn film_script_parse_and_unavailable_qwen_preserve_the_draft_and_manual_pa
         .as_str()
         .unwrap()
         .contains("not installed"));
-    assert_eq!(operation["plannerModel"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        operation["plannerModel"],
+        sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO
+    );
     assert_eq!(operation["videoModelId"], "minimax_h3");
     assert_eq!(operation["llmTimeoutSeconds"], 37);
 
@@ -757,14 +766,17 @@ async fn native_planner_checkpoint_is_routed_separately_from_the_video_model() {
             "prompt": "Return a film plan JSON object.",
             "task": "film_plan",
             "workflow": "video",
-            "model": "Qwen/Qwen3.6-27B",
+            "model": sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO,
             "modelId": "minimax_h3",
             "thinkingMode": "enabled"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
-    assert_eq!(job["payload"]["model"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        job["payload"]["model"],
+        sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_REPO
+    );
     assert_eq!(job["payload"]["modelId"], "minimax_h3");
     assert_eq!(job["payload"]["thinkingMode"], "enabled");
 }

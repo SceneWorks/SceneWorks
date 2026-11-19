@@ -736,9 +736,10 @@ pub(crate) async fn create_training_dataset_caption_job(
     }
     let options = serde_json::to_value(payload.options)
         .map_err(|error| ApiError::internal(format!("caption options serialize: {error}")))?;
-    let captioner = payload.captioner;
-    let model_name_or_path = payload.model_name_or_path;
+    let captioner = payload.captioner.trim().to_owned();
+    let model_name_or_path = payload.model_name_or_path.trim().to_owned();
     let requested_gpu = payload.requested_gpu;
+    let variant = payload.variant;
     let mut job_payload = match json!({
         "provider": "training",
         "kind": "training_caption",
@@ -759,6 +760,12 @@ pub(crate) async fn create_training_dataset_caption_job(
     // A trigger-only job loads no captioner (sc-24829), so it carries no model source — the same
     // model-free exemption the worker's runtime-source guard applies to it.
     if !trigger_only {
+        if captioner == sceneworks_core::loop_utility::CAPTIONER {
+            let tier = sceneworks_core::loop_utility::tier(variant.as_deref())
+                .map_err(|message| training_field_error("variant", message))?;
+            crate::loop_utility::ensure_tier_installed(&state, tier).await?;
+            job_payload.insert("variant".to_owned(), json!(tier));
+        }
         crate::model_sources::ensure_runtime_model_sources(
             &state,
             &JobType::TrainingCaption,
@@ -1618,7 +1625,11 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &job_payload,
     );
     if let Some(tier) = tier.filter(|_| !model_free) {
-        ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+        if model == sceneworks_core::loop_utility::MODEL_REPO {
+            crate::loop_utility::ensure_tier_installed(&state, tier).await?;
+        } else {
+            ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+        }
     }
     let requested_gpu = payload.requested_gpu;
     // Freeze the exact source each worker route loads (for a tiered describer, that tier's row on
@@ -1909,12 +1920,16 @@ pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str
         None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
         Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
         Some(QWEN38_27B_DESCRIBER_REPO) => Ok(QWEN38_27B_DESCRIBER_REPO),
+        Some(sceneworks_core::loop_utility::MODEL_REPO) => {
+            Ok(sceneworks_core::loop_utility::MODEL_REPO)
+        }
         Some(other) => Err(training_field_error(
             "model",
             format!(
                 "Unsupported describe model {other:?}. Use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
-                 describer ({QWEN38_27B_DESCRIBER_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}), the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO}), or SenseNova-Loop-9B ({}).",
+                sceneworks_core::loop_utility::MODEL_REPO
             ),
         )),
     }
@@ -2357,10 +2372,34 @@ fn training_field_error(field: &str, detail: impl Into<String>) -> ApiError {
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
-    if payload.captioner.trim() != "joy_caption" {
-        return Err(ApiError::bad_request(
-            "Unsupported training captioner. Use joy_caption.",
-        ));
+    use sceneworks_core::loop_utility;
+    match payload.captioner.trim() {
+        "joy_caption" if payload.model_name_or_path.trim() == loop_utility::MODEL_REPO => {
+            return Err(training_field_error(
+                "captioner",
+                "Select the SenseNova-Loop-9B captioner.",
+            ));
+        }
+        "joy_caption" if payload.variant.is_some() => {
+            return Err(training_field_error(
+                "variant",
+                "JoyCaption has no selectable tier.",
+            ));
+        }
+        "joy_caption" => {}
+        loop_utility::CAPTIONER
+            if payload.model_name_or_path.trim() == loop_utility::MODEL_REPO =>
+        {
+            if payload.mode != CaptionMode::TriggerOnly {
+                loop_utility::tier(payload.variant.as_deref())
+                    .map_err(|message| training_field_error("variant", message))?;
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "Unsupported training captioner or model.",
+            ))
+        }
     }
     match &payload.mode {
         CaptionMode::Default | CaptionMode::TriggerOnly => {}

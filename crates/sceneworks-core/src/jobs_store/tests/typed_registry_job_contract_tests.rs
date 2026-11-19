@@ -85,7 +85,7 @@ fn utility_jobs_use_their_actual_job_type_and_native_claim() {
         JobType::PromptRefine,
         json!({
             "prompt": "a shot", "task": "film_plan", "workflow": "video",
-            "model": crate::film_workspace::QWEN36_FILM_PLANNER_REPO,
+            "model": crate::film_workspace::NATIVE_FILM_PLANNER_REPO,
             "modelId": "minimax_h3", "thinkingMode": "disabled"
         }),
     );

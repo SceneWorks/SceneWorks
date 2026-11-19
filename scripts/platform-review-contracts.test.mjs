@@ -76,14 +76,27 @@ function assertH3RootToolchainReader(job) {
   assert.ok(job.indexOf(reader) < job.indexOf("uses: dtolnay/rust-toolchain@"), "the checkout pin is read before installing Rust");
 }
 
+// The hosted macOS suite runs as two parallel jobs (macos-checks: worker tests;
+// macos-workspace-tests: every other default member), gated by `macos-gate`, which carries the
+// required check name (2026-11-18 split).
+const MLX_WORKER_TESTS =
+  "cargo test -p sceneworks-worker -p sceneworks-rust-worker --features sceneworks-worker/test-support -- --skip nax_16bit_sdpa_is_correct";
+const MLX_REST_TESTS =
+  "cargo test -p sceneworks-rust-api -p sceneworks-core -p sceneworks-image-quality -p sceneworks-mcp -p sceneworks-options";
+
 test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
   const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
-  assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
-    "pruned/W4 model forwards belong only in explicitly selected manual validation");
-  assert.doesNotMatch(hosted, /--ignored\b/,
-    "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
-  assert.match(hosted, /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/,
-    "retain the ordinary workspace unit/math checks");
+  const rest = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-workspace-tests");
+  for (const job of [hosted, rest]) {
+    assert.doesNotMatch(job, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
+      "pruned/W4 model forwards belong only in explicitly selected manual validation");
+    assert.doesNotMatch(job, /--ignored\b/,
+      "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
+  }
+  assert.ok(hosted.includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_WORKER_TESTS}\n`),
+    "retain the ordinary worker unit/math checks");
+  assert.ok(rest.includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_REST_TESTS}\n`),
+    "retain the ordinary non-worker workspace unit checks");
   assert.match(hosted, /cargo clippy/,
     "retain ordinary compilation/lint coverage");
 });
@@ -96,7 +109,7 @@ test("H3 model-level forwards stay out of ordinary CI and require positive manua
     const ordinary = await source(`.github/workflows/${file}`);
     assert.doesNotMatch(ordinary, /(?:pruned|w4a8)_import_native_(?:mlx|cuda)_projection_smoke/);
   }
-  assert.match(await source(".github/workflows/macos-mlx.yml"), /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/);
+  assert.ok((await source(".github/workflows/macos-mlx.yml")).includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_WORKER_TESTS}\n`));
   for (const backend of ["mlx", "cuda"]) {
     const job = workflowJob(server, `h3-import-${backend}`);
     const expression = workflowExpression(job);
@@ -634,7 +647,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     const setup = workflowStep(job, "Set up Node for Cargo cache selection");
     const select = workflowStep(job, `Isolate Cargo dependency checkout${suffix}`);
     const fetchStep = workflowStep(job, `Fetch the pinned inference release${name === "candle-worker" ? "" : " for the imported NVFP4 smoke"}`);
-    assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+    assert.match(setup, /actions\/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1/);
     assert.match(setup, /node-version: 22/);
     assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
     assert.match(select, /node scripts\/prepare-windows-flash-prebuilt\.mjs/);
@@ -2579,8 +2592,12 @@ test("hosted macOS bounds the complete cold native pipeline at two hours", async
       "cargo clippy --all-targets -- -D warnings",
       "cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings",
       "node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx",
-      "node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct",
+      `node scripts/unit-hf-sandbox.mjs -- ${MLX_WORKER_TESTS}`,
     ]) assert.ok(job.includes(`run: ${command}\n`), command);
+    const rest = workflowJob(candidate, "macos-workspace-tests");
+    assert.match(rest, /^    timeout-minutes: 120$/m, "both hosted halves keep the same finite cold-build budget");
+    assert.match(rest, /^    runs-on: macos-26$/m);
+    assert.ok(rest.includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_REST_TESTS}\n`), MLX_REST_TESTS);
   };
   validate(workflow);
   assert.equal(hosted.split(budget).length - 1, 1);
@@ -3363,7 +3380,12 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
   // which is precisely what sc-17026 fixed.
   const NAX_TEST = "nax_16bit_sdpa_is_correct";
-  assert.match(mlx, new RegExp(`^\\s+run: node scripts/unit-hf-sandbox\\.mjs -- cargo test -- --skip ${NAX_TEST}$`, "m"));
+  // Still workspace-wide after the 2026-11-18 split: the two hosted halves together test every
+  // default member exactly once (asserted against Cargo.toml below); the worker half keeps the
+  // NAX skip.
+  assert.ok(mlx.includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_WORKER_TESTS}\n`));
+  assert.ok(MLX_WORKER_TESTS.endsWith(`-- --skip ${NAX_TEST}`));
+  assert.ok(mlx.includes(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_REST_TESTS}\n`));
   // The one exemption is the targeted guard invocation below; a bare narrowing of the
   // suite to the single crate is still forbidden.
   assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
@@ -3388,7 +3410,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf(`run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip ${NAX_TEST}`);
+  const testAt = mlx.indexOf(`run: node scripts/unit-hf-sandbox.mjs -- ${MLX_WORKER_TESTS}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -3398,6 +3420,15 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   const manifest = await source("Cargo.toml");
   const defaultMembers = manifest.match(/^default-members = \[([\s\S]*?)^\]/m)?.[1];
   assert.ok(defaultMembers, "workspace must declare default members");
+  // Every default member is tested by exactly one hosted half, so the split cannot drop a crate.
+  const memberDirs = [...defaultMembers.matchAll(/^\s+"([^"]+)"/gm)].map(([, dir]) => dir);
+  const testedPackages = [...`${MLX_WORKER_TESTS} ${MLX_REST_TESTS}`.matchAll(/-p (\S+)/g)].map(([, name]) => name);
+  for (const dir of memberDirs) {
+    const pkg = (await source(`${dir}/Cargo.toml`)).match(/^name = "([^"]+)"/m)[1];
+    assert.equal(testedPackages.filter((name) => name === pkg).length, 1,
+      `${pkg} must be tested by exactly one hosted macOS half`);
+  }
+  assert.equal(testedPackages.length, memberDirs.length, "the hosted halves test only default members");
   const lintedCrates = [...defaultMembers.matchAll(/^\s+"(crates\/[^"]+)"/gm)].map(([, dir]) => `- "${dir}/**"`);
   for (const watched of [...lintedCrates, '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
     assert.ok(mlxPaths.includes(watched), `&mlx_paths must watch ${watched}`);
@@ -5491,7 +5522,7 @@ function mlxJobSteps(workflow, job) {
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
 // caught it: that assertion exists precisely so a guard living outside the scanned job cannot
 // ship unpinned, and the fix it asks for is to enumerate that job, which is this.
-const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx", "browser-fixture-artifact"];
+const MLX_GUARD_JOBS = ["macos-checks", "macos-gate", "nax-worker", "moss-native-api-mlx", "browser-fixture-artifact"];
 
 function mlxGuardSteps(workflow) {
   return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
@@ -5504,6 +5535,12 @@ function mlxGuardSteps(workflow) {
 // string from an `else` fallthrough and from a following `-d` re-check, and the two
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
+  {
+    step: "Require both hosted halves",
+    detects: "a hosted macOS half that failed, was cancelled, or was skipped without the change gate declaring the lane irrelevant",
+    branch: ['if [ "$complete" != true ]; then'],
+    diagnostic: /^echo "::error::macOS hosted lane incomplete:/,
+  },
   {
     step: "Reject conflicting browser fixture selectors before setup",
     detects: "a selected browser artifact dispatch combined with any legacy model or calibration selector",
@@ -5693,6 +5730,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Require both hosted halves": null,
   "Reject conflicting browser fixture selectors before setup": null,
   "Refuse conflicting MOSS validation inputs before compiler setup": null,
   "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
@@ -6114,7 +6152,7 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
     assert.match(workflow, /ffmpeg = \$ffmpegVersion/);
     assert.match(
       workflow,
-      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9/,
       "only a verified capture may publish the MP4/stills/metadata bundle",
     );
 

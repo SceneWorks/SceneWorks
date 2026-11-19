@@ -1,3 +1,4 @@
+import { loopUtilityModel } from "../loopUtility.js";
 import { useAppearance } from "../hooks/useAppearance.js";
 import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
@@ -121,7 +122,17 @@ import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeL
 import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
-import { h3ImageSamplerDefaults, h3ImageSamplerFromRecipe, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
+import {
+  h3ImageSamplerDefaults,
+  h3ImageSamplerFromRecipe,
+  pagDefaults,
+  pagFromRecipe,
+  resolveCfgInterval,
+  resolveH3ImageSampler,
+  resolvePag,
+  supportsH3ImageSampler,
+  supportsPag,
+} from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
@@ -165,6 +176,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
+import { batchClipNotice, fitPromptToLimit, imagePromptCharLimit } from "../imagePromptLimit.js";
 import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
@@ -204,10 +216,8 @@ const BATCH_RENDER_CAP = 100;
 // under it queues in full the moment it is confirmed, and a larger run feeds in windows
 // of that size.
 const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
-// A styled Cartesian batch can be enormous even though its queue state remains bounded.
-// Yield after this many preflight prompts so the run state commits and Stop can interrupt
-// a clean (no-overage) stream before we ever reach its Cartesian suffix.
-const BATCH_PREFLIGHT_YIELD_INTERVAL = BATCH_RENDER_CAP;
+// How many resolved batch prompts the length note inspects (it is a note, not a gate).
+const BATCH_CLIP_SCAN_LIMIT = 5000;
 
 // Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
 // an unknown value) back to text_to_image so a restored studio never lands on a
@@ -310,6 +320,7 @@ export function ImageStudio() {
     () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
     [models],
   );
+  const loopModel = loopUtilityModel(models);
   // Vision-captioner catalog entry (sc-8107) — drives the reference-image caption flow (sc-8108).
   const visionModel = useMemo(
     () => models.find((entry) => entry.id === VISION_CAPTION_MODEL_ID),
@@ -573,6 +584,8 @@ export function ImageStudio() {
   const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
   // SW-7106: MiniMax-H3-Image's sampler (Euler default, or LCM with its noise-scale ramp + clip).
   const [h3ImageSampler, setH3ImageSampler] = useState(() => ({ ...h3ImageSamplerDefaults(), ...saved.h3ImageSampler }));
+  // SW-7181: Perturbed-Attention Guidance (PAG) controls, capability-gated per selectedModel.pag.
+  const [pag, setPag] = useState(() => ({ ...pagDefaults(), ...saved.pag }));
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -1568,6 +1581,11 @@ export function ImageStudio() {
     model: selectedModel,
     options: h3ImageSampler,
   });
+  const pagCapability = supportsPag(selectedModel) ? selectedModel.pag : null;
+  const { block: outgoingPag, error: pagError } = resolvePag({
+    model: selectedModel,
+    options: pag,
+  });
   const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
     ? captionOverflow
     : "default";
@@ -1637,6 +1655,7 @@ export function ImageStudio() {
     setCfgInterval("");
     setCaptionOverflow("default");
     setH3ImageSampler(h3ImageSamplerDefaults());
+    setPag(pagDefaults());
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
@@ -1961,6 +1980,7 @@ export function ImageStudio() {
   setCfgInterval,
   setCaptionOverflow,
   setH3ImageSampler,
+  setPag,
   setBatchMode,
   setBatchPromptsText,
   setGuidanceMethod,
@@ -2173,6 +2193,23 @@ export function ImageStudio() {
   // older presets (which only stored count/resolution/negativePrompt) keep working and
   // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale knobs.
   // The model is intentionally absent — presets never switch the model.
+  const normalizedSelectedPreset = useMemo(() => {
+    const base = moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset;
+    if (!base?.defaults) return base;
+    const hasTopPag = Object.hasOwn(base.defaults, "pag");
+    const hasNestedMossPag = Boolean(base.defaults.mossImage && Object.hasOwn(base.defaults.mossImage, "pag"));
+    if (!hasTopPag && !hasNestedMossPag) return base;
+    const { pag: nestedMossPag, ...restMossImage } = base.defaults.mossImage ?? {};
+    return {
+      ...base,
+      defaults: {
+        ...base.defaults,
+        ...(hasNestedMossPag ? { mossImage: restMossImage } : {}),
+        pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag),
+      },
+    };
+  }, [moss, selectedPreset]);
+
   const {
     presetName,
     setPresetName,
@@ -2184,7 +2221,7 @@ export function ImageStudio() {
     handleSaveAsPreset,
   } = useSavePreset({
     saved,
-    selectedPreset: moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset,
+    selectedPreset: normalizedSelectedPreset,
     presetApplicationId: isMossImage(launchRequest?.presetModel) && launchRequest?.presetId ? launchRequest.id : null,
     setSelectedPresetId,
     presets,
@@ -2218,6 +2255,7 @@ export function ImageStudio() {
       // SW-7106: restore the saved MiniMax-H3-Image sampler (absent or Euler ⇒ Euler).
       // The preset machinery applies through a functional update (to snapshot the prior value).
       ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
+      ["pag", setPag],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2284,6 +2322,7 @@ export function ImageStudio() {
       ...(showH3ImageSampler ? {
         h3ImageSampler: outgoingH3ImageSampler ?? { sampler: "lcm", sNoise: Number(h3ImageSampler.sNoise), sNoiseEnd: Number(h3ImageSampler.sNoiseEnd), noiseClipStd: Number(h3ImageSampler.noiseClipStd) },
       } : {}),
+      ...(outgoingPag ? { pag: outgoingPag } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2373,6 +2412,7 @@ export function ImageStudio() {
     cfgInterval,
     captionOverflow,
     h3ImageSampler,
+    pag,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2421,6 +2461,7 @@ export function ImageStudio() {
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
     if (cfgIntervalError) return cfgIntervalError;
     if (h3ImageSamplerError) return h3ImageSamplerError;
+    if (pagError) return pagError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
     if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
@@ -2637,6 +2678,7 @@ export function ImageStudio() {
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
       h3ImageSampler: outgoingH3ImageSampler,
+      pag: outgoingPag,
       stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -2703,16 +2745,25 @@ export function ImageStudio() {
   // multiplies within each job UNLESS poses are selected, in which case each job emits one image
   // per pose (images = jobs × posePayload.length). For a structured-caption model (sc-9980) the
   // caller passes the per-prompt auto-expanded caption via `opts`.
-  const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
-    buildJobRequest({
-      promptToSend: opts.promptToSend ?? resolvedPrompt,
-      appearancePromptBatch: opts.appearancePromptBatch,
-      submitIntent: resolvedPrompt,
+  //
+  // A prose item longer than the model's prompt ceiling is shortened to fit rather than refused
+  // (`fitBatchPrompt`): the dropped tail is past what the encoder reads, and the panel lists the
+  // shortened items so the run is never stopped on length alone.
+  const promptCharLimit = imagePromptCharLimit(selectedModel);
+  const fitBatchPrompt = (text) =>
+    fitPromptToLimit(text, promptCharLimit, (candidate) => composeJobPrompt({ promptToSend: candidate }).composedPrompt);
+  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => {
+    const fitted = opts.promptToSend == null ? fitBatchPrompt(resolvedPrompt).prompt : resolvedPrompt;
+    return buildJobRequest({
+      promptToSend: opts.promptToSend ?? fitted,
+      appearancePromptBatch: opts.appearancePromptBatch?.map((text) => fitBatchPrompt(text).prompt),
+      submitIntent: fitted,
       sendStructured: opts.sendStructured ?? false,
       submitCaption: opts.submitCaption ?? caption,
       submitBackend: opts.submitBackend ?? magicPromptBackend,
       resolutionOverride: opts.resolution ?? null,
     });
+  };
 
   // The Iris post-processing plan covers what the next run renders: the Studio size for a single
   // Generate, every distinct per-prompt [WxH] size (or the Studio size) for a prompt batch (S2).
@@ -2825,6 +2876,7 @@ export function ImageStudio() {
       // string is exactly what the run submits, so the cap is measured on IT.
       styleActive: stylePreviewActive || structuredStyleActive,
       composedPrompt: styledPreviewPrompt ?? structuredStyledPrompt ?? "",
+      promptCharLimit,
       mode,
       characterId,
       // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
@@ -2854,6 +2906,7 @@ export function ImageStudio() {
       stylePreviewActive,
       structuredStyleActive,
       styledPreviewPrompt,
+      promptCharLimit,
       structuredStyledPrompt,
       mode,
       characterId,
@@ -2913,6 +2966,27 @@ export function ImageStudio() {
   );
   const portableBatchRefusal = portableBatchFeedback?.result.state === "invalid"
     ? portableBatchFeedback.result.refusal : null;
+  // The batch items `buildBatchJobRequest` shortens to the model's prompt ceiling: a note beside
+  // Run, never a gate. Bounded so a huge inline-alternation product cannot stall a render.
+  const batchClipNoticeText = useMemo(() => {
+    if (!batchMode || structuredPromptModel || batchTotal === 0) return null;
+    const items = [];
+    let total = 0;
+    let index = 0;
+    for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+      index += 1;
+      if (index > BATCH_CLIP_SCAN_LIMIT) break;
+      const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+      const { clipped } = fitPromptToLimit(cleanPrompt, promptCharLimit,
+        (candidate) => composeJobPrompt({ promptToSend: candidate }).composedPrompt);
+      if (clipped) {
+        total += 1;
+        if (items.length < 8) items.push(index);
+      }
+    }
+    return batchClipNotice({ items, total, limit: promptCharLimit, modelName: selectedModel?.name });
+  }, [batchMode, structuredPromptModel, batchTotal, batchPrompts, batchVariables, resolutionOptions,
+    promptCharLimit, composeJobPrompt, selectedModel?.name]);
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
@@ -2939,11 +3013,8 @@ export function ImageStudio() {
   batchPrompts,
   batchVariables,
   resolutionOptions,
-  composeJobPrompt,
-  stylePreviewActive,
   structuredPromptModel,
   batchJobCount,
-  BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
   token,
   buildBatchJobRequest,
@@ -3008,6 +3079,7 @@ export function ImageStudio() {
             batchError={batchError}
             batchValidity={batchValidity}
             portableBatchRefusal={portableBatchRefusal}
+            batchClipNotice={batchClipNoticeText}
             portableBatchRefusalIndex={portableBatchFeedback?.index}
             portableBatchCheckedCount={["valid", "partial"].includes(portableBatchFeedback?.result.state) ? portableBatchFeedback.index : null}
             batchTotal={batchTotal}
@@ -3041,6 +3113,7 @@ export function ImageStudio() {
             characters={characters}
             importAsset={importAsset}
             visionCaptionReady={visionCaptionReady}
+            loopModel={loopModel}
             visionCaptionOffers={visionCaptionOffers}
             modelDownloadJobs={modelDownloadJobs}
             setActiveView={setActiveView}
@@ -3472,7 +3545,7 @@ export function ImageStudio() {
               and the own-`Style:` MERGE) the run will send once a style is active — reuses
               buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
               Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
+          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} maxChars={promptCharLimit} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
@@ -3609,6 +3682,10 @@ export function ImageStudio() {
             h3ImageSampler={h3ImageSampler}
             setH3ImageSampler={setH3ImageSampler}
             h3ImageSamplerError={h3ImageSamplerError}
+            pagCapability={pagCapability}
+            pag={pag}
+            setPag={setPag}
+            pagError={pagError}
             supportsTextStyle={supportsTextStyle}
             textStyleGainConfig={textStyleGainConfig}
             setTextStyleGain={setTextStyleGain}

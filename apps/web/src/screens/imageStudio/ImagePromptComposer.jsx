@@ -8,6 +8,7 @@ import StructuredPromptBuilder from "../../components/StructuredPromptBuilder.js
 import ReferenceCaptionPicker from "../../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../../components/BatchPromptPanel.jsx";
 import { QwenRewritePromptControl } from "../../components/QwenRewritePromptControl.jsx";
+import { BatchExpandPromptsControl } from "../../components/BatchExpandPromptsControl.jsx";
 import { Flux3LayoutEditor } from "../../components/Flux3LayoutEditor.jsx";
 import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
@@ -47,6 +48,7 @@ export function ImagePromptComposer({
   portableBatchRefusal,
   portableBatchRefusalIndex,
   portableBatchCheckedCount,
+  batchClipNotice,
   batchTotal,
   batchRun,
   batchRunProgress,
@@ -79,6 +81,7 @@ export function ImagePromptComposer({
   characters,
   importAsset,
   visionCaptionReady,
+  loopModel,
   visionCaptionOffers,
   modelDownloadJobs,
   setActiveView,
@@ -214,6 +217,9 @@ export function ImagePromptComposer({
                 ) : portableBatchCheckedCount ? (
                   <p className="batch-hint" role="status">Options checked for {portableBatchCheckedCount} requests. Live availability is checked when you run.</p>
                 ) : null}
+                {/* Items past the model's prompt ceiling run shortened rather than blocking the
+                    batch; this says which ones before the run. */}
+                {batchClipNotice ? <p className="batch-hint" role="note">{batchClipNotice}</p> : null}
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">
                     <span>
@@ -293,6 +299,7 @@ export function ImagePromptComposer({
                 // catalog (visionCaptionReady) through the shared ModelAvailabilityGate, not an inline
                 // error-after-click affordance. When the captioner is missing, the gate offers a download.
                 visionCaptionReady={visionCaptionReady}
+                loopModel={loopModel}
                 visionCaptionOffers={visionCaptionOffers}
                 visionCaptionDownloadJobs={modelDownloadJobs}
                 onDownloadModel={createModelDownloadJob}
@@ -467,7 +474,7 @@ export function ImagePromptComposer({
             const describeAvailable =
               mode === "text_to_image" &&
               typeof imageDescribe === "function" &&
-              (visionCaptionReady || visionCaptionOffers.length > 0);
+              (loopModel || visionCaptionReady || visionCaptionOffers.length > 0);
             const describeActive = describeAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
             // sc-24113 — Qwen-Image 2.1's OFFICIAL rewriter, offered as its own prompt tool beside
@@ -547,8 +554,9 @@ export function ImagePromptComposer({
                         <Icon.Wand size={15} /> Expand prompt
                       </span>
                       <span className="prompt-tool-desc">
-                        MiniMax-H3-Image’s own expander — a long caption plus a proposed size you
-                        can accept or ignore
+                        {batchMode
+                          ? H3_IMAGE_EXPAND_COPY.batch.tileDescription
+                          : "MiniMax-H3-Image’s own expander — a long caption plus a proposed size you can accept or ignore"}
                       </span>
                     </button>
                   ) : null}
@@ -573,6 +581,7 @@ export function ImagePromptComposer({
                       errorFallback="Could not describe the image."
                       gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
                       visionCaptionReady={visionCaptionReady}
+                      loopModel={loopModel}
                       visionCaptionOffers={visionCaptionOffers}
                       visionCaptionDownloadJobs={modelDownloadJobs}
                       onDownloadModel={createModelDownloadJob}
@@ -592,6 +601,8 @@ export function ImagePromptComposer({
                       prompt={prompt}
                       refinePrompt={refinePrompt}
                       refineModel={refineModel}
+                      loopModel={loopModel}
+                      onDownloadLoopModel={createModelDownloadJob}
                       onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
                       workflow="image"
                     />
@@ -617,7 +628,26 @@ export function ImagePromptComposer({
                     />
                   </div>
                 ) : null}
-                {h3ExpandActive ? (
+                {h3ExpandActive && batchMode ? (
+                  <div className="prompt-tool-panel">
+                    {/* Batch mode expands every prompt of the batch list, not the hidden
+                        single-prompt field. */}
+                    <BatchExpandPromptsControl
+                      copy={H3_IMAGE_EXPAND_COPY}
+                      expandModel={h3ExpandModel}
+                      expandPrompt={h3ExpandPrompt}
+                      modelId={model}
+                      onPromptsTextChange={setBatchPromptsText}
+                      projectId={activeProject?.id ?? ""}
+                      promptsText={batchPromptsText}
+                      variableValues={batchVariableValues}
+                      referenceAssetIds={qwenRewriteReferenceIds}
+                      suggestedResolutionFor={(suggestion) =>
+                        h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
+                      }
+                    />
+                  </div>
+                ) : h3ExpandActive ? (
                   <div className="prompt-tool-panel">
                     {h3ExpandPicker ? <H3ExpanderModelPicker {...h3ExpandPicker} /> : null}
                     <QwenRewritePromptControl

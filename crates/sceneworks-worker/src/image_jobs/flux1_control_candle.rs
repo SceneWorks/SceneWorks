@@ -374,6 +374,7 @@ impl Flux1StrictControl {
             guidance: self.guidance,
             control_scale: Some(self.control_scale),
             control_kind: self.control_kind.clone(),
+            pag: self.sampling.pag.clone(),
             seed,
             memory: self.memory,
             preview: preview.clone(),
@@ -472,7 +473,7 @@ impl CandleStrictControl for Flux1StrictControl {
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
-    ) -> WorkerResult<(Image, gen_core::generator::ExecutionIdentity)> {
+    ) -> WorkerResult<super::candle_strict_control::CompletedControlImage> {
         let plan = plan.ok_or_else(|| {
             WorkerError::Engine("FLUX.1-dev strict-control has no pre-load render plan".into())
         })?;
@@ -514,6 +515,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let base = resolve_flux1_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("FLUX.1-dev base (FLUX.1-dev) weights not found".to_owned())
     })?;
@@ -592,32 +594,45 @@ pub(super) async fn generate_candle_flux1_control_stream(
             &control,
             expected_control,
         );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
-        "flux1_dev",
-        &request.model,
-        &strategy_spec,
-        artifact_is_certified,
-        &request.model_manifest_entry,
-        tier,
-        &request.mode,
-        Some("control"),
-        gen_core::MemoryGeometry {
-            width: request.width,
-            height: request.height,
-            batch: 1,
-            frames: 1,
-            reference_count: 1,
-        },
-        true,
-        false,
-        false,
-        false,
-        raw_budget,
-        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-        predicted_peak,
-        runtime_overlay_bytes,
-        gen_core::MemoryCacheState::Cold,
-    )?;
+    let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+        request,
+        request.width,
+        request.height,
+        1,
+        steps,
+        None,
+    );
+    let memory_evaluation =
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
+            "flux1_dev",
+            &request.model,
+            &strategy_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            Some("control"),
+            gen_core::MemoryGeometry {
+                width: request.width,
+                height: request.height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            false,
+            raw_budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
+            predicted_peak,
+            runtime_overlay_bytes,
+            gen_core::MemoryCacheState::Cold,
+            None,
+            None,
+            pag_workspace_bytes,
+            None,
+        )?;
     let generation_memory = memory_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.memory)

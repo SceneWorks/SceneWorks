@@ -10,7 +10,7 @@ import { noPresetId } from "../../presetUtils.js";
 import { quantizeTier } from "../../quantTier.js";
 import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../../recipeFields.js";
 import { irisControlsFromRecord } from "../../irisRestore.js";
-import { h3ImageSamplerFromRecipe } from "./samplingControls.js";
+import { h3ImageSamplerFromRecipe, pagFromRecipe } from "./samplingControls.js";
 
 // Pure launch normalization: absence stays absent; repeated writes resolve in their
 // original order (ordinary MOSS settings intentionally override generic knobs).
@@ -148,7 +148,8 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   if (replayMossEdit) { values.widthOverride = settings.width ?? ""; values.heightOverride = settings.height ?? ""; }
   values.selectedLoraIds = loraIds;
   values.loraWeights = loraWeightMap;
-  values.mossImage = rawSettings.mossImage ?? mossDefaults();
+  const { pag: nestedMossPag, ...restMossImage } = rawSettings.mossImage ?? mossDefaults();
+  values.mossImage = restMossImage;
   values.mossImageEdit = rawSettings.mossImageEdit ?? mossEditDefaults();
   values.mossImageAdvanced = rawSettings.mossImageAdvanced ?? mossAdvancedDefaults();
   values.mossPromptBatch = replayMossEdit && rawSettings.mossImageAdvanced ? replayPromptBatch ?? [] : [];
@@ -163,6 +164,10 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   values.captionOverflow = rawSettings.captionOverflow ?? "default";
   // SW-7106: the recorded MiniMax-H3-Image sampler (absent = Euler, the default).
   values.h3ImageSampler = h3ImageSamplerFromRecipe(rawSettings.h3ImageSampler);
+  // SW-7181: Perturbed-Attention Guidance (PAG) controls; ignores read-only pagExecutionReport
+  // and normalizes API-authored nested `mossImage.pag` into the shared Studio controls.
+  const nestedOrdinaryPag = rawSettings.mossOrdinarySettings?.options?.pag;
+  values.pag = pagFromRecipe(rawSettings.pag ?? nestedMossPag ?? nestedOrdinaryPag);
   // sc-25681: an image of a native prompt batch reopens the whole batch.
   const batch = replayPromptBatch;
   const replayBatch = !(replayMossEdit && rawSettings.mossImageAdvanced) && Array.isArray(batch) && batch.length > 1;
@@ -173,7 +178,8 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   values.guidanceMethod = rawSettings.guidanceMethod ?? "cfg";
   if (rawSettings.mossOrdinarySettings) {
     const ordinary = rawSettings.mossOrdinarySettings;
-    values.mossImage = { ...ordinary.options, acceleration: rawSettings.mossImage?.acceleration ?? "off" };
+    const { pag: _ignoredOrdinaryPag, ...ordinaryOptions } = ordinary.options ?? {};
+    values.mossImage = { ...ordinaryOptions, acceleration: rawSettings.mossImage?.acceleration ?? "off" };
     values.stepsOverride = ordinary.steps ?? ""; values.guidanceOverride = ordinary.guidanceScale ?? ""; values.negativePrompt = ordinary.negativePrompt ?? ""; values.schedulerShift = ordinary.schedulerShift ?? null;
   }
   values.characterId = settings.characterId ?? "";

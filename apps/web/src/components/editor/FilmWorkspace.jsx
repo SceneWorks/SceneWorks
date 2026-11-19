@@ -277,19 +277,19 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
           setPlannerAvailability(availability);
           const qwen = availability?.providers?.find((item) => item.provider === "native");
           setNotice(qwen?.available
-            ? "Qwen3.6-27B download completed. Planning did not start automatically."
-            : "Qwen3.6-27B download completed, but the planner is still unavailable. Check the model installation before retrying.");
+            ? "Qwen3.8-27B download completed. Planning did not start automatically."
+            : "Qwen3.8-27B download completed, but the planner is still unavailable. Check the model installation before retrying.");
           return;
         }
         if (errorStatuses.has(job.status)) {
-          setNotice(job.message || job.error || `Qwen3.6-27B download ${job.status}.`);
+          setNotice(job.message || job.error || `Qwen3.8-27B download ${job.status}.`);
           return;
         }
         timer = window.setTimeout(pollInstall, 1000);
       } catch (error) {
         if (canceled || isAbortError(error)) return;
         setPlannerInstallError(error.message);
-        setNotice(`Could not refresh the Qwen3.6-27B download: ${error.message}`);
+        setNotice(`Could not refresh the Qwen3.8-27B download: ${error.message}`);
         timer = window.setTimeout(pollInstall, 2000);
       }
     }
@@ -538,11 +538,11 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
     setPlannerInstallError("");
     try {
       const job = await installFilmPlanner(modelId, token);
-      if (!job?.id) throw new Error("The Qwen3.6-27B download did not return a queue job.");
+      if (!job?.id) throw new Error("The Qwen3.8-27B download did not return a queue job.");
       setRequestedPlannerInstallJob(job);
       setNotice(errorStatuses.has(job.status)
-        ? (job.message || job.error || `Qwen3.6-27B download ${job.status}.`)
-        : `Qwen3.6-27B download ${job.status === "completed" ? "completed" : "queued"}. Planning will not start automatically.`);
+        ? (job.message || job.error || `Qwen3.8-27B download ${job.status}.`)
+        : `Qwen3.8-27B download ${job.status === "completed" ? "completed" : "queued"}. Planning will not start automatically.`);
     } catch (error) {
       setNotice(error.message);
     } finally {

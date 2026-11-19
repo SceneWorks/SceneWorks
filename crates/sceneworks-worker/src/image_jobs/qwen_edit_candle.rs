@@ -843,6 +843,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let qwen_base = resolve_qwen_edit_candle_base(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image-Edit base not found".to_owned()))?;
     if !qwen_edit_candle_mode_resolved(execution) {
@@ -976,17 +977,25 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         // The manifest's Lightning rows already include the built-in distill LoRA. Charge only user
         // adapters, and only when the provider keeps them independently resident for this tier.
         let user_adapter_bytes = qwen_user_adapter_resident_bytes(&user_adapters, tier)?;
-        let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        let pag_workspace_bytes = crate::execution_planner::request_pag_workspace_bytes(
+            request, width, height, 1, steps, None,
+        );
+        let selector_needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
             &request.model_manifest_entry,
             tier,
             user_adapter_bytes,
+        );
+        let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes.saturating_add(pag_workspace_bytes),
         );
         // Second-stage gate input (sc-10856): the tier's MEASURED sequential peak (the largest single
         // working set once the VL encoder is dropped). `None` for an unmeasured tier ⇒ best-effort stage.
         let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
             &request.model_manifest_entry,
             tier,
-            user_adapter_bytes,
+            user_adapter_bytes.saturating_add(pag_workspace_bytes),
         );
         let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
         let quant = match tier {
@@ -1015,7 +1024,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         let provider_protocol_available = qwen_provider_context_protocol_available(&strategy_spec);
         let optimized_evidence_is_certified = artifact_is_certified && provider_protocol_available;
         let evaluate_memory = |budget| {
-            crate::candle_memory_strategy::evaluate_shared_image(
+            crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
                 QWEN_EDIT_PROVIDER_ID,
                 &request.model,
                 &strategy_spec,
@@ -1037,11 +1046,15 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 false,
                 budget,
                 raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
-                needed,
+                selector_needed,
                 // The manifest rows include Lightning's built-in distill. User adapters remain a
                 // request-local overlay and are charged to every candidate independently.
                 user_adapter_bytes,
                 gen_core::MemoryCacheState::Cold,
+                None,
+                None,
+                pag_workspace_bytes,
+                None,
             )
         };
         // sc-13960 two-pass: ask the shared selector against raw free, then — only if reclaiming the
@@ -1211,6 +1224,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         lightning,
                         stage_residency: use_sequential,
                         memory: generation_memory,
+                        pag: sampling.pag.clone(),
                         cancel: cancel.clone(),
                         // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
                         // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits
@@ -1271,6 +1285,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                     facts.insert(
                         "workerExecutionReport".into(),
                         serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    super::lane_controls::record_pag_execution_report(
+                        &mut facts,
+                        completed.generation.pag.as_ref(),
                     );
                     let _ = facts_tx
                         .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });

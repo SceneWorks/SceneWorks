@@ -176,6 +176,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     },
     ModelConsumerInventoryEntry {
         source_files: &[
+            "crates/sceneworks-worker/src/loop_utility.rs",
             "crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs",
             // SW-7204: the Qwen3.8-27B block draft the describer and the expander load beside the
             // tier, resolved at its catalog-pinned revision.

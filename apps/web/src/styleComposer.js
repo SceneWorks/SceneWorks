@@ -154,13 +154,15 @@ export const PROMPT_MAX_CHARS = 4000;
 // over on its own. Length is counted in Unicode scalar values via the string iterator so it matches
 // Rust's `chars().count()` (a plain `.length` counts UTF-16 code units and over-counts astral
 // characters). Returns the length, the cap, the remaining budget, and whether it is over.
-export function promptBudget(composedPrompt) {
+// `max` is the selected model's ceiling where it is known (`imagePromptCharLimit`): a model that
+// declares a long encoder window accepts more than the default.
+export function promptBudget(composedPrompt, max = PROMPT_MAX_CHARS) {
   const text = typeof composedPrompt === "string" ? composedPrompt : String(composedPrompt ?? "");
   const length = [...text].length;
   return {
     length,
-    max: PROMPT_MAX_CHARS,
-    remaining: PROMPT_MAX_CHARS - length,
-    over: length > PROMPT_MAX_CHARS,
+    max,
+    remaining: max - length,
+    over: length > max,
   };
 }

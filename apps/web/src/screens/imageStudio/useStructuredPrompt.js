@@ -1,3 +1,4 @@
+import { LOOP_UTILITY_ID, loopPromptSource } from "../../loopUtility.js";
 import { useCallback } from "react";
 import { parseMagicPromptCaption, parseVisionCaption } from "../../ideogramCaption.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../../constants.js";
@@ -42,7 +43,7 @@ export function useStructuredPrompt({
   const onImageCaption = useCallback(
     // Single id (string) for one reference, or an ARRAY of ids for a mood board (sc-8595): >1 synthesizes
     // ONE Ideogram JSON caption from the shared style, exactly one keeps the scalar single-image path.
-    async (source) => {
+    async (source, variant) => {
       if (typeof imageCaption !== "function") {
         throw new Error("Image captioning is unavailable.");
       }
@@ -56,12 +57,13 @@ export function useStructuredPrompt({
         sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
+        ...loopPromptSource(variant),
       });
       const { caption: parsed, error } = parseVisionCaption(raw);
       if (error || !parsed) {
         throw new Error(error || "The image did not produce a usable caption.");
       }
-      setMagicPromptBackend(VISION_CAPTION_MODEL_ID);
+      setMagicPromptBackend(variant ? LOOP_UTILITY_ID : VISION_CAPTION_MODEL_ID);
       return parsed;
     },
     [imageCaption, activeProject?.id, setMagicPromptBackend],
@@ -79,7 +81,7 @@ export function useStructuredPrompt({
     // The shared picker passes a single asset id (string) for one reference, or an ARRAY of ids for a
     // mood board (sc-8595). Normalize: >1 rides `sourceAssetIds` (worker synthesizes one prompt from the
     // shared style), exactly one collapses to the scalar `sourceAssetId` (the unchanged single path).
-    async (source) => {
+    async (source, variant) => {
       if (typeof imageDescribe !== "function") {
         throw new Error("Image description is unavailable.");
       }
@@ -93,13 +95,14 @@ export function useStructuredPrompt({
         sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
+        ...loopPromptSource(variant),
         captionStyle: describeCaptionStyle,
       });
       const trimmed = (text || "").trim();
       if (!trimmed) {
         throw new Error("The image did not produce a usable description.");
       }
-      setMagicPromptBackend(VISION_CAPTION_MODEL_ID);
+      setMagicPromptBackend(variant ? LOOP_UTILITY_ID : VISION_CAPTION_MODEL_ID);
       return trimmed;
     },
     [imageDescribe, activeProject?.id, describeCaptionStyle, setMagicPromptBackend],

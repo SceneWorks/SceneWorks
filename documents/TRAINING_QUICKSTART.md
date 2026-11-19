@@ -96,17 +96,28 @@ adapter version is a **De-distill adapter** dropdown in the Advanced panel
 (`v1` — stable, smaller; `v2` — experimental, heavier de-distill), so you can A/B
 the two on the same dataset.
 
-The MiniMax-H3-Image presets (character, style and edit) likewise select the
-`ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter` de-distill adapter
-(`trainingAdapterVersion` `v1`, its only version). H3-Image is a 6-step distilled
+The MiniMax-H3-Image presets (character, style and edit) likewise select a
+de-distill adapter: ostris' `ostris/minimax_h3_training_adapter` image adapter
+(`minimax_h3_image_training_adapter_v1.safetensors`, `trainingAdapterVersion`
+`v1`) — the one ai-toolkit trains this model with. The
+`ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter` adapter stays selectable
+(`trainingAdapterRepo` set to that repo). H3-Image is a 6-step distilled
 model: trained on the bare weights a LoRA un-distills it (blurry, ghosted
 samples), while trained against base + adapter (strength 1.0) it learns the
 subject and keeps the model's own sharpness. The adapter is applied only while
 training; previews and the saved LoRA run without it. Each adapter is bound to
 its own base, so selecting the Z-Image adapter on an H3-Image target (or the
-reverse) is refused at submit. The adapter is a Model Derivative of
+reverse) is refused at submit. Both H3 adapters are Model Derivatives of
 MiniMax-H3-Image under the MiniMax-H3-Image Community License, so — like the base
-model — the Models screen asks you to accept that licence before downloading it.
+model — the Models screen asks you to accept that licence before downloading one.
+
+The H3-Image trainer also follows ai-toolkit's recipe for this architecture in
+two more ways. It draws one of the six distilled noise levels **uniformly** each
+step (`timestepType` `uniform`, the only choice these targets offer), so every
+output head trains as often as the six-step render runs it. And a LoRA trains
+the attention and MLP of the 50 DiT blocks **and of the 2 token-refiner
+blocks** (312 modules) — the refiner carries the caption, so training it binds
+the trigger text to the subject.
 
 ## Network type — LoRA vs LoKr
 
@@ -220,8 +231,8 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > across checkpoints confirms the adapter is learning.
 >
 > MiniMax-H3-Image is distilled the same way (six fixed noise levels), and the
-> worker applies the Fizgig de-distill adapter to it before training for the same
-> reason.
+> worker applies its de-distill adapter (ostris' by default) before training for
+> the same reason.
 
 > **LTX-2.3 video LoRA:** the stable `ltx_mlx_lora` kernel trains an LTX-2.3
 > *video* LoRA from the same still-image dataset, using native MLX on Apple

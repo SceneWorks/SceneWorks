@@ -181,6 +181,14 @@ pub(super) fn krea_turbo_on_raw_guidance(request: &ImageRequest) -> Option<f32> 
         .map(|value| value as f32)
 }
 
+type BespokeGeneratedOne = (
+    u32,
+    u32,
+    Vec<u8>,
+    gen_core::generator::ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+);
+
 /// Generate one turbo-on-Raw image (plain t2i, no reference/edit conditioning). By default
 /// the Turbo generator runs a single conditional forward per step on the fixed-mu schedule;
 /// authored guidance can request the existing experimental CFG path.
@@ -197,7 +205,7 @@ fn krea_turbo_on_raw_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
+) -> WorkerResult<BespokeGeneratedOne> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         // CFG off — no negative branch (the distilled regime baked guidance into the weights).
@@ -212,6 +220,7 @@ fn krea_turbo_on_raw_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         text_style_gain,
         preview,
         cancel: cancel.clone(),
@@ -220,12 +229,19 @@ fn krea_turbo_on_raw_generate_one(
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("Krea turbo-on-Raw generation failed", error))?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea turbo-on-Raw generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels, completed.execution))
+            Ok((
+                image.width,
+                image.height,
+                image.pixels,
+                completed.execution,
+                pag,
+            ))
         }
         _ => Err(WorkerError::Engine(
             "Krea turbo-on-Raw generator returned non-image output".to_owned(),
@@ -249,6 +265,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let pag = super::sampling::resolve_bespoke_pag(request)?;
     // The job's model is `krea_2_raw`: resolve the RAW weights + tier + repo. The accelerator LoRA
     // stacks ADDITIVELY on this frozen Raw DiT (the core reads rank off the tensor shapes at load,
     // sc-13882), so the fidelity base is unchanged — only the sampler regime differs.
@@ -273,9 +290,19 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
     let guidance = krea_turbo_on_raw_guidance(request);
     let adapters = resolve_adapters(request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
-        total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
-    });
+    let adapter_resident_bytes = adapters
+        .iter()
+        .fold(0_u64, |total, adapter| {
+            total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
+        })
+        .saturating_add(crate::execution_planner::pag_workspace_bytes(
+            request.width,
+            request.height,
+            1,
+            steps,
+            turbo.descriptor.capabilities.pag.as_ref(),
+            pag.as_ref(),
+        ));
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let offload_policy = admit_candle_base(
         request,
@@ -323,6 +350,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
         scheduler,
         scheduler_shift,
         guidance,
+        pag,
         negative_prompt: (guidance.unwrap_or(0.0) != 0.0
             && !request.negative_prompt.trim().is_empty())
         .then(|| request.negative_prompt.clone()),
@@ -342,7 +370,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let (out_w, out_h, pixels, execution) = krea_turbo_on_raw_generate_one(
+                    let (out_w, out_h, pixels, execution, pag) = krea_turbo_on_raw_generate_one(
                         generator,
                         &prompt,
                         width,
@@ -360,6 +388,7 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out_w, out_h, pixels)))
                 },

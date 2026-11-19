@@ -23,7 +23,7 @@ test("standard Linux build persistently shares unchanged CUDA compilation across
     /toolchain: "1\.98\.0"/, /cuda: "12\.9\.1"/,
     /cache-directories: \$\{\{ env.CANDLE_FLASH_ATTN_BUILD_DIR \}\}/,
     /env-vars: CANDLE_FLASH_ATTN_BUILD_DIR NVCC NVCC_CCBIN/, /cache-on-failure: true/,
-    /Swatinem\/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16/,
+    /Swatinem\/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266/,
   ]) assert.match(job, pattern);
   const setup = job.indexOf("run: node scripts/select-linux-flash-cache.mjs");
   assert.ok(setup > job.indexOf('cuda: "12.9.1"'), "inspect actual installed toolkit");

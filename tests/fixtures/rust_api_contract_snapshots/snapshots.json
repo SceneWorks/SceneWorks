@@ -2387,6 +2387,17 @@
             "standardTierLayout": true
           },
           "name": "Z-Image-Turbo",
+          "pag": {
+            "blockDomain": "layers",
+            "defaultLayers": [
+              15
+            ],
+            "defaultStart": 0.0,
+            "defaultStop": 0.75,
+            "maxScale": 15.0,
+            "numBlocks": 30,
+            "recommendedScale": 1.2
+          },
           "paths": {
             "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"
           },
@@ -3116,6 +3127,17 @@
         "candleVideoRouted": false,
         "candleVideoVace": false,
         "videoMlxRouted": false
+      },
+      "pag": {
+        "blockDomain": "layers",
+        "defaultLayers": [
+          15
+        ],
+        "defaultStart": 0.0,
+        "defaultStop": 0.75,
+        "maxScale": 15.0,
+        "numBlocks": 30,
+        "recommendedScale": 1.2
       },
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/z-image-turbo-mlx"

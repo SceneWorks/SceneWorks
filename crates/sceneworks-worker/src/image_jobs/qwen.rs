@@ -199,6 +199,14 @@ pub(super) fn qwen_control_load(
     load_control_engine(QWEN_CONTROL_ENGINE_ID, &spec)
 }
 
+type BespokeGeneratedOne = (
+    u32,
+    u32,
+    Vec<u8>,
+    gen_core::generator::ExecutionIdentity,
+    Option<gen_core::PagExecutionReport>,
+);
+
 /// Generate one Qwen strict-pose image: the pre-built `conditioning` (the required `Control`, assembled by
 /// the shared [`build_control_conditioning`] driver) drives the 2512-Fun control branch; prompt, true CFG,
 /// negative prompt, quant, and LoRA/LoKr mirror base Qwen.
@@ -218,7 +226,7 @@ pub(super) fn qwen_control_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
+) -> WorkerResult<BespokeGeneratedOne> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -235,17 +243,25 @@ pub(super) fn qwen_control_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         ..Default::default()
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("Qwen strict-pose generation failed", error))?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Qwen strict-pose generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels, completed.execution))
+            Ok((
+                image.width,
+                image.height,
+                image.pixels,
+                completed.execution,
+                pag,
+            ))
         }
         _ => Err(WorkerError::Engine(
             "Qwen strict-pose generator returned non-image output".to_owned(),
@@ -291,6 +307,7 @@ pub(super) async fn generate_qwen_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
     let qwen = mlx_model("qwen_image")
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
@@ -427,7 +444,7 @@ pub(super) async fn generate_qwen_control_stream(
                         control_scale,
                         None,
                     );
-                    let (out_w, out_h, pixels, execution) = qwen_control_generate_one(
+                    let (out_w, out_h, pixels, execution, pag) = qwen_control_generate_one(
                         generator,
                         &sampling,
                         &prompt,
@@ -448,6 +465,7 @@ pub(super) async fn generate_qwen_control_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished pose against the cached source embedding (sc-4410). The strict-
                     // control lane produces the FINAL image directly (no face-restore pass), so this scores
@@ -734,7 +752,7 @@ pub(super) fn qwen_edit_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity)> {
+) -> WorkerResult<BespokeGeneratedOne> {
     let request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -754,17 +772,25 @@ pub(super) fn qwen_edit_generate_one(
             .or_else(|| sampler.map(str::to_owned)),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         ..Default::default()
     };
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("edit generation failed", error))?;
+    let pag = completed.generation.pag;
     match completed.generation.output {
         Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("edit generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels, completed.execution))
+            Ok((
+                image.width,
+                image.height,
+                image.pixels,
+                completed.execution,
+                pag,
+            ))
         }
         _ => Err(WorkerError::Engine(
             "edit generator returned non-image output".to_owned(),
@@ -792,6 +818,7 @@ pub(super) async fn generate_qwen_edit_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -983,7 +1010,7 @@ pub(super) async fn generate_qwen_edit_stream(
                         }
                         None => build_edit_conditioning(&references),
                     };
-                    let (out_w, out_h, pixels, execution) = qwen_edit_generate_one(
+                    let (out_w, out_h, pixels, execution, pag) = qwen_edit_generate_one(
                         generator,
                         &sampling,
                         &prompt,
@@ -1005,6 +1032,7 @@ pub(super) async fn generate_qwen_edit_stream(
                         "workerExecutionReport".into(),
                         serde_json::to_value(execution).map_err(WorkerError::Json)?,
                     );
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4409 angles /
                     // sc-4410 poses / sc-4411 plain With-Character). The Image build + pixel clone is paid

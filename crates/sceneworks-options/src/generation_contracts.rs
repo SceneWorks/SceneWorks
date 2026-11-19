@@ -689,6 +689,8 @@ pub struct PromptRefineRequest {
     /// HF repo string of the model the worker should load (the worker resolves by repo,
     /// not by catalog id). The web sends the vision model's repo for the vision tasks.
     pub model: Option<String>,
+    /// Exact installed source model tier, when the utility offers multiple tiers.
+    pub variant: Option<String>,
     /// Native planner reasoning control (`disabled`, `enabled`, or `auto`). Only the film-plan task
     /// forwards it; other prompt-refine products retain their established model defaults.
     pub thinking_mode: Option<String>,

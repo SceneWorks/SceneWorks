@@ -608,7 +608,7 @@ pub(super) fn flux2_edit_generate_one(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let reference_count = conditioning
         .iter()
         .map(|conditioning| match conditioning {
@@ -642,6 +642,7 @@ pub(super) fn flux2_edit_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
@@ -667,7 +668,7 @@ pub(super) fn flux2_edit_generate_one(
         memory_evaluation,
         provider_memory_context.as_ref(),
     );
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_context,
@@ -679,12 +680,13 @@ pub(super) fn flux2_edit_generate_one(
         }
         error => crate::generation_error("edit generation failed", error),
     })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("edit generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "edit generator returned non-image output".to_owned(),
@@ -735,6 +737,7 @@ pub(super) async fn generate_flux2_edit_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -972,6 +975,14 @@ pub(super) async fn generate_flux2_edit_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::pag_workspace_bytes(
+            width,
+            height,
+            1,
+            steps,
+            model.descriptor.capabilities.pag.as_ref(),
+            sampling.pag.as_ref(),
+        ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         engine_id,
@@ -1070,7 +1081,7 @@ pub(super) async fn generate_flux2_edit_stream(
                     let _request_memory_limit = memory_evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                    let (out_w, out_h, pixels) = flux2_edit_generate_one(
+                    let (out_w, out_h, pixels, pag) = flux2_edit_generate_one(
                         generator,
                         &sampling,
                         use_provider_memory_safety,
@@ -1092,6 +1103,11 @@ pub(super) async fn generate_flux2_edit_stream(
                         &cancel,
                         on_progress,
                     )?;
+                    let mut facts = crate::JsonObject::new();
+                    super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+                    if !facts.is_empty() {
+                        prompt_enhancement.send_image_facts(facts);
+                    }
                     // Score this finished image against the cached source embedding (sc-4409 angles /
                     // sc-4410 poses / sc-4411 plain With-Character). The Image build + pixel clone is paid
                     // ONLY when a scorer exists (a character_image generation) — a plain `edit_image` job
@@ -1304,7 +1320,7 @@ pub(super) fn flux2_control_generate_one_scoped(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
+) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -1320,6 +1336,7 @@ pub(super) fn flux2_control_generate_one_scoped(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
+        pag: sampling.pag.clone(),
         ..Default::default()
     };
     // sc-20799: this lane used to call `generator.generate` directly — no request scope, no
@@ -1327,7 +1344,7 @@ pub(super) fn flux2_control_generate_one_scoped(
     // every other admitted MLX control lane so the uncalibrated dev-control contract gets its
     // route/tier/budget decision before MLX's process-terminating allocation path is entered.
     let memory_context = memory_evaluation.map(|evaluation| &evaluation.context);
-    let output = crate::memory_strategy::generate_with_scope(
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_context,
@@ -1339,12 +1356,13 @@ pub(super) fn flux2_control_generate_one_scoped(
         }
         error => crate::generation_error("FLUX.2-dev control generation failed", error),
     })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    let pag = report.pag;
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("FLUX.2-dev control generator produced no image".to_owned())
             })?;
-            Ok((image.width, image.height, image.pixels))
+            Ok((image.width, image.height, image.pixels, pag))
         }
         _ => Err(WorkerError::Engine(
             "FLUX.2-dev control generator returned non-image output".to_owned(),
@@ -1438,6 +1456,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
     // sc-20799: this lane wires no PiD decode path at all, so `advanced.usePid` was discarded here
     // with no diagnostic. Refuse it before any weights are fetched.
@@ -1592,6 +1611,14 @@ pub(super) async fn generate_flux2_dev_control_stream(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
+        pag_workspace_bytes: crate::execution_planner::pag_workspace_bytes(
+            width,
+            height,
+            1,
+            steps,
+            model.descriptor.capabilities.pag.as_ref(),
+            sampling.pag.as_ref(),
+        ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
@@ -1645,7 +1672,8 @@ pub(super) async fn generate_flux2_dev_control_stream(
             // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
             // pose. The real proposal reaches the first evaluation, an inert one the rest.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
+            let report_tx = tx.clone();
+            drive_gen_items_scored(tx, poses, move |index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -1675,7 +1703,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
                 let _request_memory_limit = memory_evaluation
                     .process_limit_bytes
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                let (out_w, out_h, pixels) = flux2_control_generate_one_scoped(
+                let (out_w, out_h, pixels, pag) = flux2_control_generate_one_scoped(
                     generator,
                     &sampling,
                     Some(&memory_evaluation),
@@ -1690,6 +1718,12 @@ pub(super) async fn generate_flux2_dev_control_stream(
                     &cancel,
                     on_progress,
                 )?;
+                let mut facts = crate::JsonObject::new();
+                super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
+                if !facts.is_empty() {
+                    let _ = report_tx
+                        .blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                }
                 // Score this finished pose against the cached source embedding (sc-4410). The strict-
                 // control lane produces the FINAL image directly (no face-restore pass), so this scores
                 // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
@@ -2036,7 +2070,8 @@ mod flux2_dev_admission_tests {
             "fn flux2_control_generate_one_scoped(",
         );
         assert!(
-            body.contains("crate::memory_strategy::generate_with_scope("),
+            body.contains("crate::memory_strategy::generate_with_scope_report(")
+                || body.contains("crate::memory_strategy::generate_with_scope("),
             "the control render bypassed the provider memory-strategy scope again"
         );
         assert!(

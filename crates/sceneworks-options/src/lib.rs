@@ -295,6 +295,32 @@ pub mod video_eligibility;
 pub mod video_request;
 pub mod yue2_validation;
 pub const MAX_PROMPT_CHARS: usize = 4000;
+/// Characters per token used to turn an image model's declared prompt window
+/// (`image.maxPromptTokens`) into a character ceiling: English prose averages about four.
+pub const PROMPT_CHARS_PER_TOKEN: usize = 4;
+/// The widest image prompt any model may be sent: the largest declared window (MiniMax-H3-Image's
+/// 4,096 tokens) at [`PROMPT_CHARS_PER_TOKEN`]. This is the pre-model shape bound; the model-aware
+/// bound is [`image_prompt_char_limit`].
+pub const MAX_IMAGE_PROMPT_CHARS: usize = 4096 * PROMPT_CHARS_PER_TOKEN;
+/// The longest image `prompt` (and each of `prompts`) this model's request may carry.
+///
+/// A flat [`MAX_PROMPT_CHARS`] is far below what a long-window encoder reads: MiniMax-H3-Image
+/// reads 4,096 tokens, about 16,000 characters, so a 4,000-character cap refused prompts the model
+/// would have read in full. A model that declares `image.maxPromptTokens` gets that window in
+/// characters, never below [`MAX_PROMPT_CHARS`] and never above [`MAX_IMAGE_PROMPT_CHARS`]; text the
+/// encoder cannot read is still the engine's to truncate (and flag) or refuse.
+pub fn image_prompt_char_limit(entry: &serde_json::Map<String, serde_json::Value>) -> usize {
+    entry
+        .get("image")
+        .and_then(|image| image.get("maxPromptTokens"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|tokens| usize::try_from(tokens).ok())
+        .map_or(MAX_PROMPT_CHARS, |tokens| {
+            tokens
+                .saturating_mul(PROMPT_CHARS_PER_TOKEN)
+                .clamp(MAX_PROMPT_CHARS, MAX_IMAGE_PROMPT_CHARS)
+        })
+}
 pub const MAX_JOB_POSES: usize = 64;
 pub const MAX_JOB_LORAS: usize = 10;
 pub fn is_moss_image(model: &str) -> bool {
@@ -324,3 +350,4 @@ pub mod supra2;
 
 pub mod moss_advanced;
 pub mod moss_validation;
+pub mod pag;

@@ -733,28 +733,34 @@ describe("de-distill training adapter (sc-25213)", () => {
     expect(id("v1", "someone/else")).toBeNull();
   });
 
-  // SW-F369: the MiniMax-H3-Image adapter is its own repo with one version; blank selects it, and
+  // SW-F369: each MiniMax-H3-Image adapter is its own repo with one version; blank selects it, and
   // a Z-Image version (or its legacy default spelling) is not one of its versions.
-  it("maps the MiniMax-H3-Image adapter to its own catalog model and offers only its versions", () => {
-    const h3 = "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter";
-    const id = (trainingAdapterVersion) => trainingAdapterModelId({ trainingAdapterRepo: h3, trainingAdapterVersion });
-    expect(id("v1")).toBe("minimax_h3_image_training_adapter_v1");
-    expect(id("")).toBe("minimax_h3_image_training_adapter_v1");
-    expect(id("v2")).toBeNull();
-    expect(id("v2-default")).toBeNull();
-    expect(trainingAdapterVersionOptions({ trainingAdapterRepo: h3 })).toEqual(["v1"]);
+  it("maps each MiniMax-H3-Image adapter to its own catalog model and offers only its versions", () => {
+    for (const [h3, modelId] of [
+      ["ostris/minimax_h3_training_adapter", "minimax_h3_image_ostris_training_adapter_v1"],
+      ["ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter", "minimax_h3_image_training_adapter_v1"],
+    ]) {
+      const id = (trainingAdapterVersion) => trainingAdapterModelId({ trainingAdapterRepo: h3, trainingAdapterVersion });
+      expect(id("v1")).toBe(modelId);
+      expect(id("")).toBe(modelId);
+      expect(id("v2")).toBeNull();
+      expect(id("v2-default")).toBeNull();
+      expect(trainingAdapterVersionOptions({ trainingAdapterRepo: h3 })).toEqual(["v1"]);
+      expect(trainingAdapterFor({ trainingAdapterRepo: h3 }).feature).toBe("MiniMax-H3-Image LoRA training");
+    }
     expect(trainingAdapterVersionOptions({ trainingAdapterRepo: repo })).toEqual(["v1", "v2"]);
     expect(trainingAdapterVersionOptions({ trainingAdapterRepo: "" })).toEqual([]);
-    expect(trainingAdapterFor({ trainingAdapterRepo: h3 }).feature).toBe("MiniMax-H3-Image LoRA training");
     expect(trainingAdapterFor({ trainingAdapterRepo: "someone/else" })).toBeNull();
   });
 
-  // Every MiniMax-H3-Image preset in the shipped registry selects the adapter by default.
-  it("defaults every MiniMax-H3-Image preset to the Fizgig adapter", () => {
+  // Every MiniMax-H3-Image preset in the shipped registry selects ostris' adapter (the one
+  // ai-toolkit trains this model with) by default, and the uniform six-head draw.
+  it("defaults every MiniMax-H3-Image preset to the ostris adapter and a uniform draw", () => {
     const h3Presets = presetRegistry.presets.filter((preset) => preset.targetId.startsWith("minimax_h3_image"));
     expect(h3Presets).toHaveLength(5);
     for (const preset of h3Presets) {
-      expect(trainingAdapterModelId(preset.config.advanced)).toBe("minimax_h3_image_training_adapter_v1");
+      expect(trainingAdapterModelId(preset.config.advanced)).toBe("minimax_h3_image_ostris_training_adapter_v1");
+      expect(preset.config.advanced.timestepType).toBe("uniform");
     }
   });
 

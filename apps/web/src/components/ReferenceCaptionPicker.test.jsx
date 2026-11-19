@@ -91,6 +91,24 @@ describe("ReferenceCaptionPicker", () => {
     expect(buttonByText("✨ Describe image").disabled).toBe(false);
   });
 
+  it("uses the selected Loop tier and keeps ordered mood-board references", async () => {
+    const onCaption = vi.fn(async () => "fox, snow, daylight");
+    const onApply = vi.fn();
+    await mount({ onCaption, onApply, visionCaptionReady: false, referenceAssets: [refAsset, refAsset2],
+      loopModel: { id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B",
+        variants: [{ variant: "q8", installState: "installed" }] } });
+    await act(async () => {
+      const select = container.querySelector("select");
+      select.value = "loop";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await selectReference();
+    await addMoodBoardExtra();
+    await clickAndSettle(buttonByText("✨ Describe image"));
+    expect(onCaption).toHaveBeenCalledWith(["ref-1", "ref-2"], "q8");
+    expect(onApply).toHaveBeenCalledWith("fox, snow, daylight");
+  });
+
   it("runs the caption for the picked asset and applies the result", async () => {
     const onCaption = vi.fn(async () => "a red fox in snow, cinematic photograph");
     const onApply = vi.fn();

@@ -242,7 +242,7 @@ fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity(
         "brief",
         "{\"shots\":[]}",
         Some("private reasoning"),
-        "Qwen/Qwen3.6-27B",
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
         "mlx",
         "enabled",
         Some(gen_core::core_llm::FinishReason::Stop),
@@ -256,7 +256,10 @@ fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity(
     assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
     assert_eq!(result["thinking"], "private reasoning");
     assert_eq!(result["executionIdentity"]["provider"], "native");
-    assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        result["executionIdentity"]["model"],
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+    );
     assert_eq!(result["executionIdentity"]["backend"], "mlx");
     assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
     assert!(!result["refinedPrompt"]
@@ -408,7 +411,7 @@ fn empty_length_result_preserves_reasoning_usage_and_actionable_failure() {
 
     let result = refine_failure_result(
         Some("private bounded reasoning"),
-        "Qwen/Qwen3.6-27B",
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
         "mlx",
         "enabled",
         Some(FinishReason::Length),
@@ -424,7 +427,10 @@ fn empty_length_result_preserves_reasoning_usage_and_actionable_failure() {
     assert_eq!(result["generation"]["usage"]["promptTokens"], 2_048);
     assert_eq!(result["generation"]["usage"]["generatedTokens"], 4_096);
     assert_eq!(result["generation"]["maxNewTokens"], 4_096);
-    assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        result["executionIdentity"]["model"],
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+    );
     assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
     assert!(result.get("refinedPrompt").is_none());
 
@@ -1583,19 +1589,36 @@ fn clean_json_output_unwraps_a_fenced_image_caption_keeping_bboxes() {
 fn image_caption_malformed_output_fails_is_caption() {
     // A non-caption JSON object (no `compositional_deconstruction`) is rejected — the worker's
     // malformed-output guard, mirroring how the magic-prompt path's non-captions fail downstream.
-    let not_a_caption: Value = serde_json::from_str(&clean_json_output(
-        "```json\n{\"high_level_description\": \"x\"}\n```",
-    ))
-    .expect("valid JSON");
-    assert!(!sceneworks_core::ideogram_caption::is_caption(
-        &not_a_caption
-    ));
+    let model = sceneworks_core::loop_utility::MODEL_REPO;
+    let not_a_caption = clean_json_output("```json\n{\"high_level_description\": \"x\"}\n```");
+    assert!(prepare_image_caption(not_a_caption, model).is_err());
 
     // Non-JSON / refusal text isolates nothing parseable as a caption.
     let refusal = clean_json_output("I cannot describe this image.");
-    assert!(!serde_json::from_str::<Value>(&refusal)
-        .map(|v| sceneworks_core::ideogram_caption::is_caption(&v))
-        .unwrap_or(false));
+    assert!(prepare_image_caption(refusal, model).is_err());
+}
+
+#[test]
+fn loop_image_caption_removes_only_the_generated_comment() {
+    let model = sceneworks_core::loop_utility::MODEL_REPO;
+    let raw = r##"{"high_level_description":"A centered red disc on white.",
+        "style_description":{"aesthetics":"flat graphic emblem","lighting":"even",
+            "medium":"vector illustration","art_style":"flat icon","color_palette":["#DE2910","#FFFFFF"]},
+        "compositional_deconstruction":{"background":"plain white",
+            "elements":[{"type":"obj","bbox":[145,145,855,855],"desc":"A solid red disc.",
+                "color_palette":["#DE2910"]}]},
+        "_comment":"The image resembles the Japanese flag."}"##;
+    let mut expected: Value = serde_json::from_str(raw).unwrap();
+    expected.as_object_mut().unwrap().remove("_comment");
+    let refined = prepare_image_caption(raw.to_owned(), model).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&refined).unwrap(), expected);
+
+    let clean = expected.to_string();
+    assert_eq!(prepare_image_caption(clean.clone(), model).unwrap(), clean);
+    assert_eq!(
+        prepare_image_caption(raw.to_owned(), "other-model").unwrap(),
+        raw
+    );
 }
 
 #[test]

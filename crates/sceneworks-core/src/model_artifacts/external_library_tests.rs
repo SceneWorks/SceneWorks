@@ -1498,3 +1498,400 @@ fn one_catalog_sweep_probes_the_volume_once_and_still_sees_disconnect_and_swap()
     std::fs::rename(&detached, &library).unwrap();
     sweep(ModelAvailability::ExternalReady);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Confirmed library replacement. The field failure: the bound drive was reformatted and a handful
+// of models re-downloaded into the SAME path. The identity probe refuses the old binding (a new
+// volume), strict relocation refuses the new library (it lacks the wiped models), and nothing in
+// between was reachable: every model read "installed on a different library" with no way out.
+// ---------------------------------------------------------------------------------------------
+
+/// Bind `owner/one` and `owner/three` (download receipts) and `owner/two` (validated-closure ledger
+/// only) on `library`, then "reformat" it: the original directory is moved aside (kept, so its
+/// directory id cannot be recycled) and an empty directory takes its path. That is a different
+/// physical directory at the same configured path, exactly as a reformatted drive presents.
+fn bind_then_reformat(data: &Path, library: &Path) {
+    seed_snapshot(library, "owner/one", "model.safetensors");
+    seed_snapshot(library, "owner/two", "model.safetensors");
+    seed_snapshot(library, "owner/three", "model.safetensors");
+    write_download_receipt(data, "owner/one", "model.safetensors");
+    write_download_receipt(data, "owner/three", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(data).unwrap();
+    for repo in ["owner/one", "owner/two", "owner/three"] {
+        store
+            .bind_or_probe_validated(library, &[requirement(repo, "model.safetensors")])
+            .unwrap();
+    }
+    std::fs::rename(library, library.with_file_name("pre-format-volume")).unwrap();
+    std::fs::create_dir_all(library).unwrap();
+}
+
+fn receipt_bytes(data: &Path, repo: &str) -> Vec<u8> {
+    std::fs::read(
+        data.join("models")
+            .join(crate::model_artifacts::artifact_selection::safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_reformatted_library_with_a_redownloaded_subset_is_recoverable_by_confirmed_replacement() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    // Only `owner/one` was re-downloaded onto the reformatted drive.
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    let one = vec![requirement("owner/one", "model.safetensors")];
+    let two = vec![requirement("owner/two", "model.safetensors")];
+    let three = vec![requirement("owner/three", "model.safetensors")];
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let binding_before = store.load().unwrap();
+
+    // The dead end, reproduced: the re-downloaded model is blocked as "different library" (the
+    // download never re-binds; a write through the configured path is not proof of identity)...
+    let blocked = resolve_model_availability(&data, &library, &one, true, &[]);
+    assert_eq!(
+        blocked.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(blocked.library_present);
+    assert_eq!(
+        store.load().unwrap(),
+        binding_before,
+        "resolution never re-binds"
+    );
+    // ...and strict relocation refuses the library for the models the format wiped.
+    assert_eq!(
+        store.relocate_binding(&library).unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories: vec!["owner/three".to_owned(), "owner/two".to_owned()],
+        })
+    );
+
+    // The plan the operator confirms names exactly what will need re-downloading, writing nothing.
+    let closures_before = store.validated_closures().unwrap();
+    let plan = store.validate_replacement(&library).unwrap();
+    assert_eq!(plan.retained_repositories, ["owner/one"]);
+    assert_eq!(plan.demoted_repositories, ["owner/three", "owner/two"]);
+    assert_eq!(store.load().unwrap(), binding_before);
+    assert_eq!(store.validated_closures().unwrap(), closures_before);
+
+    let receipt_one = receipt_bytes(&data, "owner/one");
+    let receipt_three = receipt_bytes(&data, "owner/three");
+    let (binding, applied) = store.replace_binding_approved(&library, &plan).unwrap();
+    assert_eq!(applied, plan);
+    assert_eq!(binding.physical_identity, plan.library_identity);
+    assert_eq!(
+        binding.canonical_path,
+        std::fs::canonicalize(&library).unwrap()
+    );
+    assert_ne!(Some(binding), binding_before);
+
+    // The present model is usable again, with its receipt untouched.
+    assert_eq!(
+        resolve_model_availability(&data, &library, &one, true, &[]).availability,
+        ModelAvailability::ExternalReady
+    );
+    assert_eq!(receipt_bytes(&data, "owner/one"), receipt_one);
+    // The wiped models are demoted to not-installed (present library, unsatisfied closure), so
+    // their download path is reachable again, whether their evidence was a receipt or the ledger.
+    assert_eq!(
+        resolve_model_availability(&data, &library, &three, true, &[]).availability,
+        ModelAvailability::Incomplete
+    );
+    assert_eq!(
+        resolve_model_availability(&data, &library, &two, false, &[]).availability,
+        ModelAvailability::Incomplete
+    );
+    // Receipts are never rewritten, not even the demoted model's.
+    assert_eq!(receipt_bytes(&data, "owner/three"), receipt_three);
+    // The ledger no longer claims the wiped closures validated on the bound library.
+    let closures = store.validated_closures().unwrap();
+    assert!(closures.contains(&canonical_requirement_closure(&one)));
+    assert!(!closures.contains(&canonical_requirement_closure(&two)));
+    assert!(!closures.contains(&canonical_requirement_closure(&three)));
+
+    // Re-downloading a demoted model later validates and re-records it on the new binding.
+    seed_snapshot(&library, "owner/two", "model.safetensors");
+    assert_eq!(
+        resolve_model_availability(&data, &library, &two, false, &[]).availability,
+        ModelAvailability::ExternalReady
+    );
+    assert!(store
+        .validated_closures()
+        .unwrap()
+        .contains(&canonical_requirement_closure(&two)));
+}
+
+/// A wholly emptied library (nothing re-downloaded yet) is still recoverable: the confirmation,
+/// not the folder's contents, authorises the swap, and every recorded model is listed as needing a
+/// re-download before the operator agrees.
+#[test]
+fn an_emptied_library_can_be_replaced_with_every_model_demoted() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+
+    let (_, plan) = store.replace_binding(&library).unwrap();
+    assert!(plan.retained_repositories.is_empty());
+    assert_eq!(
+        plan.demoted_repositories,
+        ["owner/one", "owner/three", "owner/two"]
+    );
+    assert_eq!(
+        probe_model_source_library(&data, &library).probe_status,
+        ExternalLibraryProbeStatus::Available
+    );
+    assert!(store.validated_closures().unwrap().is_empty());
+}
+
+/// Replacement keeps strict relocation's deleted-tier judgement: a repository whose other variant
+/// is fully present stays installed and is NOT listed as needing a re-download, while the absent
+/// variant's own closure is still dropped from the ledger.
+#[test]
+fn replacement_does_not_list_a_model_whose_other_tier_is_present() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    let tier = |variant: &str, file: &str| ExternalArtifactRequirement {
+        variant: variant.to_owned(),
+        ..requirement("owner/tiered", file)
+    };
+    seed_snapshot(&library, "owner/tiered", "q8.safetensors");
+    seed_snapshot(&library, "owner/tiered", "q4.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    store
+        .bind_or_probe_validated(&library, &[tier("q8", "q8.safetensors")])
+        .unwrap();
+    store
+        .bind_or_probe_validated(&library, &[tier("q4", "q4.safetensors")])
+        .unwrap();
+    std::fs::rename(&library, library.with_file_name("pre-format-volume")).unwrap();
+    std::fs::create_dir_all(&library).unwrap();
+    seed_snapshot(&library, "owner/tiered", "q8.safetensors");
+
+    let (_, plan) = store.replace_binding(&library).unwrap();
+    assert_eq!(plan.retained_repositories, ["owner/tiered"]);
+    assert!(plan.demoted_repositories.is_empty());
+    let closures = store.validated_closures().unwrap();
+    assert!(closures.contains(&vec![tier("q8", "q8.safetensors")]));
+    assert!(!closures.contains(&vec![tier("q4", "q4.safetensors")]));
+}
+
+/// Replacement is never a side door around the fail-closed identity check: nothing automatic calls
+/// it, so a complete decoy at the bound path still leaves the binding alone without confirmation.
+/// It also refuses a path that is not a directory, writing nothing.
+#[test]
+fn replacement_refuses_a_non_directory_and_resolution_never_replaces() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    for repo in ["owner/one", "owner/two", "owner/three"] {
+        seed_snapshot(&library, repo, "model.safetensors");
+    }
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    for repo in ["owner/one", "owner/two", "owner/three"] {
+        let requirements = vec![requirement(repo, "model.safetensors")];
+        assert_eq!(
+            resolve_model_availability(&data, &library, &requirements, true, &[]).availability,
+            ModelAvailability::InstalledExternalUnavailable,
+            "a complete decoy at the bound path is still refused without confirmation"
+        );
+    }
+    assert_eq!(store.load().unwrap(), before);
+    assert_eq!(
+        store
+            .replace_binding(&temp.path().join("absent"))
+            .unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::NotADirectory)
+    );
+    assert_eq!(store.load().unwrap(), before);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Download-driven re-bind. A SceneWorks download that completes into the bound LOCATION while a
+// different physical directory occupies it is the proof the binding was missing: the user is
+// re-downloading into their reformatted drive. Before this, downloads only wrote receipts, so even
+// the model just downloaded stayed blocked as "on a different model library".
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_completed_download_into_the_reformatted_library_rebinds_it() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let receipt_three = receipt_bytes(&data, "owner/three");
+
+    // The user re-downloads `owner/one` through SceneWorks into the configured library.
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    let one = vec![requirement("owner/one", "model.safetensors")];
+    let plan = store
+        .rebind_after_completed_download(&library, &one)
+        .unwrap()
+        .expect("the completed download re-binds the reformatted library");
+    assert_eq!(plan.retained_repositories, ["owner/one"]);
+    assert_eq!(plan.demoted_repositories, ["owner/three", "owner/two"]);
+    let after = store.load().unwrap().unwrap();
+    assert_ne!(Some(after.clone()), before);
+    assert_eq!(
+        after.canonical_path,
+        std::fs::canonicalize(&library).unwrap()
+    );
+
+    // The downloaded model is ready; the wiped ones are not-installed (download reachable again).
+    assert_eq!(
+        resolve_model_availability(&data, &library, &one, true, &[]).availability,
+        ModelAvailability::ExternalReady
+    );
+    for (repo, receipt_backed) in [("owner/two", false), ("owner/three", true)] {
+        let requirements = vec![requirement(repo, "model.safetensors")];
+        assert_eq!(
+            resolve_model_availability(&data, &library, &requirements, receipt_backed, &[])
+                .availability,
+            ModelAvailability::Incomplete,
+            "{repo}"
+        );
+    }
+    assert_eq!(receipt_bytes(&data, "owner/three"), receipt_three);
+    assert!(store
+        .validated_closures()
+        .unwrap()
+        .contains(&canonical_requirement_closure(&one)));
+
+    // A second download into the now-bound library is a no-op.
+    seed_snapshot(&library, "owner/two", "model.safetensors");
+    let two = vec![requirement("owner/two", "model.safetensors")];
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &two)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), Some(after));
+}
+
+/// The re-bind is narrow: only the bound LOCATION, only on an identity mismatch, and only when the
+/// downloaded closure is really on disk. Everything else leaves the binding exactly as it was.
+#[test]
+fn a_completed_download_rebinds_only_the_bound_location_with_the_download_present() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let one = vec![requirement("owner/one", "model.safetensors")];
+
+    // The download's bytes are not at the root: no proof, no re-bind.
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+
+    // A download into a DIFFERENT location never moves the library; that is a relocation.
+    let elsewhere = temp.path().join("elsewhere").join("hub");
+    seed_snapshot(&elsewhere, "owner/one", "model.safetensors");
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&elsewhere, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+
+    // The bound library disconnected entirely: nothing to re-bind to.
+    std::fs::remove_dir_all(&library).unwrap();
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), before);
+}
+
+#[test]
+fn a_completed_download_leaves_an_unbound_or_matching_library_alone() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    let one = vec![requirement("owner/one", "model.safetensors")];
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+
+    // No binding yet: the first resolution binds, as it always has.
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), None);
+
+    // Bound and available: nothing changes, not even `bound_at`.
+    store.bind_or_probe_validated(&library, &one).unwrap();
+    let bound = store.load().unwrap();
+    assert_eq!(
+        store
+            .rebind_after_completed_download(&library, &one)
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.load().unwrap(), bound);
+}
+
+/// The confirmation is a snapshot: if the library changes while it is open (here, another model is
+/// wiped), adopting under the approved plan refuses with the NEW plan and writes nothing, so the
+/// operator re-confirms instead of authorising a demotion they were never shown.
+#[test]
+fn a_replacement_refuses_when_the_library_changed_since_it_was_approved() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf").join("hub");
+    bind_then_reformat(&data, &library);
+    seed_snapshot(&library, "owner/one", "model.safetensors");
+    seed_snapshot(&library, "owner/two", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let before = store.load().unwrap();
+    let closures_before = store.validated_closures().unwrap();
+    let approved = store.validate_replacement(&library).unwrap();
+    assert_eq!(approved.demoted_repositories, ["owner/three"]);
+
+    std::fs::remove_dir_all(library.join("models--owner--two")).unwrap();
+    let changed = match store
+        .replace_binding_approved(&library, &approved)
+        .unwrap_err()
+    {
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::ReplacementPlanChanged {
+            plan,
+        }) => plan,
+        other => panic!("expected a changed-plan refusal, got {other:?}"),
+    };
+    assert_eq!(changed.demoted_repositories, ["owner/three", "owner/two"]);
+    assert_eq!(store.load().unwrap(), before);
+    assert_eq!(store.validated_closures().unwrap(), closures_before);
+    assert_eq!(
+        store
+            .validate_replacement_approved(&library, &approved)
+            .unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::ReplacementPlanChanged {
+            plan: changed.clone(),
+        })
+    );
+
+    // Re-confirming the plan actually shown now succeeds.
+    let (_, applied) = store.replace_binding_approved(&library, &changed).unwrap();
+    assert_eq!(applied, changed);
+}

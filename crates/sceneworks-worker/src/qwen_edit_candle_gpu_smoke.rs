@@ -173,6 +173,7 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         lightning: false,
         stage_residency: false,
         memory: None,
+        pag: None,
         cancel: cancel.clone(),
         preview: PreviewSink::new(move |frame: PreviewFrame| {
             sink_frames.lock().expect("preview frames").push(frame);
@@ -460,6 +461,7 @@ fn qwen_edit_warm_reclaim_gpu_smoke() {
             lightning: false,
             stage_residency: false,
             memory: None,
+            pag: None,
             cancel: CancelFlag::new(),
             // Deliberately INERT here (sc-16962): this smoke measures VRAM occupancy across a
             // load/drop/reload cycle, and the projection's transient allocation would perturb the very

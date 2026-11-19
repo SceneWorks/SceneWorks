@@ -116,3 +116,30 @@ it("reaches unmounted rows through keyboard boundaries and retains focus while r
   expect(caption(0)).toBeNull();
   expect(container.textContent).toContain("Every image has a caption.");
 });
+
+it("submits the selected Loop caption tier and keeps training caption modes", async () => {
+  const dataset = context.trainingDatasets[0];
+  const createTrainingDatasetCaptionJob = vi.fn(async () => ({ id: "caption-job" }));
+  const updateTrainingDataset = vi.fn(async () => dataset);
+  await render({ ...context, updateTrainingDataset, createTrainingDatasetCaptionJob,
+    models: [{ id: "vision_sensenova_loop_9b", name: "SenseNova-Loop-9B", variants: [
+      { variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" },
+    ] }],
+  });
+  const button = (text) => [...document.body.querySelectorAll("button")].find((node) => node.textContent.trim() === text);
+  const select = async (label, value) => act(async () => {
+    const control = [...document.body.querySelectorAll("label")]
+      .find((node) => node.firstChild.textContent.trim() === label).querySelector("select");
+    control.value = value;
+    control.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => button("Caption all").click());
+  await select("Method", "sensenova_loop");
+  await select("Tier", "q8");
+  await select("Mode", "subjectOnly");
+  await act(async () => button("Caption missing").click());
+  expect(createTrainingDatasetCaptionJob).toHaveBeenCalledWith(dataset.id, expect.objectContaining({
+    captioner: "sensenova_loop", modelNameOrPath: "sensenova/SenseNova-Loop-9B",
+    variant: "q8", mode: "subjectOnly", options: expect.objectContaining({ captionPrompt: "" }),
+  }));
+});

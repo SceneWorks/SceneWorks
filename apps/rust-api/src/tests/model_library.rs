@@ -814,3 +814,213 @@ async fn a_worker_published_promotion_reaches_catalog_availability_without_a_res
         "the row must name the local copy it resolved: {body}"
     );
 }
+
+/// Bind `owner/model` and `owner/other` (both receipt-backed) on the configured library, then
+/// "reformat" it in place: the original directory is moved aside and an empty one takes its path,
+/// which is a different physical directory at the same configured location.
+fn install_then_reformat_in_place(data_dir: &Path) -> PathBuf {
+    let hub = isolated_hub(data_dir);
+    let store = ExternalLibraryBindingStore::new(data_dir).expect("binding store");
+    for repository in ["owner/model", "owner/other"] {
+        seed_snapshot(&hub, repository);
+        write_receipt_for_model(data_dir, repository, repository);
+        store
+            .bind_or_probe_validated(&hub, &[requirement(repository)])
+            .expect("library binds while connected");
+    }
+    std::fs::rename(&hub, data_dir.join("pre-format-volume")).expect("old volume moves aside");
+    std::fs::create_dir_all(&hub).expect("reformatted library creates");
+    hub
+}
+
+/// The reformatted-drive dead end, end to end at the wire. The strict relocation of the configured
+/// library is refused naming the wiped model; a dry run with `acceptMissingModels` returns the plan
+/// the dialog must show (which models need re-downloading) and writes nothing; the confirmed adopt
+/// re-binds the SAME location without a restart, after which the library probes available.
+#[tokio::test]
+async fn a_reformatted_library_is_adopted_in_place_only_after_a_confirmed_replacement() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let hub = install_then_reformat_in_place(&data_dir);
+    // Only `owner/model` was re-downloaded onto the reformatted drive.
+    seed_snapshot(&hub, "owner/model");
+    let store = ExternalLibraryBindingStore::new(&data_dir).expect("binding store");
+    let before = store.load().expect("binding reads");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, body) = request(app.clone(), "GET", "/api/v1/model-library", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["available"], false);
+    assert_eq!(body["probeStatus"], "identity_mismatch");
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": hub.to_string_lossy(), "dryRun": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "missing_installed_models");
+    assert_eq!(body["context"]["repositories"], json!(["owner/other"]));
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": hub.to_string_lossy(), "dryRun": true, "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["adopted"], false);
+    assert_eq!(body["restartRequired"], false);
+    assert_eq!(
+        body["replacement"]["retainedRepositories"],
+        json!(["owner/model"])
+    );
+    assert_eq!(
+        body["replacement"]["demotedRepositories"],
+        json!(["owner/other"])
+    );
+    assert_eq!(
+        store.load().expect("binding reads"),
+        before,
+        "a dry run writes nothing"
+    );
+    let approved = body["replacement"].clone();
+
+    // A confirmed adopt must name the plan that was shown, and a stale plan is refused with the
+    // current one so the dialog can re-confirm.
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": hub.to_string_lossy(), "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let mut stale = approved.clone();
+    stale["demotedRepositories"] = json!([]);
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({
+            "path": hub.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": stale,
+        }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "replacement_plan_changed");
+    assert_eq!(body["context"]["plan"], approved);
+    assert_eq!(store.load().expect("binding reads"), before);
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({
+            "path": hub.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": approved,
+        }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["adopted"], true);
+    assert_eq!(body["restartRequired"], false);
+    assert_eq!(
+        body["replacement"]["demotedRepositories"],
+        json!(["owner/other"])
+    );
+    assert_ne!(store.load().expect("binding reads"), before);
+
+    let (status, body) = request(app.clone(), "GET", "/api/v1/model-library", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["available"], true,
+        "the re-bind takes effect without a restart"
+    );
+}
+
+/// A library emptied in place (nothing re-downloaded yet) has no `models--*` layout. Picking it is
+/// still answered with the actionable `missing_installed_models` refusal (every recorded model)
+/// rather than "not a model library", so the dialog can offer the confirmed replacement, while a
+/// layout-less folder that is NOT the configured library keeps its typed refusal.
+#[tokio::test]
+async fn an_emptied_configured_library_offers_replacement_but_an_unrelated_folder_does_not() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let hub = install_then_reformat_in_place(&data_dir);
+    let app = create_app(settings).expect("app creates");
+
+    // Picked as the cache home (the folder containing `hub`), the way the folder picker usually is.
+    let home = hub.parent().expect("hub has a home").to_path_buf();
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": home.to_string_lossy(), "dryRun": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "missing_installed_models");
+    assert_eq!(
+        body["context"]["repositories"],
+        json!(["owner/model", "owner/other"])
+    );
+
+    let (status, plan) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": home.to_string_lossy(), "dryRun": true, "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({
+            "path": home.to_string_lossy(),
+            "acceptMissingModels": true,
+            "approvedReplacement": plan["replacement"],
+        }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["adopted"], true);
+    assert!(body["libraryRoot"]
+        .as_str()
+        .is_some_and(|root| Path::new(root) == hub));
+
+    let unrelated = temp_dir.path().join("holiday-photos");
+    std::fs::create_dir_all(&unrelated).expect("unrelated dir creates");
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": unrelated.to_string_lossy(), "acceptMissingModels": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "not_a_model_library");
+}

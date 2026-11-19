@@ -389,7 +389,7 @@ jobs:
         run: python3 -I scripts/ci/moss-training-acceptance/prepare_dataset.py --manifest scripts/ci/moss-training-acceptance/campaign.json --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset"
       - name: Preserve fixed dataset bytes shared by all eight cells
         if: ${{ always() && steps.select.outputs.enabled == 'true' && (steps.select.outputs.phase == 'capture' || steps.select.outputs.phase == 'bounded-product') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: moss-dataset
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset/
@@ -511,7 +511,9 @@ jobs:
     permissions:
       contents: read
     outputs:
+      suite: ${{ steps.select.outputs.suite }}
       options: ${{ steps.select.outputs.options }}
+      pag_options: ${{ steps.select.outputs.pag_options }}
     steps:
       # Full history of every branch, commits only (treeless), so the trusted-ref rule can ask
       # `git merge-base --is-ancestor` without downloading trees or blobs.
@@ -530,9 +532,19 @@ jobs:
           node --input-type=module <<'JS'
           import {appendFileSync} from 'node:fs';
           import {assertTrustedShas,dispatchOptions} from './scripts/tier2-ab.mjs';
-          const options=dispatchOptions(JSON.parse(process.env.SELECTORS),process.env.DISPATCH_SHA);
-          console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
-          appendFileSync(process.env.GITHUB_OUTPUT,'options='+JSON.stringify(options)+'\n');
+          import {dispatchPagAcceptanceOptions} from './scripts/pag-acceptance.mjs';
+          const parsed=JSON.parse(process.env.SELECTORS);
+          const rawOpts=JSON.parse(parsed.moss_options_json || '{}');
+          if (rawOpts && typeof rawOpts === 'object' && !Array.isArray(rawOpts) && rawOpts.suite === 'pag-acceptance') {
+            const pagOptions=dispatchPagAcceptanceOptions(parsed,process.env.DISPATCH_SHA);
+            console.log(JSON.stringify(assertTrustedShas({source_sha:pagOptions.source_sha},{cwd:process.cwd()})));
+            const inert={base_sha:'',head_sha:'',backend:'none',routes:'',hubs:'',inference_sha:'',preflight_only:true};
+            appendFileSync(process.env.GITHUB_OUTPUT,'suite=pag-acceptance\noptions='+JSON.stringify(inert)+'\npag_options='+JSON.stringify(pagOptions)+'\n');
+          } else {
+            const options=dispatchOptions(parsed,process.env.DISPATCH_SHA);
+            console.log(JSON.stringify(assertTrustedShas({base_sha:options.base_sha,head_sha:options.head_sha},{cwd:process.cwd()})));
+            appendFileSync(process.env.GITHUB_OUTPUT,'suite=tier2-ab\noptions='+JSON.stringify(options)+'\npag_options={}\n');
+          }
           JS
   tier2-ab:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' }}
@@ -552,6 +564,23 @@ jobs:
       hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).hubs }}
       inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).inference_sha }}
       preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).preflight_only }}
+  pag-acceptance:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'tier2-ab' && needs.tier2-ab-selector.outputs.suite == 'pag-acceptance' }}
+    needs: [moss-selector-preflight, tier2-ab-selector]
+    permissions:
+      contents: read
+    # SW-7182 (feature SW-F371): end-to-end 6-family PAG real-weight acceptance over the production
+    # API/worker path. Evidence artifact only: no catalog walk, branch, push or PR.
+    uses: ./.github/workflows/pag-acceptance.yml
+    with:
+      source_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).source_sha }}
+      backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).backend }}
+      routes: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).routes }}
+      hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).hubs }}
+      inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).inference_sha }}
+      preflight_only: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).preflight_only }}
+      stage_missing: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).stage_missing }}
+      runner_target: ${{ fromJSON(needs.tier2-ab-selector.outputs.pag_options).runner_target }}
   qwen-app-lifecycle:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     needs: moss-selector-preflight
@@ -634,7 +663,7 @@ jobs:
         id: branch
         run: bash scripts/ci/memory-catalog/branch.sh
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       # No `npm ci`: every script this campaign runs imports only node built-ins and sibling
@@ -757,7 +786,7 @@ jobs:
 
       - name: Upload the campaign work dir
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.campaign }}-mlx-campaign-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/
@@ -882,7 +911,7 @@ jobs:
         id: branch
         run: bash scripts/ci/memory-catalog/branch.sh
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -1054,7 +1083,7 @@ jobs:
 
       - name: Upload the campaign work dir
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.campaign }}-candle-campaign-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/

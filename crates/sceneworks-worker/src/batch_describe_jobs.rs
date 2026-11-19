@@ -111,6 +111,7 @@ pub(crate) enum DescribeModel {
     /// The Qwen3.8 27B describer (SW-F365): the Vision Captioner's describing path (same prompt,
     /// JSON-constrained decode, no thinking) over a larger model that comes in tiers.
     Qwen38,
+    Loop,
 }
 
 #[cfg(native_lane)]
@@ -122,10 +123,12 @@ impl DescribeModel {
             None | Some(VISION_CAPTIONER_REPO) => Ok(Self::VisionCaptioner),
             Some(JOYCAPTION_REPO) => Ok(Self::JoyCaption),
             Some(QWEN38_27B_DESCRIBER_REPO) => Ok(Self::Qwen38),
+            Some(sceneworks_core::loop_utility::MODEL_REPO) => Ok(Self::Loop),
             Some(other) => Err(WorkerError::InvalidPayload(format!(
                 "Dataset batch describe does not support model {other:?}; use the Vision Captioner \
                  ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
-                 describer ({QWEN38_27B_DESCRIBER_REPO})."
+                 describer ({QWEN38_27B_DESCRIBER_REPO}), or SenseNova-Loop-9B ({}).",
+                sceneworks_core::loop_utility::MODEL_REPO
             ))),
         }
     }
@@ -135,6 +138,7 @@ impl DescribeModel {
             Self::VisionCaptioner => VISION_CAPTIONER_REPO,
             Self::JoyCaption => JOYCAPTION_REPO,
             Self::Qwen38 => QWEN38_27B_DESCRIBER_REPO,
+            Self::Loop => sceneworks_core::loop_utility::MODEL_REPO,
         }
     }
 
@@ -147,7 +151,7 @@ impl DescribeModel {
     pub(crate) fn speculative(self) -> Option<gen_core::core_llm::Speculative> {
         match self {
             Self::Qwen38 => Some(gen_core::core_llm::Speculative::Auto),
-            Self::VisionCaptioner | Self::JoyCaption => None,
+            Self::VisionCaptioner | Self::JoyCaption | Self::Loop => None,
         }
     }
 
@@ -157,6 +161,7 @@ impl DescribeModel {
             Self::VisionCaptioner => "Vision Captioner",
             Self::JoyCaption => "JoyCaption",
             Self::Qwen38 => "Qwen3.8 27B describer",
+            Self::Loop => sceneworks_core::loop_utility::MODEL_NAME,
         }
     }
 
@@ -165,7 +170,7 @@ impl DescribeModel {
     /// Qwen3.8 27B describer is a Vision Captioner-class describer and uses the slot contract.
     pub(crate) fn output_section(self) -> &'static str {
         match self {
-            Self::VisionCaptioner | Self::Qwen38 => "OUTPUT",
+            Self::VisionCaptioner | Self::Qwen38 | Self::Loop => "OUTPUT",
             Self::JoyCaption => "JOYCAPTION_OUTPUT",
         }
     }
@@ -339,51 +344,6 @@ pub(crate) fn qwen38_cached_fit_refusal(
     }
 }
 
-/// The free VRAM (GB) a cold Candle load is checked against. The cached image/video generator is
-/// evicted first (as the depth, training and image admissions do), then `probe_budget` reads the
-/// card, and `refiner_credit_gb` (the weights of a different cached refiner, which the load's own
-/// evict-before-load drops) is added, capped at the card's total. The refiner itself is not
-/// evicted here, so a job this check refuses leaves it resident. A warm tier is reused and needs
-/// no reading, so nothing is evicted for it. The evict and the probe are injected so the order is
-/// testable without a GPU.
-#[cfg(native_lane)]
-#[cfg_attr(
-    not(all(not(target_os = "macos"), feature = "backend-candle")),
-    allow(dead_code)
-)]
-pub(crate) async fn qwen38_free_gb_after_eviction<Evict, Probe>(
-    access: crate::cache_thread::CacheAccess,
-    refiner_credit_gb: f64,
-    evict_generator: impl FnOnce() -> Evict,
-    probe_budget: impl FnOnce() -> Probe,
-) -> WorkerResult<Option<f64>>
-where
-    Evict: std::future::Future<Output = WorkerResult<bool>>,
-    Probe: std::future::Future<Output = WorkerResult<Option<crate::fit_gate::VramBudget>>>,
-{
-    if access == crate::cache_thread::CacheAccess::Warm {
-        return Ok(None);
-    }
-    if evict_generator().await? {
-        tracing::info!(
-            event = "qwen38_describer_evicted_cached_generator",
-            "Qwen3.8 27B describer admission: evicted the cached generator before reading free VRAM"
-        );
-    }
-    Ok(probe_budget()
-        .await?
-        .map(|budget| crate::fit_gate::with_reclaimable(budget, refiner_credit_gb).free_gb))
-}
-
-/// The weights (GB) a cached refiner at `source` holds: the bytes of its safetensors payload, what
-/// dropping it releases. 0 when it cannot be read, so an unreadable entry is never over-credited.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn cached_refiner_weights_gb(source: &Path) -> f64 {
-    gen_core::core_llm::checkpoint_payload_bytes(source)
-        .map(|bytes| bytes as f64 / (1u64 << 30) as f64)
-        .unwrap_or(0.0)
-}
-
 /// Whether this worker can hold the job's tier, checked before any image.
 ///
 /// MLX: the tier's floor against TOTAL unified memory (the catalog's MLX floors are whole-machine
@@ -394,7 +354,7 @@ fn cached_refiner_weights_gb(source: &Path) -> f64 {
 /// So the refine cache is asked first, without evicting: the same tier resident there is reused
 /// (admitted with no check); a different cached refiner stays resident and its weights are
 /// credited, because the load's own evict-before-load drops it. A cold load evicts the cached
-/// image/video generator before free VRAM is read fresh ([`qwen38_free_gb_after_eviction`]).
+/// image/video generator before free VRAM is read fresh ([`crate::refine_model_cache::refiner_cold_load_free_gb`]).
 #[cfg(native_lane)]
 async fn qwen38_memory_admission(
     settings: &Settings,
@@ -415,25 +375,12 @@ async fn qwen38_memory_admission(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         let (spec, requirements) = vision_describer_load(weights_dir, block_draft);
-        let (access, cached_refiner) =
-            crate::refine_model_cache::refiner_admission_access(&spec, &requirements).await?;
         let needed_gb = qwen38_catalog_entry(payload)
             .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
-        let credit_gb = cached_refiner
-            .as_deref()
-            .map_or(0.0, cached_refiner_weights_gb);
-        let gpu_id = settings.gpu_id.clone();
-        let available_gb = qwen38_free_gb_after_eviction(
-            access,
-            credit_gb,
-            crate::generator_cache::evict_cached_generator,
-            || async move {
-                crate::load_progress::spawn_blocking(move || {
-                    crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
-                })
-                .await
-                .map_err(|error| task_join_error("describer VRAM probe", error))
-            },
+        let (access, available_gb) = crate::refine_model_cache::candle_refiner_budget(
+            &spec,
+            &requirements,
+            &settings.gpu_id,
         )
         .await?;
         qwen38_cached_fit_refusal(access, tier, needed_gb, available_gb)
@@ -1179,7 +1126,14 @@ impl VisionCaptionerDescriber {
         gen_core::core_llm::LoadSpec,
         gen_core::core_llm::ModelRequirements,
     ) {
-        vision_describer_load(&self.weights_dir, self.block_draft.as_ref())
+        let (spec, requirements) =
+            vision_describer_load(&self.weights_dir, self.block_draft.as_ref());
+        let requirements = if self.model == DescribeModel::Loop {
+            crate::loop_utility::requirements()
+        } else {
+            requirements
+        };
+        (spec, requirements)
     }
 }
 
@@ -2036,6 +1990,11 @@ pub(crate) async fn run_dataset_batch_describe_job(
                     .with_block_draft(block_draft),
             )
         }
+        DescribeModel::Loop => Box::new(VisionCaptionerDescriber::new(
+            DescribeModel::Loop,
+            crate::loop_utility::weights_dir(settings, &job.payload).await?,
+            job.id.clone(),
+        )),
         DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
             resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
             job.id.clone(),

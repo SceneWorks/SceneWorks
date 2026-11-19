@@ -1,0 +1,29 @@
+MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License Agreement, Copyright © 2026 MiniMax. All Rights Reserved.
+
+minimax_h3_image_training_adapter_v1.safetensors is a Model Derivative of MiniMax-H3-Image: a LoRA-format training adapter trained by ostris (ai-toolkit) on the MiniMax-H3-Image weights. It modifies MiniMax-H3-Image when applied.
+
+--------------------------------------------------------------------------
+
+The repository the adapter is published in, ostris/minimax_h3_training_adapter
+(revision e4e119caa391053286145e48ebbaf0e0c00293d3), carries no NOTICE or
+LICENSE file of its own. The two lines above are the notice Section III.4 of
+the MiniMax-H3-Image Community License Agreement calls for, written by
+SceneWorks for this Model Derivative; everything below is SceneWorks' own
+attribution context.
+
+Powered by MiniMax-H3-Image.
+
+This notice covers ostris' MiniMax-H3-Image de-distill training adapter, a
+rank-16 LoRA (ComfyUI keys, over the attention and MLP of the 50 DiT blocks and
+the 2 token-refiner blocks) — the assistant LoRA ai-toolkit's own
+minimax_h3_image training applies. SceneWorks applies it to MiniMax-H3-Image
+only while training a LoRA on it, at strength 1.0, and removes it for previews
+and generation. It is a Model Derivative of MiniMax-H3-Image and is governed by
+the MiniMax-H3-Image Community License Agreement, which ships with the
+MiniMax-H3-Image licence entry under About -> Licenses. LoRAs trained against
+it are Model Derivatives of MiniMax-H3-Image too, and inherit the same
+Agreement.
+
+SceneWorks does not ship the adapter in the application and does not re-host
+it. On first use it downloads the unmodified file directly from the upstream
+repository at the pinned revision above.
