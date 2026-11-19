@@ -58,6 +58,35 @@
 - For this repository, create pull requests with authenticated `gh pr create` directly.
 - Do not try the GitHub connector PR creation first; it repeatedly fails with `Resource not accessible by integration` and then requires falling back to `gh` anyway.
 
+## Code Review Rules
+
+- Trace changed behavior from its normal entry points through affected callers
+  and contracts. Check existing inputs, saved data, and failure and retry paths.
+  If an important regression lacks coverage, name the specific case a test
+  should exercise.
+- Check for an existing shared implementation before accepting a new code path.
+  Flag copied logic, parallel implementations, and fixes applied to only one
+  caller when the shared implementation can handle the same behavior. Cite the
+  existing path and explain what could diverge if both paths remain.
+- For model changes, check that the model uses the shared paths for request
+  validation, routing, weight downloads and loading, job lifecycle, and error
+  handling wherever those paths apply. Put model-specific behavior behind the
+  existing interfaces. If a shared path lacks required behavior, prefer extending
+  it. A separate path needs a concrete model or backend constraint and should
+  keep the common parts in shared code.
+- Check that changes respect module boundaries and keep a single owner for
+  shared state. Flag obsolete branches or fallbacks left by the change when
+  they can send callers through stale behavior or obscure the active path.
+- Check affected trust boundaries. Flag missing authorization, unchecked paths
+  or URLs used for file or network access, secrets written to logs, and invalid
+  inputs that bypass shared validation.
+- Check the cost of changed hot paths and resource use. Flag repeated weight
+  reads, hashes, or downloads, blocking I/O in async code, unnecessary copies
+  of large buffers, and unbounded concurrency when they have a concrete impact.
+- Tie each finding to a changed line. Explain the concrete failure or maintenance
+  risk and suggest the smallest practical fix. Match severity to impact and
+  state what would verify any material uncertainty.
+
 ## SceneWorks runner discovery
 
 For SceneWorks, inference, and ChatWorks, discover the live Actions pool rather than using a remembered runner count. Query both registration scopes with pagination:
