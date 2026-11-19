@@ -16,6 +16,8 @@ const SCENES: [(&str, &str, [u8; 3]); 2] = [
     ("circle.png", "red", [218, 20, 30]),
     ("square.png", "blue", [20, 40, 220]),
 ];
+const SUBJECT_PORTRAIT: &[u8] =
+    include_bytes!("../../../../crates/sceneworks-memory-adapter/fixtures/pulid-reference.png");
 
 const PUBLISHER: &str =
     include_str!("../../../../scripts/fixtures/sensenova-loop-9b-publisher.json");
@@ -148,6 +150,30 @@ fn grounded(text: &str, index: usize) -> bool {
     };
     words.contains(&SCENES[index].1) && shapes.iter().any(|shape| words.contains(shape))
 }
+
+fn describes_portrait_subject(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<_> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+    let has = |choices: &[&str]| choices.iter().any(|word| words.contains(word));
+    let described_clothing = has(&[
+        "blouse", "dress", "top", "shirt", "sleeve", "sleeves", "garment",
+    ]) && has(&[
+        "white",
+        "cream",
+        "ivory",
+        "beige",
+        "pale",
+        "light",
+        "embroidered",
+        "embroidery",
+        "beaded",
+        "lace",
+    ]);
+    let described_earring = has(&["earring", "earrings"])
+        && has(&["pearl", "stud", "studs", "small", "white", "silver"]);
+    text.starts_with("loopshape") && (described_clothing || described_earring)
+}
+
 fn scene_png(index: usize) -> Result<Vec<u8>> {
     let image = image::RgbImage::from_fn(384, 256, |x, y| {
         let dx = x.abs_diff(192);
@@ -650,7 +676,6 @@ pub(super) async fn exercise(
         )?;
     }
 
-    let caption_route = format!("{dataset_route}/caption-jobs");
     let progress_route = format!("/api/v1/jobs/{}/progress", field(&training, "id")?);
     let updates: Vec<Value> = ledger
         .rows
@@ -678,7 +703,46 @@ pub(super) async fn exercise(
         )?;
     }
     save(root, "caption-progress.json", &json!(updates))?;
-    let body = |mode: &str| json!({"captioner":"sensenova_loop","modelNameOrPath":MODEL,"variant":tier,"itemIds":[dataset["items"][0]["id"]],"mode":mode,"triggerWords":["loopshape"]});
+    // The subject-only contract describes a person's changeable appearance. Keep the
+    // two geometric fixtures for the matched cold batch and use an existing portrait here.
+    let filename = "subject-portrait.png";
+    let uploaded = api
+        .upload(
+            &format!("{project_route}/training/uploads"),
+            filename,
+            "image/png",
+            SUBJECT_PORTRAIT,
+        )
+        .await?;
+    let subject_dataset = api
+        .json(
+            "POST",
+            &datasets,
+            json!({
+                "name": "SenseNova subject caption acceptance",
+                "modality": "image",
+                "items": [{
+                    "path": field(&uploaded["file"], "path")?,
+                    "displayName": filename,
+                    "width": 1024,
+                    "height": 1024,
+                }],
+            }),
+        )
+        .await?;
+    let subject_route = format!("{datasets}/{}", field(&subject_dataset, "id")?);
+    let caption_route = format!("{subject_route}/caption-jobs");
+    let subject_item = field(&subject_dataset["items"][0], "id")?;
+    let body = |mode: &str| {
+        json!({
+            "captioner": "sensenova_loop",
+            "modelNameOrPath": MODEL,
+            "variant": tier,
+            "itemIds": [subject_item],
+            "mode": mode,
+            "triggerWords": ["loopshape"],
+        })
+    };
     let subject_job = api
         .json("POST", &caption_route, body("subjectOnly"))
         .await?;
@@ -691,11 +755,13 @@ pub(super) async fn exercise(
         "caption-subject",
     )
     .await?;
-    let before_cancel = api.json("GET", &dataset_route, Value::Null).await?;
+    let before_cancel = api.json("GET", &subject_route, Value::Null).await?;
+    let caption = &before_cancel["items"][0]["caption"];
+    save(root, "subject-only-caption.json", caption)?;
     require(
         subject["result"]["mode"] == "subjectOnly"
             && subject["result"]["variant"] == tier
-            && grounded(field(&before_cancel["items"][0]["caption"], "text")?, 0),
+            && describes_portrait_subject(field(caption, "text")?),
         "subject-only result lost its mode, tier or subject",
     )?;
     let canceled_job = api
@@ -724,7 +790,7 @@ pub(super) async fn exercise(
                 .as_str()
                 .is_some_and(|p| p.ends_with("/caption-sidecars"))
     });
-    let after_cancel = api.json("GET", &dataset_route, Value::Null).await?;
+    let after_cancel = api.json("GET", &subject_route, Value::Null).await?;
     require(
         !wrote_sidecars
             && before_cancel["items"] == after_cancel["items"]
@@ -743,7 +809,7 @@ pub(super) async fn exercise(
         "caption-trigger-only",
     )
     .await?;
-    let updated = api.json("GET", &dataset_route, Value::Null).await?;
+    let updated = api.json("GET", &subject_route, Value::Null).await?;
     require(
         trigger["result"]["mode"] == "triggerOnly"
             && trigger["result"].get("modelNameOrPath").is_none()
@@ -842,6 +908,25 @@ pub(super) async fn exercise(
         }
     }
     Ok(())
+}
+
+#[test]
+fn subject_only_evidence_requires_a_portrait_attribute_and_trigger() {
+    let portrait = image::load_from_memory(SUBJECT_PORTRAIT).unwrap();
+    assert_eq!((portrait.width(), portrait.height()), (1024, 1024));
+    assert!(describes_portrait_subject(
+        "loopshape, wearing a cream embroidered blouse."
+    ));
+    assert!(describes_portrait_subject(
+        "loopshape, wearing a small pearl earring."
+    ));
+    assert!(!describes_portrait_subject(
+        "loopshape, no caption can be provided, as the image contains no people."
+    ));
+    assert!(!describes_portrait_subject(
+        "loopshape, a centered red disc."
+    ));
+    assert!(!describes_portrait_subject("Wearing a cream blouse."));
 }
 
 #[test]
