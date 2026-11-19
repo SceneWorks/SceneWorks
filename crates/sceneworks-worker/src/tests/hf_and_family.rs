@@ -327,6 +327,109 @@ fn download_family_check_proceeds_for_derived_family_base_architecture() {
     ));
 }
 
+/// Like [`write_safetensors_with_keys`] but with caller-supplied `__metadata__`.
+fn write_safetensors_with_metadata_and_keys(path: &std::path::Path, metadata: Value, keys: &[String]) {
+    let mut header = serde_json::Map::new();
+    header.insert("__metadata__".to_owned(), metadata);
+    for key in keys {
+        header.insert(
+            key.clone(),
+            json!({"dtype": "BF16", "shape": [1], "data_offsets": [0, 0]}),
+        );
+    }
+    let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("serialize header");
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    std::fs::write(path, buffer).expect("write safetensors");
+}
+
+#[test]
+fn download_family_check_proceeds_for_training_adapter_lora_over_its_base() {
+    // Regression: downloading the catalog's `zimage_turbo_training_adapter_v1/v2` failed with
+    // "Downloaded model files appear to be z-image, but the catalog declared family
+    // zimage_training_adapter". The adapter is a LoRA over Z-Image's DiT and is stamped as one.
+    //
+    // Fixtures mirror the real pinned headers. ostris/zimage_turbo_training_adapter@654cd1bf
+    // (v2): ai-toolkit metadata whose `ss_base_model_version: "zimage"` is what detection keys
+    // on, over 30 `diffusion_model.layers.{i}` blocks.
+    let mut zimage_keys = Vec::new();
+    for layer in 0..30 {
+        for module in [
+            "adaLN_modulation.0",
+            "attention.to_q",
+            "attention.to_k",
+            "attention.to_v",
+            "attention.to_out.0",
+            "feed_forward.w1",
+            "feed_forward.w2",
+            "feed_forward.w3",
+        ] {
+            for half in ["lora_A", "lora_B"] {
+                zimage_keys.push(format!(
+                    "diffusion_model.layers.{layer}.{module}.{half}.weight"
+                ));
+            }
+        }
+    }
+    let zimage_dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_metadata_and_keys(
+        &zimage_dir
+            .path()
+            .join("zimage_turbo_training_adapter_v2.safetensors"),
+        json!({
+            "name": "zimage_turbo_training_adapter",
+            "version": "1.0",
+            "ss_output_name": "zimage_turbo_training_adapter",
+            "format": "pt",
+            "software": "{\"name\": \"ai-toolkit\", \"repo\": \"https://github.com/ostris/ai-toolkit\", \"version\": \"0.7.7\"}",
+            "ss_base_model_version": "zimage"
+        }),
+        &zimage_keys,
+    );
+    assert!(matches!(
+        check_downloaded_model_family(
+            Some("zimage_training_adapter".to_owned()),
+            zimage_dir.path()
+        ),
+        DownloadFamilyCheck::Proceed
+    ));
+    // The adapter family is tied to its own base: Z-Image adapter weights do not satisfy the
+    // MiniMax-H3-Image adapter family.
+    match check_downloaded_model_family(
+        Some("minimax_h3_image_training_adapter".to_owned()),
+        zimage_dir.path(),
+    ) {
+        DownloadFamilyCheck::Mismatch(mismatch) => assert_eq!(mismatch.detected, "z-image"),
+        other => panic!("expected a family mismatch, got {other:?}"),
+    }
+
+    // ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter@f1a45475: kohya keys over 50
+    // `lora_unet_blocks_{i}` and no family stamp. It must keep downloading.
+    let mut minimax_keys = Vec::new();
+    for block in 0..50 {
+        for module in ["attn_qkv_proj", "attn_out_proj", "mlp_fc1", "mlp_fc2"] {
+            for suffix in ["alpha", "lora_down.weight", "lora_up.weight"] {
+                minimax_keys.push(format!("lora_unet_blocks_{block}_{module}.{suffix}"));
+            }
+        }
+    }
+    let minimax_dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_metadata_and_keys(
+        &minimax_dir
+            .path()
+            .join("fizgig_minimax_h3_image_training_adapter.safetensors"),
+        json!({"revision_id": "c8cc830d806f44b6b6bf2f0cd1135a53"}),
+        &minimax_keys,
+    );
+    assert!(matches!(
+        check_downloaded_model_family(
+            Some("minimax_h3_image_training_adapter".to_owned()),
+            minimax_dir.path()
+        ),
+        DownloadFamilyCheck::Proceed
+    ));
+}
+
 #[tokio::test]
 async fn finalize_converted_dir_promotes_atomically_and_replaces_stale() {
     let temp = tempdir().expect("tempdir creates");
