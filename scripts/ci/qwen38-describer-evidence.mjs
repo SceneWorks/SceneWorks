@@ -21,16 +21,21 @@ const SPECS_FILE = fileURLToPath(new URL('../../config/manifests/registry/specs.
 
 // Each tier's pinned snapshot on the Candle lane, read from the compiled catalog (the source the
 // worker's catalog reads): the repository, its pinned revision, and the weights folder relative to
-// the hub cache (`models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier).
+// the hub cache (`models--<repo>/snapshots/<revision>`, then for a quantised tier the folder its
+// row's files name, e.g. `q4-full/`, the folder the worker loads).
 export function pinnedSnapshots(specs = JSON.parse(readFileSync(SPECS_FILE, 'utf8'))) {
   const rows = specs?.[CATALOG_ID]?.product?.downloads ?? [];
   return Object.freeze(Object.fromEntries(TIERS.map((tier) => {
     const repo = tier === 'bf16' ? UPSTREAM_REPO : REHOST_REPO;
     const matches = rows.filter((row) => row.repo === repo && row.variant === tier);
     assert.equal(matches.length, 1, `the catalog has one ${repo} ${tier} row`);
-    const { revision } = matches[0];
+    const { revision, files } = matches[0];
     assert.match(String(revision), /^[a-f0-9]{40}$/, `the catalog pins ${repo} ${tier} to an exact revision`);
-    const relativeDir = [`models--${repo.replace('/', '--')}`, 'snapshots', revision, ...(tier === 'bf16' ? [] : [tier])].join('/');
+    const folders = new Set((files ?? []).map((file) => String(file).split('/').slice(0, -1).join('/')));
+    assert.equal(folders.size, 1, `the catalog's ${repo} ${tier} row names one folder`);
+    const [folder] = folders;
+    assert.equal(folder === '', tier === 'bf16', `only full precision loads from the ${repo} snapshot root`);
+    const relativeDir = [`models--${repo.replace('/', '--')}`, 'snapshots', revision, ...(folder ? [folder] : [])].join('/');
     return [tier, Object.freeze({ repo, revision, relativeDir })];
   })));
 }

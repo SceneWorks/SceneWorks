@@ -45729,10 +45729,10 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000003",
         "variant": "q8",
         "files": [
-          "q8/*"
+          "q8-full/*"
         ],
         "platforms": [
           "macos"
@@ -45745,10 +45745,10 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000004",
         "variant": "q8",
         "files": [
-          "candle-q8/*"
+          "candle-q8-full/*"
         ],
         "platforms": [
           "windows",
@@ -45762,10 +45762,10 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000003",
         "variant": "q4",
         "files": [
-          "q4/*"
+          "q4-full/*"
         ],
         "platforms": [
           "macos"
@@ -45778,10 +45778,10 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+        "revision": "7202000000000000000000000000000000000004",
         "variant": "q4",
         "files": [
-          "candle-q4/*"
+          "candle-q4-full/*"
         ],
         "platforms": [
           "windows",

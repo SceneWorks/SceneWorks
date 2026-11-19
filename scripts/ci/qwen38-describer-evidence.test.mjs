@@ -70,7 +70,8 @@ for (const [name, mutate, tier] of [
   ['another cached revision', (copy) => { copy.revision = 'b'.repeat(40); }, 'q4'],
   ['a quantised tier from the upstream repository', (copy) => { copy.repo = UPSTREAM_REPO; }, 'q4'],
   ['a weights folder outside the pinned snapshot', (copy) => { copy.weights_dir = 'E:\\huggingface\\hub\\fixture'; }, 'q4'],
-  ['a quantised tier at the snapshot root', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4$/, ''); }, 'q4'],
+  ['a quantised tier at the snapshot root', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4-full$/, ''); }, 'q4'],
+  ['a quantised tier in its older plain folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4-full$/, '\\q4'); }, 'q4'],
   ['missing wall time', (copy) => { delete copy.wall_seconds; }, 'q4'],
   ['missing peak memory', (copy) => { delete copy.gpu_memory.peak_mib; }, 'q4'],
   ['a peak that was never sampled', (copy) => { copy.gpu_memory.peak_mib = 0; }, 'q4'],
@@ -87,7 +88,7 @@ test('each tier pins its own repository, revision and weights folder from the ca
   for (const tier of ['q4', 'q8']) {
     assert.equal(PINNED[tier].repo, REHOST_REPO);
     assert.equal(PINNED[tier].relativeDir,
-      `models--SceneWorks--qwen3.8-27b-abliterated-candle/snapshots/${PINNED[tier].revision}/${tier}`);
+      `models--SceneWorks--qwen3.8-27b-abliterated-candle/snapshots/${PINNED[tier].revision}/${tier}-full`);
   }
   assert.equal(PINNED.bf16.repo, UPSTREAM_REPO);
   assert.equal(PINNED.bf16.relativeDir, `models--huihui-ai--Huihui-Qwen3.8-27B-abliterated/snapshots/${PINNED.bf16.revision}`);

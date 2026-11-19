@@ -548,9 +548,15 @@ mod tests {
         assert!(!is_pending_artifact_download(&nvfp4));
         for tier in ["bf16", "q8", "q4"] {
             let row = model_download_for_variant(&value, tier).expect("converted row");
-            // bf16 is still unpublished; the macOS q8/q4 packs are pinned to the hub revision.
+            // bf16 is still unpublished; the macOS q8/q4 rows are the fully quantized `q8-full/` /
+            // `q4-full/` packs (SW-7202) pinned to their publication revision.
             assert_eq!(is_pending_artifact_download(&row), tier == "bf16", "{tier}");
-            assert_eq!(row_tier_subdir(&row).as_deref(), Some(tier));
+            let expected = if tier == "bf16" {
+                tier.to_owned()
+            } else {
+                format!("{tier}-full")
+            };
+            assert_eq!(row_tier_subdir(&row).as_deref(), Some(expected.as_str()));
         }
         // The engine's pinned revision is the catalog's, for the weights and the prompts alike.
         assert_eq!(pe::REPO, PE_REPO);
@@ -592,14 +598,14 @@ mod tests {
             }
         }
         let tier_snapshot = snapshot(data.path(), "SceneWorks/minimax-h3-image-pe", published);
-        std::fs::create_dir_all(tier_snapshot.join("q8")).unwrap();
-        std::fs::write(tier_snapshot.join("q8").join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(tier_snapshot.join("q8-full")).unwrap();
+        std::fs::write(tier_snapshot.join("q8-full").join("config.json"), "{}").unwrap();
         let upstream = snapshot(data.path(), PE_REPO, PE_REVISION);
         synthetic_prompt_tree(&upstream);
 
         let dirs =
             resolve_dirs_for_os(&settings(data.path()), &entry, None, None, "macos").unwrap();
-        assert_eq!(dirs.weights, tier_snapshot.join("q8"));
+        assert_eq!(dirs.weights, tier_snapshot.join("q8-full"));
         assert_eq!(dirs.prompt_root, upstream);
         assert_eq!(dirs.tier, Some("q8"));
         // The converted tier never carries `prompt/` of its own.
@@ -612,9 +618,9 @@ mod tests {
     #[test]
     fn each_host_os_resolves_its_own_layout_of_a_converted_tier() {
         for (os, q8_dir) in [
-            ("macos", "q8"),
-            ("windows", "candle-q8"),
-            ("linux", "candle-q8"),
+            ("macos", "q8-full"),
+            ("windows", "candle-q8-full"),
+            ("linux", "candle-q8-full"),
         ] {
             let (data, _cache) = isolated();
             let mut entry = Value::Object(catalog_entry());
@@ -628,7 +634,7 @@ mod tests {
             assert!(!is_pending_artifact_download(&row), "{os}");
             let tier_snapshot = snapshot(data.path(), repo, revision);
             // Both layouts exist on disk; only the host's own may be chosen.
-            for directory in ["q8", "candle-q8"] {
+            for directory in ["q8-full", "candle-q8-full"] {
                 std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
                 std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
             }
@@ -647,9 +653,9 @@ mod tests {
     #[test]
     fn an_unnarrowed_entry_resolves_the_executing_hosts_layout() {
         for (os, q4_dir) in [
-            ("macos", "q4"),
-            ("windows", "candle-q4"),
-            ("linux", "candle-q4"),
+            ("macos", "q4-full"),
+            ("windows", "candle-q4-full"),
+            ("linux", "candle-q4-full"),
         ] {
             let (data, _cache) = isolated();
             let entry = catalog_entry();
@@ -661,7 +667,7 @@ mod tests {
             let (repo, revision) = row_identity(&row).unwrap();
             let tier_snapshot = snapshot(data.path(), repo, revision);
             // A shared cache holding both layouts: only the host's own may be chosen.
-            for directory in ["q4", "candle-q4"] {
+            for directory in ["q4-full", "candle-q4-full"] {
                 std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
                 std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
             }

@@ -353,8 +353,10 @@ fn can_run_nvfp4_expansion(workers: &[WorkerSnapshot]) -> bool {
 
 /// The expander tier an unselected expansion runs: the worker's own order
 /// ([`sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS`]) over the tiers installed for this
-/// host's platform, with NVFP4 only when a registered worker can run it. `None` when no tier is
-/// installed, which leaves the worker's "install the expander" refusal to explain it.
+/// host's platform, with NVFP4 only when a registered worker can run it. A tier is installed when
+/// its row's pinned revision holds every file the row names, the snapshot the worker loads.
+/// `None` when no tier is installed, which leaves the worker's "install the expander" refusal to
+/// explain it.
 fn expander_tier(
     entry: &Value,
     data_dir: &std::path::Path,
@@ -362,11 +364,10 @@ fn expander_tier(
 ) -> Option<&'static str> {
     let mut host = entry.clone();
     crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
-    let installed = crate::models::installed_variant_keys(&host, data_dir);
     sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS
         .into_iter()
         .filter(|tier| *tier != "nvfp4" || nvfp4_worker)
-        .find(|tier| installed.iter().any(|variant| variant == tier))
+        .find(|tier| crate::models::pinned_variant_installed(&host, tier, data_dir))
 }
 
 /// Whether `value` is a positive-integer `W:H`.
@@ -415,6 +416,160 @@ mod tests {
             assert!(!is_positive_ratio(value), "{value}");
         }
         assert_eq!(MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, 16);
+    }
+
+    /// The shipped expander entry, this host's q4 row, and a writer that stages a file of that
+    /// tier folder at a revision of its repository, or a file of the upstream `prompt/` row at
+    /// its pinned revision.
+    struct ExpanderCache {
+        _dir: tempfile::TempDir,
+        _hub: sceneworks_core::hf_home::test_support::CacheRootGuard,
+        data_dir: std::path::PathBuf,
+        entry: Value,
+        q4: Value,
+    }
+
+    impl ExpanderCache {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let data_dir = dir.path().to_path_buf();
+            let hub = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.clone(),
+                data_dir.join("hub"),
+            );
+            let entry = Value::Object(
+                sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3_image_pe")
+                    .expect("the expander is a builtin")
+                    .clone(),
+            );
+            let mut host = entry.clone();
+            crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+            let q4 =
+                sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+                    &host, "q4",
+                )
+                .expect("q4 row");
+            Self {
+                _dir: dir,
+                _hub: hub,
+                data_dir,
+                entry,
+                q4,
+            }
+        }
+
+        fn write(&self, repo: &str, revision: &str, file: &str, body: &str) {
+            let path = sceneworks_core::hf_home::huggingface_repo_cache_path(&self.data_dir, repo)
+                .unwrap()
+                .join("snapshots")
+                .join(revision)
+                .join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+
+        /// A file of the q4 tier folder at `revision`.
+        fn tier_file(&self, revision: &str, file: &str, body: &str) {
+            let folder = self.q4["files"][0].as_str().unwrap().trim_end_matches("/*");
+            self.write(
+                self.q4["repo"].as_str().unwrap(),
+                revision,
+                &format!("{folder}/{file}"),
+                body,
+            );
+        }
+
+        fn pinned(&self) -> String {
+            self.q4["revision"].as_str().unwrap().to_owned()
+        }
+
+        /// Every file of the upstream `prompt/` co-requisite, at its pinned revision.
+        fn stage_prompt_files(&self) {
+            let row = self.entry["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["coRequisite"] == true && row["componentId"] == "prompt")
+                .expect("the prompt co-requisite row")
+                .clone();
+            for file in row["files"].as_array().unwrap() {
+                self.write(
+                    row["repo"].as_str().unwrap(),
+                    row["revision"].as_str().unwrap(),
+                    &file.as_str().unwrap().replace('*', "fixture"),
+                    "{}",
+                );
+            }
+        }
+
+        fn tier(&self) -> Option<&'static str> {
+            expander_tier(&self.entry, &self.data_dir, false)
+        }
+    }
+
+    /// The tier an unselected expansion freezes is installed only at its row's pinned revision:
+    /// an older revision of the re-host holding MORE files in the same folder never stands in
+    /// for it. In the pinned folder a leftover `config.json` alone is not a tier, and a shard
+    /// index naming a missing shard is torn; the index with every shard is installed.
+    #[test]
+    fn the_expander_tier_is_installed_only_at_its_pinned_revision() {
+        let cache = ExpanderCache::new();
+        cache.stage_prompt_files();
+        // An older revision, `refs/main`, with a complete twelve-file folder of its own.
+        let older = "0123456789abcdef0123456789abcdef01234567";
+        let root = sceneworks_core::hf_home::huggingface_repo_cache_path(
+            &cache.data_dir,
+            cache.q4["repo"].as_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs/main"), older).unwrap();
+        cache.tier_file(older, "config.json", "{}");
+        cache.tier_file(older, "model.safetensors", "");
+        for index in 0..10 {
+            cache.tier_file(older, &format!("extra-{index}.json"), "{}");
+        }
+        assert_eq!(cache.tier(), None);
+
+        // The pinned folder holds only its config: no weights, not a tier.
+        let pinned = cache.pinned();
+        cache.tier_file(&pinned, "config.json", "{}");
+        assert_eq!(cache.tier(), None);
+
+        // Its index names two shards with one on disk: torn.
+        cache.tier_file(
+            &pinned,
+            "model.safetensors.index.json",
+            &serde_json::json!({ "weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        );
+        cache.tier_file(&pinned, "model-00001-of-00002.safetensors", "");
+        assert_eq!(cache.tier(), None);
+
+        cache.tier_file(&pinned, "model-00002-of-00002.safetensors", "");
+        assert_eq!(cache.tier(), Some("q4"));
+    }
+
+    /// The expander reads its prompt files from the upstream `prompt/` co-requisite at run time,
+    /// so a tier whose weights are complete is not installed until those files are too.
+    #[test]
+    fn the_expander_tier_needs_its_prompt_files() {
+        let cache = ExpanderCache::new();
+        let pinned = cache.pinned();
+        cache.tier_file(&pinned, "config.json", "{}");
+        cache.tier_file(&pinned, "model.safetensors", "");
+        assert_eq!(cache.tier(), None, "the prompt files are absent");
+        assert!(!crate::models::pinned_variant_installed(
+            &cache.entry,
+            "q4",
+            &cache.data_dir
+        ));
+
+        cache.stage_prompt_files();
+        assert_eq!(cache.tier(), Some("q4"));
     }
 
     /// NVFP4 is offered to an expansion only when ONE available worker advertises both the

@@ -1620,7 +1620,7 @@ mod tests {
                 .as_deref(),
                 Some("bf16")
             );
-            // The expander: its frozen `peTier`, in this OS's layout (`q4/` on macOS, `candle-q4/`
+            // The expander: its frozen `peTier`, in this OS's layout (`q4-full/` on macOS, `candle-q4-full/`
             // on Windows/Linux); NVFP4 exists only on the CUDA hosts.
             let mut expander_tiers = vec!["q8", "q4"];
             if backend == "candle" {
@@ -1643,16 +1643,11 @@ mod tests {
                 let row = primary(&expander, tier, payload);
                 assert_eq!(row["variant"], tier, "{os} expander {tier}");
                 let first_file = row["files"][0].as_str().unwrap_or_default();
+                // SW-7202: the converted tiers are the fully quantized `-full` folders.
                 let expected_prefix = match (tier, backend) {
-                    ("nvfp4", _) => "",
-                    (_, "mlx") => tier,
-                    _ => {
-                        if tier == "q8" {
-                            "candle-q8"
-                        } else {
-                            "candle-q4"
-                        }
-                    }
+                    ("nvfp4", _) => String::new(),
+                    (_, "mlx") => format!("{tier}-full"),
+                    _ => format!("candle-{tier}-full"),
                 };
                 if !expected_prefix.is_empty() {
                     assert!(

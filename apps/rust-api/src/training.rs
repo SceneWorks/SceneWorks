@@ -1709,7 +1709,9 @@ pub(crate) fn validate_batch_describe_request(
 
 /// Refuse a describe tier this host has not installed, before the job is queued. Each tier is its
 /// own download (the q4 and q8 tiers are separate folders of a re-host), so the model being
-/// installed in some tier says nothing about the tier the request names.
+/// installed in some tier says nothing about the tier the request names. Installed means the
+/// tier's pinned revision holds every file its row names, the snapshot the worker loads: another
+/// cached revision of the re-host does not count.
 fn ensure_describe_tier_installed(
     data_dir: &std::path::Path,
     job_payload: &JsonObject,
@@ -1731,10 +1733,7 @@ fn ensure_describe_tier_installed(
     };
     let mut entry = entry.clone();
     crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
-    if crate::models::installed_variant_keys(&entry, data_dir)
-        .iter()
-        .any(|installed| installed == tier)
-    {
+    if crate::models::pinned_variant_installed(&entry, tier, data_dir) {
         return Ok(());
     }
     let name = entry

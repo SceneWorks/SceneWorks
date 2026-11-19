@@ -1,7 +1,9 @@
 """Provision the pinned Candle tiers of the Qwen3.8 27B describer (SW-7120).
 
 `SCENEWORKS_QWEN38_DESCRIBER_PROVISION` picks what is provisioned: `quantised` (the default) is the
-re-host's q4/ and q8/ folders; `bf16` is the full-precision upstream snapshot, the files the
+files the catalog's q4 and q8 rows name in the re-host's fully quantized `q4-full/` and `q8-full/`
+folders (SW-7202: config, tokenizer and template sidecars, the shard index and every shard);
+`bf16` is the full-precision upstream snapshot, the files the
 catalog's bf16 row names. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
@@ -10,17 +12,36 @@ downloading. Runs no model.
 """
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 import os
 from pathlib import Path
 import shutil
 import sys
 
 REPO = "SceneWorks/qwen3.8-27b-abliterated-candle"
-REVISION = "accaccc109912b9b194f7d5a47f2123fdc70672e"
-# Tier folder -> total bytes of its files, as the catalog's download rows record them
-# (config/manifests/builtin.models.jsonc, `footprint.diskSizeBytes`).
-TIER_BYTES = {"q4": 19_995_370_331, "q8": 32_371_188_675}
-# Both tiers are ~52.4 GB; keep headroom for the volume's other tenants.
+# PENDING-SW-7202: the revision (a 7202000…0002 PLACEHOLDER) and totals come from the inference `qwen38-full-tiers.yml`
+# (model describer, backend candle) publication report; they must equal the catalog's rows.
+REVISION = "7202000000000000000000000000000000000002"
+# Tier (the catalog row's `variant`) -> the re-host folder its row names.
+TIER_FOLDERS = {"q4": "q4-full", "q8": "q8-full"}
+# The selectors each tier's catalog row names inside its folder. A Candle tier is sharded like its
+# bf16 source: candle-llm `prepare_snapshot` writes one shard per source shard under the source's
+# name plus a fresh `model.safetensors.index.json`, and copies the source's sidecars. Only the
+# files these selectors match are downloaded and totalled, exactly what the app's tier download
+# fetches; any other sidecar the preparer copied into the folder is neither.
+TIER_FILES = (
+    "config.json",
+    "generation_config.json",
+    "chat_template.jinja",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "model.safetensors.index.json",
+    "model-*.safetensors",
+)
+# Tier -> total bytes of the files its row's selectors match, as the catalog's download rows record
+# them (config/manifests/builtin.models.jsonc, `footprint.diskSizeBytes`).
+TIER_BYTES = {"q4": 17_611_498_331, "q8": 29_987_316_675}
+# Both tiers are ~47.6 GB; keep headroom for the volume's other tenants.
 MIN_FREE_BYTES = 70 * 10**9
 
 # Full precision (bf16): the upstream repository at the catalog's pinned revision, the files its
@@ -47,16 +68,27 @@ BF16_MIN_FREE_BYTES = 75 * 10**9
 MODES = ("quantised", "bf16")
 
 
-def expected_files(entries, tier_bytes=TIER_BYTES):
-    """The repo's files under each tier folder, as {path: size}, checked against the tier totals."""
+def tier_patterns(folder, tier_files=TIER_FILES):
+    """The catalog row's selectors for the tier in `folder`."""
+    return [f"{folder}/{name}" for name in tier_files]
+
+
+def expected_files(entries, tier_bytes=TIER_BYTES, tier_folders=TIER_FOLDERS, tier_files=TIER_FILES):
+    """The repo's files each tier's selectors match, as {path: size}: every named file present and
+    sized, at least one shard, and each tier's total equal to the catalog's."""
     expected = {}
     for tier, total in tier_bytes.items():
-        files = {name: size for name, size in entries if name.startswith(f"{tier}/")}
-        if not files or any(not isinstance(size, int) or size <= 0 for size in files.values()):
-            raise RuntimeError(f"{REPO}@{REVISION} lists no sized files under {tier}/")
+        folder = tier_folders[tier]
+        patterns = tier_patterns(folder, tier_files)
+        files = {name: size for name, size in entries
+                 if any(fnmatchcase(name, pattern) for pattern in patterns)}
+        unmatched = [pattern for pattern in patterns if not any(fnmatchcase(name, pattern) for name in files)]
+        if not files or unmatched or any(not isinstance(size, int) or size <= 0 for size in files.values()):
+            raise RuntimeError(f"{REPO}@{REVISION} lists no sized files under {folder}/"
+                               + (f" for {', '.join(unmatched)}" if unmatched else ""))
         if sum(files.values()) != total:
             raise RuntimeError(
-                f"{tier}/ at {REVISION} totals {sum(files.values())} bytes, the catalog says {total}")
+                f"{folder}/ at {REVISION} totals {sum(files.values())} bytes, the catalog says {total}")
         expected.update(files)
     return expected
 
@@ -115,7 +147,8 @@ def plan(mode):
     free-space minimum)."""
     if mode == "quantised":
         return (REPO, REVISION, f"tiers {', '.join(TIER_BYTES)}", expected_files,
-                [f"{tier}/*" for tier in TIER_BYTES], MIN_FREE_BYTES)
+                [pattern for tier in TIER_BYTES for pattern in tier_patterns(TIER_FOLDERS[tier])],
+                MIN_FREE_BYTES)
     if mode == "bf16":
         return (BF16_REPO, BF16_REVISION, "full precision (bf16)", bf16_expected_files,
                 [*BF16_FILES, BF16_SHARD_PATTERN], BF16_MIN_FREE_BYTES)
