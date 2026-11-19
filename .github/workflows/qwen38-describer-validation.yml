@@ -72,11 +72,11 @@ on:
         options: [cuda, mlx]
         default: cuda
       mac_runner:
-        description: Mac for backend=mlx (ignored for cuda)
+        description: Mac for backend=mlx (ignored for cuda). nax-macos-2 is the default; nax-macos is Michael's dev Mac, only on a loan he approved
         required: true
         type: choice
         options: [nax-macos, nax-macos-2]
-        default: nax-macos
+        default: nax-macos-2
       tier:
         description: Candle tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true

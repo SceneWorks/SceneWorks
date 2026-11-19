@@ -19,9 +19,11 @@ name: Qwen3.8 27B describer MLX validation
 # dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
 # reusable workflow from the ref it was dispatched on. Direct `workflow_dispatch` works once on main.
 #
-# `nax-macos` (label `rw-starvector`, Michael's dev Mac; hub and build target on /Volumes/Models) is
-# the default ONLY while nax-macos-2's model disk is full: Michael approved that loan for SW-7202 on
-# 2026-11-18. Switch the default back to `nax-macos-2` (`rw-llm`) once its new drive is fitted.
+# `nax-macos-2` (label `rw-llm`) is the default Mac. Its drive was replaced on 2026-11-19 and its hub
+# starts empty: run.sh downloads the pinned tier, the prompt files (expander job only) and the selected block drafts into the
+# hub when they are missing (it refuses a download that would leave under 25 GB free). `nax-macos`
+# (label `rw-starvector`) is Michael's dev Mac: choose it only on a loan he approved for that run; its
+# hub and build target live on /Volumes/Models.
 #
 # `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter. Every
 # request sends `speculative: auto`, checked linearly; both jobs load an installed draft (DFlash2 /
@@ -67,10 +69,10 @@ on:
         type: string
         default: "1536"
       mac_runner:
-        description: nax-macos or nax-macos-2
+        description: nax-macos-2 (default; run.sh downloads missing weights into its empty hub) or nax-macos (Michael's dev Mac, only on a loan he approved)
         required: false
         type: string
-        default: nax-macos
+        default: nax-macos-2
   workflow_dispatch:
     inputs:
       job:
@@ -109,18 +111,18 @@ on:
         options: ["1536", default]
         default: "1536"
       mac_runner:
-        description: nax-macos (dev Mac, approved loan while nax-macos-2's disk is full) or nax-macos-2
+        description: nax-macos-2 (default; run.sh downloads missing weights into its empty hub) or nax-macos (Michael's dev Mac, only on a loan he approved)
         required: true
         type: choice
         options: [nax-macos, nax-macos-2]
-        default: nax-macos
+        default: nax-macos-2
 
 permissions:
   contents: read
 
 jobs:
   qwen38-describer-mlx:
-    runs-on: [self-hosted, macOS, ARM64, "${{ inputs.mac_runner == 'nax-macos-2' && 'rw-llm' || 'rw-starvector' }}"]
+    runs-on: [self-hosted, macOS, ARM64, "${{ inputs.mac_runner == 'nax-macos' && 'rw-starvector' || 'rw-llm' }}"]
     timeout-minutes: 120
     concurrency:
       group: qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}
