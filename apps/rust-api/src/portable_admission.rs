@@ -3521,7 +3521,10 @@ fn capture_receipted_local_files(
                 .map(str::to_owned)
                 .ok_or_else(|| incomplete("completed model receipt contains a non-string file"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|file| !sceneworks_core::download_receipt::is_candle_device_format_cache_path(file))
+        .collect::<Vec<_>>();
     let mut selected = BTreeSet::new();
     for selector in selectors {
         let matched = receipt_files
@@ -4791,6 +4794,63 @@ mod tests {
         let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
             .await
             .expect_err("receipt-only files must not expand the trusted pinned closure");
+        assert!(error.detail.contains("files differ from the pinned source"));
+    }
+
+    #[tokio::test]
+    async fn candle_device_format_cache_is_excluded_from_backfill_and_receipted_admission() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let (path, pinned, mut download) = receipted_install(&state, b"trusted");
+        download["files"] = json!(["*"]);
+        let snapshot = path.parent().unwrap();
+        let sidecar_dir = snapshot
+            .join("q4/transformer")
+            .join(sceneworks_core::download_receipt::CANDLE_DEVICE_FORMAT_CACHE_DIR);
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        let sidecar_rel = format!(
+            "q4/transformer/{}/deadbeef.q4_1.safetensors",
+            sceneworks_core::download_receipt::CANDLE_DEVICE_FORMAT_CACHE_DIR
+        );
+        std::fs::write(snapshot.join(&sidecar_rel), b"derived-sidecar").unwrap();
+
+        let walked = crate::models::snapshot_files(snapshot);
+        assert_eq!(walked, vec!["model.safetensors".to_owned()]);
+
+        let fixture = pinned.clone();
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| fixture.clone()));
+
+        let receipt_path = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir("owner/hash-once"))
+            .join(".sceneworks-download-complete.json");
+        let mut receipt: Value =
+            serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["resolvedFiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(sidecar_rel));
+        std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+
+        let member = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("derived .candle-device-format-v1 sidecars in receipts must self-heal");
+        assert_eq!(member.files, pinned);
+
+        std::fs::write(snapshot.join("q4/transformer/rogue.safetensors"), b"rogue").unwrap();
+        receipt["resolvedFiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("q4/transformer/rogue.safetensors"));
+        std::fs::write(&receipt_path, receipt.to_string()).unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("non-cache extra files in receipts must still fail closed");
         assert!(error.detail.contains("files differ from the pinned source"));
     }
 

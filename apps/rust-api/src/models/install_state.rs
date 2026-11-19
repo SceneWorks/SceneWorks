@@ -58,6 +58,9 @@ pub(super) fn receipt_file_sets(
                 .as_array()?
                 .iter()
                 .filter_map(Value::as_str)
+                .filter(|file| {
+                    !sceneworks_core::download_receipt::is_candle_device_format_cache_path(file)
+                })
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             let revision = entry
