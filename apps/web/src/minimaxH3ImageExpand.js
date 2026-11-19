@@ -75,9 +75,15 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
   batch: Object.freeze({
     tileDescription: "MiniMax-H3-Image’s own expander, run on every prompt in the batch",
     button: (count) => `Expand ${count === 1 ? "the prompt" : `all ${count} prompts`}`,
-    hint: "Runs MiniMax-H3-Image’s prompt expander on each prompt in the batch, one after another. You review the expansions and apply them to the batch list — nothing changes until you do, and you can undo it.",
-    skipped: (count) =>
-      `${count} prompt${count === 1 ? " uses" : "s use"} {{…}} placeholders and ${count === 1 ? "is" : "are"} left as written, since the expander would rewrite the placeholders too.`,
+    hint: "Runs MiniMax-H3-Image’s prompt expander on each prompt in the batch, one after another, before any image renders. You review the expansions and apply them to the batch list — nothing changes until you do, and you can undo it.",
+    resolved: (count) =>
+      `Variables are filled in first, so each of the ${count.toLocaleString("en-US")} resulting prompts gets its own expansion; applying replaces the templates with one line per prompt (Undo restores them).`,
+    confirm: (count) =>
+      `That runs the expander ${count.toLocaleString("en-US")} times, one after another, before the batch can render.`,
+    tooMany: (count, max) =>
+      `These templates fill in to ${count.toLocaleString("en-US")} prompts — more than the ${max.toLocaleString("en-US")} the expander runs in one go. Narrow the variables first.`,
+    missing: (keys) => `Add a value for ${keys.map((key) => `{{${key}}}`).join(", ")} before expanding.`,
+    groups: "Give every linked group the same number of options before expanding.",
     progress: (current, total) => `Expanding prompt ${current} of ${total}…`,
     summary: (expanded, total) => `Expanded ${expanded} of ${total} prompt${total === 1 ? "" : "s"}.`,
     reviewLabel: "Review the expansions",

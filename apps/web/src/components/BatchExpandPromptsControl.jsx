@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { isModelMissing } from "../modelMissing.js";
-import { joinPromptLines, splitPromptLines } from "../promptBatch.js";
+import {
+  cardinality,
+  extractKeys,
+  iterateBatch,
+  joinPromptLines,
+  linkedGroupIssues,
+  missingKeys,
+  splitPromptLines,
+} from "../promptBatch.js";
 import { Icon } from "./Icons.jsx";
 
 // Run a prompt expander over every prompt of a batch (the batch-mode counterpart of
@@ -8,27 +16,40 @@ import { Icon } from "./Icons.jsx";
 //
 // The single-prompt control's guarantees carry over: expansion is a user action, nothing in the
 // batch changes until the user applies the result, and applying can be undone. The prompts are
-// expanded one after another (each is a worker job); Stop keeps what has finished.
+// expanded one after another (each is a worker job) BEFORE any image renders, so the image model
+// stays warm across the batch; Stop keeps what has finished.
 //
-// Per prompt:
-//  * A leading `[WxH]` / `[W:H]` size directive is kept and only the text after it is expanded.
-//  * A prompt with `{{…}}` placeholders is left as written: the expander would rewrite the
-//    placeholders along with the prose, and the batch would lose its variables.
-//  * The expander's proposed size is offered as a `[WxH]` prefix for prompts with no directive of
-//    their own, off by default — the same separate opt-in the single-prompt control gives.
+// Variables are filled in first. `{{name}}` values, inline `{{a|b}}` choices and linked groups are
+// resolved exactly as the batch run resolves them, and each resulting prompt is expanded on its
+// own — every combination gets its own caption. Applying therefore replaces the templates with one
+// line per resolved prompt (expanded, or as resolved when its expansion failed or was not reached),
+// so the batch still renders the same set of prompts; Undo restores the templates.
+//
+// Per prompt, a leading `[WxH]` / `[W:H]` size directive is kept and only the text after it is
+// expanded. The expander's proposed size is offered as a `[WxH]` prefix for prompts with no
+// directive of their own, off by default — the same separate opt-in the single-prompt control gives.
 
 const DIRECTIVE = /^\s*\[\s*\d{1,5}\s*[x×X:]\s*\d{1,5}\s*\]\s*/;
+// Past this many resolved prompts the expander asks before starting (each is a worker job).
+export const BATCH_EXPAND_CONFIRM_AT = 100;
+// More than this is refused: the user should narrow the variables first.
+export const BATCH_EXPAND_MAX = 2000;
 
 function planEntry(entry) {
-  if (/\{\{[^{}]*\}\}/.test(entry)) return { skip: true };
   const match = DIRECTIVE.exec(entry);
   const directive = match ? match[0].trim() : "";
   const body = match ? entry.slice(match[0].length).trim() : entry.trim();
   return body ? { skip: false, directive, body } : { skip: true };
 }
 
+function batchVariables(prompts, variableValues) {
+  return extractKeys(prompts).map((key) => ({ key, values: variableValues?.[key] ?? [] }));
+}
+
 export function BatchExpandPromptsControl({
   promptsText,
+  // The batch's `{{name}}` values ({ key: [values] }), as the batch panel edits them.
+  variableValues = {},
   onPromptsTextChange,
   expandPrompt,
   modelId,
@@ -38,7 +59,7 @@ export function BatchExpandPromptsControl({
   copy,
   suggestedResolutionFor = () => "",
 }) {
-  const [status, setStatus] = useState("idle"); // idle | running | review | applied
+  const [status, setStatus] = useState("idle"); // idle | confirm | running | review | applied
   const [run, setRun] = useState(null); // { text, entries, plans, results, done, total }
   const [useSizes, setUseSizes] = useState(false);
   const [applied, setApplied] = useState(null); // { previous, next, count }
@@ -47,17 +68,37 @@ export function BatchExpandPromptsControl({
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
-  const entries = splitPromptLines(promptsText);
-  const eligible = entries.filter((entry) => !planEntry(entry).skip).length;
-  const skipped = entries.length - eligible;
+  const prompts = splitPromptLines(promptsText);
+  const variables = batchVariables(prompts, variableValues);
+  const variablesKey = JSON.stringify(variables);
+  const templated = prompts.some((prompt) => /\{\{[^{}]*\S[^{}]*\}\}/.test(prompt));
+  const missing = missingKeys(prompts, variables);
+  const groupIssues = linkedGroupIssues(prompts);
+  const total = cardinality(prompts, variables, 1);
+  const blocked = missing.length
+    ? copy.batch.missing(missing)
+    : groupIssues.length
+      ? copy.batch.groups
+      : total > BATCH_EXPAND_MAX
+        ? copy.batch.tooMany(total, BATCH_EXPAND_MAX)
+        : "";
+
+  function handleStart() {
+    if (total > BATCH_EXPAND_CONFIRM_AT && status !== "confirm") {
+      setStatus("confirm");
+      return;
+    }
+    handleExpand();
+  }
 
   async function handleExpand() {
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
+    const entries = [...iterateBatch(prompts, variables)].map(({ prompt }) => prompt);
     const plans = entries.map(planEntry);
-    const total = plans.filter((plan) => !plan.skip).length;
-    const state = { text: promptsText, entries, plans, results: entries.map(() => null), done: 0, total };
+    const runTotal = plans.filter((plan) => !plan.skip).length;
+    const state = { text: promptsText, variablesKey, entries, plans, results: entries.map(() => null), done: 0, total: runTotal };
     setRun({ ...state });
     setStatus("running");
     setError("");
@@ -97,7 +138,7 @@ export function BatchExpandPromptsControl({
   }
 
   function handleApply() {
-    if (promptsText !== run.text) {
+    if (promptsText !== run.text || variablesKey !== run.variablesKey) {
       setError(copy.batch.changed);
       return;
     }
@@ -130,17 +171,34 @@ export function BatchExpandPromptsControl({
         <>
           <button
             className="hero-link refine-button"
-            disabled={!eligible || typeof expandPrompt !== "function"}
-            onClick={handleExpand}
+            disabled={!total || Boolean(blocked) || typeof expandPrompt !== "function"}
+            onClick={handleStart}
             type="button"
           >
-            <Icon.Wand size={14} /> {copy.batch.button(eligible)}
+            <Icon.Wand size={14} /> {copy.batch.button(total)}
           </button>
           <p className="refine-hint">
             {copy.batch.hint}
-            {skipped ? ` ${copy.batch.skipped(skipped)}` : ""}
+            {templated && total && !blocked ? ` ${copy.batch.resolved(total)}` : ""}
           </p>
+          {blocked ? (
+            <p className="refine-error" role="alert">
+              {blocked}
+            </p>
+          ) : null}
         </>
+      ) : null}
+
+      {status === "confirm" ? (
+        <div className="batch-confirm" role="alertdialog">
+          <span>{copy.batch.confirm(total)}</span>
+          <button className="secondary-action" onClick={handleExpand} type="button">
+            {copy.batch.button(total)}
+          </button>
+          <button className="secondary-action" onClick={() => setStatus("idle")} type="button">
+            Cancel
+          </button>
+        </div>
       ) : null}
 
       {status === "applied" && applied ? (

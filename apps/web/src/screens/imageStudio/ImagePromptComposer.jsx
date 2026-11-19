@@ -638,6 +638,7 @@ export function ImagePromptComposer({
                       onPromptsTextChange={setBatchPromptsText}
                       projectId={activeProject?.id ?? ""}
                       promptsText={batchPromptsText}
+                      variableValues={batchVariableValues}
                       referenceAssetIds={qwenRewriteReferenceIds}
                       suggestedResolutionFor={(suggestion) =>
                         h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
