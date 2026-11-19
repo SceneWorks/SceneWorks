@@ -129,6 +129,17 @@ pub struct ProviderRoute {
     pub generator: Option<GeneratorRoute>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PagRouteCapability {
+    pub num_blocks: u32,
+    pub block_domain: String,
+    pub default_layers: Vec<u32>,
+    pub default_start: f32,
+    pub default_stop: f32,
+    pub recommended_scale: f32,
+    pub max_scale: f32,
+}
+
 // Field names here are those of the shipped native runtime descriptor (snake case).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeneratorRoute {
@@ -145,6 +156,8 @@ pub struct GeneratorRoute {
     pub samplers: Vec<String>,
     pub schedulers: Vec<String>,
     pub supported_guidance_methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pag: Option<PagRouteCapability>,
 }
 
 /// Preserve the calibration and memory-contract ABI payloads and their identity fields verbatim.

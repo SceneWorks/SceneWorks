@@ -16274,24 +16274,8 @@
           ]
         }
       },
-      // MLX observed 12.97 GiB q4 and 21.78 GiB BF16 at 1536×1024.
-      // Estimate q8 at 16.04 GiB from stored weights. Include the native load guard plus 2 GiB headroom.
-      "mlx": {
-        "minMemoryGbByTier": {
-          "q4": 20,
-          "q8": 26,
-          "bf16": 38
-        }
-      },
-      // Windows CUDA observed 7.94 GiB q4 and 18.31 GiB BF16 peak pool reservation at 1536×1024.
-      // Estimate q8 at 11.55 GiB from stored weights. Round each admission floor up after 2 GiB headroom.
-      "candle": {
-        "minMemoryGbByTier": {
-          "q4": 10,
-          "q8": 14,
-          "bf16": 21
-        }
-      }
+      "mlx": {},
+      "candle": {}
     },
     {
       // Qwen3.8 27B describer (SW-F365, SW-7119): the larger describing model of the dataset
