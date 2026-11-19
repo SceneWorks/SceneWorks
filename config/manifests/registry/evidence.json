@@ -45729,7 +45729,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "7202000000000000000000000000000000000003",
+        "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
         "variant": "q8",
         "files": [
           "q8-full/*"
@@ -45745,7 +45745,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "7202000000000000000000000000000000000004",
+        "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
         "variant": "q8",
         "files": [
           "candle-q8-full/*"
@@ -45762,7 +45762,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "7202000000000000000000000000000000000003",
+        "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
         "variant": "q4",
         "files": [
           "q4-full/*"
@@ -45778,7 +45778,7 @@
       {
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "7202000000000000000000000000000000000004",
+        "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
         "variant": "q4",
         "files": [
           "candle-q4-full/*"
