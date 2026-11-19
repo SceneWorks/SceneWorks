@@ -850,7 +850,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::Flux2 => Some(crate::model_family::FLUX2.to_owned()),
         Bucket::LtxVideo => Some(crate::model_family::LTX_VIDEO.to_owned()),
         Bucket::Sd3 => Some(crate::model_family::SD3.to_owned()),
-        Bucket::Ideogram => Some(crate::model_family::IDEOGRAM.to_owned()),
+        Bucket::Ideogram => confirm_ideogram(&keys),
         Bucket::Anima => Some(crate::model_family::ANIMA.to_owned()),
         Bucket::Sdxl => Some(crate::model_family::SDXL.to_owned()),
         Bucket::Sd15 => Some(crate::model_family::SD1_5.to_owned()),
@@ -1410,11 +1410,16 @@ enum Bucket {
     /// so SD3.5 community LoRAs are positively recognized rather than falling
     /// into the Qwen/Z-Image block-count disambiguation (sc-7874).
     Sd3,
-    /// Ideogram 4 (epic 4725): a single-stream 34-layer flow-matching DiT with a
-    /// unique `diffusion_model.layers.<n>.` block prefix and fused `attention.qkv`,
-    /// `adaln_modulation`, and `feed_forward.w{1,2,3}` modules — shared with no other
-    /// family we detect. Metadata (`ss_base_model_version: ideogram4`) is the primary
+    /// Ideogram 4 (epic 4725): a single-stream 34-layer flow-matching DiT whose blocks
+    /// are `diffusion_model.layers.<n>.{attention.{qkv,o}, feed_forward.w{1,2,3},
+    /// adaln_modulation}`. Metadata (`ss_base_model_version: ideogram4`) is the primary
     /// signal; this bucket catches metadata-less ComfyUI-style exports.
+    ///
+    /// The `diffusion_model.layers.<n>.` prefix and the `feed_forward.w{1,2,3}` /
+    /// fused-`attention.qkv` modules are **not** unique: Z-Image's 30-layer S3-DiT (and
+    /// Lumina-2's NextDiT, which ComfyUI loads Z-Image as) use them too. The signature
+    /// disqualifies Z-Image's own module names, and [`confirm_ideogram`] demands
+    /// Ideogram-only evidence before the bucket is reported.
     Ideogram,
     /// Anima (epic 10512): the Cosmos-Predict2 DiT anime T2I model. Its LoRAs prefix every DiT block
     /// with `diffusion_model.blocks.<n>.` (shared with native/ComfyUI Wan) but carry the
@@ -1704,14 +1709,26 @@ const SIGNATURES: &[BucketSignature] = &[
     BucketSignature {
         bucket: Bucket::Ideogram,
         // Ideogram 4 (epic 4725) native / ComfyUI export. Its single-stream 34-layer
-        // DiT prefixes every block key with `diffusion_model.layers.<n>.` — a segment
-        // no other detected family uses (`blocks`, `transformer_blocks`, `double_blocks`,
-        // `single_blocks` are all block-word forms; the CLIP text encoder uses
-        // `text_model.encoder.layers.`, a different prefix). Its modules are the fused
-        // `attention.qkv` / `attention.o`, `feed_forward.w{1,2,3}`, and `adaln_modulation`
-        // (full-word `attention`, not the `attn`/`self_attn`/`attn1` every other family
-        // uses). Requiring the prefix AND one Ideogram-specific module marker keeps this
-        // from firing on anything else; the block-word disqualifiers are belt-and-braces.
+        // DiT prefixes every block key with `diffusion_model.layers.<n>.` and names its
+        // modules `attention.qkv` / `attention.o`, `feed_forward.w{1,2,3}`, and a plain
+        // `adaln_modulation` Linear (candle-gen-ideogram `Ideogram4Block`).
+        //
+        // That prefix is NOT Ideogram's alone. Z-Image's 30-layer S3-DiT uses the same
+        // `layers.<n>.` blocks and the same `feed_forward.w{1,2,3}`, and ai-toolkit /
+        // ComfyUI Z-Image LoRAs carry the `diffusion_model.` prefix — e.g. the real
+        // ostris/zimage_turbo_training_adapter is `diffusion_model.layers.{0..29}.
+        // {adaLN_modulation.0, attention.to_{q,k,v}, attention.to_out.0,
+        // feed_forward.w{1,2,3}}.lora_{A,B}.weight`. ComfyUI's native form (it loads
+        // Z-Image as Lumina-2 NextDiT, `comfy.utils.z_image_to_diffusers`) even fuses
+        // the projection into `attention.qkv`, leaving `attention.out` and
+        // `adaLN_modulation.0` as the tells. A metadata-less Z-Image LoRA used to score
+        // every key here and come back a confident `ideogram`.
+        //
+        // So the Z-Image / Lumina-2 module names disqualify, and the bucket is only
+        // reported once `confirm_ideogram` finds Ideogram-only evidence; a file carrying
+        // nothing but the shared `attention.qkv` / `feed_forward.w*` modules on layers
+        // both DiTs have stays inconclusive. The block-word disqualifiers are
+        // belt-and-braces.
         require_all_of: &[
             &["diffusion_model.layers."],
             &[".attention.qkv", ".adaln_modulation", ".feed_forward.w"],
@@ -1721,6 +1738,16 @@ const SIGNATURES: &[BucketSignature] = &[
             "double_blocks.",
             "single_blocks",
             "diffusion_model.blocks.",
+            // Z-Image (diffusers / ai-toolkit module names).
+            ".attention.to_q",
+            ".attention.to_k",
+            ".attention.to_v",
+            ".attention.to_out",
+            ".adaLN_modulation.",
+            "context_refiner.",
+            "noise_refiner.",
+            // Z-Image / Lumina-2 ComfyUI-native output projection (Ideogram's is `.o`).
+            ".attention.out.",
         ],
         markers: &[
             "diffusion_model.layers.",
@@ -2194,6 +2221,76 @@ fn parse_block_index(key: &str) -> Option<usize> {
         rest = after;
     }
     None
+}
+
+/// Z-Image's DiT depth (`transformer/config.json` `n_layers: 30`) — block indices `layers.0..=29`.
+const Z_IMAGE_LAYER_COUNT: usize = 30;
+
+/// Ideogram 4's DiT depth (`Ideogram4DitConfig::v4().num_layers`) — block indices `layers.0..=33`.
+/// Layers 30..=33 exist only in Ideogram, so training any of them is Ideogram-only evidence.
+const IDEOGRAM_LAYER_COUNT: usize = 34;
+const _: () = assert!(IDEOGRAM_LAYER_COUNT > Z_IMAGE_LAYER_COUNT);
+
+/// Decides a file the [`Bucket::Ideogram`] signature scored, which on its own proves only that the
+/// file uses the `diffusion_model.layers.<n>.` block grammar Ideogram 4 shares with Z-Image (and
+/// Lumina-2's NextDiT, which ComfyUI loads Z-Image as).
+///
+/// The signature has already disqualified Z-Image's own module names (`attention.to_{q,k,v,out}`,
+/// `adaLN_modulation.0`, `attention.out`, the refiners). What can still reach here is a file that
+/// carries only the modules both DiTs spell identically — fused `attention.qkv` and
+/// `feed_forward.w{1,2,3}`. It is Ideogram only with positive Ideogram-only evidence:
+///
+/// - an Ideogram-only module name ([`is_ideogram_only_module`]), or
+/// - a trained block in `layers.30..=33`, which Ideogram has and Z-Image does not.
+///
+/// A block index past Ideogram's depth contradicts the family outright. Anything else stays
+/// inconclusive (`None`): a wrong family hard-rejects a valid import, where `None` only leaves the
+/// file unassociated.
+fn confirm_ideogram(keys: &[String]) -> Option<String> {
+    let layers: std::collections::BTreeSet<usize> = keys
+        .iter()
+        .filter_map(|key| parse_dit_layer_index(key))
+        .collect();
+    if layers
+        .last()
+        .is_some_and(|&layer| layer >= IDEOGRAM_LAYER_COUNT)
+    {
+        return None;
+    }
+    let ideogram_only_depth = layers
+        .last()
+        .is_some_and(|&layer| layer >= Z_IMAGE_LAYER_COUNT);
+    let ideogram_only_module = keys.iter().any(|key| is_ideogram_only_module(key));
+    (ideogram_only_depth || ideogram_only_module).then(|| crate::model_family::IDEOGRAM.to_owned())
+}
+
+/// The `<n>` of a `diffusion_model.layers.<n>.` block key.
+fn parse_dit_layer_index(key: &str) -> Option<usize> {
+    let rest = key.split_once("diffusion_model.layers.")?.1;
+    let digits = rest.split_once('.').map_or(rest, |(index, _)| index);
+    digits.parse().ok()
+}
+
+/// Whether `key` names a module only Ideogram 4 has, by its exact spelling in
+/// candle-gen-ideogram's `Ideogram4Block`:
+///
+/// - `attention.o` — the output projection. Z-Image's is `attention.to_out.0` (diffusers) or
+///   `attention.out` (ComfyUI / Lumina-2); neither contains `.attention.o.`.
+/// - `adaln_modulation` as a plain Linear (its next segment is the LoRA factor, e.g.
+///   `.lora_A` / `.lokr_w1`). Z-Image's is the `nn.Sequential` `adaLN_modulation.0`, so a
+///   digit-indexed modulation is never accepted even if an exporter lower-cased the key.
+fn is_ideogram_only_module(key: &str) -> bool {
+    if key.contains(".attention.o.") {
+        return true;
+    }
+    key.match_indices(".adaln_modulation")
+        .any(|(position, needle)| {
+            let rest = &key[position + needle.len()..];
+            match rest.strip_prefix('.') {
+                Some(next) => !next.starts_with(|c: char| c.is_ascii_digit()),
+                None => rest.is_empty(),
+            }
+        })
 }
 
 /// A family read from adapter metadata, plus whether the stamp that produced it was the bare,
@@ -4235,6 +4332,191 @@ mod tests {
         assert_eq!(detect_lora_family(&header).as_deref(), Some("ideogram"));
     }
 
+    /// The tensor keys of the real `ostris/zimage_turbo_training_adapter` v2 (ai-toolkit 0.7.7,
+    /// snapshot `654cd1bf`): 480 keys, `diffusion_model.layers.{0..29}` × the eight modules below ×
+    /// `lora_{A,B}.weight`. The real file also stamps `ss_base_model_version: "zimage"`, which is all
+    /// that kept it from detecting as `ideogram` before; tests strip it to exercise the key path.
+    fn zimage_ai_toolkit_adapter_keys() -> Vec<String> {
+        let mut keys = Vec::new();
+        for layer in 0..30 {
+            for module in [
+                "adaLN_modulation.0",
+                "attention.to_q",
+                "attention.to_k",
+                "attention.to_v",
+                "attention.to_out.0",
+                "feed_forward.w1",
+                "feed_forward.w2",
+                "feed_forward.w3",
+            ] {
+                for factor in ["lora_A", "lora_B"] {
+                    keys.push(format!(
+                        "diffusion_model.layers.{layer}.{module}.{factor}.weight"
+                    ));
+                }
+            }
+        }
+        keys
+    }
+
+    /// Ideogram 4's real block modules (candle-gen-ideogram `Ideogram4Block::visit_adaptable_mut`)
+    /// over its 34 layers, as a native/ComfyUI-prefixed `lora_{A,B}` adapter.
+    fn ideogram4_native_adapter_keys(
+        modules: &[&str],
+        layers: std::ops::Range<usize>,
+    ) -> Vec<String> {
+        let mut keys = Vec::new();
+        for layer in layers {
+            for module in modules {
+                for factor in ["lora_A", "lora_B"] {
+                    keys.push(format!(
+                        "diffusion_model.layers.{layer}.{module}.{factor}.weight"
+                    ));
+                }
+            }
+        }
+        keys
+    }
+
+    const IDEOGRAM4_BLOCK_MODULES: &[&str] = &[
+        "attention.qkv",
+        "attention.o",
+        "feed_forward.w1",
+        "feed_forward.w2",
+        "feed_forward.w3",
+        "adaln_modulation",
+    ];
+
+    #[test]
+    fn metadata_less_zimage_ai_toolkit_adapter_is_not_ideogram() {
+        // Regression: the shared `diffusion_model.layers.<n>.` prefix + `feed_forward.w*` used to
+        // score all 480 keys for the Ideogram bucket, so this Z-Image adapter reported a confident
+        // `ideogram` and a Z-Image import was misfiled or rejected as a family mismatch.
+        let keys = zimage_ai_toolkit_adapter_keys();
+        assert_eq!(keys.len(), 480);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header), None);
+
+        // Same through the file path `detect_model_family` takes.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp
+            .path()
+            .join("zimage_turbo_training_adapter_v2.safetensors");
+        write_safetensors(&path, &keys);
+        assert_eq!(detect_model_family(&path).expect("detect"), None);
+    }
+
+    #[test]
+    fn zimage_ai_toolkit_adapter_with_its_real_metadata_detects_z_image() {
+        let keys = zimage_ai_toolkit_adapter_keys();
+        let mut header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        header["__metadata__"] = json!({
+            "format": "pt",
+            "ss_base_model_version": "zimage",
+            "software": "{\"name\": \"ai-toolkit\", \"repo\": \"https://github.com/ostris/ai-toolkit\", \"version\": \"0.7.7\"}"
+        });
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("z-image"));
+    }
+
+    #[test]
+    fn metadata_less_zimage_comfyui_native_adapter_is_not_ideogram() {
+        // ComfyUI loads Z-Image as Lumina-2 NextDiT and maps its diffusers keys onto the native
+        // `attention.qkv` (fused) / `attention.out` / `adaLN_modulation.0` modules
+        // (`comfy.utils.z_image_to_diffusers`). The fused `attention.qkv` is spelled exactly like
+        // Ideogram's, so only `attention.out` / `adaLN_modulation.0` tell them apart.
+        for modules in [
+            &[
+                "attention.qkv",
+                "attention.out",
+                "adaLN_modulation.0",
+                "feed_forward.w1",
+            ][..],
+            &["attention.qkv", "attention.out"][..],
+            &["attention.qkv", "adaLN_modulation.0"][..],
+        ] {
+            let keys = ideogram4_native_adapter_keys(modules, 0..30);
+            let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_eq!(detect_lora_family(&header), None, "{modules:?}");
+        }
+    }
+
+    #[test]
+    fn shared_modules_on_shared_layers_are_inconclusive() {
+        // `attention.qkv` and `feed_forward.w{1,2,3}` are spelled identically by Ideogram 4 and
+        // ComfyUI-native Z-Image, and layers 0..=29 exist in both, so a file with nothing else is
+        // genuinely ambiguous: inconclusive, never a confident (possibly wrong) family.
+        let keys = ideogram4_native_adapter_keys(
+            &[
+                "attention.qkv",
+                "feed_forward.w1",
+                "feed_forward.w2",
+                "feed_forward.w3",
+            ],
+            0..30,
+        );
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header), None);
+    }
+
+    #[test]
+    fn metadata_less_ideogram_adapter_with_its_real_modules_detects_ideogram() {
+        let keys = ideogram4_native_adapter_keys(IDEOGRAM4_BLOCK_MODULES, 0..34);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("ideogram"));
+
+        // Each Ideogram-only module is enough on its own, even on layers Z-Image also has.
+        for modules in [
+            &["attention.qkv", "attention.o"][..],
+            &["feed_forward.w1", "adaln_modulation"][..],
+        ] {
+            let keys = ideogram4_native_adapter_keys(modules, 0..30);
+            let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+            assert_eq!(
+                detect_lora_family(&header).as_deref(),
+                Some("ideogram"),
+                "{modules:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ideogram_depth_alone_disambiguates_shared_modules() {
+        // An Ideogram adapter that trains only the modules Z-Image also spells this way is still
+        // Ideogram when it reaches `layers.30..=33`, which Z-Image's 30-layer DiT does not have.
+        let keys = ideogram4_native_adapter_keys(&["attention.qkv", "feed_forward.w1"], 0..34);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("ideogram"));
+
+        // A block index past Ideogram's 34 layers contradicts the family.
+        let keys = ideogram4_native_adapter_keys(IDEOGRAM4_BLOCK_MODULES, 0..40);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header), None);
+    }
+
+    #[test]
+    fn ideogram_only_module_spellings() {
+        assert!(is_ideogram_only_module(
+            "diffusion_model.layers.0.attention.o.lora_A.weight"
+        ));
+        assert!(is_ideogram_only_module(
+            "diffusion_model.layers.0.adaln_modulation.lokr_w2"
+        ));
+        assert!(is_ideogram_only_module(
+            "diffusion_model.final_layer.adaln_modulation.lora_B.weight"
+        ));
+        // Z-Image / Lumina-2 spellings, including a lower-cased Sequential modulation.
+        for key in [
+            "diffusion_model.layers.0.attention.out.lora_A.weight",
+            "diffusion_model.layers.0.attention.to_out.0.lora_A.weight",
+            "diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight",
+            "diffusion_model.layers.0.adaln_modulation.0.lora_A.weight",
+            "diffusion_model.layers.0.attention.qkv.lora_A.weight",
+            "diffusion_model.layers.0.feed_forward.w1.lora_A.weight",
+        ] {
+            assert!(!is_ideogram_only_module(key), "{key}");
+        }
+    }
+
     #[test]
     fn detects_xflux_double_blocks_only() {
         // XLabs / x-flux realism-style LoRAs adapt only the double-stream blocks
@@ -4848,11 +5130,13 @@ mod tests {
     /// would be a 12-block miss anyway.
     #[test]
     fn an_ideogram_lokr_is_not_mistaken_for_mage_flow() {
+        // Module names are Ideogram 4's real ones (candle-gen-ideogram `Ideogram4Block`): the output
+        // projection is `attention.o` — `attention.out` is the Z-Image / Lumina-2 ComfyUI spelling.
         let mut keys = Vec::new();
         for layer in 0..34 {
             for module in [
                 "attention.qkv",
-                "attention.out",
+                "attention.o",
                 "adaln_modulation",
                 "feed_forward.w1",
             ] {
