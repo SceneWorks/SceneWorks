@@ -17,12 +17,13 @@ afterEach(() => unmountRoot(root, container));
 
 const button = (text) => [...container.querySelectorAll("button")].find((node) => node.textContent.includes(text));
 
-function Harness({ initial, expandPrompt, onText }) {
+function Harness({ initial, expandPrompt, onText, variableValues = {} }) {
   const [text, setText] = React.useState(initial);
   onText(text);
   return (
     <BatchExpandPromptsControl
       copy={H3_IMAGE_EXPAND_COPY}
+      variableValues={variableValues}
       expandPrompt={expandPrompt}
       modelId="minimax_h3_image"
       onPromptsTextChange={setText}
@@ -40,43 +41,158 @@ async function settle() {
 }
 
 describe("BatchExpandPromptsControl", () => {
-  it("expands each prompt, keeps directives, skips placeholders, and applies only on request", async () => {
+  it("fills in variables first, expands each resolved prompt, keeps directives, and applies only on request", async () => {
     let text = "";
-    const expandPrompt = vi.fn(async ({ prompt }) => ({
-      refinedPrompt: `Expanded: ${prompt}`,
-      rewriteSuggestion: { whRatio: "16:9" },
-    }));
-    const initial = "a fox\n[832x1216] a heron\n{{name}} in a coat\nbroken";
-    expandPrompt.mockImplementation(async ({ prompt }) => {
+    const expandPrompt = vi.fn(async ({ prompt }) => {
       if (prompt === "broken") throw new Error("worker exploded");
       return { refinedPrompt: `Expanded: ${prompt}`, rewriteSuggestion: { whRatio: "16:9" } };
     });
-    await act(async () => root.render(<Harness initial={initial} expandPrompt={expandPrompt} onText={(value) => { text = value; }} />));
+    const initial = "a fox\n[832x1216] a heron\n{{name}} in a {{red|blue}} coat\nbroken";
+    await act(async () =>
+      root.render(
+        <Harness
+          initial={initial}
+          expandPrompt={expandPrompt}
+          variableValues={{ name: ["Ann", "Bo"] }}
+          onText={(value) => { text = value; }}
+        />,
+      ),
+    );
 
-    expect(container.textContent).toContain("1 prompt uses {{…}} placeholders");
-    await act(async () => click(button("Expand all 3 prompts")));
+    expect(container.textContent).toContain("Variables are filled in first, so each of the 7 resulting prompts");
+    await act(async () => click(button("Expand all 7 prompts")));
     await settle();
 
-    // The directive is not sent to the expander; the placeholder prompt is never expanded.
-    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox", "a heron", "broken"]);
+    // The directive is not sent to the expander; every variable combination is expanded on its own.
+    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual([
+      "a fox",
+      "a heron",
+      "Ann in a red coat",
+      "Ann in a blue coat",
+      "Bo in a red coat",
+      "Bo in a blue coat",
+      "broken",
+    ]);
     expect(expandPrompt.mock.calls[0][0]).toMatchObject({ modelId: "minimax_h3_image", projectId: "p1" });
     expect(text).toBe(initial);
-    expect(container.textContent).toContain("Expanded 2 of 3 prompts.");
-    expect(container.textContent).toContain("Prompt 4: worker exploded");
+    expect(container.textContent).toContain("Expanded 6 of 7 prompts.");
+    expect(container.textContent).toContain("Prompt 7: worker exploded");
 
-    // Opt in to the proposed sizes: only the prompt without its own directive takes one.
-    const sizes = container.querySelector(".batch-expand-sizes input");
-    await act(async () => click(sizes));
+    // Opt in to the proposed sizes: only prompts without their own directive take one.
+    await act(async () => click(container.querySelector(".batch-expand-sizes input")));
     await act(async () => click(button("Apply to batch")));
     expect(splitPromptLines(text)).toEqual([
       "[2752x1536] Expanded: a fox",
       "[832x1216] Expanded: a heron",
-      "{{name}} in a coat",
+      "[2752x1536] Expanded: Ann in a red coat",
+      "[2752x1536] Expanded: Ann in a blue coat",
+      "[2752x1536] Expanded: Bo in a red coat",
+      "[2752x1536] Expanded: Bo in a blue coat",
       "broken",
     ]);
 
     await act(async () => click(button("Undo")));
     expect(text).toBe(initial);
+  });
+
+  it("asks before a large run, and refuses an unfilled or oversized template", async () => {
+    const expandPrompt = vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` }));
+    const many = Array.from({ length: 101 }, (_, index) => `v${index}`);
+    await act(async () =>
+      root.render(<Harness initial="{{x}} portrait" expandPrompt={expandPrompt} variableValues={{ x: many }} onText={() => {}} />),
+    );
+    await act(async () => click(button("Expand all 101 prompts")));
+    expect(expandPrompt).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("That runs the expander 101 times");
+    await act(async () => click(button("Cancel")));
+    expect(expandPrompt).not.toHaveBeenCalled();
+
+    await act(async () =>
+      root.render(<Harness key="missing" initial="{{missing}} portrait" expandPrompt={expandPrompt} onText={() => {}} />),
+    );
+    expect(container.textContent).toContain("Add a value for {{missing}} before expanding.");
+    expect(button("Expand").disabled).toBe(true);
+
+    const huge = Array.from({ length: 50 }, (_, index) => `v${index}`);
+    await act(async () =>
+      root.render(
+        <Harness key="huge" initial="{{a}} {{b}}" expandPrompt={expandPrompt} variableValues={{ a: huge, b: huge }} onText={() => {}} />,
+      ),
+    );
+    expect(container.textContent).toContain("fill in to 2,500 prompts — more than the 2,000");
+    expect(button("Expand").disabled).toBe(true);
+  });
+
+  it("re-checks the limits when a confirmed run starts after the variables changed", async () => {
+    const expandPrompt = vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` }));
+    const values = (count) => Array.from({ length: count }, (_, index) => `v${index}`);
+    const view = (variableValues) => <Harness key="grow" initial="{{a}} {{b}}" expandPrompt={expandPrompt} variableValues={variableValues} onText={() => {}} />;
+    await act(async () => root.render(view({ a: values(101), b: values(1) })));
+    await act(async () => click(button("Expand all 101 prompts")));
+    expect(container.textContent).toContain("That runs the expander 101 times");
+
+    // Edited past the maximum while the confirmation is open.
+    await act(async () => root.render(view({ a: values(101), b: values(50) })));
+    const confirm = container.querySelector(".batch-confirm button");
+    expect(confirm.disabled).toBe(true);
+    expect(container.querySelector(".batch-confirm").textContent).toContain("more than the 2,000");
+    await act(async () => click(confirm));
+    await settle();
+    expect(expandPrompt).not.toHaveBeenCalled();
+  });
+
+  // The batch list has no escape for `{{…}}`, so a resolved line carrying placeholder text (here
+  // from a named value, its expansion failed) would be re-read as a template on Apply.
+  it("refuses to apply a line that would be read as a template again", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => {
+      if (prompt.includes("sign")) throw new Error("worker exploded");
+      return { refinedPrompt: `Expanded ${prompt}` };
+    });
+    const initial = "a fox\n{{label}} on a sign";
+    await act(async () =>
+      root.render(
+        <Harness initial={initial} expandPrompt={expandPrompt} variableValues={{ label: ["{{red|blue}}"] }} onText={(value) => { text = value; }} />,
+      ),
+    );
+    await act(async () => click(button("Expand all 2 prompts")));
+    await settle();
+    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox", "{{red|blue}} on a sign"]);
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe(initial);
+    expect(container.textContent).toContain("Prompt 2 would contain {{…}} text");
+  });
+
+  // A resolved prompt of just `---` is the batch list's block delimiter, so writing it back would
+  // merge or drop prompts; Apply refuses rather than change the batch.
+  it("refuses to apply a result that would split into different prompts", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => {
+      if (prompt !== "a fox") throw new Error("worker exploded");
+      return { refinedPrompt: "Expanded fox" };
+    });
+    const initial = "a fox\n{{---|a heron}}";
+    await act(async () => root.render(<Harness initial={initial} expandPrompt={expandPrompt} onText={(value) => { text = value; }} />));
+    await act(async () => click(button("Expand all 3 prompts")));
+    await settle();
+    expect(container.textContent).toContain("Expanded 1 of 3 prompts.");
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe(initial);
+    expect(container.textContent).toContain("Prompt 2 contains a line of just ---");
+  });
+
+  // An empty inline choice resolves to an empty prompt that the batch list cannot hold, so Apply
+  // refuses rather than drop it.
+  it("refuses to apply when an empty resolved choice would be dropped", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` }));
+    await act(async () => root.render(<Harness initial="{{|a fox}}" expandPrompt={expandPrompt} onText={(value) => { text = value; }} />));
+    await act(async () => click(button("Expand all 2 prompts")));
+    await settle();
+    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox"]);
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe("{{|a fox}}");
+    expect(container.textContent).toContain("Prompt 1 is empty");
   });
 
   it("keeps finished expansions when stopped", async () => {
