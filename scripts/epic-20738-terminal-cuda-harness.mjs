@@ -210,9 +210,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // The MiniMax-H3-Image-PE bf16 tier is published and pinned (SceneWorks/minimax-h3-image-pe@7c0e818c…):
 // 159 keys; every prior row is unchanged.
 // SW-F373 adds three SenseNova-Loop-9B listings. The 159 prior rows and Illustrious file lists match.
+// SW-F369 adds ostris' MiniMax-H3-Image training adapter (ostris/minimax_h3_training_adapter
+// @e4e119ca…): 162 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "763683c3e46cd385743af1d152f9950235da4564bbc585ddcb7a37b971864506";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "d0801d496453222410dafaf85d31ef66da1ca662f5a9e180e9496db1bec88d51";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

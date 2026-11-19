@@ -4,13 +4,18 @@
 //! errors) and the worker (engine mapping) share, the per-target support flag, and the catalog
 //! models each version resolves to.
 //!
-//! Two adapters ship, one per distilled base, each bound to the targets it was trained for:
+//! Each adapter is bound to the targets of the distilled base it was trained for:
 //!
 //! * ostris' `zimage_turbo_training_adapter` for Z-Image-Turbo. Its presets set
 //!   `trainingAdapterVersion` to `v2-default`; the Training Studio offers `v1` / `v2`.
-//! * ShootTheSound's `Fizgig-MiniMax-H3-Image-Training-Adapter` for the 6-step MiniMax-H3-Image
-//!   (text-to-image and edit LoRA targets). One version, `v1`, which the presets select. It is a
-//!   Model Derivative of MiniMax-H3-Image, so its catalog entry carries that model's licence gate.
+//! * ostris' `minimax_h3_training_adapter` image adapter for the 6-step MiniMax-H3-Image
+//!   (text-to-image and edit LoRA targets) — the assistant LoRA ai-toolkit's own
+//!   `minimax_h3_image` training applies, and the presets' default. One version, `v1`.
+//! * ShootTheSound's `Fizgig-MiniMax-H3-Image-Training-Adapter` for the same targets, kept
+//!   selectable (`v1`) for runs and presets that name it.
+//!
+//! Both MiniMax-H3-Image adapters are Model Derivatives of MiniMax-H3-Image, so their catalog
+//! entries carry that model's licence gate.
 //!
 //! The worker resolves the version to its installed `.safetensors` and hands the trainer the file
 //! (`gen_core::TrainingConfig::training_adapter`), which trains against base + adapter (strength
@@ -63,8 +68,8 @@ pub const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO: &str =
 /// The pinned revision the adapter is cataloged at.
 const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REVISION: &str = "f1a4547596faeb98bae568dd28da296c49fbe0a1";
 
-/// The MiniMax-H3-Image de-distill adapter (rank 16, kohya keys, ~149 MB) — the presets' default.
-/// Kept on at strength 1.0 while training and off at inference, per its model card.
+/// The Fizgig MiniMax-H3-Image de-distill adapter (rank 16, kohya keys, ~149 MB). Kept on at
+/// strength 1.0 while training and off at inference, per its model card.
 pub const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1: AuxTrainingModel = AuxTrainingModel {
     id: "minimax_h3_image_training_adapter_v1",
     label: "MiniMax-H3-Image de-distill training adapter v1",
@@ -73,11 +78,31 @@ pub const MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1: AuxTrainingModel = AuxTrainingMo
     file: "fizgig_minimax_h3_image_training_adapter.safetensors",
 };
 
+/// ostris' MiniMax-H3 training-adapter repo: one assistant LoRA per H3 architecture (video, image,
+/// ref2va, FastH3, P-H3-Image). Only its image file is cataloged.
+pub const MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO: &str = "ostris/minimax_h3_training_adapter";
+/// The pinned revision the image adapter is cataloged at.
+const MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REVISION: &str =
+    "e4e119caa391053286145e48ebbaf0e0c00293d3";
+
+/// ostris' MiniMax-H3-Image assistant LoRA (rank 16 over the attention and MLP of the 50 DiT
+/// blocks and the 2 token-refiner blocks, ComfyUI keys, ~155 MB) — the one ai-toolkit's
+/// `minimax_h3_image` architecture trains with (`assistant_lora_path`), and the presets' default.
+/// On at strength 1.0 while training, off at inference.
+pub const MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1: AuxTrainingModel = AuxTrainingModel {
+    id: "minimax_h3_image_ostris_training_adapter_v1",
+    label: "MiniMax-H3-Image de-distill training adapter v1 (ostris / ai-toolkit)",
+    repo: MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO,
+    revision: MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REVISION,
+    file: "minimax_h3_image_training_adapter_v1.safetensors",
+};
+
 /// Every cataloged training adapter (a parity test pins each to its `builtin.models.jsonc` entry).
-pub const TRAINING_ADAPTER_MODELS: [AuxTrainingModel; 3] = [
+pub const TRAINING_ADAPTER_MODELS: [AuxTrainingModel; 4] = [
     ZIMAGE_TURBO_TRAINING_ADAPTER_V1,
     ZIMAGE_TURBO_TRAINING_ADAPTER_V2,
     MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1,
+    MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1,
 ];
 
 /// One shipped training-adapter repo: the versions it offers, the version a blank selection means,
@@ -98,7 +123,7 @@ pub struct TrainingAdapterFamily {
 }
 
 /// Every shipped training-adapter repo.
-pub static TRAINING_ADAPTER_FAMILIES: [TrainingAdapterFamily; 2] = [
+pub static TRAINING_ADAPTER_FAMILIES: [TrainingAdapterFamily; 3] = [
     TrainingAdapterFamily {
         repo: ZIMAGE_TURBO_TRAINING_ADAPTER_REPO,
         versions: &[
@@ -112,6 +137,13 @@ pub static TRAINING_ADAPTER_FAMILIES: [TrainingAdapterFamily; 2] = [
     TrainingAdapterFamily {
         repo: MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO,
         versions: &[("v1", MINIMAX_H3_IMAGE_TRAINING_ADAPTER_V1)],
+        default_version: "v1",
+        default_aliases: &[],
+        target_ids: &["minimax_h3_image_lora", "minimax_h3_image_edit_lora"],
+    },
+    TrainingAdapterFamily {
+        repo: MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO,
+        versions: &[("v1", MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1)],
         default_version: "v1",
         default_aliases: &[],
         target_ids: &["minimax_h3_image_lora", "minimax_h3_image_edit_lora"],
@@ -272,6 +304,8 @@ mod tests {
             .flat_map(|family| family.target_ids.iter().copied())
             .collect();
         union.sort_unstable();
+        // Two adapters (ostris', Fizgig's) share the MiniMax-H3-Image targets.
+        union.dedup();
         let mut targets = TRAINING_ADAPTER_TARGETS.to_vec();
         targets.sort_unstable();
         assert_eq!(union, targets);

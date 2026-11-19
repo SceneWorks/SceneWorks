@@ -19430,6 +19430,52 @@
       }
     },
     {
+      // SW-F369: ostris' MiniMax-H3-Image de-distill training adapter — the assistant LoRA
+      // ai-toolkit's own `minimax_h3_image` architecture trains with (`assistant_lora_path`
+      // ostris/minimax_h3_training_adapter/minimax_h3_image_training_adapter_v1.safetensors; rank 16
+      // over the attention and MLP of the 50 DiT blocks and the 2 token-refiner blocks, ComfyUI keys).
+      // The MiniMax-H3-Image presets' default; the Fizgig entry above stays selectable. Strength 1.0
+      // while training, off at inference. componentOnly: staged by the training lane. The repo holds
+      // one adapter per H3 architecture, so only the image file is listed. repo/revision/file MUST
+      // equal sceneworks_core::training::training_adapter::MINIMAX_H3_IMAGE_OSTRIS_TRAINING_ADAPTER_V1
+      // (parity test).
+      //
+      // The licence gate: a Model Derivative of MiniMax-H3-Image (trained from its weights), so it
+      // inherits the MiniMax-H3-Image Community License Agreement, as the Fizgig adapter does. The
+      // repo is PUBLIC and carries no licence file of its own, so the link is the agreement published
+      // with MiniMax-H3-Image at the revision the base entry pins.
+      "id": "minimax_h3_image_ostris_training_adapter_v1",
+      "autoDownload": false,
+      "name": "MiniMax-H3-Image Training Adapter (ostris)",
+      "family": "minimax_h3_image_training_adapter",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "ostris/minimax_h3_training_adapter",
+          "revision": "e4e119caa391053286145e48ebbaf0e0c00293d3",
+          "files": ["minimax_h3_image_training_adapter_v1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 155110072,
+          "footprint": { "diskSizeBytes": 155110072 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/ostris/minimax_h3_training_adapter"
+      },
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+      "licenseNotice": "The ostris MiniMax-H3-Image de-distill training adapter is a Model Derivative of MiniMax-H3-Image, so it is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026), the same agreement as MiniMax-H3-Image itself, not by SceneWorks' own AGPL-3.0 licence. SceneWorks applies it only while training a MiniMax-H3-Image LoRA and never renders with it. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use of the model, its derivatives and their Outputs is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A), including clearly and prominently disclosing machine-generated content you publish. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): the Works and their Outputs may be used to improve only MiniMax-H3-Image or its Model Derivatives; this adapter and the LoRAs it helps train are such derivatives and inherit these terms. Read the full text under About → Licenses before downloading.",
+      "ui": {
+        "label": "MiniMax-H3-Image Training Adapter (ostris)",
+        "description": "ostris de-distill training adapter for MiniMax-H3-Image (rank 16, the one ai-toolkit trains this model with) — the training presets' default. Applied to MiniMax-H3-Image only while training a LoRA so it learns your subject instead of un-distilling the 6-step base into blurry, ghosted samples; removed for previews and generation - not a generation model. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": []
+      }
+    },
+    {
       // TAESDXL (madebyollin/taesdxl) — the tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESDXL_MODEL (parity test).
       "id": "taesdxl",
       "autoDownload": false,

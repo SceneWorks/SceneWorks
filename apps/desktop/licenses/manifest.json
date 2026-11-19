@@ -1228,6 +1228,32 @@
       ]
     },
     {
+      "id": "minimax-h3-image-ostris-training-adapter",
+      "models": [
+        "minimax_h3_image_ostris_training_adapter_v1"
+      ],
+      "name": "MiniMax-H3-Image Training Adapter (ostris)",
+      "publisher": "ostris (Model Derivative of MiniMax-H3-Image by MiniMax)",
+      "license": "MiniMax-H3-Image Community License",
+      "homepage": "https://huggingface.co/ostris/minimax_h3_training_adapter",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "De-distill training adapter for MiniMax-H3-Image (ostris/minimax_h3_training_adapter minimax_h3_image_training_adapter_v1.safetensors @e4e119caa391053286145e48ebbaf0e0c00293d3), the rank-16 assistant LoRA ai-toolkit trains this model with and the SceneWorks training presets' default. It renders no images: SceneWorks applies it to MiniMax-H3-Image only while training a LoRA, so the LoRA learns the subject instead of un-distilling the 6-step base, and removes it for previews and generation. SceneWorks downloads the unmodified file directly from the upstream repository (not re-hosted). It is a Model Derivative of MiniMax-H3-Image governed by the MiniMax-H3-Image Community License Agreement, a RESTRICTED licence: it requires separate written authorization above 1 million US dollars of annualized revenue or for any Hosted Service, requires displaying \"MiniMax-H3-Image\" on a commercial product's user interface, forbids using the Works or their Outputs to improve any other AI model, and limits its Applicable Territory to the world EXCLUDING the European Union, the United Kingdom, the Republic of Korea and the United States of America. LoRAs trained with it inherit the same Agreement. Read the full text before use.",
+      "documents": [
+        {
+          "label": "NOTICE (MiniMax-H3-Image Community License §III.4)",
+          "key": "minimax-h3-image-ostris-training-adapter-notice"
+        },
+        {
+          "label": "MiniMax-H3-Image Community License Agreement",
+          "key": "minimax-h3-image-community-license"
+        }
+      ]
+    },
+    {
       "id": "wan2_1_t2v_14b_diffusers",
       "models": [],
       "appliesToModels": [

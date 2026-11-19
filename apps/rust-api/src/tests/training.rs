@@ -3256,13 +3256,16 @@ async fn create_training_job_validates_the_training_adapter_selection() {
 }
 
 /// SW-F369: the MiniMax-H3-Image targets (text-to-image and edit) advertise
-/// `supportsTrainingAdapter`, their presets' Fizgig adapter (`v1`, and blank) passes validation
-/// (then hits the missing-dataset tripwire), and each base's adapter on the other base's target is a
-/// field error on `trainingAdapterRepo` before any dataset lookup.
+/// `supportsTrainingAdapter`, both H3 adapters — ostris' (the presets' default) and Fizgig's —
+/// pass validation (`v1`, and blank; then hit the missing-dataset tripwire), and each base's
+/// adapter on the other base's target is a field error on `trainingAdapterRepo` before any dataset
+/// lookup.
 #[tokio::test]
 async fn minimax_h3_image_targets_accept_only_their_own_training_adapter() {
     use sceneworks_core::training::training_adapter::{
-        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO as H3, ZIMAGE_TURBO_TRAINING_ADAPTER_REPO as ZIMAGE,
+        MINIMAX_H3_IMAGE_TRAINING_ADAPTER_REPO as FIZGIG,
+        MINIMAX_H3_OSTRIS_TRAINING_ADAPTER_REPO as OSTRIS,
+        ZIMAGE_TURBO_TRAINING_ADAPTER_REPO as ZIMAGE,
     };
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -3309,22 +3312,30 @@ async fn minimax_h3_image_targets_accept_only_their_own_training_adapter() {
             Some(true),
             "{id} advertises training-adapter support"
         );
-        for version in ["v1", ""] {
-            let (status, error) = submit(h3.clone(), H3, version).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{id}/{version}: {error}");
-            assert_eq!(error["detail"], "Training dataset not found", "{id}");
+        for repo in [OSTRIS, FIZGIG] {
+            for version in ["v1", ""] {
+                let (status, error) = submit(h3.clone(), repo, version).await;
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_FOUND,
+                    "{id}/{repo}/{version}: {error}"
+                );
+                assert_eq!(error["detail"], "Training dataset not found", "{id}");
+            }
+            let (status, error) = submit(h3.clone(), repo, "v2").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}/{repo}: {error}");
+            assert_eq!(error["context"]["field"], "trainingAdapterVersion", "{id}");
         }
-        let (status, error) = submit(h3.clone(), H3, "v2").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
-        assert_eq!(error["context"]["field"], "trainingAdapterVersion", "{id}");
         let (status, error) = submit(h3, ZIMAGE, "v2").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
         assert_eq!(error["code"], "training_field_error", "{id}");
         assert_eq!(error["context"]["field"], "trainingAdapterRepo", "{id}");
     }
-    let (status, error) = submit(target("z_image_turbo_lora"), H3, "v1").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["context"]["field"], "trainingAdapterRepo");
+    for repo in [OSTRIS, FIZGIG] {
+        let (status, error) = submit(target("z_image_turbo_lora"), repo, "v1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repo}: {error}");
+        assert_eq!(error["context"]["field"], "trainingAdapterRepo");
+    }
 }
 
 /// sc-25213 (finding 5): a REAL run whose selected de-distill adapter is not installed is refused at

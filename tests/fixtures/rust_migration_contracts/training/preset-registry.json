@@ -2060,8 +2060,8 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "timestepType": "uniform",
+          "trainingAdapterRepo": "ostris/minimax_h3_training_adapter",
           "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
@@ -2107,8 +2107,8 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "timestepType": "uniform",
+          "trainingAdapterRepo": "ostris/minimax_h3_training_adapter",
           "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
@@ -2153,8 +2153,8 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "timestepType": "uniform",
+          "trainingAdapterRepo": "ostris/minimax_h3_training_adapter",
           "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
@@ -2199,8 +2199,8 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "timestepType": "uniform",
+          "trainingAdapterRepo": "ostris/minimax_h3_training_adapter",
           "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
@@ -2246,8 +2246,8 @@
           "requestedGpu": "auto",
           "sampleEvery": 500,
           "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "trainingAdapterRepo": "ShootTheSound/Fizgig-MiniMax-H3-Image-Training-Adapter",
+          "timestepType": "uniform",
+          "trainingAdapterRepo": "ostris/minimax_h3_training_adapter",
           "trainingAdapterVersion": "v1",
           "weightDecay": 0.0001
         }
