@@ -92,8 +92,11 @@ export function usePromptRunners({
   //
   // The deadline is longer than the rewrite's: a 27B checkpoint decodes up to 4096 tokens of
   // reasoning and answer, after a cold load of ~18-55 GB of weights inside this window.
+  //
+  // SW-7208: `expanderModelId` names the model the expander runs (MiniMax-H3-Image-PE or the
+  // abliterated describer); absent, the API runs the saved choice.
   const h3ImageExpandPrompt = useCallback(
-    ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
+    ({ prompt, modelId, projectId, sourceAssetIds, expanderModelId, signal }) =>
       pollJobToCompletion({
         createPath: JOB_PATHS.refine,
         body: {
@@ -104,6 +107,7 @@ export function usePromptRunners({
           workflow: "image",
           aspectRatio: "adaptive",
           sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
+          ...(expanderModelId ? { expanderModelId } : {}),
         },
         deadlineMs: 600000,
         resolveResult: (job) => {

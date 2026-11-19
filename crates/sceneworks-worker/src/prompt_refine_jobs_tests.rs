@@ -2861,3 +2861,61 @@ fn the_h3_image_expansion_is_a_json_task_that_takes_references_and_is_reviewed()
     );
     assert_eq!(expansion.aspect_ratio, "9:16");
 }
+
+/// SW-7208: an expansion runs the model its job names, and only under that model's own entry —
+/// never one model's weights under the other's name, and never a model that is not an expander.
+/// Refused while parsing, before any load.
+#[cfg(native_lane)]
+#[tokio::test]
+async fn an_expansion_runs_only_the_named_expander_model_under_its_own_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = Settings::for_test(temp.path().to_path_buf());
+    let job = |expander: Value, entry_id: &str| -> JobSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "id": "job_h3_expand_model", "type": "prompt_refine", "status": "running",
+            "payload": {
+                "task": sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK,
+                "prompt": "a lighthouse",
+                "modelId": sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID,
+                "expanderModelId": expander,
+                "modelManifestEntry": crate::test_env::shipped_catalog_entry(entry_id),
+            },
+            "result": {}, "requestedGpu": "auto", "workerId": "w", "progress": 0,
+            "stage": "running", "message": "", "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-11-19T00:00:00Z", "updatedAt": "2026-11-19T00:00:00Z"
+        }))
+        .unwrap()
+    };
+    let describer = sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let pe = sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID;
+    for (expander, entry) in [(describer, pe), (pe, describer)] {
+        let error = match parse::parse_refine_request(&settings, &job(expander.into(), entry)).await
+        {
+            Ok(_) => panic!("{expander} under {entry}'s entry was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("modelManifestEntry"), "{error}");
+    }
+    let error =
+        match parse::parse_refine_request(&settings, &job("vision_caption_qwen3vl_8b".into(), pe))
+            .await
+        {
+            Ok(_) => panic!("a non-expander model was accepted"),
+            Err(error) => error.to_string(),
+        };
+    assert!(
+        error.contains("not a MiniMax-H3-Image prompt expander model"),
+        "{error}"
+    );
+    // The describer's own entry without MiniMax's prompt co-requisite cannot run either: the
+    // worker never guesses where the licensed prompt files are.
+    let error =
+        match parse::parse_refine_request(&settings, &job(describer.into(), describer)).await {
+            Ok(_) => panic!("the describer ran without the prompt co-requisite"),
+            Err(error) => error.to_string(),
+        };
+    assert!(
+        error.contains("not installed") || error.contains("co-requisite"),
+        "{error}"
+    );
+}

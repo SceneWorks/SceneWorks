@@ -194,4 +194,13 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         MachineBudget,
         "TextLlm KV compression policy"
     ),
+    field!(
+        "promptRefine",
+        "expanderModelId",
+        OneOf("minimax_h3_image_pe | vision_describe_qwen3_8_27b"),
+        Provider("saved h3ImageExpanderModel UI preference, else minimax_h3_image_pe"),
+        WhatToMake,
+        "MiniMax-H3-Image prompt expander model"
+    )
+    .limits(&["minimax_h3_image_expand task only"]),
 ];

@@ -305,9 +305,9 @@ async fn prepare_h3_image_expand(
             ));
         }
     }
-    let entry =
+    let pe_entry =
         crate::models::resolve_model_manifest_entry(state, MINIMAX_H3_IMAGE_PE_MODEL_ID).await?;
-    let object = entry
+    let pe_object = pe_entry
         .as_object()
         .filter(|object| !object.is_empty())
         .ok_or_else(|| {
@@ -315,14 +315,45 @@ async fn prepare_h3_image_expand(
                 "the {MINIMAX_H3_IMAGE_PE_MODEL_ID} catalog entry is missing"
             ))
         })?;
-    crate::models::ensure_run_license_acknowledged(state, object).await?;
+    // Both models run MiniMax's licensed prompt files, so the expander entry's acknowledgment
+    // gates either choice (SW-7208 AC3).
+    crate::models::ensure_run_license_acknowledged(state, pe_object).await?;
+    // SW-7208: the model the request names, else the saved choice, else MiniMax-H3-Image-PE.
+    let requested = payload
+        .expander_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let expander = match requested {
+        Some(_) => sceneworks_core::contracts::minimax_h3_image_expander_model(requested).map_err(
+            |unknown| {
+                ApiError::bad_request(format!(
+                    "expanderModelId {unknown:?} is not a MiniMax-H3-Image prompt expander; use {}",
+                    sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS.join(" or ")
+                ))
+            },
+        )?,
+        None => crate::preferences::saved_h3_image_expander_model(state)
+            .await
+            .unwrap_or(MINIMAX_H3_IMAGE_PE_MODEL_ID),
+    };
+    job_payload.insert(
+        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY.to_owned(),
+        Value::String(expander.to_owned()),
+    );
+    let entry = if expander == MINIMAX_H3_IMAGE_PE_MODEL_ID {
+        pe_entry
+    } else {
+        let describer = crate::models::resolve_model_manifest_entry(state, expander).await?;
+        describer_expansion_entry(describer, &pe_entry)?
+    };
     // Freeze the tier the worker will load BEFORE admission binds the job's sources. The request
     // names no tier, and portable admission has no implicit expander choice of its own, so without
     // this it would bind the catalog's default download (the unpublished bf16 row on macOS, NVFP4
     // on Windows/Linux) while the worker loaded whichever tier is actually installed.
     let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
     let nvfp4_worker = can_run_nvfp4_expansion(&workers);
-    if let Some(tier) = expander_tier(&entry, &state.settings.data_dir, nvfp4_worker) {
+    if let Some(tier) = expander_tier(&entry, expander, &state.settings.data_dir, nvfp4_worker) {
         job_payload.insert(
             sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY.to_owned(),
             Value::String(tier.to_owned()),
@@ -330,6 +361,33 @@ async fn prepare_h3_image_expand(
     }
     job_payload.insert("modelManifestEntry".to_owned(), entry);
     Ok(())
+}
+
+/// The entry an expansion with the abliterated describer runs (SW-7208): the describer's own catalog
+/// entry (its tiers and their memory floors) with MiniMax's `prompt/` files from the expander entry's
+/// `describer_prompt_expansion` conditional component added as a required co-requisite. The worker
+/// reads the prompt files from that row, and admission binds them with the tier, exactly as it binds
+/// the expander's own `prompt` co-requisite.
+fn describer_expansion_entry(describer: Value, pe_entry: &Value) -> Result<Value, ApiError> {
+    let mut entry = describer;
+    let prompts = sceneworks_core::model_usage_policy::conditional_component_downloads(
+        pe_entry,
+        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE,
+    )
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "the {MINIMAX_H3_IMAGE_PE_MODEL_ID} catalog entry declares no prompt files for the \
+             describer: {error}"
+        ))
+    })?;
+    entry
+        .as_object_mut()
+        .filter(|object| !object.is_empty())
+        .and_then(|object| object.get_mut("downloads"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| ApiError::internal("the describer catalog entry is missing"))?
+        .extend(prompts);
+    Ok(entry)
 }
 
 /// Whether one available worker can run an NVFP4 expansion: it must advertise BOTH the
@@ -351,21 +409,23 @@ fn can_run_nvfp4_expansion(workers: &[WorkerSnapshot]) -> bool {
     })
 }
 
-/// The expander tier an unselected expansion runs: the worker's own order
-/// ([`sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS`]) over the tiers installed for this
-/// host's platform, with NVFP4 only when a registered worker can run it. A tier is installed when
-/// its row's pinned revision holds every file the row names, the snapshot the worker loads.
-/// `None` when no tier is installed, which leaves the worker's "install the expander" refusal to
-/// explain it.
+/// The expander tier an unselected expansion of `model_id` runs: the worker's own order
+/// ([`sceneworks_core::contracts::minimax_h3_image_expander_tiers`]) over the tiers installed for
+/// this host's platform, with NVFP4 only when a registered worker can run it. A tier is installed
+/// when its row's pinned revision holds every file the row names, the snapshot the worker loads,
+/// and the prompt files are installed too. `None` when no tier is installed, which leaves the
+/// worker's "install the expander" refusal to explain it.
 fn expander_tier(
     entry: &Value,
+    model_id: &str,
     data_dir: &std::path::Path,
     nvfp4_worker: bool,
 ) -> Option<&'static str> {
     let mut host = entry.clone();
     crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
-    sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS
-        .into_iter()
+    sceneworks_core::contracts::minimax_h3_image_expander_tiers(model_id)
+        .iter()
+        .copied()
         .filter(|tier| *tier != "nvfp4" || nvfp4_worker)
         .find(|tier| crate::models::pinned_variant_installed(&host, tier, data_dir))
 }
@@ -503,7 +563,12 @@ mod tests {
         }
 
         fn tier(&self) -> Option<&'static str> {
-            expander_tier(&self.entry, &self.data_dir, false)
+            expander_tier(
+                &self.entry,
+                MINIMAX_H3_IMAGE_PE_MODEL_ID,
+                &self.data_dir,
+                false,
+            )
         }
     }
 

@@ -9,7 +9,9 @@ catalog's bf16 row names. `expander-q4` / `expander-q8` is ONE expander tier: ev
 Candle folder (`candle-q4-full/` or `candle-q8-full/`, the folder its catalog row names) plus the
 five upstream `prompt/` files the catalog's `prompt` co-requisite names, each at its own pinned
 revision. Only the selected tier is fetched, so a cache provisioned this way holds no other
-expander tier. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
+expander tier. `expander-abliterated-q4` / `expander-abliterated-q8` (SW-7208) is the expander run by
+the abliterated describer instead: ONE describer tier (the files its catalog row names in `q4-full/`
+or `q8-full/`) plus the same five prompt files, and no MiniMax-H3-Image-PE weights. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
 downloading when the cache volume has less than MIN_FREE_BYTES free; checks every file's size after
@@ -93,7 +95,8 @@ PROMPT_FILES = (
 )
 PROMPT_BYTES = 56_282
 PROMPT_MIN_FREE_BYTES = 1 * 10**9
-MODES = ("quantised", "bf16", "expander-q4", "expander-q8")
+MODES = ("quantised", "bf16", "expander-q4", "expander-q8", "expander-abliterated-q4",
+         "expander-abliterated-q8")
 
 
 def tier_patterns(folder, tier_files=TIER_FILES):
@@ -210,9 +213,25 @@ def plan(mode):
     raise RuntimeError(f"unknown provisioning mode {mode!r}; use one of {', '.join(MODES)}")
 
 
+def prompt_plan():
+    """The upstream prompt files every expander mode provisions, in `plan`'s shape."""
+    return (PROMPT_REPO, PROMPT_REVISION, "expander prompt files (prompt/)", prompt_expected_files,
+            list(PROMPT_FILES), PROMPT_MIN_FREE_BYTES)
+
+
 def plans(mode):
     """Every snapshot `mode` provisions, each in `plan`'s shape: a describer mode is one snapshot;
-    an expander tier is its Candle folder, then the upstream prompt files."""
+    an expander tier is its Candle folder, then the upstream prompt files; an abliterated expander
+    tier is ONE describer tier folder, then the same prompt files."""
+    described = mode.removeprefix("expander-abliterated-")
+    if mode.startswith("expander-abliterated-") and described in TIER_BYTES:
+        folder = TIER_FOLDERS[described]
+        return [
+            (REPO, REVISION, f"abliterated expander tier {described} ({folder}/)",
+             lambda entries: expected_files(entries, {described: TIER_BYTES[described]}),
+             tier_patterns(folder), EXPANDER_MIN_FREE_BYTES[described]),
+            prompt_plan(),
+        ]
     tier = mode.removeprefix("expander-")
     if mode.startswith("expander-") and tier in EXPANDER_TIER_FOLDERS:
         folder = EXPANDER_TIER_FOLDERS[tier]
@@ -220,8 +239,7 @@ def plans(mode):
             (EXPANDER_REPO, EXPANDER_REVISION, f"expander tier {tier} ({folder}/)",
              lambda entries: expander_expected_files(entries, tier), [f"{folder}/*"],
              EXPANDER_MIN_FREE_BYTES[tier]),
-            (PROMPT_REPO, PROMPT_REVISION, "expander prompt files (prompt/)", prompt_expected_files,
-             list(PROMPT_FILES), PROMPT_MIN_FREE_BYTES),
+            prompt_plan(),
         ]
     return [plan(mode)]
 

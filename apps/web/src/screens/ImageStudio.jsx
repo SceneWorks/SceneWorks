@@ -126,6 +126,7 @@ import { usePidState, useStrictControlState } from "./imageStudio/useImageContro
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
+import { useH3Expander } from "../minimaxH3ImageExpand.js";
 import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useValidation } from "../validation/useValidation.js";
@@ -143,7 +144,7 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, MINIMAX_H3_IMAGE_PE_MODEL_ID, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
+import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 
@@ -2035,18 +2036,16 @@ export function ImageStudio() {
     typeof qwenRewritePrompt === "function";
   // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
   // edit (references present, read as `<Picture N>` in the same order the render takes), and the
-  // tile renders only when it is installed, exactly like the Qwen rewriter above.
-  const h3ExpandModel = useMemo(
-    () =>
-      h3ImageExpanderAppliesTo(selectedModel)
-        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
-        : undefined,
-    [models, selectedModel],
-  );
-  const h3ExpandAvailable =
-    Boolean(h3ExpandModel) &&
-    h3ExpandModel.installState !== "missing" &&
-    typeof h3ImageExpandPrompt === "function";
+  // tile renders only when it is installed, exactly like the Qwen rewriter above. SW-7208: it runs
+  // the saved model of the two, MiniMax-H3-Image-PE or the abliterated describer.
+  const h3Expander = useH3Expander({
+    models,
+    applies: h3ImageExpanderAppliesTo(selectedModel),
+    expandPrompt: h3ImageExpandPrompt,
+    downloadConditionalComponents,
+  });
+  const h3ExpandModel = h3Expander.model;
+  const h3ExpandAvailable = h3Expander.available;
   const imageReference = useImageReferenceStatus({
     enabled: mode === "text_to_image" && supportsImg2img,
     assetId: img2imgReferenceAssetId,
@@ -3078,7 +3077,8 @@ export function ImageStudio() {
             qwenRewritePrompt={qwenRewritePrompt}
             h3ExpandAvailable={h3ExpandAvailable}
             h3ExpandModel={h3ExpandModel}
-            h3ExpandPrompt={h3ImageExpandPrompt}
+            h3ExpandPrompt={h3Expander.prompt}
+            h3ExpandPicker={h3Expander.picker}
             resolution={resolution}
             selectedModel={selectedModel}
             flux3LayoutAvailable={flux3LayoutAvailable}

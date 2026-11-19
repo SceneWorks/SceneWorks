@@ -771,14 +771,60 @@ pub const MINIMAX_H3_IMAGE_PE_MODEL_ID: &str = "minimax_h3_image_pe";
 /// Catalog id of the image model the prompt expander serves.
 pub const MINIMAX_H3_IMAGE_MODEL_ID: &str = "minimax_h3_image";
 
-/// Payload key naming the expander tier a `minimax_h3_image_expand` job runs. The API freezes the
-/// tier it selects here before admission binds the job's sources, and the worker honours it by
-/// name (never substituting another tier), so the binding and the load agree on one tier.
+/// Payload key naming the expander tier a `minimax_h3_image_expand` job runs: a tier of the model
+/// [`MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY`] names. The API freezes the tier it selects here before
+/// admission binds the job's sources, and the worker honours it by name (never substituting
+/// another tier), so the binding and the load agree on one tier.
 pub const MINIMAX_H3_IMAGE_PE_TIER_KEY: &str = "peTier";
 
 /// The expander's tiers in selection order: the published NVFP4 original first (only where a
 /// worker can run it: Blackwell CUDA), then the converted tiers densest first.
 pub const MINIMAX_H3_IMAGE_PE_TIERS: [&str; 4] = ["nvfp4", "bf16", "q8", "q4"];
+
+/// Payload (and request) key naming the model a `minimax_h3_image_expand` job runs (SW-7208): one
+/// of [`MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS`]. Absent means MiniMax-H3-Image-PE.
+pub const MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY: &str = "expanderModelId";
+
+/// The models the MiniMax-H3-Image prompt expander can run, the default first: MiniMax-H3-Image-PE,
+/// or the abliterated Qwen3.8-27B the dataset describer uses. Both run MiniMax's own prompt files
+/// and reply contract (`core_llm::minimax_h3_image_pe`); only the weights differ.
+pub const MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS: [&str; 2] = [
+    MINIMAX_H3_IMAGE_PE_MODEL_ID,
+    crate::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID,
+];
+
+/// The abliterated describer's tiers in expander selection order: densest first, as for
+/// [`MINIMAX_H3_IMAGE_PE_TIERS`].
+pub const MINIMAX_H3_IMAGE_EXPANDER_DESCRIBER_TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+
+/// The `conditionalComponents` purpose on the MiniMax-H3-Image-PE entry whose one component is
+/// MiniMax's `prompt/` files alone. Expanding with the abliterated describer needs those files but
+/// not MiniMax-H3-Image-PE's weights, so they download on their own through this purpose, behind
+/// the expander entry's licence acknowledgment.
+pub const MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE: &str = "describer_prompt_expansion";
+
+/// The expander model `requested` names, or the default MiniMax-H3-Image-PE when it names none.
+/// `Err` carries the unknown value.
+pub fn minimax_h3_image_expander_model(requested: Option<&str>) -> Result<&'static str, String> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(MINIMAX_H3_IMAGE_PE_MODEL_ID),
+        Some(value) => MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS
+            .into_iter()
+            .find(|id| *id == value)
+            .ok_or_else(|| value.to_owned()),
+    }
+}
+
+/// `model_id`'s expander tiers in selection order (empty for a model that is not an expander).
+pub fn minimax_h3_image_expander_tiers(model_id: &str) -> &'static [&'static str] {
+    match model_id {
+        MINIMAX_H3_IMAGE_PE_MODEL_ID => &MINIMAX_H3_IMAGE_PE_TIERS,
+        crate::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID => {
+            &MINIMAX_H3_IMAGE_EXPANDER_DESCRIBER_TIERS
+        }
+        _ => &[],
+    }
+}
 
 /// The worker capability a CUDA worker advertises when its GPU can run NVFP4 (sm_120 or newer).
 pub const NVFP4_WORKER_CAPABILITY: &str = "nvfp4";
@@ -1957,6 +2003,37 @@ pub struct ModelInstallMarker {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// SW-7208: the expander runs MiniMax-H3-Image-PE unless the request names the abliterated
+    /// describer; anything else is refused by name, and each model has its own tier order.
+    #[test]
+    fn the_h3_image_expander_runs_one_of_two_models_with_its_own_tiers() {
+        assert_eq!(
+            minimax_h3_image_expander_model(None),
+            Ok(MINIMAX_H3_IMAGE_PE_MODEL_ID)
+        );
+        assert_eq!(
+            minimax_h3_image_expander_model(Some("  ")),
+            Ok(MINIMAX_H3_IMAGE_PE_MODEL_ID)
+        );
+        assert_eq!(
+            minimax_h3_image_expander_model(Some("vision_describe_qwen3_8_27b")),
+            Ok("vision_describe_qwen3_8_27b")
+        );
+        assert_eq!(
+            minimax_h3_image_expander_model(Some("vision_caption_qwen3vl_8b")),
+            Err("vision_caption_qwen3vl_8b".to_owned())
+        );
+        assert_eq!(
+            minimax_h3_image_expander_tiers(MINIMAX_H3_IMAGE_PE_MODEL_ID),
+            &MINIMAX_H3_IMAGE_PE_TIERS
+        );
+        assert_eq!(
+            minimax_h3_image_expander_tiers("vision_describe_qwen3_8_27b"),
+            &["bf16", "q8", "q4"]
+        );
+        assert!(minimax_h3_image_expander_tiers("minimax_h3_image").is_empty());
+    }
 
     #[test]
     fn raster_asset_identity_requires_image_type_and_raster_media() {

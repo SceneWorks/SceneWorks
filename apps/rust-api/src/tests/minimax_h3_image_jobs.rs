@@ -1366,3 +1366,352 @@ async fn installing_a_qwen38_tier_queues_only_that_tiers_folder_and_its_co_requi
         }
     }
 }
+
+fn shipped_describer_entry() -> Value {
+    Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("vision_describe_qwen3_8_27b")
+            .expect("the describer is a builtin")
+            .clone(),
+    )
+}
+
+/// The three entries an expansion reads (the image model, the expander and the describer) as the
+/// test install's catalog.
+fn write_expansion_catalog(config: &std::path::Path) {
+    single_model_manifest(config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [
+            shipped_entry(), shipped_pe_entry(), shipped_describer_entry()
+        ] })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// A pinned snapshot directory of `repo` at `revision` in `data_dir`'s hub.
+fn pinned_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> std::path::PathBuf {
+    let root = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo).unwrap();
+    std::fs::create_dir_all(root.join("refs")).unwrap();
+    std::fs::write(root.join("refs").join("main"), revision).unwrap();
+    root.join("snapshots").join(revision)
+}
+
+/// Every file the host's `tier` row of the describer names, at its pinned revision (a shard glob as
+/// the one shard its index names).
+fn install_describer_tier(data_dir: &std::path::Path, tier: &str) {
+    let mut host = shipped_describer_entry();
+    crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+    let row = crate::models::model_download_for_variant(&host, tier).expect("describer tier row");
+    let snapshot = pinned_snapshot(
+        data_dir,
+        row["repo"].as_str().unwrap(),
+        row["revision"].as_str().unwrap(),
+    );
+    for file in row["files"].as_array().unwrap() {
+        let file = file.as_str().unwrap();
+        let (path, body) = if file.contains('*') {
+            (file.replace('*', "00001-of-00001"), String::new())
+        } else if file.ends_with("model.safetensors.index.json") {
+            (
+                file.to_owned(),
+                json!({ "weight_map": { "a": "model-00001-of-00001.safetensors" } }).to_string(),
+            )
+        } else {
+            (file.to_owned(), "{}".to_owned())
+        };
+        let path = snapshot.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+}
+
+/// MiniMax's five prompt files at the expander's pinned upstream revision.
+fn install_prompt_files(data_dir: &std::path::Path) {
+    let upstream = pinned_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3-Image-PE",
+        "35603d4b63949afa12cb098227fffefedf081afa",
+    );
+    for file in [
+        "prompt/manifest.json",
+        "prompt/t2i/system_prompt.txt",
+        "prompt/t2i/task_prompt.txt",
+        "prompt/t2i/request_params.json",
+        "prompt/edit/task_prompt.txt",
+    ] {
+        let path = upstream.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    }
+}
+
+/// The catalog row the models route serves for `id`.
+async fn served_model(app: axum::Router, id: &str) -> Value {
+    let (_, catalog) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    catalog
+        .as_array()
+        .or_else(|| catalog["models"].as_array())
+        .expect("the models route lists models")
+        .iter()
+        .find(|model| model["id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("{id} is served"))
+}
+
+/// SW-7208 (AC1, AC3): the expander runs the model the request names, else the saved choice, else
+/// MiniMax-H3-Image-PE. The abliterated choice stays behind the expander's MiniMax licence, and its
+/// job carries the describer's entry with MiniMax's prompt files as a co-requisite.
+#[tokio::test]
+async fn an_expansion_runs_the_chosen_model_and_the_saved_choice_behind_the_expanders_licence() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    write_expansion_catalog(&temp.path().join("config/manifests"));
+    let settings = test_settings(&temp);
+    let ack_path =
+        sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+    let app = create_app(settings).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Expand").await;
+    let expand = |extra: Value| {
+        let mut body = json!({
+            "task": "minimax_h3_image_expand",
+            "prompt": "a lighthouse in fog",
+            "modelId": "minimax_h3_image",
+            "projectId": project["id"],
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let describer = json!({ "expanderModelId": "vision_describe_qwen3_8_27b" });
+
+    // The abliterated model reads MiniMax's licensed prompts: refused until the licence is accepted.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(describer.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["code"], "license_acknowledgment_required");
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &ack_path,
+        &shipped_pe_entry(),
+        "test",
+        "2026-11-19T00:00:00Z",
+    )
+    .unwrap();
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(describer.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["expanderModelId"],
+        "vision_describe_qwen3_8_27b"
+    );
+    let entry = &job["payload"]["modelManifestEntry"];
+    assert_eq!(entry["id"], "vision_describe_qwen3_8_27b", "{job}");
+    let prompts: Vec<&Value> = entry["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["coRequisite"] == true && row["componentId"] == "prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1, "{entry}");
+    assert_eq!(prompts[0]["repo"], "MiniMaxAI/MiniMax-H3-Image-PE");
+    assert_eq!(
+        prompts[0]["revision"],
+        "35603d4b63949afa12cb098227fffefedf081afa"
+    );
+    assert_eq!(prompts[0]["files"].as_array().unwrap().len(), 5);
+
+    // No choice and nothing saved: MiniMax-H3-Image-PE.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["expanderModelId"], "minimax_h3_image_pe");
+    assert_eq!(
+        job["payload"]["modelManifestEntry"]["id"],
+        "minimax_h3_image_pe"
+    );
+
+    // A model that is not an expander is refused by name, the dataset captioner included.
+    let (status, bad) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({ "expanderModelId": "vision_caption_qwen3vl_8b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+
+    // The saved choice is what a request without one runs, and it survives a fresh read.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "h3ImageExpanderModel": "vision_describe_qwen3_8_27b" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(prefs["h3ImageExpanderModel"], "vision_describe_qwen3_8_27b");
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["expanderModelId"],
+        "vision_describe_qwen3_8_27b"
+    );
+    // An unknown value never replaces the saved choice; an explicit request still wins over it.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "h3ImageExpanderModel": "minimax_h3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(prefs["h3ImageExpanderModel"], "vision_describe_qwen3_8_27b");
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({ "expanderModelId": "minimax_h3_image_pe" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["modelManifestEntry"]["id"],
+        "minimax_h3_image_pe"
+    );
+}
+
+/// SW-7208 (AC3): the abliterated choice needs only an installed describer tier plus MiniMax's
+/// prompt files — no MiniMax-H3-Image-PE weights. The prompt files download on their own behind the
+/// expander's licence. With the tier alone no tier is frozen; with the prompt files too the job
+/// freezes that tier, binds the describer's own pinned folder, and the worker's portable guard
+/// accepts the binding.
+#[tokio::test]
+async fn an_abliterated_expansion_needs_only_a_describer_tier_and_the_prompt_files() {
+    let _hf = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().unwrap();
+    write_expansion_catalog(&temp.path().join("config/manifests"));
+    let settings = test_settings(&temp);
+    let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Expand").await;
+    let body = json!({
+        "task": "minimax_h3_image_expand",
+        "prompt": "a lighthouse in fog",
+        "modelId": "minimax_h3_image",
+        "projectId": project["id"],
+        "expanderModelId": "vision_describe_qwen3_8_27b",
+    });
+    let prompts_route = "/api/v1/models/minimax_h3_image_pe/conditional-components/\
+                         describer_prompt_expansion/download";
+
+    // The prompt files are MiniMax Materials: their own download waits on the expander's licence.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        prompts_route,
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["code"], "license_acknowledgment_required");
+    let (status, components) = request(
+        app.clone(),
+        "POST",
+        prompts_route,
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{components}");
+    let queued = components["components"].as_array().unwrap();
+    assert_eq!(queued.len(), 1, "only the prompt files: {components}");
+    assert_eq!(queued[0]["repo"], "MiniMaxAI/MiniMax-H3-Image-PE");
+    assert_eq!(queued[0]["status"], "queued");
+    let pe = served_model(app.clone(), "minimax_h3_image_pe").await;
+    assert_eq!(
+        pe["conditionalPurposes"]["describer_prompt_expansion"]["installState"], "missing",
+        "{pe}"
+    );
+
+    install_describer_tier(&settings.data_dir, "q4");
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(
+        job["payload"].get("peTier").is_none(),
+        "the prompt files are absent: {job}"
+    );
+
+    install_prompt_files(&settings.data_dir);
+    // A finished download refreshes the catalog; these files were written directly.
+    state.model_catalog_cache.invalidate();
+    let pe = served_model(app.clone(), "minimax_h3_image_pe").await;
+    assert_eq!(
+        pe["conditionalPurposes"]["describer_prompt_expansion"]["installState"], "installed",
+        "{pe}"
+    );
+    let (status, job) = request(app.clone(), "POST", "/api/v1/prompts/refine", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["peTier"], "q4", "{job}");
+    let binding = state
+        .jobs_store
+        .portable_model_binding(job["id"].as_str().unwrap())
+        .expect("binding reads")
+        .expect("the expansion is bound");
+    let stored = state
+        .jobs_store
+        .get_job(job["id"].as_str().unwrap())
+        .expect("job reads");
+    assert_eq!(
+        assert_worker_guard_accepts(
+            &JobType::PromptRefine,
+            &stored.payload,
+            &binding,
+            "vision_describe_qwen3_8_27b"
+        ),
+        "q4"
+    );
+}
+
+/// SW-7208 (E7): MiniMax-H3-Image-PE is never a dataset describer — its licence forbids using its
+/// outputs to improve other models. The describe route refuses it under every name it has.
+#[test]
+fn the_dataset_describer_never_accepts_minimax_h3_image_pe() {
+    for model in [
+        "minimax_h3_image_pe",
+        "MiniMaxAI/MiniMax-H3-Image-PE",
+        "SceneWorks/minimax-h3-image-pe",
+    ] {
+        assert!(
+            crate::training::resolve_describe_model(Some(model)).is_err(),
+            "{model} must not describe a dataset"
+        );
+    }
+    assert!(crate::training::resolve_describe_model(Some(
+        sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_REPO
+    ))
+    .is_ok());
+}

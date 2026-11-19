@@ -10,6 +10,11 @@
 // prompt files at their pinned revision and a complete well-formed expansion. `tier_isolated` is
 // true when no other expander tier folder was in the snapshot: a fresh-hub run that proves the job
 // needed only the selected tier.
+//
+// `SCENEWORKS_H3_EXPANDER_MODEL=abliterated` (SW-7208) validates an expansion run by the abliterated
+// Qwen3.8-27B describer instead of MiniMax-H3-Image-PE: the describer's own pinned Candle tier
+// folder, the same upstream prompt files and output contract, and a result that names the
+// describer as the model that ran.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -91,6 +96,8 @@ export const EXPANDER_CATALOG_ID = 'minimax_h3_image_pe';
 export const EXPANDER_REPO = 'SceneWorks/minimax-h3-image-pe';
 export const EXPANDER_TIERS = Object.freeze(['q4', 'q8']);
 export const EXPANDER_TEST_NAME = 'h3_prompt_expander_expands_a_prompt_on_cuda';
+// The expander's models (SW-7208): the workflow's `expander_model` input -> the catalog id that runs.
+export const EXPANDER_MODELS = Object.freeze({ minimax: EXPANDER_CATALOG_ID, abliterated: CATALOG_ID });
 
 // Each published expander tier's pinned Candle folder (the Windows/Linux row's), and the `prompt`
 // co-requisite's upstream snapshot, from the compiled catalog.
@@ -121,10 +128,27 @@ function validateGpuMemory(memory) {
   return memory;
 }
 
-export function validateExpanderResult(result, tier, pinned = expanderPinnedSnapshots()) {
+// The pinned tier folders `model` loads on the Candle lane, with the expander's prompt snapshot:
+// MiniMax-H3-Image-PE's own tiers, or the describer's quantised tiers.
+export function expanderModelSnapshots(model = 'minimax') {
+  const expander = expanderPinnedSnapshots();
+  if (model === 'minimax') return expander;
+  const describer = pinnedSnapshots();
+  return Object.freeze({ q4: describer.q4, q8: describer.q8, prompt: expander.prompt });
+}
+
+export function validateExpanderResult(result, tier, pinned = expanderPinnedSnapshots(), model = 'minimax') {
   assert(EXPANDER_TIERS.includes(tier), `requested expander tier must be one of ${EXPANDER_TIERS.join(', ')}`);
+  assert(Object.hasOwn(EXPANDER_MODELS, model), `expander model must be one of ${Object.keys(EXPANDER_MODELS).join(', ')}`);
   assert.equal(result?.schema_version, 1, 'unknown expander result schema');
   assert.equal(result.job, 'expander', 'result is not from the expander smoke');
+  // An older result names no model: it is MiniMax-H3-Image-PE's.
+  assert.equal(result.expander_model ?? 'minimax', model, 'result is from another expander model');
+  assert.equal(result.catalog_id ?? EXPANDER_CATALOG_ID, EXPANDER_MODELS[model],
+    'result names another catalog entry than the requested model');
+  if (result.rewriter_model_id !== undefined) {
+    assert.equal(result.rewriter_model_id, EXPANDER_MODELS[model], 'the job record names another model than ran');
+  }
   assert.equal(typeof result.test_fqn, 'string');
   assert.equal(result.test_fqn.split('::').at(-1), EXPANDER_TEST_NAME, 'result is not from the expander smoke');
   assert.equal(result.backend, 'candle', 'the CUDA run must be the Candle backend');
@@ -156,6 +180,8 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
     'the reply ran to its budget');
   assert(Number.isFinite(result.wall_seconds) && result.wall_seconds > 0, 'wall time is missing');
   return {
+    expander_model: model,
+    catalog_id: EXPANDER_MODELS[model],
     tier: result.tier,
     revision: result.revision,
     prompt: result.prompt,
@@ -203,7 +229,8 @@ export function summary(evidence) {
   const result = evidence.result;
   if (result && expander) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
-    lines.push(`Tier: \`${result.tier}\` at \`${result.revision}\``, '',
+    lines.push(`Model: \`${result.catalog_id ?? EXPANDER_CATALOG_ID}\``, '',
+      `Tier: \`${result.tier}\` at \`${result.revision}\``, '',
       `Loaded weights: \`${result.weights_dir}\``, '',
       `Tier isolated: **${result.tier_isolated}** (other tier folders present: `
         + `${result.other_tiers_present.length ? result.other_tiers_present.join(', ') : 'none'})`, '',
@@ -232,11 +259,12 @@ export function summary(evidence) {
 // policy. The peak is measured above the smoke's own baseline, on a card other programs may also
 // use, so it is labelled as such.
 export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'shared',
-  job = 'describer') {
+  job = 'describer', expanderModel = 'minimax') {
   assert(Object.hasOwn(ADMISSION_POLICIES, admission), `unsupported GPU admission ${admission}`);
   assert(JOBS.includes(job), `unsupported job ${job}`);
   const evidence = job === 'expander'
-    ? { schema_version: 1, job, accepted: false, requested_tier: tier, gpu_admission: admission }
+    ? { schema_version: 1, job, accepted: false, requested_tier: tier, requested_expander_model: expanderModel,
+      gpu_admission: admission }
     : { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
       gpu_admission: admission };
   const artifact = path.join(outputDir, 'artifact');
@@ -244,7 +272,8 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
   let failure = null;
   try {
     evidence.result = job === 'expander'
-      ? validateExpanderResult(await readBoundedJson(path.join(outputDir, 'expander-result.json')), tier)
+      ? validateExpanderResult(await readBoundedJson(path.join(outputDir, 'expander-result.json')), tier,
+        expanderModelSnapshots(expanderModel), expanderModel)
       : validateResult(await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
     evidence.result.gpu_memory = { ...evidence.result.gpu_memory, measured_on: 'shared-card' };
   } catch (error) {
@@ -277,7 +306,8 @@ export async function main(env = process.env) {
     `sceneworks-cuda-execution-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${GUARD_ACTOR}`, 'resource-receipt.json');
   const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
   const job = env.SCENEWORKS_QWEN38_VALIDATION_JOB?.trim() || 'describer';
-  const evidence = await stage(outputDir, receiptFile, tier, imageSide, 'shared', job);
+  const expanderModel = env.SCENEWORKS_H3_EXPANDER_MODEL?.trim() || 'minimax';
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide, 'shared', job, expanderModel);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
   const name = job === 'expander' ? 'MiniMax-H3-Image prompt expander' : 'Qwen3.8 27B describer';
   console.log(`${name} validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
