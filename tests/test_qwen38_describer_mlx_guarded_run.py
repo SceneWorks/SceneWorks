@@ -166,12 +166,18 @@ def run_script(tmp_path: Path, **env: str):
     )
 
 
-@pytest.mark.parametrize("job,tier,error", [
-    ("expander", "bf16", "the prompt expander has no published bf16 tier; use q4 or q8"),
-    ("captioner", "q4", "QWEN38_JOB must be describer or expander, got captioner"),
+@pytest.mark.parametrize("job,tier,fresh,error", [
+    ("expander", "bf16", "false", "the prompt expander has no published bf16 tier; use q4 or q8"),
+    ("captioner", "q4", "false", "QWEN38_JOB must be describer or expander, got captioner"),
+    # A fresh hub is the expander's isolation proof; the describer keeps its provisioned cache.
+    ("describer", "q4", "true", "QWEN38_FRESH_HUB applies only to the expander job"),
+    ("expander", "q4", "yes", "QWEN38_FRESH_HUB must be true or false, got yes"),
+    # Without the run identity there is no run-scoped path to create, or to remove.
+    ("expander", "q4", "true", "a fresh hub needs the workflow run id and attempt"),
 ])
-def test_run_refuses_an_unknown_job_or_an_unpublished_expander_tier_before_any_work(tmp_path, job, tier, error):
-    done = run_script(tmp_path, QWEN38_JOB=job, QWEN38_TIER=tier, QWEN38_MAC_RUNNER="nax-macos-2")
+def test_run_refuses_a_bad_job_tier_or_fresh_hub_request_before_any_work(tmp_path, job, tier, fresh, error):
+    done = run_script(tmp_path, QWEN38_JOB=job, QWEN38_TIER=tier, QWEN38_FRESH_HUB=fresh,
+                      QWEN38_MAC_RUNNER="nax-macos-2")
     assert done.returncode == 1
     assert f"::error::{error}" in done.stdout, done.stdout + done.stderr
     assert not (tmp_path / "evidence").exists(), "nothing was started"

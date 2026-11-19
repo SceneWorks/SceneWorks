@@ -17,9 +17,12 @@
 # QWEN38_JOB = expander (default describer) runs the MiniMax-H3-Image prompt expander smoke instead:
 # one production prompt_refine expand job on the selected MLX tier (q4 or q8 only), with only that
 # tier's folder and the upstream prompt/ files fetched, under the same guards and caps (the same
-# 27B model at the same bit widths).
+# 27B model at the same bit widths). QWEN38_FRESH_HUB=true (expander only) fetches them into a new
+# hub scoped to this run (<weights root>/fresh-hubs/<run id>-<attempt>/hub), removed on exit, so the
+# smoke records tier_isolated=true: nothing but the selected tier was there to load.
 #
-# Inputs (env): QWEN38_JOB = describer | expander, QWEN38_TIER = q4 | q8 | bf16,
+# Inputs (env): QWEN38_JOB = describer | expander, QWEN38_FRESH_HUB = true | false (default false),
+# QWEN38_TIER = q4 | q8 | bf16,
 # QWEN38_IMAGE_SIDE = default | 1536, QWEN38_EVIDENCE_DIR, QWEN38_MAC_RUNNER = nax-macos | nax-macos-2.
 set -euo pipefail
 
@@ -32,6 +35,15 @@ case "$job" in
   expander)
     [[ "$tier" == q4 || "$tier" == q8 ]] || { echo "::error::the prompt expander has no published $tier tier; use q4 or q8"; exit 1; } ;;
   *) echo "::error::QWEN38_JOB must be describer or expander, got $job"; exit 1 ;;
+esac
+fresh_hub="${QWEN38_FRESH_HUB:-false}"
+case "$fresh_hub" in
+  false) ;;
+  true)
+    [[ "$job" == expander ]] || { echo "::error::QWEN38_FRESH_HUB applies only to the expander job"; exit 1; }
+    [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]+$ ]] \
+      || { echo "::error::a fresh hub needs the workflow run id and attempt"; exit 1; } ;;
+  *) echo "::error::QWEN38_FRESH_HUB must be true or false, got $fresh_hub"; exit 1 ;;
 esac
 mkdir -p "$out"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -72,7 +84,16 @@ case "$tier" in
 esac
 
 # ---- the pinned tier, from the catalog row (registry specs.json), into the task-owned hub ----------
-hub="$weights_root/hub"
+if [[ "$fresh_hub" == true ]]; then
+  fresh_root="$weights_root/fresh-hubs/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+  [[ ! -e "$fresh_root" ]] || { echo "::error::the run-scoped hub $fresh_root already exists"; exit 1; }
+  # Only this run's own hub, by its exact run-scoped path.
+  trap 'rm -rf "$fresh_root"' EXIT
+  hub="$fresh_root/hub"
+  echo "fresh run-scoped hub: $hub" | tee -a "$out/host.txt"
+else
+  hub="$weights_root/hub"
+fi
 mkdir -p "$hub"
 python3.12 -m venv "$RUNNER_TEMP/qwen38-hf-venv"
 "$RUNNER_TEMP/qwen38-hf-venv/bin/python" -m pip install --disable-pip-version-check --no-input "huggingface_hub==0.36.0" >/dev/null

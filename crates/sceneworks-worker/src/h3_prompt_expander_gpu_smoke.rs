@@ -16,18 +16,27 @@
 //! verifies them against `prompt/manifest.json`, generates, and parses the reply strictly. The smoke
 //! then requires:
 //!
-//! * the tier resolved to the catalog's pinned folder for that tier on this host's layout, and to
-//!   no other folder: the expander repository's other tier folders are listed in the RESULT line
-//!   and the evidence, so a run on a cache holding only the selected tier proves the job needs
-//!   nothing else;
+//! * the job LOADED the catalog's pinned folder for that tier on this host's layout: the result's
+//!   `executionIdentity.weightsDir` (the `LoadSpec` source the job handed the loader) is that
+//!   folder at the pinned revision;
 //! * a completed job whose expanded prompt is non-empty, differs from the input, carries no
-//!   reasoning block, and was not cut off (`finishReason` `stop`, under the budget);
+//!   reasoning block, and was not cut off (`finishReason` `stop`, under the budget). A reply that
+//!   stops at its budget (`length`) is a real product failure — the user gets no expansion — so it
+//!   fails here rather than being retried with a larger budget;
 //! * a proposed aspect ratio that is one of the recipe's own ratios (`request_params.json`), the
-//!   text-to-image workflow, and the selected tier on the suggestion block.
+//!   text-to-image workflow, and the requested tier named on the suggestion block.
+//!
+//! The expander repository's other tier folders present in the snapshot are recorded
+//! (`other_tiers_present`, `tier_isolated`). Run against a fresh run-scoped hub
+//! (`fresh_hub: true` on the workflow), which holds only the selected tier and the prompt files,
+//! `tier_isolated=true` shows the job needed nothing else.
+//!
+//! The block-draft co-requisites (DSpine, DFlash2) are not provisioned: SW-7204 adds them here when
+//! the refine path uses them.
 //!
 //! Fail-loud: the tier, the prompt files and the cache must all be present. Nothing is downloaded
-//! (`qwen38-describer-provision.yml` with `tiers: expander-q4|expander-q8` fills the CUDA cache;
-//! the MLX run script fetches the selected tier itself).
+//! (`qwen38-describer-provision.yml` with `tiers: expander-q4|expander-q8`, or the validation
+//! workflow's `fresh_hub`, fills the CUDA cache; the MLX run script fetches the selected tier).
 //!
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
@@ -307,11 +316,30 @@ async fn expand_on_tier(tier: &'static str) -> Run {
     );
     assert_eq!(suggestion["workflow"], "t2i");
     assert_eq!(suggestion["rewriterModelId"], expand::PE_MODEL_ID);
-    assert_eq!(suggestion["tier"], tier, "the job ran on the selected tier");
+    assert_eq!(
+        suggestion["tier"], tier,
+        "the suggestion block names the requested tier"
+    );
+    // What the job actually loaded: the `LoadSpec` source it handed the loader.
+    let loaded = PathBuf::from(
+        result["executionIdentity"]["weightsDir"]
+            .as_str()
+            .expect("the expansion result records the weights folder it loaded"),
+    );
+    assert!(
+        loaded.ends_with(&pinned.relative_dir),
+        "the job loaded {} instead of the pinned {tier} folder {}",
+        loaded.display(),
+        pinned.relative_dir.display()
+    );
+    assert_eq!(
+        loaded, dirs.weights,
+        "the job loaded the folder it resolved"
+    );
 
     Run {
         tier,
-        weights_dir: dirs.weights,
+        weights_dir: loaded,
         pinned,
         prompt,
         other_tiers_present,
@@ -339,12 +367,13 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
             "tier": run.tier,
             "weights_dir": run.weights_dir,
             "other_tiers_present": run.other_tiers_present,
+            "tier_isolated": run.other_tiers_present.is_empty(),
             "prompt_files": { "repo": run.prompt.repo, "revision": run.prompt.revision },
             "prompt": PROMPT,
             "expanded_prompt": run.result["refinedPrompt"],
             "wh_ratio": run.result["rewriteSuggestion"]["whRatio"],
             "workflow": run.result["rewriteSuggestion"]["workflow"],
-            "result_tier": run.result["rewriteSuggestion"]["tier"],
+            "suggestion_tier": run.result["rewriteSuggestion"]["tier"],
             "generation": run.result["generation"],
             "wall_seconds": run.wall_seconds,
             "wall_time_scope": "one prompt_refine job on a cold process: model load plus one expansion",
@@ -363,11 +392,13 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
 fn result_line(run: &Run, backend: &str, memory: &str) -> String {
     format!(
         "RESULT model=minimax_h3_image_pe job=expander backend={backend} tier={} {memory} \
-         wall_s={:.1} generated_tokens={} wh_ratio={} other_tiers_present={:?} weights={}",
+         wall_s={:.1} generated_tokens={} wh_ratio={} tier_isolated={} other_tiers_present={:?} \
+         loaded_weights={}",
         run.tier,
         run.wall_seconds,
         run.result["generation"]["usage"]["generatedTokens"],
         run.result["rewriteSuggestion"]["whRatio"],
+        run.other_tiers_present.is_empty(),
         run.other_tiers_present,
         run.weights_dir.display(),
     )

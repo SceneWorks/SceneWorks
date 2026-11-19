@@ -227,13 +227,14 @@ function expanderResult(tier = 'q4') {
   return {
     schema_version: 1, job: 'expander',
     test_fqn: `h3_prompt_expander_gpu_smoke::${EXPANDER_TEST_NAME}`,
-    backend: 'candle', repo: EXPANDER[tier].repo, revision: EXPANDER[tier].revision, tier, result_tier: tier,
+    backend: 'candle', repo: EXPANDER[tier].repo, revision: EXPANDER[tier].revision, tier, suggestion_tier: tier,
     weights_dir: `E:\\huggingface\\hub\\${EXPANDER[tier].relativeDir.replaceAll('/', '\\')}`,
-    other_tiers_present: [],
+    other_tiers_present: [], tier_isolated: true,
     prompt_files: { repo: EXPANDER.prompt.repo, revision: EXPANDER.prompt.revision },
     prompt: 'a lighthouse', expanded_prompt: 'A weathered lighthouse | on a basalt headland at dusk.',
     wh_ratio: '9:16', workflow: 't2i',
-    generation: { finishReason: 'stop', usage: { promptTokens: 900, generatedTokens: 1200 }, maxNewTokens: 8192 },
+    // The recipe's own budget (`request_params.json` max_tokens at the pinned revision).
+    generation: { finishReason: 'stop', usage: { promptTokens: 900, generatedTokens: 1200 }, maxNewTokens: 4096 },
     wall_seconds: 61.5, wall_time_scope: 'fixture',
     memory: { gpu_index: '1', baseline_mib: 500, peak_mib: 21000, peak_delta_mib: 20500, method: 'fixture' },
   };
@@ -258,7 +259,9 @@ test('a complete expander result is accepted for its own tier', () => {
 for (const [name, mutate, tier] of [
   ['an unpublished tier', () => {}, 'bf16'],
   ['a different tier than requested', (copy) => { copy.tier = 'q8'; }, 'q4'],
-  ['a job that ran on another tier', (copy) => { copy.result_tier = 'q8'; }, 'q4'],
+  ['a suggestion block naming another tier', (copy) => { copy.suggestion_tier = 'q8'; }, 'q4'],
+  ['a tier_isolated flag that hides another tier', (copy) => { copy.other_tiers_present = ['candle-q8-full']; }, 'q4'],
+  ['a tier_isolated flag that is missing', (copy) => { delete copy.tier_isolated; }, 'q4'],
   ['a describer result', (copy) => { copy.job = 'describer'; }, 'q4'],
   ['another test', (copy) => { copy.test_fqn = 'other::test'; }, 'q4'],
   ['the MLX backend', (copy) => { copy.backend = 'mlx'; }, 'q4'],
@@ -273,7 +276,7 @@ for (const [name, mutate, tier] of [
   ['a malformed ratio', (copy) => { copy.wh_ratio = 'tall'; }, 'q4'],
   ['the edit workflow', (copy) => { copy.workflow = 'edit'; }, 'q4'],
   ['a reply cut off at its budget', (copy) => { copy.generation.finishReason = 'length'; }, 'q4'],
-  ['a reply that used the whole budget', (copy) => { copy.generation.usage.generatedTokens = 8192; }, 'q4'],
+  ['a reply that used the whole budget', (copy) => { copy.generation.usage.generatedTokens = 4096; }, 'q4'],
   ['an unrecorded tier listing', (copy) => { delete copy.other_tiers_present; }, 'q4'],
   ['missing peak memory', (copy) => { delete copy.memory.peak_mib; }, 'q4'],
 ]) {
@@ -283,11 +286,21 @@ for (const [name, mutate, tier] of [
     assert.throws(() => validateExpanderResult(copy, tier));
   });
 }
-test('the expander summary names the tier, the other tiers present, the ratio and the expansion', () => {
+test('a run on a cache holding another tier is accepted but recorded as not isolated', () => {
+  const shared = validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'],
+    tier_isolated: false }, 'q4');
+  assert.equal(shared.tier_isolated, false);
+  assert.equal(validateExpanderResult(expanderResult(), 'q4').tier_isolated, true);
+});
+test('the expander summary names the loaded folder, the isolation, the ratio and the expansion', () => {
   const text = summary({ job: 'expander', accepted: true, gpu_admission: 'shared',
-    result: validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'] }, 'q4') });
+    result: validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'],
+      tier_isolated: false }, 'q4') });
   assert.match(text, /## MiniMax-H3-Image prompt expander CUDA validation/);
-  assert.match(text, /Other tier folders present: candle-q8-full/);
+  assert.match(text, /Tier isolated: \*\*false\*\* \(other tier folders present: candle-q8-full\)/);
+  assert.match(text, /Loaded weights: `E:\\huggingface\\hub\\models--SceneWorks--minimax-h3-image-pe/);
+  assert.match(summary({ job: 'expander', accepted: true, result: validateExpanderResult(expanderResult(), 'q4') }),
+    /Tier isolated: \*\*true\*\* \(other tier folders present: none\)/);
   assert.match(text, /proposed aspect ratio 9:16/);
   assert.match(text, /> A weathered lighthouse/);
   assert.match(text, /Peak GPU memory: 21000 MiB/);

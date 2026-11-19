@@ -6,8 +6,10 @@
 //
 // With `SCENEWORKS_QWEN38_VALIDATION_JOB=expander` it validates the MiniMax-H3-Image prompt expander
 // smoke's `expander-result.json` instead (SW-7202): the selected q4/q8 Candle tier at its pinned
-// folder, the upstream prompt files at their pinned revision, a complete well-formed expansion and
-// the job's own tier on the result.
+// folder (the folder the job LOADED, its result's `executionIdentity.weightsDir`), the upstream
+// prompt files at their pinned revision and a complete well-formed expansion. `tier_isolated` is
+// true when no other expander tier folder was in the snapshot: a fresh-hub run that proves the job
+// needed only the selected tier.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -127,17 +129,19 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
   assert.equal(result.test_fqn.split('::').at(-1), EXPANDER_TEST_NAME, 'result is not from the expander smoke');
   assert.equal(result.backend, 'candle', 'the CUDA run must be the Candle backend');
   assert.equal(result.tier, tier, 'result tier differs from the requested tier');
-  assert.equal(result.result_tier, tier, 'the job did not run on the requested tier');
+  assert.equal(result.suggestion_tier, tier, 'the suggestion block names another tier than requested');
   const expected = pinned[tier];
   assert.equal(result.repo, expected.repo, `the ${tier} tier must load from ${expected.repo}`);
   assert.equal(result.revision, expected.revision, `the ${tier} tier must load the pinned revision ${expected.revision}`);
   assert(typeof result.weights_dir === 'string'
     && result.weights_dir.replaceAll('\\', '/').replace(/\/+$/, '').endsWith(`/${expected.relativeDir}`),
-  `weights_dir must be the pinned tier folder .../${expected.relativeDir}`);
+  `the job must have loaded the pinned tier folder .../${expected.relativeDir}`);
   assert.deepEqual(result.prompt_files, { repo: pinned.prompt.repo, revision: pinned.prompt.revision },
     'the prompt files must come from the pinned upstream snapshot');
   assert(Array.isArray(result.other_tiers_present)
     && result.other_tiers_present.every((folder) => typeof folder === 'string'), 'other_tiers_present is missing');
+  const tierIsolated = result.other_tiers_present.length === 0;
+  assert.equal(result.tier_isolated, tierIsolated, 'tier_isolated disagrees with other_tiers_present');
   assert.equal(typeof result.prompt, 'string', 'the input prompt is missing');
   const expanded = result.expanded_prompt;
   assert(typeof expanded === 'string' && expanded.trim(), 'the expanded prompt is empty');
@@ -158,7 +162,9 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
     expanded_prompt: expanded,
     wh_ratio: result.wh_ratio,
     generation,
+    weights_dir: result.weights_dir,
     other_tiers_present: result.other_tiers_present,
+    tier_isolated: tierIsolated,
     wall_seconds: result.wall_seconds,
     wall_time_scope: result.wall_time_scope,
     gpu_memory: validateGpuMemory(result.memory),
@@ -198,7 +204,9 @@ export function summary(evidence) {
   if (result && expander) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
     lines.push(`Tier: \`${result.tier}\` at \`${result.revision}\``, '',
-      `Other tier folders present: ${result.other_tiers_present.length ? result.other_tiers_present.join(', ') : 'none'}`, '',
+      `Loaded weights: \`${result.weights_dir}\``, '',
+      `Tier isolated: **${result.tier_isolated}** (other tier folders present: `
+        + `${result.other_tiers_present.length ? result.other_tiers_present.join(', ') : 'none'})`, '',
       `Wall time: ${result.wall_seconds.toFixed(1)} s (${result.wall_time_scope})`, '',
       `Generated tokens: ${result.generation.usage.generatedTokens} of ${result.generation.maxNewTokens}; `
         + `proposed aspect ratio ${result.wh_ratio}`, '',

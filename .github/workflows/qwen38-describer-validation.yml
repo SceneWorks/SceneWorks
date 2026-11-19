@@ -14,7 +14,12 @@ name: Qwen3.8 27B describer CUDA validation
 # prompt_refine expand job on the selected q4 or q8 tier (CUDA: candle-q4-full/ or candle-q8-full/,
 # provisioned by qwen38-describer-provision.yml `tiers: expander-q4|expander-q8`; MLX: q4-full/ or
 # q8-full/, fetched by the MLX run script). It fails unless the expansion is complete and
-# well-formed and the job ran on the selected tier. `image_side` does not apply to it.
+# well-formed and the job loaded the selected tier's folder. `image_side` does not apply to it.
+#
+# `fresh_hub: true` (expander only) runs it against a new run-scoped hub that holds only the
+# selected tier and the prompt files (CUDA: fetched here by qwen38_describer_provision.py into
+# E:\huggingface\sw-fresh-hub-<run>-<attempt>, removed afterwards; MLX: run.sh), so the evidence
+# records tier_isolated=true: the job needed no other tier.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +29,11 @@ on:
         type: choice
         options: [describer, expander]
         default: describer
+      fresh_hub:
+        description: expander only - run against a fresh run-scoped hub holding only the selected tier (proves tier isolation; downloads the tier)
+        required: false
+        type: boolean
+        default: false
       backend:
         description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
         required: true
@@ -53,27 +63,29 @@ permissions:
   contents: read
 
 jobs:
-  # The prompt expander's bf16 tier is unpublished (pendingArtifact): refuse it here, before any
-  # runner builds or takes a GPU, instead of failing inside the smoke.
-  refuse-unpublished-expander-tier:
-    if: ${{ inputs.job == 'expander' && inputs.tier == 'bf16' }}
+  # Refused here, before any runner builds or takes a GPU, instead of failing inside the smoke: the
+  # prompt expander's bf16 tier is unpublished (pendingArtifact), and a fresh hub is an expander-only
+  # option (the describer keeps its provisioned cache).
+  refuse-invalid-request:
+    if: ${{ (inputs.job == 'expander' && inputs.tier == 'bf16') || (inputs.job == 'describer' && inputs.fresh_hub) }}
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "::error::the prompt expander's bf16 tier is unpublished; dispatch job=expander with tier q4 or q8"
+          echo "::error::job=expander needs tier q4 or q8 (its bf16 tier is unpublished), and fresh_hub applies only to job=expander"
           exit 1
 
   qwen38-describer-mlx:
-    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') }}
+    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && inputs.fresh_hub) }}
     uses: ./.github/workflows/qwen38-describer-mlx-validation.yml
     with:
       job: ${{ inputs.job }}
+      fresh_hub: ${{ inputs.fresh_hub }}
       tier: ${{ inputs.tier }}
       image_side: ${{ inputs.image_side }}
       mac_runner: ${{ inputs.mac_runner }}
 
   qwen38-describer-smoke:
-    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') }}
+    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && inputs.fresh_hub) }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -139,10 +151,36 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test --locked -p sceneworks-worker --features backend-candle --release --lib --no-run
+      # fresh_hub (expander only): a new hub for this run, holding only the selected tier's Candle
+      # folder and the upstream prompt files, fetched by the same checked provisioning script.
+      - name: Provision a fresh run-scoped hub with only the selected expander tier
+        if: ${{ inputs.fresh_hub }}
+        shell: powershell
+        env:
+          HF_HUB_CACHE: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
+          HF_HUB_OFFLINE: "0"
+          SCENEWORKS_QWEN38_DESCRIBER_PROVISION: expander-${{ inputs.tier }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          if (Test-Path $env:HF_HUB_CACHE) { throw "the run-scoped hub $env:HF_HUB_CACHE already exists" }
+          New-Item -ItemType Directory -Path $env:HF_HUB_CACHE | Out-Null
+          $venv = Join-Path $env:RUNNER_TEMP "qwen38-fresh-hub-venv-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local provisioning venv' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
+          & $python -I -B scripts/ci/qwen38_describer_provision.py
+          if ($LASTEXITCODE -ne 0) { throw "fresh-hub provisioning failed with exit code $LASTEXITCODE" }
       - name: Run the describer smoke under the CUDA guard
         shell: cmd
         env:
           MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+          # The job's own hub, or (fresh_hub) this run's.
+          HF_HUB_CACHE: ${{ inputs.fresh_hub && format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) || 'E:\huggingface\hub' }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -169,3 +207,11 @@ jobs:
           name: ${{ inputs.job == 'expander' && format('h3-expander-proof-{0}', inputs.tier) || format('qwen38-describer-proof-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error
+      # Only this run's own hub, by its exact run-scoped path.
+      - name: Remove the fresh run-scoped hub
+        if: ${{ always() && inputs.fresh_hub }}
+        shell: powershell
+        env:
+          FRESH_HUB: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
+        run: |
+          if (Test-Path $env:FRESH_HUB) { Remove-Item -LiteralPath $env:FRESH_HUB -Recurse -Force }

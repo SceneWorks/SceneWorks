@@ -11,6 +11,8 @@ name: Qwen3.8 27B describer MLX validation
 # prompt_refine expand job on the selected MLX tier (q4-full/ or q8-full/ of
 # SceneWorks/minimax-h3-image-pe), with the upstream prompt/ files of MiniMaxAI/MiniMax-H3-Image-PE,
 # both fetched at their catalog revisions; only the selected tier is fetched. q4 and q8 only.
+# `fresh_hub: true` (expander only) fetches them into a new run-scoped hub, removed afterwards, so
+# the evidence records tier_isolated=true.
 #
 # GitHub dispatches only workflows that exist on the default branch, so until this file is on main
 # dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
@@ -27,6 +29,11 @@ on:
         required: false
         type: string
         default: describer
+      fresh_hub:
+        description: expander only - a fresh run-scoped hub holding only the selected tier
+        required: false
+        type: boolean
+        default: false
       tier:
         description: MLX tier to describe with (q4, q8 or bf16)
         required: true
@@ -49,6 +56,11 @@ on:
         type: choice
         options: [describer, expander]
         default: describer
+      fresh_hub:
+        description: expander only - run against a fresh run-scoped hub holding only the selected tier (proves tier isolation; downloads the tier)
+        required: false
+        type: boolean
+        default: false
       tier:
         description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -83,6 +95,7 @@ jobs:
         shell: bash
     env:
       QWEN38_JOB: ${{ inputs.job }}
+      QWEN38_FRESH_HUB: ${{ inputs.fresh_hub }}
       QWEN38_TIER: ${{ inputs.tier }}
       QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
       QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
