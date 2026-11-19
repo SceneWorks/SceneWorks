@@ -1296,6 +1296,16 @@ fn image_execution_receipt(
         }),
         outputs,
         stages: Vec::new(),
+        low_res_start: asset_writes
+            .first()
+            .and_then(|fact| {
+                fact.get("workerLowResStartReceipt")
+                    .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartReceipt"))
+            })
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(WorkerError::Json)?,
     })
 }
 
@@ -3970,3 +3980,69 @@ pub(crate) use artifact_resolution::resolved_artifact_provenance_tests;
 
 #[cfg(native_lane)]
 mod dispatch;
+
+#[cfg(test)]
+mod low_res_share_attachment_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn attach_pag_report_to_share_attaches_low_res_start_without_pag_and_round_trips_png_chunk() {
+        let facts = WorkflowAssetFacts {
+            mode: "text_to_image".to_owned(),
+            model: "z_image_turbo".to_owned(),
+            prompt: "fox in snow".to_owned(),
+            negative_prompt: String::new(),
+            seed: 42,
+            width: Some(1024),
+            height: Some(1024),
+        };
+        let scrubbed_payload = json!({
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "fox in snow",
+            "width": 1024,
+            "height": 1024,
+            "advanced": { "steps": 9, "sampler": "euler" }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let mut share =
+            embeddable_workflow_share(&facts, &scrubbed_payload).expect("embeddable share");
+        assert_eq!(share.schema_version, 1);
+
+        let raw_settings = json!({
+            "steps": 9,
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        attach_pag_report_to_share(&mut share, Some(&raw_settings));
+        assert_eq!(
+            share.schema_version,
+            sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            share.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("attached_low_res.png");
+        let image = image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]));
+        write_workflow_chunk(&image, &png_path, Some(&share)).unwrap();
+        let read_back = sceneworks_core::workflow_png::read_workflow_chunk_file(&png_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_back.schema_version,
+            sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            read_back.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+    }
+}

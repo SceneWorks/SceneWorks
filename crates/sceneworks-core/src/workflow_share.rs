@@ -4895,4 +4895,39 @@ mod tests {
         assert!(!sanitized.advanced.contains_key("pag"));
         assert!(!sanitized.advanced.contains_key("pagExecutionReport"));
     }
+
+    #[test]
+    fn attached_low_res_start_without_pag_report_survives_png_workflow_chunk_round_trip() {
+        let mut share = build_workflow_share(&asset_fixture(), &payload_fixture());
+        assert_eq!(share.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+        assert!(!share.advanced.contains_key("pagExecutionReport"));
+        assert!(!share.advanced.contains_key("lowResStart"));
+
+        let raw_settings = json!({
+            "steps": 9,
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+        });
+        let sanitized_low_res = raw_settings
+            .get("lowResStart")
+            .and_then(sanitize_share_low_res_start)
+            .expect("valid lowResStart sanitizes");
+        share
+            .advanced
+            .insert("lowResStart".to_owned(), sanitized_low_res);
+        share.schema_version = WORKFLOW_SHARE_SCHEMA_VERSION;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("low_res_round_trip.png");
+        let img = image::RgbImage::from_pixel(16, 16, image::Rgb([12, 34, 56]));
+        crate::workflow_png::write_workflow_chunk(&img, &png_path, Some(&share))
+            .expect("writes workflow chunk");
+        let parsed = crate::workflow_png::read_workflow_chunk_file(&png_path)
+            .expect("reads workflow chunk")
+            .expect("workflow chunk present");
+        assert_eq!(parsed.schema_version, WORKFLOW_SHARE_SCHEMA_VERSION);
+        assert_eq!(
+            parsed.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+    }
 }

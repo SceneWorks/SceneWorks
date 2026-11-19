@@ -234,11 +234,25 @@ describe("background MOSS edit regeneration", () => {
     const duplicateBody = JSON.parse(apiFetch.mock.calls[1][2].body);
     expect(duplicateBody.payloadChanges.seed).toEqual(expect.any(Number));
     expect(duplicateBody.payloadChanges.seeds).toEqual([]);
-    expect(duplicateBody.payloadChanges.advanced.lowResStart).toEqual({
+
+    // Fallback recipe replay (when original job is purged) sends the full stripped request with lowResStart preserved.
+    const orphanAsset = { ...lowResAsset, lineage: {} };
+    apiFetch.mockReset().mockResolvedValueOnce({ id: "job-lowres-fallback" });
+    await regenerateImage(
+      options({
+        asset: orphanAsset,
+        models: [{ id: "z_image_turbo", features: { low_res_start: true } }],
+        assets: [],
+      }),
+    );
+    const createBody = JSON.parse(apiFetch.mock.calls[0][2].body);
+    expect(createBody.seed).toBeNull();
+    expect(createBody.advanced.lowResStart).toEqual({
       version: 1,
       k: 3,
       scale: 0.5,
     });
-    expect(duplicateBody.payloadChanges.advanced).not.toHaveProperty("memoryStrategy");
+    expect(createBody.advanced).not.toHaveProperty("memoryStrategy");
+    expect(createBody.advanced).not.toHaveProperty("memoryEvidenceRevision");
   });
 });
