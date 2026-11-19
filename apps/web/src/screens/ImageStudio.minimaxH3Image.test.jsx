@@ -12,8 +12,8 @@ import { MAX_USER_JOB_LORAS } from "../presetUtils.js";
 import { appendPromptToken, insertPromptToken, referencePromptToken } from "../imageReferenceLimits.js";
 
 // SW-7100 (feature SW-F363): MiniMax-H3-Image text-to-image in the advanced Image Studio, from the
-// SHIPPED catalog entry — the published 16 MP presets up to a 6272 px edge, no Steps / Guidance /
-// Negative prompt control, and the §IV.2 "MiniMax-H3-Image" attribution on the generation surface.
+// SHIPPED catalog entry — the published 16 MP presets plus their ~36 MP scalings up to a
+// 9408 px edge, no Steps / Guidance / Negative prompt control, and the §IV.2 "MiniMax-H3-Image" attribution on the generation surface.
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -126,7 +126,9 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
       expect(field(container, absent), absent).toBeUndefined();
     }
     expect(field(container, "Seed")).toBeTruthy();
-    expect(field(container, "Width override").getAttribute("max")).toBe("6272");
+    expect(presets).toContain("6144x6144");
+    expect(presets).toContain("9408x4032");
+    expect(field(container, "Width override").getAttribute("max")).toBe("9408");
     expect(container.querySelector(".studio-model-attribution")?.textContent).toBe(
       "Powered by MiniMax-H3-Image",
     );

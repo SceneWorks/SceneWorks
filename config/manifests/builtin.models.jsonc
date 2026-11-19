@@ -14362,9 +14362,12 @@
       },
       // E25 — this model's own size envelope. The engine accepts ANY positive size (it generates on
       // a 32 px canvas of at least 4 MP and resizes back), so there is no stride; the presets are the
-      // upstream default (2048x2048) and the model card's published 16 MP aspect table, up to a
-      // 6272 px edge. The 4096 px blanket edge stays in force for every model that declares no
-      // `maxDimension`.
+      // upstream default (2048x2048), the model card's published 16 MP aspect table, and that same
+      // table scaled 1.5x (~36 MP) onto the 32 px grid (SW-7206). Upstream sets NO maximum and
+      // 16 MP is the model's native size, not its ceiling; the edge bound is the largest offered
+      // preset's edge (9408, the ~36 MP 21:9 row). A real 6144x6144 Candle render peaked at
+      // 66.9 GB Resident. ~64 MP is not offered until it has an in-app measurement. The 4096 px
+      // blanket edge stays in force for every model that declares no `maxDimension`.
       "limits": {
         "resolutions": [
           "2048x2048",
@@ -14375,11 +14378,19 @@
           "3360x5024",
           "5472x3072",
           "3072x5472",
-          "6272x2688"
+          "6272x2688",
+          "6144x6144",
+          "7104x5344",
+          "5344x7104",
+          "7552x5056",
+          "5056x7552",
+          "8224x4608",
+          "4608x8224",
+          "9408x4032"
         ],
         "count": [1],
         "minDimension": 16,
-        "maxDimension": 6272,
+        "maxDimension": 9408,
         // SW-7101: the model card's edit ceiling (`gen_core::h3_image::MAX_REFERENCES`), counted over
         // the flattened ordered list at enqueue, by the worker, and by the Image Studio picker.
         "maxReferenceAssets": 16,
@@ -14408,7 +14419,7 @@
         "label": "MiniMax-H3-Image",
         // §IV.2: "MiniMax-H3-Image", exactly — the H3 video entries' "MiniMax H3" does not satisfy it.
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — its native size is about 16 megapixels (the model card's presets reach 6272 px on the long edge at 21:9), SceneWorks also offers those presets scaled to about 36 megapixels (up to 9408 px on the long edge), and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "recommendedFor": ["text_to_image", "edit_image"],
         // SW-7101: the ordered multi-reference picker (plural `referenceAssetIds`) for the edit; its
         // ceiling is `limits.maxReferenceAssets`. No `img2img`: an H3-Image reference has no strength.

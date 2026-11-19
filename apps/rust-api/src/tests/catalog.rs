@@ -9361,3 +9361,79 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     }
     assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
+
+/// The merged-manifest memo is addressed by manifest CONTENT, so it can never serve a stale merge:
+/// a same-length rewrite that even restores the original mtime is seen on the next read, and so is
+/// a deleted manifest. Two states serving the same text share one equal merge.
+#[tokio::test]
+async fn merged_model_manifest_memo_follows_manifest_content_not_file_identity() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).expect("manifest dir");
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .expect("builtin manifest");
+    let user_path = config.join("user.models.jsonc");
+    let user_manifest = |name: &str| {
+        format!(
+            r#"{{"schemaVersion":1,"models":[{{"id":"memo_probe_7f3c","name":"{name}","type":"image"}}]}}"#
+        )
+    };
+    std::fs::write(&user_path, user_manifest("Alpha")).expect("user manifest");
+    let (_, state) = create_app_with_state(test_settings(&temp)).expect("app");
+    let names = |rows: &[Value]| {
+        rows.iter()
+            .filter(|row| row["id"] == "memo_probe_7f3c")
+            .map(|row| row["name"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let (rows, user_ids) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("merged rows");
+    assert_eq!(names(&rows), ["Alpha"]);
+    assert!(user_ids.contains("memo_probe_7f3c"));
+
+    // A second state over identical text (another directory) reads the same merge.
+    let other = tempfile::tempdir().expect("temp dir");
+    let other_config = other.path().join("config/manifests");
+    std::fs::create_dir_all(&other_config).expect("manifest dir");
+    for name in ["builtin.models.jsonc", "user.models.jsonc"] {
+        std::fs::copy(config.join(name), other_config.join(name)).expect("copy manifest");
+    }
+    let (_, other_state) = create_app_with_state(test_settings(&other)).expect("app");
+    let (other_rows, _) = crate::models::merged_model_manifest_entries(&other_state)
+        .await
+        .expect("merged rows");
+    assert_eq!(other_rows, rows);
+
+    // Same length, original mtime restored: a file-identity key would call this unchanged.
+    let modified = std::fs::metadata(&user_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("mtime");
+    std::fs::write(&user_path, user_manifest("Bravo")).expect("rewrite user manifest");
+    std::fs::File::options()
+        .write(true)
+        .open(&user_path)
+        .and_then(|file| file.set_times(std::fs::FileTimes::new().set_modified(modified)))
+        .expect("restore mtime");
+    assert_eq!(
+        std::fs::metadata(&user_path).expect("metadata").len() as usize,
+        user_manifest("Alpha").len()
+    );
+    let (rows, _) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("merged rows");
+    assert_eq!(names(&rows), ["Bravo"]);
+
+    std::fs::remove_file(&user_path).expect("remove user manifest");
+    let (rows, user_ids) = crate::models::merged_model_manifest_entries(&state)
+        .await
+        .expect("merged rows");
+    assert!(names(&rows).is_empty());
+    assert!(user_ids.is_empty());
+}
