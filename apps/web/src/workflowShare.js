@@ -28,6 +28,127 @@ import { isFlux3ImageModel } from "./modelEligibility.js";
 import { reacquireMossTensors } from "./mossImageAdvanced.js";
 export const WORKFLOW_STATUS_WORKFLOW = "workflow";
 export const WORKFLOW_STATUS_NO_WORKFLOW = "no_workflow";
+export const WORKFLOW_SHARE_SCHEMA_VERSION = 2;
+export const WORKFLOW_SHARE_LEGACY_VERSION = 1;
+export const OMITTED_LOW_RES_START = "advanced.lowResStart";
+
+export function isLowResStartActive(lowResStart) {
+  return lowResStart !== undefined && lowResStart !== null && lowResStart !== false;
+}
+
+export function workflowShareSchemaVersion(shareOrOptions) {
+  const lowRes = shareOrOptions?.advanced !== undefined
+    ? shareOrOptions.advanced?.lowResStart
+    : shareOrOptions?.lowResStart;
+  return isLowResStartActive(lowRes)
+    ? WORKFLOW_SHARE_SCHEMA_VERSION
+    : WORKFLOW_SHARE_LEGACY_VERSION;
+}
+
+export function validateLowResStartShare(share) {
+  if (!share || typeof share !== "object" || Array.isArray(share)) {
+    return { ok: false, code: "NotAnObject", field: "workflow" };
+  }
+  const schemaVersion = share.schemaVersion;
+  if (schemaVersion === undefined || schemaVersion === null) {
+    return { ok: false, code: "MissingSchemaVersion", field: "schemaVersion" };
+  }
+  if (!Number.isInteger(schemaVersion) || schemaVersion < 1) {
+    return { ok: false, code: "Malformed", field: "schemaVersion" };
+  }
+  if (schemaVersion > WORKFLOW_SHARE_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "schemaVersion",
+      file: schemaVersion,
+      supported: WORKFLOW_SHARE_SCHEMA_VERSION,
+    };
+  }
+  const lowRes = share.advanced?.lowResStart;
+  if (!isLowResStartActive(lowRes)) {
+    return { ok: true, schemaVersion };
+  }
+  if (typeof lowRes !== "object" || Array.isArray(lowRes)) {
+    return { ok: false, code: "Malformed", field: "advanced.lowResStart" };
+  }
+  if (lowRes.version === undefined || lowRes.version === null) {
+    return { ok: false, code: "MissingRecipeVersion", field: "advanced.lowResStart.version" };
+  }
+  if (lowRes.version !== 1) {
+    return {
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "advanced.lowResStart.version",
+      version: lowRes.version,
+      supported: 1,
+    };
+  }
+  if (schemaVersion < WORKFLOW_SHARE_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      code: "Malformed",
+      field: "schemaVersion",
+      detail: "active lowResStart requires schemaVersion 2",
+    };
+  }
+  for (const key of Object.keys(lowRes)) {
+    if (key !== "version" && key !== "k" && key !== "scale") {
+      return { ok: false, code: "Malformed", field: `advanced.lowResStart.${key}` };
+    }
+  }
+  if (!Number.isInteger(lowRes.k) || lowRes.k < 1) {
+    return { ok: false, code: "Malformed", field: "advanced.lowResStart.k" };
+  }
+  if (typeof lowRes.scale !== "number" || !Number.isFinite(lowRes.scale) || lowRes.scale < 0.25 || lowRes.scale > 0.9) {
+    return { ok: false, code: "Malformed", field: "advanced.lowResStart.scale" };
+  }
+  return { ok: true, schemaVersion };
+}
+
+export function revalidatePortableWorkflowShare(share, modelEntry = null) {
+  if (!share || typeof share !== "object") return share;
+  const lowRes = share.advanced?.lowResStart;
+  if (!isLowResStartActive(lowRes)) {
+    const nextShare = structuredClone(share);
+    nextShare.schemaVersion = WORKFLOW_SHARE_LEGACY_VERSION;
+    if (nextShare.advanced && typeof nextShare.advanced === "object") {
+      delete nextShare.advanced.lowResStart;
+    }
+    return nextShare;
+  }
+  const check = validateLowResStartShare({
+    ...share,
+    schemaVersion: share.schemaVersion ?? WORKFLOW_SHARE_SCHEMA_VERSION,
+  });
+  const supportsRoute = modelEntry?.features?.low_res_start === true;
+  const steps = Number(share.advanced?.steps ?? modelEntry?.defaults?.steps ?? 0);
+  const stepsOk = !(Number.isFinite(steps) && steps > 0) || lowRes.k < steps;
+  const hasPhases = Array.isArray(share.advanced?.phases) && share.advanced.phases.length > 0;
+  let dimsOk = true;
+  if (Number.isFinite(share.width) && Number.isFinite(share.height)) {
+    const quantum = Number(modelEntry?.resolution?.multipleOf ?? 16) || 16;
+    const minDim = Number(modelEntry?.resolution?.minDimension ?? 64) || 64;
+    const lowW = Math.round((share.width * lowRes.scale) / quantum) * quantum;
+    const lowH = Math.round((share.height * lowRes.scale) / quantum) * quantum;
+    dimsOk = lowW >= minDim && lowH >= minDim && (lowW < share.width || lowH < share.height);
+  }
+  if (!check.ok || !supportsRoute || !stepsOk || hasPhases || !dimsOk) {
+    const nextShare = structuredClone(share);
+    nextShare.schemaVersion = WORKFLOW_SHARE_LEGACY_VERSION;
+    if (nextShare.advanced && typeof nextShare.advanced === "object") {
+      delete nextShare.advanced.lowResStart;
+    }
+    nextShare.omitted = Array.from(
+      new Set([...(Array.isArray(share.omitted) ? share.omitted : []), OMITTED_LOW_RES_START]),
+    ).sort();
+    return nextShare;
+  }
+  return {
+    ...share,
+    schemaVersion: WORKFLOW_SHARE_SCHEMA_VERSION,
+  };
+}
 
 // The first eight bytes of every PNG (the signature the endpoint's own `NotPng` check reads).
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];

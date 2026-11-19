@@ -298,6 +298,8 @@ pub struct ImageAdvanced {
     pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
     pub pag: Option<Bound<sceneworks_options::pag::PagWireConfig>>,
+    pub low_res_start:
+        Option<Bound<sceneworks_options::image_sampling_controls::LowResStartWireConfig>>,
 }
 
 /// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
@@ -429,6 +431,7 @@ impl ImageAdvanced {
         put!(moss_image_edit, "mossImageEdit");
         put!(moss_image_advanced, "mossImageAdvanced");
         put!(pag, "pag");
+        put!(low_res_start, "lowResStart");
         wire
     }
 
@@ -504,6 +507,7 @@ impl ImageAdvanced {
             moss_image_edit: input.structured("advanced", "mossImageEdit")?,
             moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
             pag: input.structured("advanced", "pag")?,
+            low_res_start: input.structured("advanced", "lowResStart")?,
         })
     }
 }
@@ -915,6 +919,18 @@ impl ImageRequest {
             ));
         }
         Ok(())
+    }
+
+    /// Return the resolved `advanced.lowResStart` wire config when bound on this request.
+    pub fn resolved_low_res_start(
+        &self,
+    ) -> Option<sceneworks_options::image_sampling_controls::LowResStartWireConfig> {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .low_res_start
+            .as_ref()
+            .map(|bound| bound.value)
     }
 
     /// Legacy authoring/persistence reader. Execution uses [`Self::resolved_quant_bits`].

@@ -2029,6 +2029,18 @@ fn attach_pag_report_to_share(
             report,
         );
     }
+    if let Some(low_res) = raw_settings
+        .and_then(|raw| {
+            raw.get(sceneworks_core::options::image_sampling_controls::LOW_RES_START_KEY)
+        })
+        .and_then(sceneworks_core::workflow_share::sanitize_share_low_res_start)
+    {
+        share.advanced.insert(
+            sceneworks_core::options::image_sampling_controls::LOW_RES_START_KEY.to_owned(),
+            low_res,
+        );
+        share.schema_version = sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION;
+    }
 }
 
 /// The workflow envelope for an inline-upscaled variant (sc-15948): the generation's own payload

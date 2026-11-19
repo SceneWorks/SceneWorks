@@ -4644,16 +4644,22 @@ impl JobsStore {
                 execution: receipt.execution.clone(),
                 outputs: receipt.outputs.clone(),
                 stages: receipt.stages.clone(),
+                low_res_start: receipt.low_res_start.clone(),
             };
             if let Some(encoded) = replay_expected.as_deref() {
                 let expected: crate::execution_receipt::TrustedExecutionReceipt =
                     serde_json::from_str(encoded)?;
+                if expected.low_res_start.is_some() || trusted.low_res_start.is_some() {
+                    crate::execution_receipt::verify_completed_exact_replay(&expected, &trusted)
+                        .map_err(JobsStoreError::ReplayUnavailable)?;
+                }
                 if expected.accepted_backend != trusted.accepted_backend
                     || expected.accepted_device != trusted.accepted_device
                     || expected.accepted_source_route != trusted.accepted_source_route
                     || expected.inference_revision != trusted.inference_revision
                     || expected.execution != trusted.execution
                     || expected.stages != trusted.stages
+                    || expected.low_res_start != trusted.low_res_start
                     || expected.outputs.len() != trusted.outputs.len()
                     || expected
                         .outputs

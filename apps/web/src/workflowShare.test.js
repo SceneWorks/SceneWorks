@@ -13,12 +13,18 @@ import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.j
 import {
   ADVANCED_PREFILL,
   assetImportedWorkflow,
+  isLowResStartActive,
   looksLikeWorkflowCandidate,
   MAX_WORKFLOW_INSPECT_BYTES,
+  OMITTED_LOW_RES_START,
   PREFILL_CONTROL,
   PREFILL_NONE,
   PREFILL_PROMPT,
   recipeFromWorkflowShare,
+  revalidatePortableWorkflowShare,
+  validateLowResStartShare,
+  WORKFLOW_SHARE_LEGACY_VERSION,
+  WORKFLOW_SHARE_SCHEMA_VERSION,
   workflowHasMissingInputs,
   workflowInputSlots,
   workflowInstallable,
@@ -28,6 +34,7 @@ import {
   workflowNotRestored,
   workflowPhases,
   workflowReplaySeed,
+  workflowShareSchemaVersion,
   workflowResolutionLabel,
   workflowSettingRows,
   workflowUnresolved,
@@ -1105,5 +1112,85 @@ describe("PAG exported workflow replay", () => {
       restored: false,
       value: "Recorded",
     });
+  });
+});
+
+describe("Low Res Start share versioning and portable import revalidation (SW-6943)", () => {
+  it("emits outer schemaVersion 2 for active lowResStart and schemaVersion 1 for expressible content", () => {
+    expect(isLowResStartActive(undefined)).toBe(false);
+    expect(isLowResStartActive(null)).toBe(false);
+    expect(isLowResStartActive(false)).toBe(false);
+    expect(isLowResStartActive({ version: 1, k: 3, scale: 0.5 })).toBe(true);
+
+    expect(workflowShareSchemaVersion({ advanced: { steps: 9 } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: null } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: false } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: { version: 1, k: 3, scale: 0.5 } } }))
+      .toBe(WORKFLOW_SHARE_SCHEMA_VERSION);
+  });
+
+  it("refuses unknown outer schema versions, missing recipe version, and higher lowResStart.version", () => {
+    const activeV2 = share({
+      schemaVersion: 2,
+      advanced: { steps: 9, lowResStart: { version: 1, k: 3, scale: 0.5 } },
+    });
+    expect(validateLowResStartShare(activeV2)).toEqual({ ok: true, schemaVersion: 2 });
+
+    expect(validateLowResStartShare({ ...activeV2, schemaVersion: 3 })).toMatchObject({
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "schemaVersion",
+    });
+
+    expect(
+      validateLowResStartShare({
+        ...activeV2,
+        advanced: { lowResStart: { k: 3, scale: 0.5 } },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: "MissingRecipeVersion",
+      field: "advanced.lowResStart.version",
+    });
+
+    expect(
+      validateLowResStartShare({
+        ...activeV2,
+        advanced: { lowResStart: { version: 2, k: 3, scale: 0.5 } },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "advanced.lowResStart.version",
+    });
+  });
+
+  it("revalidates portable import against local route availability and records advanced.lowResStart in omitted when stripped", () => {
+    const activeV2 = share({
+      schemaVersion: 2,
+      model: "z_image_turbo",
+      width: 1024,
+      height: 1024,
+      advanced: { steps: 9, lowResStart: { version: 1, k: 3, scale: 0.5 } },
+    });
+    const supportedEntry = {
+      id: "z_image_turbo",
+      defaults: { steps: 9 },
+      resolution: { multipleOf: 16, minDimension: 64 },
+      features: { low_res_start: true },
+    };
+    const kept = revalidatePortableWorkflowShare(activeV2, supportedEntry);
+    expect(kept.schemaVersion).toBe(2);
+    expect(kept.advanced.lowResStart).toEqual({ version: 1, k: 3, scale: 0.5 });
+
+    const unsupportedEntry = {
+      id: "flux_dev",
+      defaults: { steps: 28 },
+      features: {},
+    };
+    const stripped = revalidatePortableWorkflowShare(activeV2, unsupportedEntry);
+    expect(stripped.schemaVersion).toBe(1);
+    expect(stripped.advanced.lowResStart).toBeUndefined();
+    expect(stripped.omitted).toContain(OMITTED_LOW_RES_START);
   });
 });

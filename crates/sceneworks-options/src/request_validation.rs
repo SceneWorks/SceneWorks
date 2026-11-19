@@ -362,15 +362,7 @@ pub fn validate(
             .and_then(Value::as_str)
             .or(default_model.as_deref())
             .unwrap_or_default();
-        if advanced.get("lowResStart").is_some_and(|v| !v.is_null())
-            && entry.get("features").and_then(|f| f.get("low_res_start"))
-                != Some(&Value::Bool(true))
-        {
-            return Err(ValidationRefusal::new(
-                "advanced.lowResStart",
-                "The selected model route does not support Low Res Start.",
-            ));
-        }
+        crate::image_sampling_controls::requested_low_res_start(advanced, entry)?;
         crate::pag::requested_pag(model, advanced, entry)?;
         if matches!(kind, "image" | "video") {
             if let Some(steps) = crate::limits::requested_steps(advanced) {

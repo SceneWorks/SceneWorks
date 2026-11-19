@@ -151,6 +151,28 @@ fn fresh_generation_strips_machine_decisions_but_retains_source_identity() {
         original["expectedImportedModelRef"]
     );
     assert!(original["advanced"].get("memoryStrategy").is_some());
+
+    // Regenerate / fresh generation preserves authored lowResStart while stripping machine decisions.
+    let with_low_res = json!({
+        "seed": 123,
+        "advanced": {
+            "memoryStrategy": { "rung": "tiled_vae" },
+            "memoryEvidenceRevision": 2,
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 },
+            "steps": 9,
+            "sampler": "euler"
+        }
+    });
+    let mut fresh_low_res = with_low_res.as_object().unwrap().clone();
+    strip_machine_decisions(&mut fresh_low_res);
+    assert_eq!(
+        fresh_low_res["advanced"],
+        json!({
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 },
+            "steps": 9,
+            "sampler": "euler"
+        })
+    );
 }
 
 #[test]

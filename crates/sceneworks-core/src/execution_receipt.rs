@@ -9,6 +9,141 @@ use sha2::{Digest, Sha256};
 
 pub const EXECUTION_RECEIPT_VERSION: u32 = 1;
 pub const SAME_DEVICE_PINNED_RUNTIME_SCOPE: &str = "same_device_pinned_runtime";
+pub const LOW_RES_START_RECIPE_VERSION: u32 = 1;
+pub const LOW_RES_START_ESTIMATOR_ENDPOINT_V1: &str = "endpoint_evaluation_v1";
+pub const LOW_RES_START_ESTIMATOR_PREVIOUS_V1: &str = "previous_evaluation_v1";
+pub const LOW_RES_START_TRANSITION_ARITHMETIC_V1: &str =
+    "unpack_f32_bilinear_half_pixel_clamp_renoise_repack_v1";
+pub const LOW_RES_START_TRANSITION_SEED_SCHEME_V1: &str = "low_res_start_transition_v1";
+pub const LOW_RES_START_SCHEDULE_POLICY_V1: &str = "full_pass_full_resolution_invariant_v1";
+
+/// Resolved `advanced.lowResStart` recipe and estimator provenance persisted in the trusted
+/// execution receipt (`OPT-6`, `ADM-3`, `FEAT-1`, `M2`, `E6`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LowResStartReceipt {
+    pub version: u32,
+    pub k: u32,
+    pub executed_steps: u32,
+    pub scale: f64,
+    pub low_w: u32,
+    pub low_h: u32,
+    pub full_w: u32,
+    pub full_h: u32,
+    pub target_pass: usize,
+    pub estimator: String,
+    pub schedule_policy: String,
+    pub transition_arithmetic: String,
+    pub transition_seed_scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_rung: Option<String>,
+}
+
+impl LowResStartReceipt {
+    pub fn validate(&self) -> Result<(), ReplayUnavailable> {
+        if self.version != LOW_RES_START_RECIPE_VERSION {
+            return Err(ReplayUnavailable::new(
+                "unsupported_low_res_recipe_version",
+                "lowResStart.version",
+            ));
+        }
+        if self.k == 0 || self.k >= self.executed_steps {
+            return Err(ReplayUnavailable::new(
+                "invalid_low_res_step_budget",
+                "lowResStart.k",
+            ));
+        }
+        if !(self.scale.is_finite() && (0.25..=0.9).contains(&self.scale)) {
+            return Err(ReplayUnavailable::new(
+                "invalid_low_res_scale",
+                "lowResStart.scale",
+            ));
+        }
+        if self.low_w == 0
+            || self.low_h == 0
+            || self.full_w == 0
+            || self.full_h == 0
+            || self.low_w > self.full_w
+            || self.low_h > self.full_h
+            || (self.low_w == self.full_w && self.low_h == self.full_h)
+        {
+            return Err(ReplayUnavailable::new(
+                "invalid_low_res_dimensions",
+                "lowResStart.dimensions",
+            ));
+        }
+        if self.target_pass != 0 {
+            return Err(ReplayUnavailable::new(
+                "invalid_low_res_target_pass",
+                "lowResStart.targetPass",
+            ));
+        }
+        if !matches!(
+            self.estimator.as_str(),
+            LOW_RES_START_ESTIMATOR_ENDPOINT_V1 | LOW_RES_START_ESTIMATOR_PREVIOUS_V1
+        ) {
+            return Err(ReplayUnavailable::new(
+                "unsupported_low_res_estimator",
+                "lowResStart.estimator",
+            ));
+        }
+        if self.schedule_policy != LOW_RES_START_SCHEDULE_POLICY_V1 {
+            return Err(ReplayUnavailable::new(
+                "unsupported_low_res_schedule_policy",
+                "lowResStart.schedulePolicy",
+            ));
+        }
+        if self.transition_arithmetic != LOW_RES_START_TRANSITION_ARITHMETIC_V1 {
+            return Err(ReplayUnavailable::new(
+                "unsupported_low_res_transition_arithmetic",
+                "lowResStart.transitionArithmetic",
+            ));
+        }
+        if self.transition_seed_scheme != LOW_RES_START_TRANSITION_SEED_SCHEME_V1 {
+            return Err(ReplayUnavailable::new(
+                "unsupported_low_res_transition_seed_scheme",
+                "lowResStart.transitionSeedScheme",
+            ));
+        }
+        if self
+            .selected_rung
+            .as_deref()
+            .is_some_and(|rung| rung.trim().is_empty())
+        {
+            return Err(ReplayUnavailable::new(
+                "invalid_quality_rung",
+                "lowResStart.selectedRung",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Derive the deterministic transition re-noising seed for a single-pass low-res start transition.
+/// Matches `gen_core::low_res_start_transition_seed`.
+pub fn low_res_start_transition_seed(
+    request_seed: u64,
+    output_index: u32,
+    pass_index: usize,
+    phase_index: usize,
+) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(LOW_RES_START_TRANSITION_SEED_SCHEME_V1.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(request_seed.to_le_bytes());
+    hasher.update(output_index.to_le_bytes());
+    hasher.update((pass_index as u64).to_le_bytes());
+    hasher.update((phase_index as u64).to_le_bytes());
+    let digest = hasher.finalize();
+    let seed = u64::from_le_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]);
+    if seed == request_seed {
+        seed ^ 0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,6 +175,8 @@ pub struct WorkerExecutionReceipt {
     pub outputs: Vec<OutputExecutionBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<ExecutionStageBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_res_start: Option<LowResStartReceipt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +212,8 @@ pub struct TrustedExecutionReceipt {
     pub outputs: Vec<OutputExecutionBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<ExecutionStageBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_res_start: Option<LowResStartReceipt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +303,9 @@ pub fn validate_worker_receipt(
 ) -> Result<(), ReplayUnavailable> {
     if submitted.version != EXECUTION_RECEIPT_VERSION {
         return Err(ReplayUnavailable::new("unknown_receipt_version", "version"));
+    }
+    if let Some(low_res) = &submitted.low_res_start {
+        low_res.validate()?;
     }
     if submitted.outputs.is_empty() {
         return Err(ReplayUnavailable::new("missing_outputs", "outputs"));
@@ -591,6 +733,277 @@ pub fn require_provider_route_binding(
     Ok(())
 }
 
+/// Verify that a trusted receipt's `low_res_start` provenance and quality-affecting rung match the
+/// accepted payload (`OPT-6`, `ADM-3`, `FEAT-1`, `M2`, `E6`).
+pub fn require_low_res_start_replay_binding(
+    receipt: &TrustedExecutionReceipt,
+    payload: &Map<String, Value>,
+) -> Result<(), ReplayUnavailable> {
+    use crate::resolved_options::{RouteField, RouteOptionFacts};
+    let facts = RouteOptionFacts::from_payload_syntax(payload);
+    let requested_low_res = match &facts.low_res_start {
+        RouteField::Absent | RouteField::Null => None,
+        RouteField::Valid(cfg) if cfg.disabled => None,
+        RouteField::Valid(cfg) => Some(cfg),
+        RouteField::Invalid => {
+            return Err(ReplayUnavailable::new(
+                "invalid_low_res_recipe",
+                "advanced.lowResStart",
+            ));
+        }
+    };
+    let Some(requested) = requested_low_res else {
+        if receipt.low_res_start.is_some() {
+            return Err(ReplayUnavailable::new(
+                "low_res_recipe_changed",
+                "advanced.lowResStart",
+            ));
+        }
+        return Ok(());
+    };
+    let version = requested.version.ok_or_else(|| {
+        ReplayUnavailable::new(
+            "missing_low_res_recipe_version",
+            "advanced.lowResStart.version",
+        )
+    })?;
+    if version != LOW_RES_START_RECIPE_VERSION {
+        return Err(ReplayUnavailable::new(
+            "unsupported_low_res_recipe_version",
+            "advanced.lowResStart.version",
+        ));
+    }
+    if payload
+        .get("modelManifestEntry")
+        .and_then(|entry| entry.get("features"))
+        .and_then(|features| features.get("low_res_start"))
+        == Some(&Value::Bool(false))
+    {
+        return Err(ReplayUnavailable::new(
+            "low_res_start_unavailable",
+            "advanced.lowResStart",
+        ));
+    }
+    let Some(recorded) = &receipt.low_res_start else {
+        return Err(ReplayUnavailable::new(
+            "low_res_receipt_missing",
+            "executionReceipt.lowResStart",
+        ));
+    };
+    recorded.validate()?;
+    if Some(recorded.version) != requested.version
+        || Some(recorded.k) != requested.k
+        || requested
+            .scale
+            .is_none_or(|s| (recorded.scale - s).abs() > 1e-9)
+    {
+        return Err(ReplayUnavailable::new(
+            "low_res_recipe_changed",
+            "executionReceipt.lowResStart",
+        ));
+    }
+    if let (Some(w), Some(h)) = (
+        payload
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        payload
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+    ) {
+        if recorded.full_w != w || recorded.full_h != h {
+            return Err(ReplayUnavailable::new(
+                "low_res_dimensions_changed",
+                "executionReceipt.lowResStart.dimensions",
+            ));
+        }
+    }
+    if let RouteField::Valid(strategy) = &facts.memory_strategy {
+        if let Some(requested_rung) = strategy.rung.as_deref() {
+            if recorded.selected_rung.as_deref() != Some(requested_rung) {
+                return Err(ReplayUnavailable::new(
+                    "quality_rung_changed",
+                    "execution.quality_policy",
+                ));
+            }
+        }
+    }
+    for output in &receipt.outputs {
+        let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
+        if let Some(identity_rung) = execution
+            .pointer("/identity/quality_policy/value/rung")
+            .and_then(Value::as_str)
+        {
+            if let Some(recorded_rung) = recorded.selected_rung.as_deref() {
+                if recorded_rung != identity_rung {
+                    return Err(ReplayUnavailable::new(
+                        "quality_rung_changed",
+                        "execution.quality_policy",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Capabilities of the executing host checked before or during an Exact Replay attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayHostCapabilities {
+    pub backend: String,
+    pub supports_low_res_start: bool,
+    pub available_estimators: BTreeSet<String>,
+    pub available_quality_rungs: BTreeSet<String>,
+}
+
+/// Verify that the executing host supports every pinned recipe, estimator, backend, and
+/// quality-affecting rung required by the trusted execution receipt (`OPT-6`, `ADM-3`, `FEAT-1`, `E6`).
+/// Never silently downgrades or substitutes an unavailable quality-affecting rung or estimator.
+pub fn require_exact_replay_host_support(
+    receipt: &TrustedExecutionReceipt,
+    payload: &Map<String, Value>,
+    host: &ReplayHostCapabilities,
+) -> Result<(), ReplayUnavailable> {
+    if receipt.accepted_backend != host.backend {
+        return Err(ReplayUnavailable::new("backend_changed", "backend"));
+    }
+    require_low_res_start_replay_binding(receipt, payload)?;
+    for output in &receipt.outputs {
+        let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
+        if let Some(rung) = execution
+            .pointer("/identity/quality_policy/value/rung")
+            .and_then(Value::as_str)
+        {
+            if !host.available_quality_rungs.contains(rung) {
+                return Err(ReplayUnavailable::new(
+                    "quality_rung_unavailable",
+                    "execution.quality_policy",
+                ));
+            }
+        }
+    }
+    if let Some(low_res) = &receipt.low_res_start {
+        if !host.supports_low_res_start {
+            return Err(ReplayUnavailable::new(
+                "low_res_start_unavailable",
+                "advanced.lowResStart",
+            ));
+        }
+        if !host.available_estimators.contains(&low_res.estimator) {
+            return Err(ReplayUnavailable::new(
+                "estimator_unavailable",
+                "lowResStart.estimator",
+            ));
+        }
+        if let Some(rung) = low_res.selected_rung.as_deref() {
+            if !host.available_quality_rungs.contains(rung) {
+                return Err(ReplayUnavailable::new(
+                    "quality_rung_unavailable",
+                    "lowResStart.selectedRung",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compare the expected and actual trusted execution receipts on exact replay completion,
+/// returning a specific typed [`ReplayUnavailable`] refusal if the backend, quality-affecting rung,
+/// estimator, or low-res recipe changed.
+pub fn verify_completed_exact_replay(
+    expected: &TrustedExecutionReceipt,
+    actual: &TrustedExecutionReceipt,
+) -> Result<(), ReplayUnavailable> {
+    if expected.accepted_backend != actual.accepted_backend {
+        return Err(ReplayUnavailable::new("backend_changed", "backend"));
+    }
+    if expected.accepted_device != actual.accepted_device {
+        return Err(ReplayUnavailable::new("device_changed", "device"));
+    }
+    if expected.accepted_source_route != actual.accepted_source_route {
+        return Err(ReplayUnavailable::new("source_route_changed", "source"));
+    }
+    if expected.inference_revision != actual.inference_revision {
+        return Err(ReplayUnavailable::new(
+            "runtime_revision_changed",
+            "inferenceRevision",
+        ));
+    }
+    match (&expected.low_res_start, &actual.low_res_start) {
+        (Some(exp), Some(act)) => {
+            if exp.version != act.version {
+                return Err(ReplayUnavailable::new(
+                    "unsupported_low_res_recipe_version",
+                    "lowResStart.version",
+                ));
+            }
+            if exp.estimator != act.estimator {
+                return Err(ReplayUnavailable::new(
+                    "estimator_changed",
+                    "lowResStart.estimator",
+                ));
+            }
+            if exp.selected_rung != act.selected_rung {
+                return Err(ReplayUnavailable::new(
+                    "quality_rung_changed",
+                    "lowResStart.selectedRung",
+                ));
+            }
+            if exp != act {
+                return Err(ReplayUnavailable::new(
+                    "low_res_recipe_changed",
+                    "lowResStart",
+                ));
+            }
+        }
+        (Some(_), None) => {
+            return Err(ReplayUnavailable::new(
+                "low_res_receipt_missing",
+                "executionReceipt.lowResStart",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(ReplayUnavailable::new(
+                "low_res_recipe_changed",
+                "executionReceipt.lowResStart",
+            ));
+        }
+        (None, None) => {}
+    }
+    let exp_rung = expected
+        .execution
+        .pointer("/identity/quality_policy/value/rung");
+    let act_rung = actual
+        .execution
+        .pointer("/identity/quality_policy/value/rung");
+    if exp_rung != act_rung {
+        return Err(ReplayUnavailable::new(
+            "quality_rung_changed",
+            "execution.quality_policy",
+        ));
+    }
+    if expected.execution != actual.execution
+        || expected.stages != actual.stages
+        || expected.outputs.len() != actual.outputs.len()
+        || expected
+            .outputs
+            .iter()
+            .zip(&actual.outputs)
+            .any(|(before, after)| {
+                before.output_index != after.output_index
+                    || before.execution != after.execution
+                    || before.artifact_sha256 != after.artifact_sha256
+            })
+    {
+        return Err(ReplayUnavailable::new(
+            "completed_execution_changed",
+            "executionReceipt",
+        ));
+    }
+    Ok(())
+}
+
 /// The current image worker resolves an explicit base seed before per-image
 /// seeds. Exact replay uses the unchanged accepted payload, so every observed
 /// draw must already equal that payload's effective seed. Unobserved or
@@ -599,6 +1012,7 @@ pub fn require_image_seed_binding(
     receipt: &TrustedExecutionReceipt,
     payload: &Map<String, Value>,
 ) -> Result<(), ReplayUnavailable> {
+    require_low_res_start_replay_binding(receipt, payload)?;
     let count = receipt.outputs.len();
     if payload.get("count").and_then(Value::as_u64).unwrap_or(1) as usize != count {
         return Err(ReplayUnavailable::new(
@@ -663,7 +1077,36 @@ pub fn require_image_seed_binding(
             }
             continue;
         }
-        if draws.len() != if output.execution.is_some() { 1 } else { count } {
+        let unit_count = if output.execution.is_some() { 1 } else { count };
+        if let Some(low_res) = &receipt.low_res_start {
+            if draws.len() == unit_count * 2 {
+                let initial_draw = &draws[provider_index * 2];
+                let transition_draw = &draws[provider_index * 2 + 1];
+                let expected_transition = expected.map(|seed| {
+                    low_res_start_transition_seed(
+                        seed,
+                        provider_index as u32,
+                        low_res.target_pass,
+                        0,
+                    )
+                });
+                if initial_draw.get("output_index").and_then(Value::as_u64)
+                    != Some(provider_index as u64)
+                    || initial_draw.get("seed").and_then(Value::as_u64) != expected
+                    || transition_draw.get("output_index").and_then(Value::as_u64)
+                        != Some(provider_index as u64)
+                    || transition_draw.get("seed").and_then(Value::as_u64) != expected_transition
+                    || expected.is_none()
+                {
+                    return Err(ReplayUnavailable::new(
+                        "seed_draw_binding_changed",
+                        "execution.randomness",
+                    ));
+                }
+                continue;
+            }
+        }
+        if draws.len() != unit_count {
             return Err(ReplayUnavailable::new(
                 "unsupported_draw_mapping",
                 "execution.randomness",
@@ -1121,6 +1564,7 @@ mod tests {
             execution: input.execution,
             outputs: input.outputs,
             stages: Vec::new(),
+            low_res_start: None,
         };
         assert!(require_deterministic_scope(&receipt, "same-device").is_ok());
         assert_eq!(
@@ -1176,6 +1620,7 @@ mod tests {
             execution: worker.execution,
             outputs: worker.outputs,
             stages: Vec::new(),
+            low_res_start: None,
         };
         let files = vec![PortableArtifactFile {
             relative_path: "model.safetensors".into(),
@@ -1291,6 +1736,7 @@ mod tests {
             execution: input.execution,
             outputs: input.outputs,
             stages: Vec::new(),
+            low_res_start: None,
         };
         receipt.execution["identity"]["randomness"] = json!({
             "kind":"draws", "scheme":"cpu_std_rng", "draws":[
@@ -1337,6 +1783,7 @@ mod tests {
             execution: input.execution,
             outputs: input.outputs,
             stages: Vec::new(),
+            low_res_start: None,
         };
         receipt.execution["identity"]["provider_id"] = json!("sdxl");
         receipt.execution["identity"]["randomness"] = json!({
@@ -1439,5 +1886,167 @@ mod tests {
         });
         validate_worker_receipt(&receipt, result.as_object().unwrap())
             .expect("execution identity with PAG sampling receipt must validate");
+    }
+
+    fn low_res_receipt_fixture() -> LowResStartReceipt {
+        LowResStartReceipt {
+            version: LOW_RES_START_RECIPE_VERSION,
+            k: 3,
+            executed_steps: 9,
+            scale: 0.5,
+            low_w: 512,
+            low_h: 512,
+            full_w: 1024,
+            full_h: 1024,
+            target_pass: 0,
+            estimator: LOW_RES_START_ESTIMATOR_ENDPOINT_V1.into(),
+            schedule_policy: LOW_RES_START_SCHEDULE_POLICY_V1.into(),
+            transition_arithmetic: LOW_RES_START_TRANSITION_ARITHMETIC_V1.into(),
+            transition_seed_scheme: LOW_RES_START_TRANSITION_SEED_SCHEME_V1.into(),
+            selected_rung: Some("resident".into()),
+        }
+    }
+
+    #[test]
+    fn low_res_start_receipt_validates_and_binds_exact_replay_draws_and_host_support() {
+        let mut worker = worker_receipt();
+        worker.outputs.truncate(1);
+        worker.execution["identity"]["output_units"] = json!(1);
+        let transition_seed = low_res_start_transition_seed(41, 0, 0, 0);
+        assert_ne!(transition_seed, 41);
+        assert_eq!(transition_seed, low_res_start_transition_seed(41, 0, 0, 0));
+        worker.execution["identity"]["randomness"]["draws"] = json!([
+            {"output_index": 0, "purpose": "initial_noise", "seed": 41, "noise_sha256": null},
+            {"output_index": 0, "purpose": "low_res_start_transition_v1", "seed": transition_seed, "noise_sha256": null}
+        ]);
+        worker.low_res_start = Some(low_res_receipt_fixture());
+        let result = json!({
+            "expectedCount": 1,
+            "assetWrites": [{
+                "assetId": "a",
+                "index": 0,
+                "workerExecutionReport": worker.execution
+            }]
+        });
+        validate_worker_receipt(&worker, result.as_object().unwrap())
+            .expect("valid low-res start receipt passes validation");
+
+        let trusted = TrustedExecutionReceipt {
+            version: EXECUTION_RECEIPT_VERSION,
+            job_id: "job-lowres".into(),
+            job_type: "image_generate".into(),
+            worker_id: "worker-1".into(),
+            attempt_id: "a".repeat(64),
+            accepted_backend: "mlx".into(),
+            accepted_device: "mlx".into(),
+            accepted_source_route: None,
+            inference_revision: "b".repeat(40),
+            accepted_binding_sha256: "c".repeat(64),
+            accepted_result_sha256: "d".repeat(64),
+            execution: worker.execution.clone(),
+            outputs: worker.outputs.clone(),
+            stages: Vec::new(),
+            low_res_start: worker.low_res_start.clone(),
+        };
+        let payload = json!({
+            "model": "z_image_turbo",
+            "seed": 41,
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "modelManifestEntry": {
+                "features": { "low_res_start": true }
+            },
+            "advanced": {
+                "steps": 9,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 },
+                "memoryStrategy": { "rung": "resident" }
+            }
+        });
+        require_image_seed_binding(&trusted, payload.as_object().unwrap())
+            .expect("low-res exact replay seed + recipe binding succeeds");
+
+        let host = ReplayHostCapabilities {
+            backend: "mlx".into(),
+            supports_low_res_start: true,
+            available_estimators: BTreeSet::from([LOW_RES_START_ESTIMATOR_ENDPOINT_V1.into()]),
+            available_quality_rungs: BTreeSet::from(["resident".into()]),
+        };
+        require_exact_replay_host_support(&trusted, payload.as_object().unwrap(), &host)
+            .expect("matching host capabilities allow exact replay");
+        verify_completed_exact_replay(&trusted, &trusted)
+            .expect("identical low-res execution receipt passes completion check");
+
+        // Unavailable quality-affecting rung refuses exact replay with typed ReplayUnavailable.
+        let mut downgraded_host = host.clone();
+        downgraded_host.available_quality_rungs = BTreeSet::from(["tiled_vae".into()]);
+        assert_eq!(
+            require_exact_replay_host_support(
+                &trusted,
+                payload.as_object().unwrap(),
+                &downgraded_host
+            )
+            .unwrap_err()
+            .reason,
+            "quality_rung_unavailable"
+        );
+
+        // Unavailable estimator refuses exact replay with typed ReplayUnavailable.
+        let mut missing_estimator_host = host.clone();
+        missing_estimator_host.available_estimators =
+            BTreeSet::from([LOW_RES_START_ESTIMATOR_PREVIOUS_V1.into()]);
+        assert_eq!(
+            require_exact_replay_host_support(
+                &trusted,
+                payload.as_object().unwrap(),
+                &missing_estimator_host
+            )
+            .unwrap_err()
+            .reason,
+            "estimator_unavailable"
+        );
+
+        // Unavailable low_res_start feature on host refuses exact replay.
+        let mut no_feature_host = host.clone();
+        no_feature_host.supports_low_res_start = false;
+        assert_eq!(
+            require_exact_replay_host_support(
+                &trusted,
+                payload.as_object().unwrap(),
+                &no_feature_host
+            )
+            .unwrap_err()
+            .reason,
+            "low_res_start_unavailable"
+        );
+
+        // Mismatched recipe version refuses exact replay.
+        let mut future_payload = payload.clone();
+        future_payload["advanced"]["lowResStart"]["version"] = json!(2);
+        assert_eq!(
+            require_image_seed_binding(&trusted, future_payload.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "unsupported_low_res_recipe_version"
+        );
+
+        // Mismatched quality-affecting rung or estimator on completion refuses exact replay.
+        let mut changed_rung = trusted.clone();
+        changed_rung.low_res_start.as_mut().unwrap().selected_rung = Some("tiled_vae".into());
+        assert_eq!(
+            verify_completed_exact_replay(&trusted, &changed_rung)
+                .unwrap_err()
+                .reason,
+            "quality_rung_changed"
+        );
+        let mut changed_estimator = trusted.clone();
+        changed_estimator.low_res_start.as_mut().unwrap().estimator =
+            LOW_RES_START_ESTIMATOR_PREVIOUS_V1.into();
+        assert_eq!(
+            verify_completed_exact_replay(&trusted, &changed_estimator)
+                .unwrap_err()
+                .reason,
+            "estimator_changed"
+        );
     }
 }
