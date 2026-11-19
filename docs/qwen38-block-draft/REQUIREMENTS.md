@@ -6,7 +6,8 @@ and added E15: the 4-bit tier ships too, for smaller cards.
 Tracked in CodeGraph:
 
 - **SW-F374:** the SceneWorks describer and H3 prompt expander. It holds E1 as consumed, E12,
-  E13, E15, the tier work, and AT1, AT2, AT6, AT7.
+  E13, E15, the tier work, and AT1, AT2, AT6, AT7. It also holds the prompt expander's model
+  choice, recorded on the feature as its own E7 and AT6 (section 8).
 - **SW-F360:** widened to DFlash2 and DSpine. It holds E2–E5, E10, and draft quantization from
   E11 and E15.
 - **SW-F328:** tree checking, E6 and E8.
@@ -209,7 +210,40 @@ prompts (E10), the int8 and 4-bit describer tiers and the quantized-embedding lo
 E15), draft distribution for SceneWorks (E13), and the describer acceptance tests (AT1, AT6,
 AT7).
 
-## 8. References
+## 8. Added on the SW-F374 feature: the prompt expander's model
+
+The CodeGraph feature SW-F374 records this requirement and acceptance test under its own
+numbers, E7 and AT6. They are not this document's E7 (tree size) and AT6 (describer output).
+SW-7208 implements them.
+
+- **SW-F374 E7.** The MiniMax-H3-Image prompt expander lets the user choose its model:
+  MiniMax-H3-Image-PE (default) or the abliterated Qwen3.8-27B (the describer's model, any
+  installed tier). Both run MiniMax's licensed prompt files and the same reply contract
+  (expansion plus proposed aspect ratio); the choice persists and the job record names the model
+  that ran. MiniMax-H3-Image-PE is never offered as the dataset describer (its license forbids
+  using its outputs to improve other models).
+- **SW-F374 AT6.** With each expander model, an H3-Image expansion on MLX and Candle/CUDA returns
+  a valid expansion and aspect ratio; the job record names the model; the abliterated choice
+  works with only a describer tier + MiniMax prompt files installed, behind the MiniMax license
+  acknowledgment.
+
+How SW-7208 meets them:
+
+- The request names the model in `expanderModelId`. With none, the API runs the saved
+  `h3ImageExpanderModel` UI preference, else MiniMax-H3-Image-PE. The Image Studio's Expand prompt
+  panel (both views) picks the model and saves the choice.
+- For the abliterated choice the job carries the describer's catalog entry with MiniMax's `prompt`
+  files added as a co-requisite. The worker loads the describer's own pinned tier folder and runs
+  the same `core_llm::minimax_h3_image_pe` request and reply parsing.
+- The prompt files download on their own (56 KB, no expander weights) as the expander entry's
+  `describer_prompt_expansion` conditional component. That download and every expansion, with
+  either model, require the MiniMax-H3-Image licence acknowledgment.
+- The job result names the model in `executionIdentity.expanderModelId` (with `tier` and
+  `weightsDir`) and in `rewriteSuggestion.rewriterModelId`.
+- The dataset describer accepts only its own three models; tests assert MiniMax-H3-Image-PE is
+  never among them, in the API and in the web describer list.
+
+## 9. References
 
 - Splash (Apache-2.0, C++/Metal): tree checking and GatedDeltaNet tree kernels, `docs/models.md`
   "Drafts" and `docs/internals.md`. https://github.com/incoai/splash

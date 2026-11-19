@@ -20,8 +20,12 @@
 # 27B model at the same bit widths). QWEN38_FRESH_HUB=true (expander only) fetches them into a new
 # hub scoped to this run (<weights root>/fresh-hubs/<run id>-<attempt>/hub), removed on exit, so the
 # smoke records tier_isolated=true: nothing but the selected tier was there to load.
+# QWEN38_EXPANDER_MODEL = abliterated (expander only, SW-7208; default minimax) runs the expansion with
+# the abliterated describer's own MLX tier folder (q4-full/ or q8-full/ of
+# SceneWorks/qwen3.8-27b-abliterated-mlx) and the same upstream prompt files instead.
 #
 # Inputs (env): QWEN38_JOB = describer | expander, QWEN38_FRESH_HUB = true | false (default false),
+# QWEN38_EXPANDER_MODEL = minimax | abliterated (default minimax),
 # QWEN38_TIER = q4 | q8 | bf16,
 # QWEN38_IMAGE_SIDE = default | 1536, QWEN38_EVIDENCE_DIR, QWEN38_MAC_RUNNER = nax-macos | nax-macos-2.
 set -euo pipefail
@@ -35,6 +39,13 @@ case "$job" in
   expander)
     [[ "$tier" == q4 || "$tier" == q8 ]] || { echo "::error::the prompt expander has no published $tier tier; use q4 or q8"; exit 1; } ;;
   *) echo "::error::QWEN38_JOB must be describer or expander, got $job"; exit 1 ;;
+esac
+expander_model="${QWEN38_EXPANDER_MODEL:-minimax}"
+case "$expander_model" in
+  minimax) ;;
+  abliterated)
+    [[ "$job" == expander ]] || { echo "::error::QWEN38_EXPANDER_MODEL applies only to the expander job"; exit 1; } ;;
+  *) echo "::error::QWEN38_EXPANDER_MODEL must be minimax or abliterated, got $expander_model"; exit 1 ;;
 esac
 fresh_hub="${QWEN38_FRESH_HUB:-false}"
 case "$fresh_hub" in
@@ -52,7 +63,7 @@ guard_dir="$(cd "$here/../iris-mlx-real-weights" && pwd)"
 mem_gib=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 {
   if [[ "$job" == expander ]]; then
-    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) job=expander tier=$tier"
+    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) job=expander expander_model=$expander_model tier=$tier"
   else
     echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) tier=$tier image_side=$side"
   fi
@@ -99,11 +110,12 @@ python3.12 -m venv "$RUNNER_TEMP/qwen38-hf-venv"
 "$RUNNER_TEMP/qwen38-hf-venv/bin/python" -m pip install --disable-pip-version-check --no-input "huggingface_hub==0.36.0" >/dev/null
 free_gb=$(( $(df -k "$hub" | awk 'NR==2 {print $4}') / 1048576 ))
 if [[ "$job" == expander ]]; then
-# The expander: the catalog's macOS row for the tier (its whole `q4-full/` or `q8-full/` folder) and
-# the `prompt` co-requisite (five upstream files), each at its pinned revision. Each file is checked
-# at its published size, so a partial folder is completed rather than taken as resident.
+# The expander: the catalog's macOS row for the tier (its whole `q4-full/` or `q8-full/` folder; for
+# the abliterated model the describer's row and the files it names) and the `prompt` co-requisite
+# (five upstream files), each at its pinned revision. Each file is checked at its published size,
+# so a partial folder is completed rather than taken as resident.
 HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
-QWEN38_HUB="$hub" QWEN38_TIER="$tier" QWEN38_FREE_GB="$free_gb" \
+QWEN38_HUB="$hub" QWEN38_TIER="$tier" QWEN38_FREE_GB="$free_gb" QWEN38_EXPANDER_MODEL="$expander_model" \
   "$RUNNER_TEMP/qwen38-hf-venv/bin/python" - <<'PY' | tee "$out/provision.txt"
 import json, os, sys
 from fnmatch import fnmatchcase
@@ -111,7 +123,9 @@ from huggingface_hub import HfApi, snapshot_download
 specs = json.load(open("config/manifests/registry/specs.json"))
 tier = os.environ["QWEN38_TIER"]
 downloads = specs["minimax_h3_image_pe"]["product"]["downloads"]
-tier_rows = [r for r in downloads if r.get("variant") == tier and not r.get("coRequisite")
+weights = (specs["vision_describe_qwen3_8_27b"]["product"]["downloads"]
+           if os.environ["QWEN38_EXPANDER_MODEL"] == "abliterated" else downloads)
+tier_rows = [r for r in weights if r.get("variant") == tier and not r.get("coRequisite")
              and not r.get("pendingArtifact") and "macos" in r.get("platforms", [])]
 prompt_rows = [r for r in downloads if r.get("coRequisite") and r.get("componentId") == "prompt"]
 if len(tier_rows) != 1 or len(prompt_rows) != 1:
@@ -190,7 +204,7 @@ fi
 if [[ "$job" == expander ]]; then
   test_name=h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_mlx
   log="$out/expander.log"
-  summary="## MiniMax-H3-Image prompt expander, MLX $tier (${RUNNER_NAME:-unknown})"
+  summary="## MiniMax-H3-Image prompt expander ($expander_model), MLX $tier (${RUNNER_NAME:-unknown})"
 else
   test_name=qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_mlx
   log="$out/describer.log"
@@ -202,6 +216,6 @@ bash "$here/guarded_run.sh" "$out" "$log" "$test_name" -- \
   python3.12 -I "$here/../metal_execution_lock.py" --wait-seconds 3600 -- \
   env HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" MODEL_PROOF_OUTPUT_DIR="$out/result" \
   SCENEWORKS_QWEN38_DESCRIBER_TIER="$tier" SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE="$side" \
-  SCENEWORKS_H3_EXPANDER_TIER="$tier" \
+  SCENEWORKS_H3_EXPANDER_TIER="$tier" SCENEWORKS_H3_EXPANDER_MODEL="$expander_model" \
   python3.12 "$guard_dir/tree_guard.py" "$cap_gib" 2400 "$log" -- \
   "$bin" "$test_name" --ignored --exact --nocapture --test-threads=1

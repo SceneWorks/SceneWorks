@@ -206,6 +206,26 @@ class ExpanderTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
             provision.plans("expander-bf16")
 
+    # SW-7208: the expander run by the abliterated describer needs ONE describer tier and the prompt
+    # files, never MiniMax-H3-Image-PE's weights.
+    def test_an_abliterated_expander_mode_plans_one_describer_tier_then_the_prompt_files(self):
+        for tier, other in (("q4", "q8"), ("q8", "q4")):
+            folder = provision.TIER_FOLDERS[tier]
+            (repo, revision, _, read, patterns, minimum), prompt = provision.plans(f"expander-abliterated-{tier}")
+            self.assertEqual((repo, revision), (provision.REPO, provision.REVISION))
+            self.assertEqual(patterns, provision.tier_patterns(folder))
+            self.assertEqual(minimum, provision.EXPANDER_MIN_FREE_BYTES[tier])
+            sized = provision.TIER_BYTES[tier] - 1
+            entries = [(f"{folder}/config.json", 1), (f"{folder}/generation_config.json", 1),
+                       (f"{folder}/chat_template.jinja", 1), (f"{folder}/tokenizer.json", 1),
+                       (f"{folder}/tokenizer_config.json", 1), (f"{folder}/model.safetensors.index.json", 1),
+                       (f"{folder}/model-00001-of-00001.safetensors", sized - 5),
+                       (f"{provision.TIER_FOLDERS[other]}/config.json", 7)]
+            self.assertEqual(set(read(entries)), {name for name, _ in entries[:-1]})
+            self.assertEqual(prompt, provision.prompt_plan())
+        with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
+            provision.plans("expander-abliterated-bf16")
+
     def test_repositories_revisions_folders_and_totals_match_the_catalog_rows(self):
         specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
         rows = specs["minimax_h3_image_pe"]["product"]["downloads"]
@@ -222,6 +242,13 @@ class ExpanderTest(unittest.TestCase):
         self.assertEqual((prompt[0]["repo"], prompt[0]["revision"]), (provision.PROMPT_REPO, provision.PROMPT_REVISION))
         self.assertEqual(prompt[0]["files"], list(provision.PROMPT_FILES))
         self.assertEqual(prompt[0]["estimatedSizeBytes"], provision.PROMPT_BYTES)
+        # SW-7208: the prompt files alone, for the abliterated choice, are the same five files.
+        alone = [row for row in specs["minimax_h3_image_pe"]["product"]["conditionalComponents"]
+                 if "describer_prompt_expansion" in row["requiredFor"]]
+        self.assertEqual(len(alone), 1)
+        self.assertEqual((alone[0]["repo"], alone[0]["revision"], alone[0]["files"], alone[0]["estimatedSizeBytes"]),
+                         (provision.PROMPT_REPO, provision.PROMPT_REVISION, list(provision.PROMPT_FILES),
+                          provision.PROMPT_BYTES))
 
 
 class FreeSpaceTest(unittest.TestCase):

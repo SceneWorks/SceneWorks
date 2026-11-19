@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderPinnedSnapshots,
+import { EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderModelSnapshots, expanderPinnedSnapshots,
   main, pinnedSnapshots, stage, summary, validateExpanderResult, validateReceipt, validateResult } from './qwen38-describer-evidence.mjs';
 
 const PINNED = pinnedSnapshots();
@@ -342,4 +342,63 @@ test('main validates the expander when the workflow selects job=expander', () =>
   const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
   assert.equal(evidence.accepted, true, evidence.error);
   assert.equal(evidence.result.tier, 'q8');
+}));
+
+// ---- the abliterated describer as the expander's model (SW-7208) --------------------------------
+function abliteratedResult(tier = 'q4') {
+  const pinned = expanderModelSnapshots('abliterated');
+  return {
+    ...expanderResult(tier),
+    expander_model: 'abliterated', catalog_id: 'vision_describe_qwen3_8_27b',
+    rewriter_model_id: 'vision_describe_qwen3_8_27b',
+    repo: pinned[tier].repo, revision: pinned[tier].revision,
+    weights_dir: `E:\\huggingface\\hub\\${pinned[tier].relativeDir.replaceAll('/', '\\')}`,
+  };
+}
+
+test('the abliterated expander loads the describer tier folders with the expander prompt files', () => {
+  const pinned = expanderModelSnapshots('abliterated');
+  for (const tier of ['q4', 'q8']) {
+    assert.equal(pinned[tier].repo, REHOST_REPO);
+    assert.match(pinned[tier].relativeDir, new RegExp(`/${tier}-full$`));
+  }
+  assert.deepEqual(pinned.prompt, EXPANDER.prompt);
+  const accepted = validateExpanderResult(abliteratedResult('q8'), 'q8', pinned, 'abliterated');
+  assert.equal(accepted.catalog_id, 'vision_describe_qwen3_8_27b');
+  assert.equal(accepted.expander_model, 'abliterated');
+});
+test('an expander result is accepted only for the model that ran', () => {
+  const pinned = expanderModelSnapshots('abliterated');
+  // MiniMax-H3-Image-PE's result does not satisfy an abliterated request, nor the reverse.
+  assert.throws(() => validateExpanderResult(expanderResult(), 'q4', pinned, 'abliterated'), /another expander model/);
+  assert.throws(() => validateExpanderResult(abliteratedResult(), 'q4', EXPANDER, 'minimax'), /another expander model/);
+  // The job record must name the model that ran.
+  assert.throws(() => validateExpanderResult({ ...abliteratedResult(), rewriter_model_id: 'minimax_h3_image_pe' }, 'q4',
+    pinned, 'abliterated'), /names another model/);
+  // The describer's folder under the expander's name is refused.
+  assert.throws(() => validateExpanderResult({ ...abliteratedResult(), expander_model: 'minimax',
+    catalog_id: 'minimax_h3_image_pe', rewriter_model_id: 'minimax_h3_image_pe' }, 'q4', EXPANDER, 'minimax'));
+  assert.throws(() => validateExpanderResult(abliteratedResult(), 'q4', pinned, 'captioner'), /expander model/);
+});
+test('main validates the abliterated expander when the workflow selects it', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(abliteratedResult('q4')));
+  const receiptDir = path.join(directory, `sceneworks-cuda-execution-9-1-${GUARD_ACTOR}`);
+  await fs.mkdir(receiptDir);
+  await fs.writeFile(path.join(receiptDir, 'resource-receipt.json'), JSON.stringify(receipt()));
+  const previous = process.exitCode;
+  try {
+    await main({ MODEL_PROOF_OUTPUT_DIR: output, SCENEWORKS_QWEN38_DESCRIBER_TIER: 'q4',
+      SCENEWORKS_QWEN38_VALIDATION_JOB: 'expander', SCENEWORKS_H3_EXPANDER_MODEL: 'abliterated',
+      RUNNER_TEMP: directory, GITHUB_RUN_ID: '9', GITHUB_RUN_ATTEMPT: '1' });
+    assert.notEqual(process.exitCode, 1);
+  } finally {
+    process.exitCode = previous;
+  }
+  const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.requested_expander_model, 'abliterated');
+  assert.equal(evidence.result.catalog_id, 'vision_describe_qwen3_8_27b');
+  assert.match(summary(evidence), /Model: `vision_describe_qwen3_8_27b`/);
 }));

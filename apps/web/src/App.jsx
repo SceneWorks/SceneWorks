@@ -60,6 +60,7 @@ import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
+import { seedH3ExpanderModelFromServer } from "./minimaxH3ImageExpand.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
 import { UpgradeError } from "./requestUpgrade.js";
@@ -1114,6 +1115,8 @@ export function App() {
         if (prefs?.perModelTier) {
           seedLastTiersFromServer(prefs.perModelTier);
         }
+        // SW-7208: the MiniMax-H3-Image expander's saved model, for the same reason.
+        seedH3ExpanderModelFromServer(prefs?.h3ImageExpanderModel);
         // Re-prime the Simple studios' settings cache from the durable server copy, for exactly
         // the same reason as the tier sticky above: the desktop shell's per-launch origin wipes
         // localStorage, so the model/prompt/resolution a user left in a Simple studio would be

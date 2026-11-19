@@ -3,6 +3,14 @@
 //! `minimax_h3_image_expand` task, on the q4 or q8 tier a user picks, on CUDA (Candle layout,
 //! `candle-q4-full/` / `candle-q8-full/`) and on MLX (`q4-full/` / `q8-full/`).
 //!
+//! `SCENEWORKS_H3_EXPANDER_MODEL` picks the expander model (SW-7208): `minimax` (the default,
+//! MiniMax-H3-Image-PE from `SceneWorks/minimax-h3-image-pe`) or `abliterated` (the abliterated
+//! Qwen3.8-27B the describer uses, from its own `q4-full/` / `q8-full/` folder of
+//! `SceneWorks/qwen3.8-27b-abliterated-{mlx,candle}`). Both read the same MiniMax prompt files and
+//! must meet the same output contract; the abliterated job carries the describer's entry with the
+//! expander's `prompt` co-requisite added, exactly as the API builds it, and its result must name
+//! the abliterated model as the one that ran.
+//!
 //! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow with `job=expander`
 //! (CUDA under the exact-UUID guard `scripts/ci/windows_cuda_execution.py`; MLX through
 //! `qwen38-describer-mlx-validation.yml` under the external phys_footprint guard). It is never part
@@ -41,6 +49,7 @@
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
 //! $env:SCENEWORKS_H3_EXPANDER_TIER = "q4"
+//! $env:SCENEWORKS_H3_EXPANDER_MODEL = "abliterated"   # or "minimax" (the default)
 //! cargo test -p sceneworks-worker --features backend-candle --release --lib h3_prompt_expander_gpu_smoke -- --ignored --nocapture --test-threads=1
 //! ```
 
@@ -56,11 +65,42 @@ use super::*;
 use crate::minimax_h3_image_prompt_expand as expand;
 
 const TIER_ENV: &str = "SCENEWORKS_H3_EXPANDER_TIER";
+const MODEL_ENV: &str = "SCENEWORKS_H3_EXPANDER_MODEL";
 const JOB_ID: &str = "sw-7202-h3-expander-smoke";
 const WORKER_ID: &str = "h3-expander-smoke-worker";
 const STAMP: &str = "2026-11-19T00:00:00Z";
-/// The converted tiers' repository.
-const TIER_REPO: &str = "SceneWorks/minimax-h3-image-pe";
+/// The expander model under test and where its tiers live.
+#[derive(Clone, Copy, Debug)]
+struct Expander {
+    /// The workflow's `expander_model` input: `minimax` or `abliterated`.
+    input: &'static str,
+    /// The catalog id the job runs and its result must name.
+    catalog_id: &'static str,
+    /// The repository this host's tier rows load from.
+    tier_repo: &'static str,
+}
+
+/// `$SCENEWORKS_H3_EXPANDER_MODEL`: `minimax` (default) or `abliterated`.
+fn requested_expander() -> Expander {
+    let model = std::env::var(MODEL_ENV).unwrap_or_default();
+    match model.trim() {
+        "" | "minimax" => Expander {
+            input: "minimax",
+            catalog_id: expand::PE_MODEL_ID,
+            tier_repo: "SceneWorks/minimax-h3-image-pe",
+        },
+        "abliterated" => Expander {
+            input: "abliterated",
+            catalog_id: expand::DESCRIBER_MODEL_ID,
+            tier_repo: if cfg!(target_os = "macos") {
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MLX_REPO
+            } else {
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO
+            },
+        },
+        other => panic!("${MODEL_ENV} must be minimax or abliterated, got {other:?}"),
+    }
+}
 /// A short text-to-image prompt: the expander's own use case.
 const PROMPT: &str = "a lighthouse on a rocky coast at dusk, waves breaking below";
 
@@ -88,9 +128,29 @@ fn relative_snapshot(repo: &str, revision: &str) -> PathBuf {
         .join(revision)
 }
 
-/// The shipped catalog entry with only this host's rows (MLX layout on macOS, Candle elsewhere).
-fn host_entry() -> Value {
-    let mut entry = Value::Object(crate::test_env::shipped_catalog_entry(expand::PE_MODEL_ID));
+/// The entry the API forwards for `expander`: the expander's own, or the describer's with the
+/// expander's `describer_prompt_expansion` prompt files added as a co-requisite (every platform).
+fn job_entry(expander: Expander) -> Value {
+    let pe = Value::Object(crate::test_env::shipped_catalog_entry(expand::PE_MODEL_ID));
+    if expander.catalog_id == expand::PE_MODEL_ID {
+        return pe;
+    }
+    let mut entry = Value::Object(crate::test_env::shipped_catalog_entry(expander.catalog_id));
+    let prompts = sceneworks_core::model_usage_policy::conditional_component_downloads(
+        &pe,
+        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE,
+    )
+    .expect("the expander declares its prompt files for the describer");
+    entry["downloads"]
+        .as_array_mut()
+        .expect("the describer declares download rows")
+        .extend(prompts);
+    entry
+}
+
+/// [`job_entry`] with only this host's rows (MLX layout on macOS, Candle elsewhere).
+fn host_entry(expander: Expander) -> Value {
+    let mut entry = job_entry(expander);
     sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
         &mut entry,
         std::env::consts::OS,
@@ -106,26 +166,41 @@ fn host_rows(entry: &Value) -> Vec<&Value> {
         .collect()
 }
 
-/// The folder a converted row's files name (`candle-q4-full/*` ⇒ `candle-q4-full`).
+/// The one folder a converted row's files name (`candle-q4-full/*` ⇒ `candle-q4-full`; the
+/// describer's `q4-full/config.json`, `q4-full/model.safetensors`, ... ⇒ `q4-full`).
 fn row_folder(row: &Value) -> String {
-    let first = row["files"][0].as_str().expect("the row names its files");
-    let (folder, rest) = first
-        .split_once('/')
-        .unwrap_or_else(|| panic!("a converted tier row names files in one folder, got {first}"));
-    assert_eq!(rest, "*", "a converted tier row names its whole folder");
-    folder.to_owned()
+    let folders: std::collections::BTreeSet<&str> = row["files"]
+        .as_array()
+        .expect("the row names its files")
+        .iter()
+        .map(|file| {
+            let file = file.as_str().expect("file selectors are strings");
+            file.split_once('/')
+                .unwrap_or_else(|| {
+                    panic!("a converted tier row names files in a folder, got {file}")
+                })
+                .0
+        })
+        .collect();
+    assert_eq!(
+        folders.len(),
+        1,
+        "a converted tier row names one folder: {folders:?}"
+    );
+    folders.into_iter().next().unwrap().to_owned()
 }
 
 /// The catalog's pinned folder of `tier` on this host's layout.
-fn pinned_tier(entry: &Value, tier: &str) -> Pinned {
+fn pinned_tier(entry: &Value, expander: Expander, tier: &str) -> Pinned {
+    let tier_repo = expander.tier_repo;
     let rows: Vec<&Value> = host_rows(entry)
         .into_iter()
-        .filter(|row| row["repo"] == TIER_REPO && row["variant"] == tier)
+        .filter(|row| row["repo"] == tier_repo && row["variant"] == tier)
         .collect();
     assert_eq!(
         rows.len(),
         1,
-        "the catalog has one {TIER_REPO} {tier} row for {}",
+        "the catalog has one {tier_repo} {tier} row for {}",
         std::env::consts::OS
     );
     let row = rows[0];
@@ -138,18 +213,18 @@ fn pinned_tier(entry: &Value, tier: &str) -> Pinned {
         .expect("pinned revision")
         .to_owned();
     Pinned {
-        repo: TIER_REPO.to_owned(),
-        relative_dir: relative_snapshot(TIER_REPO, &revision).join(row_folder(row)),
+        repo: tier_repo.to_owned(),
+        relative_dir: relative_snapshot(tier_repo, &revision).join(row_folder(row)),
         revision,
     }
 }
 
 /// Every other published tier folder of the converted repository on this host's layout.
-fn other_tier_folders(entry: &Value, tier: &str) -> Vec<String> {
+fn other_tier_folders(entry: &Value, expander: Expander, tier: &str) -> Vec<String> {
     host_rows(entry)
         .into_iter()
         .filter(|row| {
-            row["repo"] == TIER_REPO
+            row["repo"] == expander.tier_repo
                 && row["variant"] != tier
                 && row.get("pendingArtifact").is_none()
         })
@@ -179,6 +254,7 @@ fn pinned_prompt(entry: &Value) -> Pinned {
 
 /// What the smoke measured outside the job, for the RESULT line and the evidence.
 struct Run {
+    expander: Expander,
     tier: &'static str,
     weights_dir: PathBuf,
     pinned: Pinned,
@@ -189,9 +265,9 @@ struct Run {
     wall_seconds: f64,
 }
 
-/// Run one expand job on `tier` through the production entry point and check its result against
-/// the expander's output contract.
-async fn expand_on_tier(tier: &'static str) -> Run {
+/// Run one expand job with `expander` on `tier` through the production entry point and check its
+/// result against the expander's output contract.
+async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
     let hf_hub_cache = PathBuf::from(
         std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
     );
@@ -200,9 +276,9 @@ async fn expand_on_tier(tier: &'static str) -> Run {
         "HF_HUB_CACHE is not a directory: {}",
         hf_hub_cache.display()
     );
-    let entry = Value::Object(crate::test_env::shipped_catalog_entry(expand::PE_MODEL_ID));
-    let host = host_entry();
-    let pinned = pinned_tier(&host, tier);
+    let entry = job_entry(expander);
+    let host = host_entry(expander);
+    let pinned = pinned_tier(&host, expander, tier);
     let prompt = pinned_prompt(&host);
 
     let temp = tempfile::tempdir().expect("smoke tempdir creates");
@@ -225,6 +301,10 @@ async fn expand_on_tier(tier: &'static str) -> Run {
         Some(tier),
         "an explicit tier is never substituted"
     );
+    assert_eq!(
+        dirs.model_id, expander.catalog_id,
+        "the chosen model resolves"
+    );
     assert!(
         dirs.weights.ends_with(&pinned.relative_dir),
         "the {tier} tier resolved to {} instead of the pinned folder {}",
@@ -241,7 +321,7 @@ async fn expand_on_tier(tier: &'static str) -> Run {
         .weights
         .parent()
         .expect("a tier folder sits in its snapshot");
-    let other_tiers_present: Vec<String> = other_tier_folders(&host, tier)
+    let other_tiers_present: Vec<String> = other_tier_folders(&host, expander, tier)
         .into_iter()
         .filter(|folder| snapshot.join(folder).exists())
         .collect();
@@ -259,6 +339,7 @@ async fn expand_on_tier(tier: &'static str) -> Run {
         "prompt": PROMPT,
         "modelId": sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID,
         (sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY): tier,
+        (sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY): expander.catalog_id,
         "modelManifestEntry": entry,
     });
     let job: JobSnapshot = serde_json::from_value(snapshot_job).expect("smoke job deserializes");
@@ -315,7 +396,14 @@ async fn expand_on_tier(tier: &'static str) -> Run {
         "the proposed ratio {ratio:?} is not one of the recipe's {allowed_ratios:?}"
     );
     assert_eq!(suggestion["workflow"], "t2i");
-    assert_eq!(suggestion["rewriterModelId"], expand::PE_MODEL_ID);
+    assert_eq!(
+        suggestion["rewriterModelId"], expander.catalog_id,
+        "the suggestion names the model that ran"
+    );
+    assert_eq!(
+        result["executionIdentity"]["expanderModelId"], expander.catalog_id,
+        "the job record names the model that ran"
+    );
     assert_eq!(
         suggestion["tier"], tier,
         "the suggestion block names the requested tier"
@@ -338,6 +426,7 @@ async fn expand_on_tier(tier: &'static str) -> Run {
     );
 
     Run {
+        expander,
         tier,
         weights_dir: loaded,
         pinned,
@@ -360,6 +449,9 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
         let evidence = json!({
             "schema_version": 1,
             "job": "expander",
+            "expander_model": run.expander.input,
+            "catalog_id": run.expander.catalog_id,
+            "rewriter_model_id": run.result["rewriteSuggestion"]["rewriterModelId"],
             "test_fqn": test_fqn,
             "backend": backend,
             "repo": run.pinned.repo,
@@ -391,9 +483,10 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
 
 fn result_line(run: &Run, backend: &str, memory: &str) -> String {
     format!(
-        "RESULT model=minimax_h3_image_pe job=expander backend={backend} tier={} {memory} \
+        "RESULT model={} job=expander backend={backend} tier={} {memory} \
          wall_s={:.1} generated_tokens={} wh_ratio={} tier_isolated={} other_tiers_present={:?} \
          loaded_weights={}",
+        run.expander.catalog_id,
         run.tier,
         run.wall_seconds,
         run.result["generation"]["usage"]["generatedTokens"],
@@ -406,9 +499,10 @@ fn result_line(run: &Run, backend: &str, memory: &str) -> String {
 
 #[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "real-weight prompt-expander GPU validation; needs a pinned Candle tier of the MiniMax-H3-Image prompt expander and its upstream prompt files under HF_HUB_CACHE and a CUDA device"]
+#[ignore = "real-weight prompt-expander GPU validation; needs a pinned Candle tier of the selected expander model and the upstream MiniMax prompt files under HF_HUB_CACHE and a CUDA device"]
 async fn h3_prompt_expander_expands_a_prompt_on_cuda() {
     let tier = requested_tier();
+    let expander = requested_expander();
     // The same card reading as the describer smoke: the job's card by its nvidia-smi
     // (PCI-bus-ordered) index, which under `CUDA_VISIBLE_DEVICES` is the visible device's index.
     let gpu_index = std::env::var("CUDA_VISIBLE_DEVICES")
@@ -434,7 +528,7 @@ async fn h3_prompt_expander_expands_a_prompt_on_cuda() {
         })
     };
     // A panic inside the job still stops the sampler: the guard then sees this process exit.
-    let run = tokio::spawn(expand_on_tier(tier)).await;
+    let run = tokio::spawn(expand_on_tier(expander, tier)).await;
     stop.store(true, Ordering::Relaxed);
     let peak_mib = sampler.join().expect("sampler thread joins");
     let run = run.unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
@@ -472,10 +566,10 @@ async fn h3_prompt_expander_expands_a_prompt_on_cuda() {
 /// `tree_guard.py` (`root_lifetime_max`), which `guarded_run.sh` records.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "real-weight prompt-expander MLX validation; needs a pinned MLX tier of the MiniMax-H3-Image prompt expander and its upstream prompt files under HF_HUB_CACHE"]
+#[ignore = "real-weight prompt-expander MLX validation; needs a pinned MLX tier of the selected expander model and the upstream MiniMax prompt files under HF_HUB_CACHE"]
 async fn h3_prompt_expander_expands_a_prompt_on_mlx() {
     let tier = requested_tier();
-    let run = expand_on_tier(tier).await;
+    let run = expand_on_tier(requested_expander(), tier).await;
     eprintln!(
         "{}",
         result_line(&run, "mlx", "memory=tree_guard_root_lifetime_max")

@@ -48298,6 +48298,26 @@
       "autoDownload": false,
       "candle": {},
       "capabilities": [],
+      "conditionalComponents": [
+        {
+          "componentId": "prompt",
+          "estimatedSizeBytes": 56282,
+          "files": [
+            "prompt/manifest.json",
+            "prompt/t2i/system_prompt.txt",
+            "prompt/t2i/task_prompt.txt",
+            "prompt/t2i/request_params.json",
+            "prompt/edit/task_prompt.txt"
+          ],
+          "license": "MiniMax-H3-Image Community License",
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "requiredFor": [
+            "describer_prompt_expansion"
+          ],
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa"
+        }
+      ],
       "defaults": {},
       "downloads": [
         {

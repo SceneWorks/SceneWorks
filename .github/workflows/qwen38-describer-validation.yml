@@ -20,6 +20,12 @@ name: Qwen3.8 27B describer CUDA validation
 # selected tier and the prompt files (CUDA: fetched here by qwen38_describer_provision.py into
 # E:\huggingface\sw-fresh-hub-<run>-<attempt>, removed afterwards; MLX: run.sh), so the evidence
 # records tier_isolated=true: the job needed no other tier.
+#
+# `expander_model` (expander only, SW-7208) picks the model the expansion runs: `minimax` (the
+# default, MiniMax-H3-Image-PE, unchanged from above) or `abliterated` (the abliterated Qwen3.8-27B
+# describer's own q4-full/ or q8-full/ folder, with the same MiniMax prompt files; a fresh hub then
+# holds that describer tier and the prompt files, provisioned as `expander-abliterated-<tier>`).
+# The evidence must name the model that ran.
 on:
   workflow_dispatch:
     inputs:
@@ -34,6 +40,12 @@ on:
         required: false
         type: boolean
         default: false
+      expander_model:
+        description: expander only - minimax (MiniMax-H3-Image-PE) or abliterated (the describer's Qwen3.8-27B with MiniMax's prompt files)
+        required: false
+        type: choice
+        options: [minimax, abliterated]
+        default: minimax
       backend:
         description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
         required: true
@@ -65,27 +77,28 @@ permissions:
 jobs:
   # Refused here, before any runner builds or takes a GPU, instead of failing inside the smoke: the
   # prompt expander's bf16 tier is unpublished (pendingArtifact), and a fresh hub is an expander-only
-  # option (the describer keeps its provisioned cache).
+  # option (the describer keeps its provisioned cache), and so is the expander's model choice.
   refuse-invalid-request:
-    if: ${{ (inputs.job == 'expander' && inputs.tier == 'bf16') || (inputs.job == 'describer' && inputs.fresh_hub) }}
+    if: ${{ (inputs.job == 'expander' && inputs.tier == 'bf16') || (inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "::error::job=expander needs tier q4 or q8 (its bf16 tier is unpublished), and fresh_hub applies only to job=expander"
+          echo "::error::job=expander needs tier q4 or q8 (its bf16 tier is unpublished), and fresh_hub and expander_model=abliterated apply only to job=expander"
           exit 1
 
   qwen38-describer-mlx:
-    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && inputs.fresh_hub) }}
+    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
     uses: ./.github/workflows/qwen38-describer-mlx-validation.yml
     with:
       job: ${{ inputs.job }}
       fresh_hub: ${{ inputs.fresh_hub }}
+      expander_model: ${{ inputs.expander_model }}
       tier: ${{ inputs.tier }}
       image_side: ${{ inputs.image_side }}
       mac_runner: ${{ inputs.mac_runner }}
 
   qwen38-describer-smoke:
-    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && inputs.fresh_hub) }}
+    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -110,6 +123,8 @@ jobs:
       # job=expander: the prompt expander smoke's tier, the evidence validator's job, and the smoke's
       # exact test path (the describer's otherwise).
       SCENEWORKS_H3_EXPANDER_TIER: ${{ inputs.tier }}
+      # SW-7208: the expander's model (minimax unless dispatched otherwise), for the smoke and the validator.
+      SCENEWORKS_H3_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
       SCENEWORKS_QWEN38_VALIDATION_JOB: ${{ inputs.job }}
       SCENEWORKS_QWEN38_SMOKE_TEST: ${{ inputs.job == 'expander' && 'h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_cuda' || 'qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda' }}
       # Free memory the run needs on the card before it starts: at least candle-llm's own load
@@ -159,7 +174,7 @@ jobs:
         env:
           HF_HUB_CACHE: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
           HF_HUB_OFFLINE: "0"
-          SCENEWORKS_QWEN38_DESCRIBER_PROVISION: expander-${{ inputs.tier }}
+          SCENEWORKS_QWEN38_DESCRIBER_PROVISION: ${{ inputs.expander_model == 'abliterated' && format('expander-abliterated-{0}', inputs.tier) || format('expander-{0}', inputs.tier) }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
           HF_HUB_DISABLE_TELEMETRY: "1"
@@ -204,7 +219,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.job == 'expander' && format('h3-expander-proof-{0}', inputs.tier) || format('qwen38-describer-proof-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-proof-{0}', inputs.tier) || format('h3-expander-proof-{0}', inputs.tier)) || format('qwen38-describer-proof-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error
       # Only this run's own hub, by its exact run-scoped path.

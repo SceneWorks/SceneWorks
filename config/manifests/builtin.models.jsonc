@@ -15497,6 +15497,30 @@
           "footprint": { "diskSizeBytes": 3848830679 }
         }
       ],
+      // SW-7208 (SW-F374 E7): the expander can also run the abliterated Qwen3.8-27B describer
+      // (`vision_describe_qwen3_8_27b`) with these same prompt files and reply contract. That choice
+      // needs MiniMax's prompt files but not this entry's weights, so the five files are also a
+      // conditional component of their own: `POST .../conditional-components/describer_prompt_expansion/download`
+      // fetches only them, behind this entry's licence acknowledgment. They are the `prompt`
+      // co-requisite's files at its revision, so an installed expander tier already satisfies it.
+      "conditionalComponents": [
+        {
+          "componentId": "prompt",
+          "requiredFor": ["describer_prompt_expansion"],
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "files": [
+            "prompt/manifest.json",
+            "prompt/t2i/system_prompt.txt",
+            "prompt/t2i/task_prompt.txt",
+            "prompt/t2i/request_params.json",
+            "prompt/edit/task_prompt.txt"
+          ],
+          "estimatedSizeBytes": 56282,
+          "license": "MiniMax-H3-Image Community License"
+        }
+      ],
       "paths": {
         "model": "${HF_CACHE}/MiniMaxAI/MiniMax-H3-Image-PE"
       },

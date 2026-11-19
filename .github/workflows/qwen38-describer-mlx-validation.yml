@@ -12,7 +12,8 @@ name: Qwen3.8 27B describer MLX validation
 # SceneWorks/minimax-h3-image-pe), with the upstream prompt/ files of MiniMaxAI/MiniMax-H3-Image-PE,
 # both fetched at their catalog revisions; only the selected tier is fetched. q4 and q8 only.
 # `fresh_hub: true` (expander only) fetches them into a new run-scoped hub, removed afterwards, so
-# the evidence records tier_isolated=true.
+# the evidence records tier_isolated=true. `expander_model: abliterated` (SW-7208) runs the expansion
+# with the abliterated describer's own MLX tier folder and the same MiniMax prompt files instead.
 #
 # GitHub dispatches only workflows that exist on the default branch, so until this file is on main
 # dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
@@ -34,6 +35,11 @@ on:
         required: false
         type: boolean
         default: false
+      expander_model:
+        description: expander only - minimax or abliterated
+        required: false
+        type: string
+        default: minimax
       tier:
         description: MLX tier to describe with (q4, q8 or bf16)
         required: true
@@ -61,6 +67,12 @@ on:
         required: false
         type: boolean
         default: false
+      expander_model:
+        description: expander only - minimax (MiniMax-H3-Image-PE) or abliterated (the describer's Qwen3.8-27B with MiniMax's prompt files)
+        required: false
+        type: choice
+        options: [minimax, abliterated]
+        default: minimax
       tier:
         description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -96,6 +108,7 @@ jobs:
     env:
       QWEN38_JOB: ${{ inputs.job }}
       QWEN38_FRESH_HUB: ${{ inputs.fresh_hub }}
+      QWEN38_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
       QWEN38_TIER: ${{ inputs.tier }}
       QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
       QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
@@ -130,7 +143,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.job == 'expander' && format('h3-expander-mlx-{0}', inputs.tier) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-mlx-{0}', inputs.tier) || format('h3-expander-mlx-{0}', inputs.tier)) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.txt
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.log

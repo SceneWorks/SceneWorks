@@ -13,6 +13,7 @@ import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../../minimaxH3ImageExpand.js";
+import { H3ExpanderModelPicker } from "../../components/H3ExpanderModelPicker.jsx";
 
 export function ImagePromptComposer({
   mode,
@@ -115,6 +116,7 @@ export function ImagePromptComposer({
   h3ExpandAvailable,
   h3ExpandModel,
   h3ExpandPrompt,
+  h3ExpandPicker,
   resolution,
   selectedModel,
   flux3LayoutAvailable,
@@ -617,6 +619,7 @@ export function ImagePromptComposer({
                 ) : null}
                 {h3ExpandActive ? (
                   <div className="prompt-tool-panel">
+                    {h3ExpandPicker ? <H3ExpanderModelPicker {...h3ExpandPicker} /> : null}
                     <QwenRewritePromptControl
                       copy={H3_IMAGE_EXPAND_COPY}
                       modelId={model}
