@@ -92,6 +92,13 @@ export function BatchExpandPromptsControl({
   }
 
   async function handleExpand() {
+    // Admission is re-read here, not only on the first click: the batch list and variables stay
+    // editable while the confirmation is open, and the product must never be materialised past
+    // the maximum (or with an unfilled key / mismatched group).
+    if (blocked || !total) {
+      setStatus("idle");
+      return;
+    }
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -191,8 +198,8 @@ export function BatchExpandPromptsControl({
 
       {status === "confirm" ? (
         <div className="batch-confirm" role="alertdialog">
-          <span>{copy.batch.confirm(total)}</span>
-          <button className="secondary-action" onClick={handleExpand} type="button">
+          <span>{blocked || copy.batch.confirm(total)}</span>
+          <button className="secondary-action" disabled={Boolean(blocked) || !total} onClick={handleExpand} type="button">
             {copy.batch.button(total)}
           </button>
           <button className="secondary-action" onClick={() => setStatus("idle")} type="button">

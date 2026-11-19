@@ -123,6 +123,24 @@ describe("BatchExpandPromptsControl", () => {
     expect(button("Expand").disabled).toBe(true);
   });
 
+  it("re-checks the limits when a confirmed run starts after the variables changed", async () => {
+    const expandPrompt = vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` }));
+    const values = (count) => Array.from({ length: count }, (_, index) => `v${index}`);
+    const view = (variableValues) => <Harness key="grow" initial="{{a}} {{b}}" expandPrompt={expandPrompt} variableValues={variableValues} onText={() => {}} />;
+    await act(async () => root.render(view({ a: values(101), b: values(1) })));
+    await act(async () => click(button("Expand all 101 prompts")));
+    expect(container.textContent).toContain("That runs the expander 101 times");
+
+    // Edited past the maximum while the confirmation is open.
+    await act(async () => root.render(view({ a: values(101), b: values(50) })));
+    const confirm = container.querySelector(".batch-confirm button");
+    expect(confirm.disabled).toBe(true);
+    expect(container.querySelector(".batch-confirm").textContent).toContain("more than the 2,000");
+    await act(async () => click(confirm));
+    await settle();
+    expect(expandPrompt).not.toHaveBeenCalled();
+  });
+
   it("keeps finished expansions when stopped", async () => {
     let text = "";
     let release;
