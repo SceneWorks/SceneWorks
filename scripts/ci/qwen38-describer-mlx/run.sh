@@ -6,9 +6,9 @@
 # derived from (floor = ceil(peak GiB / 0.9), the catalog's MLX fit rule).
 #
 # Safety, in order, before any GPU work:
-#   * the runner must be the one QWEN38_MAC_RUNNER selects: nax-macos-2, or nax-macos (Michael's dev
-#     Mac) only as the loan he approved on 2026-11-18 while nax-macos-2's model disk is full; on
-#     nax-macos the hub and the build target live on /Volumes/Models, never the internal disk;
+#   * the runner must be the one QWEN38_MAC_RUNNER selects: nax-macos-2 (the default), or nax-macos
+#     (Michael's dev Mac) only on a loan he approved for that run; on nax-macos the hub and the build
+#     target live on /Volumes/Models, never the internal disk;
 #   * >= 128 GiB unified memory, and `memory_pressure` free GiB >= the cap + 10 GiB right before the run;
 #   * the test binary runs under the external phys_footprint guard (iris-mlx-real-weights/tree_guard.py)
 #     that SIGTERMs it at the cap or the wall limit (MLX is never SIGKILLed mid-buffer from here), and
