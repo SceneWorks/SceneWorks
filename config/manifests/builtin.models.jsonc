@@ -16096,6 +16096,55 @@
       "downloads": [
         {
           "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-loop-9b-mlx",
+          "revision": "bd3d7dfbf55eb82e9d8443a6e689c5adb161672a",
+          "variant": "q4",
+          "default": true,
+          "files": [
+            "q4/chat_template.jinja",
+            "q4/config.json",
+            "q4/generation_config.json",
+            "q4/model.safetensors",
+            "q4/preprocessor_config.json",
+            "q4/processor_config.json",
+            "q4/tokenizer.json",
+            "q4/tokenizer_config.json",
+            "q4/video_preprocessor_config.json"
+          ],
+          "platforms": [
+            "macos"
+          ],
+          "estimatedSizeBytes": 8916086883,
+          "footprint": {
+            "diskSizeBytes": 8916086883
+          }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-loop-9b-mlx",
+          "revision": "bd3d7dfbf55eb82e9d8443a6e689c5adb161672a",
+          "variant": "q8",
+          "files": [
+            "q8/chat_template.jinja",
+            "q8/config.json",
+            "q8/generation_config.json",
+            "q8/model.safetensors",
+            "q8/preprocessor_config.json",
+            "q8/processor_config.json",
+            "q8/tokenizer.json",
+            "q8/tokenizer_config.json",
+            "q8/video_preprocessor_config.json"
+          ],
+          "platforms": [
+            "macos"
+          ],
+          "estimatedSizeBytes": 12372195427,
+          "footprint": {
+            "diskSizeBytes": 12372195427
+          }
+        },
+        {
+          "provider": "huggingface",
           "repo": "SceneWorks/sensenova-loop-9b-candle",
           "revision": "6404d86b5d728a4c09a85f33b7f6cecdd1a97226",
           "variant": "q4",
@@ -16223,6 +16272,15 @@
               "url": "https://huggingface.co/sensenova/SenseNova-Loop-9B"
             }
           ]
+        }
+      },
+      // MLX observed 12.97 GiB q4 and 21.78 GiB BF16 at 1536×1024.
+      // Estimate q8 at 16.04 GiB from stored weights. Include the native load guard plus 2 GiB headroom.
+      "mlx": {
+        "minMemoryGbByTier": {
+          "q4": 20,
+          "q8": 26,
+          "bf16": 38
         }
       },
       // Windows CUDA observed 7.94 GiB q4 and 18.31 GiB BF16 peak pool reservation at 1536×1024.
