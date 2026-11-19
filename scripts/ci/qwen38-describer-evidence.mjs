@@ -15,6 +15,11 @@
 // Qwen3.8-27B describer instead of MiniMax-H3-Image-PE: the describer's own pinned Candle tier
 // folder, the same upstream prompt files and output contract, and a result that names the
 // describer as the model that ran.
+//
+// `SCENEWORKS_QWEN38_BLOCK_DRAFT` (SW-7204) re-checks the smoke's block-draft record: `record` (the
+// default) only carries it into the evidence; `on` requires the block draft to have run with tree
+// checking, a named draft and precision, more than one accepted token per target pass and no
+// fallback; `no_fit` requires the job to have run without the draft and to name why.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -197,6 +202,31 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
   };
 }
 
+// What a run checks about the block drafter (SW-7204), and the record the smoke wrote.
+export const BLOCK_DRAFT_CHECKS = Object.freeze(['record', 'on', 'no_fit']);
+
+export function validateBlockDraft(blockDraft, check = 'record') {
+  assert(BLOCK_DRAFT_CHECKS.includes(check), `block-draft check must be one of ${BLOCK_DRAFT_CHECKS.join(', ')}`);
+  if (check === 'record') return blockDraft ?? null;
+  assert.equal(blockDraft?.check, check, `the smoke ran the ${blockDraft?.check ?? 'no'} block-draft check, not ${check}`);
+  const decode = blockDraft.decode;
+  if (check === 'on') {
+    assert.equal(decode?.proposer, 'block_draft', 'the block draft did not run');
+    assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
+      'the record names no pinned draft');
+    assert(['q8', 'q4'].includes(decode.draft?.precision), 'the record names no draft precision');
+    assert.equal(decode.verify, 'tree', 'the target did not check a tree');
+    assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
+      'accepted tokens per target pass is not above 1.0');
+    assert.equal(decode.draftFallback, null, 'the draft fell back');
+  } else {
+    assert.notEqual(decode?.proposer, 'block_draft', 'the draft ran although it could not fit');
+    assert(typeof decode?.draftFallback === 'string' && decode.draftFallback.includes('beside the target'),
+      'the record does not say the draft did not fit');
+  }
+  return blockDraft;
+}
+
 // The guard policy each GPU admission must have run under. The wrapper has one admission rule for
 // every actor (free memory and a stable window, never an idle card), so a run is always `shared`.
 export const ADMISSION_POLICIES = Object.freeze({ shared: 'shared-free-memory' });
@@ -227,6 +257,14 @@ export function summary(evidence) {
     + 'memory and a stable window, no idle check; the card may be shared with the desktop). The peak below was '
     + 'measured on a shared card: card-wide, above the smoke\'s own baseline.', '');
   const result = evidence.result;
+  const decode = result?.block_draft?.decode;
+  if (decode) {
+    lines.push(`Block draft (${evidence.block_draft_check ?? 'record'}): proposer \`${decode.proposer}\`, `
+      + `draft ${decode.draft ? `\`${decode.draft.repo}@${decode.draft.revision}\` ${decode.draft.format} ${decode.draft.precision}` : 'none'}, `
+      + `${decode.targetPasses} target passes, ${decode.rowsCheckedPerPass ?? 'n/a'} rows checked and `
+      + `${decode.acceptedTokensPerPass ?? 'n/a'} tokens accepted per pass`
+      + `${decode.draftFallback ? `; draft fallback: ${decode.draftFallback}` : ''}`, '');
+  }
   if (result && expander) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
     lines.push(`Model: \`${result.catalog_id ?? EXPANDER_CATALOG_ID}\``, '',
@@ -259,7 +297,7 @@ export function summary(evidence) {
 // policy. The peak is measured above the smoke's own baseline, on a card other programs may also
 // use, so it is labelled as such.
 export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'shared',
-  job = 'describer', expanderModel = 'minimax') {
+  job = 'describer', expanderModel = 'minimax', blockDraft = 'record') {
   assert(Object.hasOwn(ADMISSION_POLICIES, admission), `unsupported GPU admission ${admission}`);
   assert(JOBS.includes(job), `unsupported job ${job}`);
   const evidence = job === 'expander'
@@ -271,10 +309,13 @@ export async function stage(outputDir, receiptFile, tier, imageSide = 'default',
   await fs.mkdir(artifact, { recursive: true });
   let failure = null;
   try {
+    const raw = await readBoundedJson(path.join(outputDir,
+      job === 'expander' ? 'expander-result.json' : 'describer-result.json'));
     evidence.result = job === 'expander'
-      ? validateExpanderResult(await readBoundedJson(path.join(outputDir, 'expander-result.json')), tier,
-        expanderModelSnapshots(expanderModel), expanderModel)
-      : validateResult(await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
+      ? validateExpanderResult(raw, tier, expanderModelSnapshots(expanderModel), expanderModel)
+      : validateResult(raw, tier, imageSide);
+    evidence.block_draft_check = blockDraft;
+    evidence.result.block_draft = validateBlockDraft(raw.block_draft, blockDraft);
     evidence.result.gpu_memory = { ...evidence.result.gpu_memory, measured_on: 'shared-card' };
   } catch (error) {
     failure = error;
@@ -307,7 +348,8 @@ export async function main(env = process.env) {
   const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
   const job = env.SCENEWORKS_QWEN38_VALIDATION_JOB?.trim() || 'describer';
   const expanderModel = env.SCENEWORKS_H3_EXPANDER_MODEL?.trim() || 'minimax';
-  const evidence = await stage(outputDir, receiptFile, tier, imageSide, 'shared', job, expanderModel);
+  const blockDraft = env.SCENEWORKS_QWEN38_BLOCK_DRAFT?.trim() || 'record';
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide, 'shared', job, expanderModel, blockDraft);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
   const name = job === 'expander' ? 'MiniMax-H3-Image prompt expander' : 'Qwen3.8 27B describer';
   console.log(`${name} validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);

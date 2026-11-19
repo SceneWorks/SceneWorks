@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderModelSnapshots, expanderPinnedSnapshots,
+import { BLOCK_DRAFT_CHECKS, validateBlockDraft, EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderModelSnapshots, expanderPinnedSnapshots,
   main, pinnedSnapshots, stage, summary, validateExpanderResult, validateReceipt, validateResult } from './qwen38-describer-evidence.mjs';
 
 const PINNED = pinnedSnapshots();
@@ -402,3 +402,43 @@ test('main validates the abliterated expander when the workflow selects it', () 
   assert.equal(evidence.result.catalog_id, 'vision_describe_qwen3_8_27b');
   assert.match(summary(evidence), /Model: `vision_describe_qwen3_8_27b`/);
 }));
+
+// SW-7204: the block-draft record the smoke wrote, re-checked per the run's `block_draft` input.
+function blockDraft(check, overrides = {}) {
+  return {
+    check,
+    decode: {
+      proposer: 'block_draft', verify: 'tree', targetPasses: 40, rowsCheckedPerPass: 9.5,
+      acceptedTokensPerPass: 2.4, draftFallback: null,
+      draft: { repo: 'SceneWorks/qwen3.8-27b-dflash2', revision: '9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9',
+        format: 'dflash2', precision: 'q4' },
+      ...overrides,
+    },
+  };
+}
+
+test('the block-draft checks are record, on and no_fit, and record asserts nothing', () => {
+  assert.deepEqual(BLOCK_DRAFT_CHECKS, ['record', 'on', 'no_fit']);
+  assert.equal(validateBlockDraft(undefined), null);
+  assert.throws(() => validateBlockDraft(blockDraft('on'), 'sometimes'), /must be one of/);
+});
+
+test('an on run needs the draft, its precision, a tree and more than one token per pass', () => {
+  assert.deepEqual(validateBlockDraft(blockDraft('on'), 'on'), blockDraft('on'));
+  assert.throws(() => validateBlockDraft(blockDraft('record'), 'on'), /ran the record block-draft check/);
+  assert.throws(() => validateBlockDraft(blockDraft('on', { proposer: 'mtp' }), 'on'), /did not run/);
+  assert.throws(() => validateBlockDraft(blockDraft('on', { verify: 'linear' }), 'on'), /tree/);
+  assert.throws(() => validateBlockDraft(blockDraft('on', { acceptedTokensPerPass: 1 }), 'on'), /above 1.0/);
+  assert.throws(() => validateBlockDraft(blockDraft('on', { draftFallback: 'x' }), 'on'), /fell back/);
+});
+
+test('a no_fit run must decode without the draft and name why', () => {
+  const fellBack = blockDraft('no_fit', {
+    proposer: 'mtp', draft: null,
+    draftFallback: "draft model: its load needs an estimated 2 bytes beside the target's 9, but only 10 bytes are available",
+  });
+  assert.deepEqual(validateBlockDraft(fellBack, 'no_fit'), fellBack);
+  assert.throws(() => validateBlockDraft(blockDraft('no_fit'), 'no_fit'), /could not fit/);
+  assert.throws(() => validateBlockDraft(blockDraft('no_fit', { proposer: 'mtp', draft: null }), 'no_fit'),
+    /did not fit/);
+});

@@ -400,10 +400,11 @@ async fn qwen38_memory_admission(
     payload: &JsonObject,
     tier: &str,
     weights_dir: &Path,
+    block_draft: Option<&crate::qwen38_block_draft::BlockDraftChoice>,
 ) -> WorkerResult<()> {
     #[cfg(target_os = "macos")]
     {
-        let _ = (settings, weights_dir);
+        let _ = (settings, weights_dir, block_draft);
         qwen38_fit_refusal(
             tier,
             qwen38_tier_floor_gb(payload, "mlx", tier),
@@ -412,7 +413,7 @@ async fn qwen38_memory_admission(
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        let (spec, requirements) = vision_describer_load(weights_dir);
+        let (spec, requirements) = vision_describer_load(weights_dir, block_draft);
         let (access, cached_refiner) =
             crate::refine_model_cache::refiner_admission_access(&spec, &requirements).await?;
         let needed_gb = qwen38_catalog_entry(payload)
@@ -1035,6 +1036,12 @@ pub(crate) trait BatchDescriber: Send + Sync {
     fn condense(&self, _system: String, _user: String, _cancel: CancelFlag) -> CondenseFuture {
         Box::pin(async { Ok(Err("This describer does not condense.".to_owned())) })
     }
+
+    /// The job record's `decode` block: what the job's generations decoded with (SW-7204). `None`
+    /// for a describer that records none.
+    fn decode_record(&self) -> Option<Value> {
+        None
+    }
 }
 
 /// The Vision Captioner (Qwen3-VL) describer: a JSON-constrained decode on the resident refine-model
@@ -1046,6 +1053,34 @@ pub(crate) struct VisionCaptionerDescriber {
     pub(crate) model: DescribeModel,
     pub(crate) weights_dir: PathBuf,
     pub(crate) job_id: String,
+    /// The installed block draft the Qwen3.8 27B load names (SW-7204); `None` for the Vision
+    /// Captioner and when no draft is installed.
+    pub(crate) block_draft: Option<crate::qwen38_block_draft::BlockDraftChoice>,
+    /// What this job's generations decoded with, for the job record's `decode` block.
+    pub(crate) decode: crate::qwen38_block_draft::SharedDecodeTally,
+}
+
+#[cfg(native_lane)]
+impl VisionCaptionerDescriber {
+    /// A describer of `model` loading `weights_dir` with no block draft.
+    pub(crate) fn new(model: DescribeModel, weights_dir: PathBuf, job_id: String) -> Self {
+        Self {
+            model,
+            weights_dir,
+            job_id,
+            block_draft: None,
+            decode: Default::default(),
+        }
+    }
+
+    /// The same describer naming `draft` in its load.
+    pub(crate) fn with_block_draft(
+        mut self,
+        draft: Option<crate::qwen38_block_draft::BlockDraftChoice>,
+    ) -> Self {
+        self.block_draft = draft;
+        self
+    }
 }
 
 /// One `describe_generation_stats` event per generation: what the decode cost and which path it
@@ -1082,22 +1117,45 @@ fn emit_generation_stats(job_id: &str, phase: &str, output: &gen_core::core_llm:
     );
 }
 
-/// The refine-cache load a Vision Captioner-class describer makes for `weights_dir`: its spec and
-/// requirements, which together are the cache key. Shared with the 27B's memory check so that
-/// check asks the cache about exactly the model the describe call loads.
+/// Add one generation on `model` to the job's decode tally (SW-7204).
+#[cfg(native_lane)]
+fn note_decode(
+    tally: &crate::qwen38_block_draft::SharedDecodeTally,
+    model: &dyn gen_core::core_llm::TextLlm,
+    output: &gen_core::core_llm::TextLlmOutput,
+    block_draft: Option<&crate::qwen38_block_draft::BlockDraftChoice>,
+) {
+    tally
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note(
+            output.decode.as_ref(),
+            model.load_report().as_ref(),
+            block_draft,
+        );
+}
+
+/// The refine-cache load a Vision Captioner-class describer makes for `weights_dir` (naming the
+/// Qwen3.8 27B's installed block draft, SW-7204): its spec and requirements, which together are
+/// the cache key. Shared with the 27B's memory check so that check asks the cache about exactly
+/// the model the describe call loads.
 #[cfg(native_lane)]
 pub(crate) fn vision_describer_load(
     weights_dir: &Path,
+    block_draft: Option<&crate::qwen38_block_draft::BlockDraftChoice>,
 ) -> (
     gen_core::core_llm::LoadSpec,
     gen_core::core_llm::ModelRequirements,
 ) {
     use gen_core::core_llm::{Constraint, ModelRequirements};
-    let spec = gen_core::core_llm::LoadSpec {
-        source: weights_dir.to_string_lossy().into_owned(),
-        // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
-        ..Default::default()
-    };
+    let spec = crate::qwen38_block_draft::with_block_draft(
+        gen_core::core_llm::LoadSpec {
+            source: weights_dir.to_string_lossy().into_owned(),
+            // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
+            ..Default::default()
+        },
+        block_draft,
+    );
     // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
     // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
     // flip to vision at load (see `prompt_refine_jobs`).
@@ -1118,7 +1176,7 @@ impl VisionCaptionerDescriber {
         gen_core::core_llm::LoadSpec,
         gen_core::core_llm::ModelRequirements,
     ) {
-        vision_describer_load(&self.weights_dir)
+        vision_describer_load(&self.weights_dir, self.block_draft.as_ref())
     }
 }
 
@@ -1139,7 +1197,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
-        let speculative = self.model.speculative();
+        let product_speculative = self.model.speculative();
+        let block_draft = self.block_draft.clone();
+        let tally = self.decode.clone();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
@@ -1160,6 +1220,12 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     model.descriptor().capabilities.supports_thinking,
                     thinking,
                 );
+                // SW-7204: the block draft with tree checking when the load kept it.
+                let (speculative, speculative_verify) =
+                    crate::qwen38_block_draft::block_draft_speculation(
+                        &model.descriptor().capabilities,
+                        product_speculative,
+                    );
                 let request = TextLlmRequest {
                     progress: Some(crate::load_progress::text_observer()),
                     messages: vec![
@@ -1181,6 +1247,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     cancel,
                     thinking,
                     speculative,
+                    speculative_verify,
                     kv_compression,
                     ..Default::default()
                 };
@@ -1201,6 +1268,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 if let Ok(output) = &generation {
                     emit_generation_stats(&job_id, "describe", output);
+                    note_decode(&tally, model, output, block_draft.as_ref());
                 }
                 Ok(generation
                     .map(|output| output.text)
@@ -1213,6 +1281,17 @@ impl BatchDescriber for VisionCaptionerDescriber {
         true
     }
 
+    /// The Qwen3.8 27B's decode record (SW-7204): proposer, block draft and per-pass counts over
+    /// the job's generations. The Vision Captioner records none.
+    fn decode_record(&self) -> Option<Value> {
+        (self.model == DescribeModel::Qwen38).then(|| {
+            self.decode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record()
+        })
+    }
+
     /// The text-only rewrite on the model the describe call left resident (same cache key, so no
     /// second load and no new memory admission): plain text, thinking disabled.
     fn condense(&self, system: String, user: String, cancel: CancelFlag) -> CondenseFuture {
@@ -1223,12 +1302,19 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
-        let speculative = self.model.speculative();
+        let product_speculative = self.model.speculative();
+        let block_draft = self.block_draft.clone();
+        let tally = self.decode.clone();
         Box::pin(crate::refine_model_cache::with_cached_refiner(
             spec,
             requirements,
             format!("{name} load failed"),
             move |model| -> WorkerResult<Result<CondenseReply, String>> {
+                let (speculative, speculative_verify) =
+                    crate::qwen38_block_draft::block_draft_speculation(
+                        &model.descriptor().capabilities,
+                        product_speculative,
+                    );
                 let request = TextLlmRequest {
                     progress: Some(crate::load_progress::text_observer()),
                     messages: vec![Message::system(system), Message::user(user)],
@@ -1242,6 +1328,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     cancel,
                     thinking: ThinkingMode::Disabled,
                     speculative,
+                    speculative_verify,
                     kv_compression,
                     ..Default::default()
                 };
@@ -1261,6 +1348,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 .emit(&job_id);
                 if let Ok(output) = &generation {
                     emit_generation_stats(&job_id, "condense", output);
+                    note_decode(&tally, model, output, block_draft.as_ref());
                 }
                 Ok(generation
                     .map(|output| CondenseReply {
@@ -1837,6 +1925,15 @@ fn batch_describe_result(
     result
 }
 
+/// `result` with the describer's `decode` block (SW-7204), when it records one.
+#[cfg(native_lane)]
+fn with_decode_record(mut result: JsonObject, describer: &dyn BatchDescriber) -> JsonObject {
+    if let Some(decode) = describer.decode_record() {
+        result.insert("decode".to_owned(), decode);
+    }
+    result
+}
+
 /// Progress before image `index` (0-based) of `total` starts: 0.08 at the first image, 0.96 once
 /// every image is done.
 #[cfg(native_lane)]
@@ -1864,27 +1961,40 @@ pub(crate) async fn run_dataset_batch_describe_job(
         return run_batch_describe(api, settings, job, request, &NoDescriber).await;
     }
     let describer: Box<dyn BatchDescriber> = match request.model {
-        DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber {
-            model: DescribeModel::VisionCaptioner,
-            weights_dir: resolve_app_managed_model_dir(
+        DescribeModel::VisionCaptioner => Box::new(VisionCaptionerDescriber::new(
+            DescribeModel::VisionCaptioner,
+            resolve_app_managed_model_dir(
                 settings,
                 VISION_CAPTIONER_REPO,
                 "Vision Captioner model path",
             )?,
-            job_id: job.id.clone(),
-        }),
+            job.id.clone(),
+        )),
         DescribeModel::Qwen38 => {
             // Both refusals come before any image: the tier must be installed and fit here.
             let tier = request.tier.unwrap_or(
                 sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
             );
             let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
-            qwen38_memory_admission(settings, &job.payload, tier, &weights_dir).await?;
-            Box::new(VisionCaptionerDescriber {
-                model: DescribeModel::Qwen38,
-                weights_dir,
-                job_id: job.id.clone(),
-            })
+            // SW-7204: the installed block draft rides the load; the engine prices it beside the
+            // target and drops it (never the tier) when it does not fit.
+            let block_draft = crate::qwen38_block_draft::installed_block_draft(
+                &settings.data_dir,
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID,
+                Some(tier),
+            );
+            qwen38_memory_admission(
+                settings,
+                &job.payload,
+                tier,
+                &weights_dir,
+                block_draft.as_ref(),
+            )
+            .await?;
+            Box::new(
+                VisionCaptionerDescriber::new(DescribeModel::Qwen38, weights_dir, job.id.clone())
+                    .with_block_draft(block_draft),
+            )
         }
         DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
             resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
@@ -2060,14 +2170,20 @@ async fn run_batch_describe(
                 ProgressStage::Running,
                 image_progress(done, total),
                 &format!("{finished} {done} of {total} images."),
-                Some(batch_describe_result(&request, &described, false)),
+                Some(with_decode_record(
+                    batch_describe_result(&request, &described, false),
+                    describer,
+                )),
                 backend,
             ),
         )
         .await?;
     }
 
-    let result = batch_describe_result(&request, &described, canceled);
+    let result = with_decode_record(
+        batch_describe_result(&request, &described, canceled),
+        describer,
+    );
     if canceled {
         update_job(
             api,

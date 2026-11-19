@@ -39,8 +39,13 @@
 //! (`fresh_hub: true` on the workflow), which holds only the selected tier and the prompt files,
 //! `tier_isolated=true` shows the job needed nothing else.
 //!
-//! The block-draft co-requisites (DSpine, DFlash2) are not provisioned: SW-7204 adds them here when
-//! the refine path uses them.
+//! SW-7204: the job names the installed block draft (DFlash2 / DSpine, provisioned with the tier)
+//! and its result's `executionIdentity.decode` records the proposer, draft, precision, target
+//! passes, rows checked and accepted tokens per pass. `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires
+//! the draft to run (block draft, the tier's draft precision, tree checking, more than one
+//! accepted token per pass, no fallback); `no_fit` caps the engine's load budget so the draft
+//! cannot fit beside the target and requires the job to complete without it, its record saying
+//! why. The default `record` records it and asserts nothing about it.
 //!
 //! Fail-loud: the tier, the prompt files and the cache must all be present. Nothing is downloaded
 //! (`qwen38-describer-provision.yml` with `tiers: expander-q4|expander-q8`, or the validation
@@ -263,6 +268,8 @@ struct Run {
     other_tiers_present: Vec<String>,
     result: Value,
     wall_seconds: f64,
+    /// The block-draft check this run made (SW-7204).
+    draft_check: crate::qwen38_block_draft::SmokeDraftCheck,
 }
 
 /// Run one expand job with `expander` on `tier` through the production entry point and check its
@@ -343,6 +350,15 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
         "modelManifestEntry": entry,
     });
     let job: JobSnapshot = serde_json::from_value(snapshot_job).expect("smoke job deserializes");
+    // SW-7204: the block draft the job will name, and (`no_fit`) the load-budget cap held for it.
+    let draft_check = crate::qwen38_block_draft::SmokeDraftCheck::from_env();
+    let draft = draft_check.installed_draft(&settings.data_dir, expander.catalog_id, Some(tier));
+    let _no_fit_cap = match (draft_check, &draft) {
+        (crate::qwen38_block_draft::SmokeDraftCheck::NoFit, Some(draft)) => {
+            Some(crate::qwen38_block_draft::force_draft_no_fit(&dirs.weights, draft).await)
+        }
+        _ => None,
+    };
     let api = ApiClient::new(&settings);
     let started = std::time::Instant::now();
     let outcome = crate::prompt_refine_jobs::run_prompt_refine_job(&api, &settings, &job).await;
@@ -424,6 +440,11 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
         loaded, dirs.weights,
         "the job loaded the folder it resolved"
     );
+    let decode = &result["executionIdentity"]["decode"];
+    eprintln!("DECODE block_draft_check={} {decode}", draft_check.label());
+    draft_check
+        .check(decode, draft.as_ref())
+        .unwrap_or_else(|error| panic!("block-draft check {}: {error}", draft_check.label()));
 
     Run {
         expander,
@@ -434,6 +455,7 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
         other_tiers_present,
         result,
         wall_seconds,
+        draft_check,
     }
 }
 
@@ -467,6 +489,10 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
             "workflow": run.result["rewriteSuggestion"]["workflow"],
             "suggestion_tier": run.result["rewriteSuggestion"]["tier"],
             "generation": run.result["generation"],
+            "block_draft": {
+                "check": run.draft_check.label(),
+                "decode": run.result["executionIdentity"]["decode"],
+            },
             "wall_seconds": run.wall_seconds,
             "wall_time_scope": "one prompt_refine job on a cold process: model load plus one expansion",
             "memory": memory,

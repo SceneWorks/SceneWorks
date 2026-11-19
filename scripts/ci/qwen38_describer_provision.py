@@ -11,7 +11,10 @@ five upstream `prompt/` files the catalog's `prompt` co-requisite names, each at
 revision. Only the selected tier is fetched, so a cache provisioned this way holds no other
 expander tier. `expander-abliterated-q4` / `expander-abliterated-q8` (SW-7208) is the expander run by
 the abliterated describer instead: ONE describer tier (the files its catalog row names in `q4-full/`
-or `q8-full/`) plus the same five prompt files, and no MiniMax-H3-Image-PE weights. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
+or `q8-full/`) plus the same five prompt files, and no MiniMax-H3-Image-PE weights. Every mode
+also provisions the two Qwen3.8-27B block drafts (SW-7204; DFlash2 and DSpine, the soft
+co-requisites both catalog entries install with every tier), each at its pinned revision; `drafts`
+provisions only them. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
 downloading when the cache volume has less than MIN_FREE_BYTES free; checks every file's size after
@@ -95,8 +98,18 @@ PROMPT_FILES = (
 )
 PROMPT_BYTES = 56_282
 PROMPT_MIN_FREE_BYTES = 1 * 10**9
+# The Qwen3.8-27B block drafts (SW-7204): the catalog's soft co-requisite rows of both the describer
+# and the prompt expander (config/manifests/builtin.models.jsonc), each repo's pinned revision, the
+# three files its row names and their exact total (`footprint.diskSizeBytes`).
+DRAFT_FILES = ("config.json", "model.safetensors", "LICENSE")
+DRAFTS = (
+    ("SceneWorks/qwen3.8-27b-dflash2", "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9", 3_848_830_679),
+    ("SceneWorks/qwen3.8-27b-dspine-b16", "8e450d7faf38238b64580163a7d3dd7e44af759d", 4_051_845_726),
+)
+# Both drafts are ~7.9 GB; keep headroom for the volume's other tenants.
+DRAFT_MIN_FREE_BYTES = 20 * 10**9
 MODES = ("quantised", "bf16", "expander-q4", "expander-q8", "expander-abliterated-q4",
-         "expander-abliterated-q8")
+         "expander-abliterated-q8", "drafts")
 
 
 def tier_patterns(folder, tier_files=TIER_FILES):
@@ -213,6 +226,28 @@ def plan(mode):
     raise RuntimeError(f"unknown provisioning mode {mode!r}; use one of {', '.join(MODES)}")
 
 
+def draft_expected_files(entries, repo, total, names=DRAFT_FILES):
+    """The draft files its catalog row names, as {path: size}, totalling the catalog's."""
+    sized = {name: size for name, size in entries}
+    missing = [name for name in names if not isinstance(sized.get(name), int) or sized[name] <= 0]
+    if missing:
+        raise RuntimeError(f"{repo} lists no sized {', '.join(missing)}")
+    expected = {name: sized[name] for name in names}
+    if sum(expected.values()) != total:
+        raise RuntimeError(f"{repo} files total {sum(expected.values())} bytes, the catalog says {total}")
+    return expected
+
+
+def draft_plans():
+    """The two block drafts every mode provisions, each in `plan`'s shape."""
+    return [
+        (repo, revision, f"block draft {repo.split('/')[-1]}",
+         lambda entries, repo=repo, total=total: draft_expected_files(entries, repo, total),
+         list(DRAFT_FILES), DRAFT_MIN_FREE_BYTES)
+        for repo, revision, total in DRAFTS
+    ]
+
+
 def prompt_plan():
     """The upstream prompt files every expander mode provisions, in `plan`'s shape."""
     return (PROMPT_REPO, PROMPT_REVISION, "expander prompt files (prompt/)", prompt_expected_files,
@@ -220,9 +255,17 @@ def prompt_plan():
 
 
 def plans(mode):
-    """Every snapshot `mode` provisions, each in `plan`'s shape: a describer mode is one snapshot;
-    an expander tier is its Candle folder, then the upstream prompt files; an abliterated expander
-    tier is ONE describer tier folder, then the same prompt files."""
+    """Every snapshot `mode` provisions, each in `plan`'s shape, then the two block drafts
+    (SW-7204): a describer mode is one snapshot; an expander tier is its Candle folder, then the
+    upstream prompt files; an abliterated expander tier is ONE describer tier folder, then the same
+    prompt files; `drafts` is the drafts alone."""
+    if mode == "drafts":
+        return draft_plans()
+    return weight_plans(mode) + draft_plans()
+
+
+def weight_plans(mode):
+    """The weights and prompt files `mode` provisions, without the drafts."""
     described = mode.removeprefix("expander-abliterated-")
     if mode.startswith("expander-abliterated-") and described in TIER_BYTES:
         folder = TIER_FOLDERS[described]

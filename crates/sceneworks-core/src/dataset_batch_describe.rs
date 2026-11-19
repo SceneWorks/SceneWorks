@@ -109,6 +109,66 @@ pub fn qwen38_tier_dir(repo: &str, tier: &str) -> Option<String> {
         .then(|| head.to_owned())
 }
 
+/// The Qwen3.8-27B block drafts (SW-F374 E1, E13), in the order the worker prefers them when more
+/// than one is installed: DFlash2 first (its tree checking led the measured runs, 96.0 against
+/// DSpine's 63.6 tok/s on the base 4-bit weights, requirements section 2), then DSpine. The
+/// describer's and the prompt expander's catalog entries ship both as soft co-requisites.
+pub const QWEN38_27B_BLOCK_DRAFT_REPOS: [&str; 2] = [
+    "SceneWorks/qwen3.8-27b-dflash2",
+    "SceneWorks/qwen3.8-27b-dspine-b16",
+];
+
+/// One block-draft co-requisite of a Qwen3.8-27B catalog entry: its repository, pinned revision and
+/// the files its row names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Qwen38BlockDraftRow {
+    pub repo: String,
+    pub revision: String,
+    pub files: Vec<String>,
+}
+
+/// The block-draft co-requisite rows of the shipped catalog entry `model_id` (the describer or the
+/// prompt expander), in [`QWEN38_27B_BLOCK_DRAFT_REPOS`] preference order. Empty when the entry
+/// ships none.
+pub fn qwen38_block_draft_rows(model_id: &str) -> Vec<Qwen38BlockDraftRow> {
+    let Some(entry) = crate::builtin_manifests::builtin_model_entry(model_id) else {
+        return Vec::new();
+    };
+    let rows = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    QWEN38_27B_BLOCK_DRAFT_REPOS
+        .iter()
+        .filter_map(|repo| {
+            let row = rows.iter().find(|row| {
+                row.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                    && row.get("repo").and_then(Value::as_str) == Some(*repo)
+            })?;
+            Some(Qwen38BlockDraftRow {
+                repo: (*repo).to_owned(),
+                revision: row.get("revision")?.as_str()?.to_owned(),
+                files: row
+                    .get("files")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|file| file.as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// The load precision of the block draft beside a Qwen3.8-27B `tier` (SW-F374 E3): the 4-bit tier
+/// runs a 4-bit draft, every other tier (and an unnamed one) the default 8-bit draft.
+pub fn qwen38_block_draft_precision(tier: Option<&str>) -> &'static str {
+    match tier {
+        Some("q4") => "q4",
+        _ => "q8",
+    }
+}
+
 /// Whether `model` (the request's `model` value) selects the Qwen3.8 27B describer.
 pub fn is_qwen38_27b_describer(model: Option<&str>) -> bool {
     model.map(str::trim) == Some(QWEN38_27B_DESCRIBER_REPO)
@@ -558,6 +618,30 @@ mod tests {
         // The Qwen3.8 27B is a Vision Captioner-class describer: it condenses on its own model.
         assert!(describer_condenses(Some(QWEN38_27B_DESCRIBER_REPO)));
         assert!(!describer_condenses(Some(JOYCAPTION_REPO)));
+    }
+
+    /// SW-7204: both Qwen3.8-27B entries ship the two block drafts at pinned revisions, DFlash2
+    /// first; the 4-bit tier runs a 4-bit draft and every other tier an 8-bit one.
+    #[test]
+    fn both_qwen38_entries_ship_the_block_drafts_in_preference_order() {
+        for model_id in [
+            QWEN38_27B_DESCRIBER_MODEL_ID,
+            crate::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID,
+        ] {
+            let rows = qwen38_block_draft_rows(model_id);
+            let repos: Vec<&str> = rows.iter().map(|row| row.repo.as_str()).collect();
+            assert_eq!(repos, QWEN38_27B_BLOCK_DRAFT_REPOS, "{model_id}");
+            for row in &rows {
+                assert_eq!(row.revision.len(), 40, "{model_id} pins {}", row.repo);
+                assert!(row.files.iter().any(|file| file == "config.json"));
+                assert!(row.files.iter().any(|file| file == "model.safetensors"));
+            }
+        }
+        assert!(qwen38_block_draft_rows("not_a_model").is_empty());
+        assert_eq!(qwen38_block_draft_precision(Some("q4")), "q4");
+        assert_eq!(qwen38_block_draft_precision(Some("q8")), "q8");
+        assert_eq!(qwen38_block_draft_precision(Some("bf16")), "q8");
+        assert_eq!(qwen38_block_draft_precision(None), "q8");
     }
 
     #[test]

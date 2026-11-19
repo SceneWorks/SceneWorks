@@ -22,6 +22,14 @@ name: Qwen3.8 27B describer MLX validation
 # `nax-macos` (label `rw-starvector`, Michael's dev Mac; hub and build target on /Volumes/Models) is
 # the default ONLY while nax-macos-2's model disk is full: Michael approved that loan for SW-7202 on
 # 2026-11-18. Switch the default back to `nax-macos-2` (`rw-llm`) once its new drive is fitted.
+#
+# `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter, which both
+# jobs name whenever a draft (DFlash2 / DSpine, provisioned with the tiers) is installed: `record`
+# (the default) records the decode block (proposer, draft, precision, target passes, rows checked
+# and accepted tokens per pass) and asserts nothing about it; `on` requires the draft to run with
+# tree checking at the tier's draft precision, more than one accepted token per target pass and no
+# fallback; `no_fit` caps the engine's load budget so the draft cannot fit beside the target and
+# requires the job to complete without it, its record naming why.
 on:
   workflow_call:
     inputs:
@@ -40,6 +48,11 @@ on:
         required: false
         type: string
         default: minimax
+      block_draft:
+        description: record, on or no_fit
+        required: false
+        type: string
+        default: record
       tier:
         description: MLX tier to describe with (q4, q8 or bf16)
         required: true
@@ -73,6 +86,12 @@ on:
         type: choice
         options: [minimax, abliterated]
         default: minimax
+      block_draft:
+        description: record (record the decode block only), on (require the block draft to run), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
+        required: false
+        type: choice
+        options: [record, on, no_fit]
+        default: record
       tier:
         description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -109,6 +128,7 @@ jobs:
       QWEN38_JOB: ${{ inputs.job }}
       QWEN38_FRESH_HUB: ${{ inputs.fresh_hub }}
       QWEN38_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
+      QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
       QWEN38_TIER: ${{ inputs.tier }}
       QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
       QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
@@ -143,7 +163,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-mlx-{0}', inputs.tier) || format('h3-expander-mlx-{0}', inputs.tier)) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-mlx-{0}', inputs.tier) || format('h3-expander-mlx-{0}', inputs.tier)) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-draft-${{ inputs.block_draft || 'record' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.txt
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.log

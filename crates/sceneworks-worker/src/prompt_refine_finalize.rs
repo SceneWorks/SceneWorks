@@ -199,6 +199,10 @@ pub(super) async fn finalize_refine_job(
             if let Some(tier) = reply.tier {
                 identity.insert("tier".to_owned(), Value::from(tier));
             }
+            // SW-7204: the proposer, block draft and per-pass counts the expansion decoded with.
+            if !reply.decode.is_null() {
+                identity.insert("decode".to_owned(), reply.decode.clone());
+            }
         }
     }
     update_job(
@@ -284,6 +288,7 @@ mod tests {
                         model_id,
                         tier: Some("q4"),
                         weights_source: loaded.to_owned(),
+                        decode: json!({ "proposer": "block_draft" }),
                     }),
                     image_reference_count: 0,
                     emits_json: true,
@@ -305,6 +310,7 @@ mod tests {
             assert_eq!(identity["expanderModelId"], model_id);
             assert_eq!(identity["model"], repo, "{model_id}");
             assert_eq!(identity["tier"], "q4", "{model_id}");
+            assert_eq!(identity["decode"]["proposer"], "block_draft", "{model_id}");
             assert_eq!(result["rewriteSuggestion"]["tier"], "q4");
             assert_eq!(result["rewriteSuggestion"]["rewriterModelId"], model_id);
             assert_eq!(result["rewriteSuggestion"]["whRatio"], "9:16");

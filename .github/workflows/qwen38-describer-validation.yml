@@ -26,6 +26,14 @@ name: Qwen3.8 27B describer CUDA validation
 # describer's own q4-full/ or q8-full/ folder, with the same MiniMax prompt files; a fresh hub then
 # holds that describer tier and the prompt files, provisioned as `expander-abliterated-<tier>`).
 # The evidence must name the model that ran.
+#
+# `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter, which both
+# jobs name whenever a draft (DFlash2 / DSpine, provisioned with the tiers) is installed: `record`
+# (the default) records the decode block (proposer, draft, precision, target passes, rows checked
+# and accepted tokens per pass) and asserts nothing about it; `on` requires the draft to run with
+# tree checking at the tier's draft precision, more than one accepted token per target pass and no
+# fallback; `no_fit` caps the engine's load budget so the draft cannot fit beside the target and
+# requires the job to complete without it, its record naming why.
 on:
   workflow_dispatch:
     inputs:
@@ -46,6 +54,12 @@ on:
         type: choice
         options: [minimax, abliterated]
         default: minimax
+      block_draft:
+        description: record (record the decode block only), on (require the block draft to run), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
+        required: false
+        type: choice
+        options: [record, on, no_fit]
+        default: record
       backend:
         description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
         required: true
@@ -93,6 +107,7 @@ jobs:
       job: ${{ inputs.job }}
       fresh_hub: ${{ inputs.fresh_hub }}
       expander_model: ${{ inputs.expander_model }}
+      block_draft: ${{ inputs.block_draft || 'record' }}
       tier: ${{ inputs.tier }}
       image_side: ${{ inputs.image_side }}
       mac_runner: ${{ inputs.mac_runner }}
@@ -126,6 +141,8 @@ jobs:
       # SW-7208: the expander's model (minimax unless dispatched otherwise), for the smoke and the validator.
       SCENEWORKS_H3_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
       SCENEWORKS_QWEN38_VALIDATION_JOB: ${{ inputs.job }}
+      # SW-7204: what the smoke and the validator check about the block drafter.
+      SCENEWORKS_QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
       SCENEWORKS_QWEN38_SMOKE_TEST: ${{ inputs.job == 'expander' && 'h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_cuda' || 'qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda' }}
       # Free memory the run needs on the card before it starts: at least candle-llm's own load
       # requirement for the tier (21,248 / 33,657 / 66,300 MiB for q4 / q8 / bf16) and its measured

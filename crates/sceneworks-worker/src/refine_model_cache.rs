@@ -60,6 +60,10 @@ pub(crate) struct RefineModelCacheKey {
     source: PathBuf,
     fingerprint: Fingerprint,
     quantize: Option<Quantize>,
+    /// The block draft the load names and its precision (SW-7204): a model loaded without the
+    /// draft is not the model a load naming it asks for.
+    draft_source: Option<String>,
+    draft_quantize: Option<Quantize>,
     vision: bool,
     video: bool,
     constraints: Vec<Constraint>,
@@ -73,6 +77,8 @@ impl RefineModelCacheKey {
             source,
             fingerprint,
             quantize: spec.quantize,
+            draft_source: spec.draft_source.clone(),
+            draft_quantize: spec.draft_quantize,
             vision: reqs.vision,
             video: reqs.video,
             constraints: reqs.constraints.clone(),
