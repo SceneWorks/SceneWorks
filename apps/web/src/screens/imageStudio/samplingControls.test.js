@@ -247,5 +247,14 @@ describe("PAG sampling controls", () => {
       stop: "",
       adaptiveScale: "",
     });
+    // API-authored recipes/presets can carry duplicate layer indices ([7, 0, 7]);
+    // deduplicating on restore keeps Studio submission replayable without manual edits.
+    const restoredDupes = pagFromRecipe({ scale: 1.5, layers: [7, 0, 7] });
+    expect(restoredDupes.layers).toBe("7, 0");
+    expect(resolvePag({ model: pagModel, options: restoredDupes })).toEqual({
+      block: { scale: 1.5, layers: [7, 0] },
+      error: null,
+    });
+    expect(pagFromRecipe({ scale: 1.5, layers: "7, 0, 07" }).layers).toBe("7, 0");
   });
 });

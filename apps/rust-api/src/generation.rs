@@ -2262,23 +2262,29 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
         }
     }
     // SW-7180: a preset's Perturbed-Attention Guidance block expands onto the preset's own model
-    // when the caller omitted `advanced.pag`. Explicit caller blocks win; other models never inherit it.
-    if let Some(pag) = preset
-        .get("defaults")
-        .and_then(|d| d.get("pag"))
-        .filter(|v| !v.is_null())
-    {
-        let same_model = preset.get("model").and_then(Value::as_str)
-            == job_payload.get("model").and_then(Value::as_str);
-        if same_model {
-            let advanced = job_payload
-                .entry("advanced".to_owned())
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
-            advanced
-                .entry("pag".to_owned())
-                .or_insert_with(|| pag.clone());
+    // for headless requests when the caller omitted `advanced.pag`. Studio and recipe-replay
+    // clients (`preset_loras_resolved_client_side == true`) already seed `defaults.pag` into the
+    // form and omit `advanced.pag` when the user clears PAG or sets scale to 0, so skipping this
+    // fallback preserves an explicit Studio PAG-off override while explicit headless blocks
+    // (`{ "scale": 0 }` or active settings) also win and other models never inherit it.
+    if !payload.preset_loras_resolved_client_side.unwrap_or(false) {
+        if let Some(pag) = preset
+            .get("defaults")
+            .and_then(|d| d.get("pag"))
+            .filter(|v| !v.is_null())
+        {
+            let same_model = preset.get("model").and_then(Value::as_str)
+                == job_payload.get("model").and_then(Value::as_str);
+            if same_model {
+                let advanced = job_payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+                advanced
+                    .entry("pag".to_owned())
+                    .or_insert_with(|| pag.clone());
+            }
         }
     }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT

@@ -19483,8 +19483,8 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
 
     for (route, source, marker) in [
         ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
-        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
-        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
+        ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n            gen_core::MemoryCacheState::Cold"),
+        ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n            gen_core::MemoryCacheState::Cold"),
         ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
         ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
         ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),

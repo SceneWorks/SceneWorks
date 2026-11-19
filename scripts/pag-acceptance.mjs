@@ -39,7 +39,6 @@ import {
   jobClaimed,
   jobDiagnostics,
   jobProgressDecision,
-  lastLines,
   numericDifference,
   nvidiaSmiPath,
   pmetalSource,
@@ -1239,7 +1238,6 @@ async function submitAndVerifyOneJob({ endpoint, apiCtx, projectId, projectPath,
   const claimMinutes = Math.max(def.claimMinutes, 15);
   const timeoutMinutes = Math.max(def.timeoutMinutes, 60);
   let claimedAtMs = null, maxProgress = 0, monotonicProgress = true, progressUpdates = 0;
-  let completedJob = null;
   while (true) {
     const current = await endpoint.call("GET", `/api/v1/jobs/${jobId}`);
     if (claimedAtMs === null && jobClaimed(current)) claimedAtMs = Date.now();
@@ -1264,7 +1262,7 @@ async function submitAndVerifyOneJob({ endpoint, apiCtx, projectId, projectPath,
       }
       return { label: runLabel, jobId, status: "error", error: decision.reason, diagnostics: jobDiagnostics(current) };
     }
-    if (decision.state === "completed") { completedJob = current; break; }
+    if (decision.state === "completed") break;
     await delay(500);
   }
   const seconds = Number(((Date.now() - posted) / 1000).toFixed(2));

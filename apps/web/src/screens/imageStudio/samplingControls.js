@@ -226,13 +226,28 @@ export function pagFromRecipe(recorded) {
       ? ""
       : formatOptionalNumber(rawAdaptive);
 
+  const formatLayers = (rawLayers) => {
+    const items = Array.isArray(rawLayers)
+      ? rawLayers
+      : typeof rawLayers === "string"
+        ? rawLayers.split(",")
+        : [];
+    const seen = new Set();
+    const deduped = [];
+    for (const item of items) {
+      const text = String(item ?? "").trim();
+      if (!text) continue;
+      const normalized = /^\d+$/.test(text) ? String(Number(text)) : text;
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      deduped.push(normalized);
+    }
+    return deduped.join(", ");
+  };
+
   return {
     scale: formatOptionalNumber(rawScale),
-    layers: Array.isArray(recorded.layers)
-      ? recorded.layers.join(", ")
-      : typeof recorded.layers === "string"
-        ? recorded.layers
-        : "",
+    layers: formatLayers(recorded.layers),
     start: formatOptionalNumber(recorded.start),
     stop: formatOptionalNumber(recorded.stop),
     adaptiveScale,

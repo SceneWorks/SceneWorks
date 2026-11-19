@@ -6936,14 +6936,19 @@ fn pag_workspace_bytes_is_zero_delta_when_inert_and_charges_active_pag_with_lora
         "active PAG workspace bytes must add onto Candle LoRA + staged residency peak"
     );
 
-    // At borderline 21.2 GiB free (19.2 GiB effective after 2 GiB reserve):
-    // Staged + LoRA floor is (15 + 2 + 1) * 1.04 = 18.72 GiB -> inert fits, +2 GiB PAG rejects!
+    // Midpoint between the widened inert and PAG-charged structural floors (pad-carrying
+    // candidates compare against unreserved `free_gb` under `ReserveCharge::ExceptPadCarrying`):
+    // inert fits, +2 GiB PAG surcharge rejects.
+    let spread = 1.0 + crate::ladder_margin_policy::CANDLE_RECAPTURE_SPREAD;
+    let inert_needed_gb = (inert.context.predicted_peak_bytes as f64 * spread) / BYTES_PER_GIB;
+    let active_needed_gb = (active.context.predicted_peak_bytes as f64 * spread) / BYTES_PER_GIB;
+    let borderline_free_gb = (inert_needed_gb + active_needed_gb) / 2.0;
     assert!(
-        eval_at(21.2, 0).is_ok(),
-        "inert PAG must fit borderline staged + LoRA VRAM budget"
+        eval_at(borderline_free_gb, 0).is_ok(),
+        "inert PAG must fit borderline staged + LoRA VRAM budget ({borderline_free_gb:.2} GiB)"
     );
     assert!(
-        eval_at(21.2, pag_surcharge).is_err(),
-        "active PAG workspace surcharge must push borderline staged + LoRA request over VRAM budget"
+        eval_at(borderline_free_gb, pag_surcharge).is_err(),
+        "active PAG workspace surcharge must push borderline staged + LoRA request over VRAM budget ({borderline_free_gb:.2} GiB)"
     );
 }

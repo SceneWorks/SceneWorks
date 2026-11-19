@@ -893,6 +893,7 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs/moss.rs` | `write_moss_tensor_companion` | Embeds — writes the bounded portable workflow companion for each MOSS sampled-latent output. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `upscaled_workflow_share` | Embeds — the inline-upscale sub-step's envelope: the generation payload with the applied pass overlaid. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
+| `crates/sceneworks-worker/src/image_jobs.rs` | `attach_pag_report_to_share` | Inert — attaches the sanitized `pagExecutionReport` onto an envelope already constructed and written by `write_image_asset` and `upscaled_workflow_share`; it constructs and writes no envelope of its own. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_upscale_workflow_share` | Embeds — the standalone upscale job's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_restore_workflow_share` | Embeds — the standalone Iris restoration job's envelope (sc-25683). |
