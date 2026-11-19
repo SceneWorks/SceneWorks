@@ -318,34 +318,40 @@ async fn prepare_h3_image_expand(
     // Both models run MiniMax's licensed prompt files, so the expander entry's acknowledgment
     // gates either choice (SW-7208 AC3).
     crate::models::ensure_run_license_acknowledged(state, pe_object).await?;
-    // SW-7208: the model the request names, else the saved choice, else MiniMax-H3-Image-PE.
+    // SW-7208: the model the request names, else the saved choice while it can run here, else the
+    // first model that can (MiniMax-H3-Image-PE first) — the web UI's own rule. A named model is
+    // never substituted; with nothing runnable the saved choice stands and the worker explains.
     let requested = payload
         .expander_model_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let expander = match requested {
-        Some(_) => sceneworks_core::contracts::minimax_h3_image_expander_model(requested).map_err(
-            |unknown| {
-                ApiError::bad_request(format!(
-                    "expanderModelId {unknown:?} is not a MiniMax-H3-Image prompt expander; use {}",
-                    sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS.join(" or ")
-                ))
-            },
-        )?,
-        None => crate::preferences::saved_h3_image_expander_model(state)
-            .await
-            .unwrap_or(MINIMAX_H3_IMAGE_PE_MODEL_ID),
-    };
-    job_payload.insert(
-        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY.to_owned(),
-        Value::String(expander.to_owned()),
-    );
-    let entry = if expander == MINIMAX_H3_IMAGE_PE_MODEL_ID {
-        pe_entry
-    } else {
-        let describer = crate::models::resolve_model_manifest_entry(state, expander).await?;
-        describer_expansion_entry(describer, &pe_entry)?
+    let candidates: Vec<&'static str> = match requested {
+        Some(_) => vec![
+            sceneworks_core::contracts::minimax_h3_image_expander_model(requested).map_err(
+                |unknown| {
+                    ApiError::bad_request(format!(
+                        "expanderModelId {unknown:?} is not a MiniMax-H3-Image prompt expander; \
+                         use {}",
+                        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS
+                            .join(" or ")
+                    ))
+                },
+            )?,
+        ],
+        None => {
+            let saved = crate::preferences::saved_h3_image_expander_model(state)
+                .await
+                .unwrap_or(MINIMAX_H3_IMAGE_PE_MODEL_ID);
+            std::iter::once(saved)
+                .chain(sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS)
+                .fold(Vec::new(), |mut order, id| {
+                    if !order.contains(&id) {
+                        order.push(id);
+                    }
+                    order
+                })
+        }
     };
     // Freeze the tier the worker will load BEFORE admission binds the job's sources. The request
     // names no tier, and portable admission has no implicit expander choice of its own, so without
@@ -353,7 +359,29 @@ async fn prepare_h3_image_expand(
     // on Windows/Linux) while the worker loaded whichever tier is actually installed.
     let workers = store_call(state.clone(), |store, _timeout| store.list_workers()).await?;
     let nvfp4_worker = can_run_nvfp4_expansion(&workers);
-    if let Some(tier) = expander_tier(&entry, expander, &state.settings.data_dir, nvfp4_worker) {
+    let mut chosen = None;
+    for &candidate in &candidates {
+        let entry = if candidate == MINIMAX_H3_IMAGE_PE_MODEL_ID {
+            pe_entry.clone()
+        } else {
+            let describer = crate::models::resolve_model_manifest_entry(state, candidate).await?;
+            describer_expansion_entry(describer, &pe_entry)?
+        };
+        let tier = expander_tier(&entry, candidate, &state.settings.data_dir, nvfp4_worker);
+        let runnable = tier.is_some();
+        if chosen.is_none() || runnable {
+            chosen = Some((candidate, entry, tier));
+        }
+        if runnable {
+            break;
+        }
+    }
+    let (expander, entry, tier) = chosen.expect("at least one expander candidate");
+    job_payload.insert(
+        sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY.to_owned(),
+        Value::String(expander.to_owned()),
+    );
+    if let Some(tier) = tier {
         job_payload.insert(
             sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIER_KEY.to_owned(),
             Value::String(tier.to_owned()),

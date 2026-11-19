@@ -317,6 +317,30 @@ pub(crate) async fn ensure_payload_run_licenses_acknowledged(
     for entry in carriers.filter_map(Value::as_object) {
         ensure_run_license_acknowledged(state, entry).await?;
     }
+    // SW-7208: a MiniMax-H3-Image expansion reads MiniMax's licensed prompt files whichever model
+    // runs it, and with the abliterated describer the carried entry is the describer's, which has
+    // no licence of its own. So every admission and replay of an expansion re-checks the expander
+    // entry's CURRENT terms from the catalog.
+    if *job_type == JobType::PromptRefine
+        && payload.get("task").and_then(Value::as_str)
+            == Some(sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK)
+    {
+        let expander = super::resolve_model_manifest_entry(
+            state,
+            sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID,
+        )
+        .await?;
+        let expander = expander
+            .as_object()
+            .filter(|object| !object.is_empty())
+            .ok_or_else(|| {
+                ApiError::internal(format!(
+                    "the {} catalog entry is missing",
+                    sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID
+                ))
+            })?;
+        ensure_run_license_acknowledged(state, expander).await?;
+    }
     Ok(())
 }
 

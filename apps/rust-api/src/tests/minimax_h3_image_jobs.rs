@@ -1715,3 +1715,129 @@ fn the_dataset_describer_never_accepts_minimax_h3_image_pe() {
     ))
     .is_ok());
 }
+
+/// SW-7208 review: a retry or duplicate of an expansion re-checks the expander's MiniMax licence
+/// against the catalog's current terms, whichever model runs it. The abliterated job carries the
+/// describer's entry, which has no licence of its own, so before this its replay skipped the gate.
+/// Both models' replays are refused once the acceptance is no longer on record.
+#[tokio::test]
+async fn retrying_an_expansion_rechecks_the_expanders_current_licence_for_either_model() {
+    let _hf = isolate_hf_cache();
+    for expander in ["vision_describe_qwen3_8_27b", "minimax_h3_image_pe"] {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config/manifests");
+        write_expansion_catalog(&config);
+        let settings = test_settings(&temp);
+        sceneworks_core::license_acknowledgments::record_acknowledgment(
+            &sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+            &shipped_pe_entry(),
+            "test",
+            "2026-11-19T00:00:00Z",
+        )
+        .unwrap();
+        let app = create_app(settings.clone()).unwrap();
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Retry").await;
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({
+                "task": "minimax_h3_image_expand",
+                "prompt": "a lighthouse in fog",
+                "modelId": "minimax_h3_image",
+                "projectId": project["id"],
+                "expanderModelId": expander,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{expander}: {job}");
+        let id = job["id"].as_str().unwrap().to_owned();
+
+        // The recorded acceptance is withdrawn after admission.
+        std::fs::remove_file(
+            sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+        )
+        .unwrap();
+        for action in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{action}"),
+                json!({ "payloadChanges": {} }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{expander} {action}: {body}");
+            assert_eq!(body["code"], "license_acknowledgment_required", "{body}");
+        }
+    }
+}
+
+/// SW-7208 review: a request that names no model runs the saved choice only while it can run
+/// here, else the first model that can (MiniMax-H3-Image-PE first), as the web UI does. A model
+/// the request names is never substituted.
+#[tokio::test]
+async fn an_unnamed_expansion_falls_back_to_a_runnable_model() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    write_expansion_catalog(&temp.path().join("config/manifests"));
+    let settings = test_settings(&temp);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir),
+        &shipped_pe_entry(),
+        "test",
+        "2026-11-19T00:00:00Z",
+    )
+    .unwrap();
+    let app = create_app(settings.clone()).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Fallback").await;
+    let expand = |extra: Value| {
+        let mut body = json!({
+            "task": "minimax_h3_image_expand",
+            "prompt": "a lighthouse in fog",
+            "modelId": "minimax_h3_image",
+            "projectId": project["id"],
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "h3ImageExpanderModel": "minimax_h3_image_pe" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Only the describer and the prompt files: the saved MiniMax-H3-Image-PE cannot run, so the
+    // describer does, on its installed tier.
+    install_describer_tier(&settings.data_dir, "q4");
+    install_prompt_files(&settings.data_dir);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["expanderModelId"],
+        "vision_describe_qwen3_8_27b"
+    );
+    assert_eq!(job["payload"]["peTier"], "q4", "{job}");
+
+    // A named model is never substituted, even when it cannot run.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        expand(json!({ "expanderModelId": "minimax_h3_image_pe" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["expanderModelId"], "minimax_h3_image_pe");
+    assert!(job["payload"].get("peTier").is_none(), "{job}");
+}
