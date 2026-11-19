@@ -8,7 +8,6 @@ import StructuredPromptBuilder from "../../components/StructuredPromptBuilder.js
 import ReferenceCaptionPicker from "../../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../../components/BatchPromptPanel.jsx";
 import { QwenRewritePromptControl } from "../../components/QwenRewritePromptControl.jsx";
-import { BatchExpandPromptsControl } from "../../components/BatchExpandPromptsControl.jsx";
 import { Flux3LayoutEditor } from "../../components/Flux3LayoutEditor.jsx";
 import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
@@ -118,6 +117,11 @@ export function ImagePromptComposer({
   h3ExpandAvailable,
   h3ExpandModel,
   h3ExpandPrompt,
+  h3BatchExpandOn = false,
+  batchJobCount = 0,
+  h3BatchExpandTooMany = "",
+  h3BatchUseSizes = false,
+  setH3BatchUseSizes,
   resolution,
   selectedModel,
   flux3LayoutAvailable,
@@ -221,10 +225,12 @@ export function ImagePromptComposer({
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">
                     <span>
-                      {batchRun.submitting
+                      {batchRun.expanding
+                        ? `${H3_IMAGE_EXPAND_COPY.batch.progress(Math.min(batchRun.expanding.done + 1, batchRun.expanding.total), batchRun.expanding.total)}${batchRunProgress.failed ? ` · ${batchRunProgress.failed} not expanded` : ""}`
+                        : batchRun.submitting
                         ? `Processed ${batchRunProgress.total - batchRunProgress.pending}/${batchRunProgress.total}`
                         : `${batchRunProgress.done}/${batchRunProgress.total} done`}
-                      {batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
+                      {!batchRun.expanding && batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
                       {!batchRun.submitting && batchRunProgress.pending ? ` · ${batchRunProgress.pending} not queued` : ""}
                     </span>
                     {batchRun.firstError ? <span role="alert">First enqueue error: {batchRun.firstError}{batchRun.lastError !== batchRun.firstError ? ` · Last enqueue error: ${batchRun.lastError}` : ""}</span> : null}
@@ -245,7 +251,10 @@ export function ImagePromptComposer({
                 ) : null}
                 {batchConfirmPending ? (
                   <div className="batch-confirm" role="alertdialog">
-                    <span>Queue {batchTotal} images? That’s a large batch.</span>
+                    <span>
+                      Queue {batchTotal} images? That’s a large batch.
+                      {h3BatchExpandOn ? H3_IMAGE_EXPAND_COPY.batch.confirm(batchJobCount) : ""}
+                    </span>
                     <button className="prompt-cta" onClick={() => runBatch(true)} type="button">
                       <Icon.Play size={14} /> Queue {batchTotal}
                     </button>
@@ -261,7 +270,13 @@ export function ImagePromptComposer({
                     type="button"
                   >
                     <Icon.Play size={14} />
-                    {batchRun?.submitting ? "Queueing…" : `Run batch · ${batchTotal}`}
+                    {batchRun?.expanding
+                      ? H3_IMAGE_EXPAND_COPY.batch.running
+                      : batchRun?.submitting
+                        ? "Queueing…"
+                        : h3BatchExpandOn
+                          ? H3_IMAGE_EXPAND_COPY.batch.run(batchTotal)
+                          : `Run batch · ${batchTotal}`}
                   </button>
                 )}
               </div>
@@ -628,22 +643,26 @@ export function ImagePromptComposer({
                 ) : null}
                 {h3ExpandActive && batchMode ? (
                   <div className="prompt-tool-panel">
-                    {/* Batch mode expands every prompt of the batch list, not the hidden
-                        single-prompt field. */}
-                    <BatchExpandPromptsControl
-                      copy={H3_IMAGE_EXPAND_COPY}
-                      expandModel={h3ExpandModel}
-                      expandPrompt={h3ExpandPrompt}
-                      modelId={model}
-                      onPromptsTextChange={setBatchPromptsText}
-                      projectId={activeProject?.id ?? ""}
-                      promptsText={batchPromptsText}
-                      variableValues={batchVariableValues}
-                      referenceAssetIds={qwenRewriteReferenceIds}
-                      suggestedResolutionFor={(suggestion) =>
-                        h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
-                      }
-                    />
+                    {/* Batch mode: expansion is part of Run batch (useImageBatchRun), so there
+                        is nothing to start or apply here — only what it will do, and the size
+                        opt-in the single-prompt control offers per prompt. */}
+                    <div className="refine-control batch-expand-control">
+                      <p className="refine-hint">{H3_IMAGE_EXPAND_COPY.batch.hint}</p>
+                      <label className="batch-expand-sizes">
+                        <input
+                          checked={h3BatchUseSizes}
+                          disabled={Boolean(batchRun?.submitting)}
+                          onChange={(event) => setH3BatchUseSizes?.(event.target.checked)}
+                          type="checkbox"
+                        />{" "}
+                        {H3_IMAGE_EXPAND_COPY.batch.useSizes}
+                      </label>
+                      {h3BatchExpandTooMany ? (
+                        <p className="refine-error" role="alert">
+                          {h3BatchExpandTooMany}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
                 ) : h3ExpandActive ? (
                   <div className="prompt-tool-panel">
