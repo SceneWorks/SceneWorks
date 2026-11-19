@@ -48045,7 +48045,7 @@
         ],
         "hardMaxSteps": 6,
         "hardMinSteps": 6,
-        "maxDimension": 6272,
+        "maxDimension": 9408,
         "maxReferenceAssets": 16,
         "minDimension": 16,
         "resolutions": [
@@ -48057,7 +48057,15 @@
           "3360x5024",
           "5472x3072",
           "3072x5472",
-          "6272x2688"
+          "6272x2688",
+          "6144x6144",
+          "7104x5344",
+          "5344x7104",
+          "7552x5056",
+          "5056x7552",
+          "8224x4608",
+          "4608x8224",
+          "9408x4032"
         ],
         "samplers": [
           "default"
@@ -48085,7 +48093,7 @@
       "type": "image",
       "ui": {
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — its native size is about 16 megapixels (the model card's presets reach 6272 px on the long edge at 21:9), SceneWorks also offers those presets scaled to about 36 megapixels (up to 9408 px on the long edge), and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "label": "MiniMax-H3-Image",
         "multiReference": true,
         "promptGuide": {
@@ -48200,7 +48208,7 @@
         },
         "provider": "huggingface",
         "repo": "SceneWorks/minimax-h3-image-pe",
-        "revision": "0000000000000000000000000000000000000000",
+        "revision": "7c0e818cc31e72839227237cc8c1cf18c4de5dbb",
         "variant": "bf16"
       },
       {
@@ -48327,17 +48335,16 @@
           "variant": "nvfp4"
         },
         {
-          "estimatedSizeBytes": 54733741976,
+          "estimatedSizeBytes": 54733722806,
           "files": [
             "bf16/*"
           ],
           "footprint": {
-            "diskSizeBytes": 54733741976
+            "diskSizeBytes": 54733722806
           },
-          "pendingArtifact": true,
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "0000000000000000000000000000000000000000",
+          "revision": "7c0e818cc31e72839227237cc8c1cf18c4de5dbb",
           "variant": "bf16"
         },
         {
@@ -48443,7 +48450,7 @@
       "type": "utility",
       "ui": {
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe, and the bf16 tier is not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16 tier (the NVFP4 weights dequantized to dense bf16) and the Q8 and Q4 tiers quantized from it are SceneWorks conversions published at SceneWorks/minimax-h3-image-pe. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "label": "MiniMax-H3-Image Prompt Expander",
         "promptGuide": {
           "path": "/prompt-guides/minimax-h3-image.md",

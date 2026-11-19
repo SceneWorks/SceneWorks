@@ -59,8 +59,13 @@ gh workflow run windows-candle.yml --ref <branch> \
   -f run_imported_nvfp4_worker_smoke=true
 ```
 
-The hosted `macos-checks` job sets `line-tables-only` for dev/test and both build
-override profiles in its workflow environment. Root Cargo profiles and release
+The hosted macOS suite runs as two parallel `macos-26` jobs: `macos-checks` (build, lint,
+memory adapter, worker tests, capability dump) and `macos-workspace-tests` (every other
+default member). `macos-gate` carries the required check name, `macOS build, lint and
+workspace tests (hosted)`, and passes only when both halves passed. The split was made on
+2026-11-18, when the single job had grown to about 55 minutes on a serial chain of
+large-crate compiles. Both hosted jobs set `line-tables-only` for dev/test and both build
+override profiles in their workflow environment. Root Cargo profiles and release
 artifacts are unchanged. Full epic acceptance still requires all applicable
 platform lanes and explicit real-weight evidence; a selected PR run alone does
 not establish that evidence. The existing platform workflows' terminal

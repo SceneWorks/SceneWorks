@@ -2200,8 +2200,9 @@ mod request_validation_tests {
         assert!(check(json!({"width":16,"height":32}), json!({})).is_err());
         assert!(check(json!({"width":2049,"height":32}), entry).is_err());
     }
-    /// SW-7100 (E25): the shipped MiniMax-H3-Image entry admits its 6272 px preset; the same size
-    /// stays refused for a model that declares no `maxDimension` (the 4096 blanket).
+    /// SW-7100 (E25): the shipped MiniMax-H3-Image entry admits its 6272 px preset and its 9408 px
+    /// ~36 MP row up to the declared 9408 edge; the same sizes stay refused for a model that
+    /// declares no `maxDimension` (the 4096 blanket).
     #[test]
     fn minimax_h3_image_declared_edge_is_its_own() {
         let manifest =
@@ -2215,7 +2216,9 @@ mod request_validation_tests {
             .clone();
         let preset = json!({"model":"minimax_h3_image","width":6272,"height":2688,"count":1});
         assert!(check(preset.clone(), entry.clone()).is_ok());
-        assert!(check(json!({"width":6273,"height":2688}), entry.clone()).is_err());
+        let above_16mp = json!({"model":"minimax_h3_image","width":9408,"height":4032,"count":1});
+        assert!(check(above_16mp, entry.clone()).is_ok());
+        assert!(check(json!({"width":9409,"height":2688}), entry.clone()).is_err());
         assert!(check(json!({"width":6272,"height":2688}), json!({})).is_err());
         assert_eq!(
             default_resolution(entry.as_object().unwrap()),

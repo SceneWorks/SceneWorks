@@ -133,11 +133,19 @@ async fn minimax_h3_image_runs_only_after_its_license_is_accepted_and_admits_its
         "2026-11-10T00:00:00Z",
     )
     .unwrap();
-    // The 21:9 preset's 6272 px edge is this model's own; one past it is refused.
-    let (status, created) =
-        request(app.clone(), "POST", "/api/v1/image/jobs", job(6272, 2688)).await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
-    let (status, over) = request(app.clone(), "POST", "/api/v1/image/jobs", job(6273, 2688)).await;
+    // The 21:9 16 MP preset's 6272 px edge and the ~36 MP row's 9408 px edge are this model's own
+    // (SW-7206); one past the declared 9408 edge is refused.
+    for (width, height) in [(6272, 2688), (9408, 4032)] {
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            job(width, height),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{width}x{height}: {created}");
+    }
+    let (status, over) = request(app.clone(), "POST", "/api/v1/image/jobs", job(9409, 2688)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{over}");
 }
 
@@ -1128,8 +1136,8 @@ async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_lic
     assert_eq!(refused["code"], "license_acknowledgment_required");
 
     // Accepting at the download door records the expander's own acceptance and passes the licence
-    // gate. Off-Mac the published NVFP4 tier installs; on macOS every expander tier is a converted
-    // SceneWorks tier that is not published yet (E28), so the next gate — not the licence — answers.
+    // gate, and the default tier installs: the published NVFP4 tier off-Mac, the published bf16
+    // conversion on macOS (where the Blackwell-only NVFP4 row is narrowed away).
     let (status, job) = request(
         app.clone(),
         "POST",
@@ -1137,18 +1145,8 @@ async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_lic
         json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
     )
     .await;
-    if cfg!(target_os = "macos") {
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{job}");
-        assert!(
-            job["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("not published yet")),
-            "{job}"
-        );
-    } else {
-        assert_eq!(status, StatusCode::CREATED, "{job}");
-        assert_eq!(job["type"], "model_download");
-    }
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "model_download");
     assert!(
         sceneworks_core::license_acknowledgments::current_acknowledgment(&ack_path, &expander)
             .unwrap()

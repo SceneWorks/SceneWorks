@@ -4205,15 +4205,26 @@ def test_minimax_h3_image_downloads_only_the_diffusers_components():
 
 
 def test_minimax_h3_image_size_envelope_is_its_own():
-    """E25: the published 16 MP presets up to a 6272 px edge, the 2048x2048 default, fixed six
-    steps — declared on this entry alone; no other image model declares an edge above 4096."""
+    """E25: the published 16 MP presets plus their ~36 MP scalings (9408 px edge),
+    the 2048x2048 default, fixed six steps — declared on this entry alone; no other image model
+    declares an edge above 4096."""
     models = _models_by_id()
     entry = models["minimax_h3_image"]
     limits = entry["limits"]
-    assert limits["maxDimension"] == 6272
+    assert limits["maxDimension"] == 9408
     assert entry["defaults"]["resolution"] == "2048x2048"
-    for preset in ("4096x4096", "4736x3552", "5024x3360", "5472x3072", "6272x2688"):
+    for preset in (
+        "4096x4096",
+        "4736x3552",
+        "5024x3360",
+        "5472x3072",
+        "6272x2688",
+        "6144x6144",
+        "9408x4032",
+    ):
         assert preset in limits["resolutions"], preset
+    for preset in ("8192x8192", "12544x5376"):
+        assert preset not in limits["resolutions"], preset
     assert "requiresDimensionsMultipleOf" not in limits
     assert limits["hardMinSteps"] == limits["hardMaxSteps"] == entry["defaults"]["steps"] == 6
     above = [
@@ -4291,8 +4302,9 @@ _PE_PROMPT_FILES = [
 
 def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     """E17: its own entry — the published NVFP4 tier (Blackwell CUDA, so Windows/Linux only), the
-    bf16 conversion pending publication (null SHA + `pendingArtifact`), the published macOS q8/q4, and a `prompt`
-    co-requisite that fetches the five prompt files from the UPSTREAM snapshot for every tier."""
+    published bf16 conversion (one backend-neutral row), the published q8/q4 (an MLX row for macOS
+    and a Candle row for Windows/Linux each), and a `prompt` co-requisite that fetches the five
+    prompt files from the UPSTREAM snapshot for every tier."""
     entry = _models_by_id()["minimax_h3_image_pe"]
     assert entry["type"] == "utility"
     assert entry["adapter"] == "prompt-refine"
@@ -4309,9 +4321,13 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
     assert nvfp4["default"] is True and nvfp4.get("pendingArtifact") is None
     assert nvfp4["platforms"] == ["windows", "linux"]
     assert not any(pattern.startswith("prompt") for pattern in nvfp4["files"])
-    assert primaries["bf16"]["pendingArtifact"] is True
-    assert primaries["bf16"]["revision"] == "0" * 40
-    assert primaries["bf16"]["files"] == ["bf16/*"]
+    bf16 = primaries["bf16"]
+    assert bf16.get("pendingArtifact") is None
+    assert bf16["repo"] == "SceneWorks/minimax-h3-image-pe"
+    assert bf16["revision"] == "7c0e818cc31e72839227237cc8c1cf18c4de5dbb"
+    assert bf16["files"] == ["bf16/*"]
+    # Both backends load the one dense snapshot, so the row is not narrowed to a platform.
+    assert "platforms" not in bf16
     for tier in ("q8", "q4"):
         rows = [
             download
