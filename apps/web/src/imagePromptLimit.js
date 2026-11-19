@@ -26,16 +26,26 @@ export function clipPromptChars(text, limit) {
 }
 
 // Shorten a prompt so its COMPOSED form (preset fold, style and appearance wrapping added around
-// it) fits `limit`. `compose` returns the composed string for a prompt. The wrapping is a fixed
-// amount around the user's text, so cutting the user's text by the overflow fits the composition
-// and keeps every style/appearance directive whole. Returns the prompt to send and, when it had to
-// be shortened, the composed length it would otherwise have had.
+// it) fits `limit`. `compose` returns the composed string for a prompt. The wrapping is mostly a
+// fixed amount, but cutting into a recognised directive (`Style: …`) can change how the rest is
+// wrapped, so the candidate is recomposed and cut again until it actually fits; every pass
+// shortens it, so this ends. Returns the prompt to send and, when it had to be shortened, the
+// composed length it would otherwise have had.
 export function fitPromptToLimit(prompt, limit, compose = (text) => text) {
   const composedLength = promptCharCount(compose(prompt));
-  const overflow = composedLength - limit;
-  if (overflow <= 0) return { prompt, clipped: false, composedLength };
-  const keep = Math.max(1, promptCharCount(prompt) - overflow);
-  return { prompt: clipPromptChars(prompt, keep), clipped: true, composedLength };
+  if (composedLength <= limit) return { prompt, clipped: false, composedLength };
+  let candidate = prompt;
+  let overflow = composedLength - limit;
+  while (overflow > 0) {
+    const keep = promptCharCount(candidate) - overflow;
+    if (keep < 1) {
+      candidate = clipPromptChars(candidate, 1);
+      break;
+    }
+    candidate = clipPromptChars(candidate, keep);
+    overflow = promptCharCount(compose(candidate)) - limit;
+  }
+  return { prompt: candidate, clipped: true, composedLength };
 }
 
 // The non-blocking batch note for prompts that were shortened to fit.

@@ -8,6 +8,7 @@ import {
   MAX_PROMPT_CHARS,
   promptCharCount,
 } from "./imagePromptLimit.js";
+import { composeStyledPrompt } from "./styleComposer.js";
 
 describe("imagePromptCharLimit", () => {
   it("follows the declared token window, between 4,000 and 16,384 characters", () => {
@@ -34,6 +35,20 @@ describe("fitPromptToLimit", () => {
     expect(fitted.clipped).toBe(true);
     expect(promptCharCount(compose(fitted.prompt))).toBe(limit);
     expect(compose(fitted.prompt).endsWith("Style: watercolor")).toBe(true);
+  });
+
+  // Cutting into a recognised `Style:` directive changes how the rest is wrapped, so one cut by
+  // the first overflow can still compose past the limit; the fit recomposes until it fits.
+  it("recomposes after cutting through a recognised directive", () => {
+    const compose = (text) => composeStyledPrompt({ styleText: "soft watercolor, warm light", userPrompt: text });
+    const prompt = `${"x".repeat(200)}\nStyle: y`;
+    const full = promptCharCount(compose(prompt));
+    for (let overflow = 1; overflow <= 12; overflow += 1) {
+      const limit = full - overflow;
+      const fitted = fitPromptToLimit(prompt, limit, compose);
+      expect(fitted.clipped).toBe(true);
+      expect(promptCharCount(compose(fitted.prompt))).toBeLessThanOrEqual(limit);
+    }
   });
 
   it("counts Unicode scalars like the server", () => {
