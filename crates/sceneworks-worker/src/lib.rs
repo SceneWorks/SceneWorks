@@ -736,6 +736,11 @@ mod imported_nvfp4_gpu_smoke;
 // workflows run them.
 #[cfg(all(test, native_lane))]
 mod qwen38_describer_gpu_smoke;
+// Real-weight validation of the MiniMax-H3-Image prompt expander's q4/q8 tiers (SW-7202): one
+// production `prompt_refine` expand job on CUDA (candle builds) or MLX (macOS). Test-only and
+// ignored; only `qwen38-describer-validation.yml` with `job=expander` runs it.
+#[cfg(all(test, native_lane))]
+mod h3_prompt_expander_gpu_smoke;
 // Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
 // descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
 // NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the

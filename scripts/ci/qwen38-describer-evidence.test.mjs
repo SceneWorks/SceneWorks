@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, main, pinnedSnapshots, stage, summary, validateReceipt,
-  validateResult } from './qwen38-describer-evidence.mjs';
+import { EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderPinnedSnapshots,
+  main, pinnedSnapshots, stage, summary, validateExpanderResult, validateReceipt, validateResult } from './qwen38-describer-evidence.mjs';
 
 const PINNED = pinnedSnapshots();
 
@@ -218,4 +218,115 @@ test('main reads the guard receipt for this run and sets a failing exit code', (
   const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
   assert.equal(evidence.resource_receipt.resource_completed, true);
   assert.equal(evidence.accepted, false);
+}));
+
+// ---- the MiniMax-H3-Image prompt expander (job=expander, SW-7202) ------------------------------
+const EXPANDER = expanderPinnedSnapshots();
+
+function expanderResult(tier = 'q4') {
+  return {
+    schema_version: 1, job: 'expander',
+    test_fqn: `h3_prompt_expander_gpu_smoke::${EXPANDER_TEST_NAME}`,
+    backend: 'candle', repo: EXPANDER[tier].repo, revision: EXPANDER[tier].revision, tier, result_tier: tier,
+    weights_dir: `E:\\huggingface\\hub\\${EXPANDER[tier].relativeDir.replaceAll('/', '\\')}`,
+    other_tiers_present: [],
+    prompt_files: { repo: EXPANDER.prompt.repo, revision: EXPANDER.prompt.revision },
+    prompt: 'a lighthouse', expanded_prompt: 'A weathered lighthouse | on a basalt headland at dusk.',
+    wh_ratio: '9:16', workflow: 't2i',
+    generation: { finishReason: 'stop', usage: { promptTokens: 900, generatedTokens: 1200 }, maxNewTokens: 8192 },
+    wall_seconds: 61.5, wall_time_scope: 'fixture',
+    memory: { gpu_index: '1', baseline_mib: 500, peak_mib: 21000, peak_delta_mib: 20500, method: 'fixture' },
+  };
+}
+
+test('the expander tiers pin their Candle folders and the upstream prompt snapshot from the catalog', () => {
+  for (const tier of ['q4', 'q8']) {
+    assert.equal(EXPANDER[tier].repo, EXPANDER_REPO);
+    assert.equal(EXPANDER[tier].relativeDir,
+      `models--SceneWorks--minimax-h3-image-pe/snapshots/${EXPANDER[tier].revision}/candle-${tier}-full`);
+  }
+  assert.equal(EXPANDER.prompt.repo, 'MiniMaxAI/MiniMax-H3-Image-PE');
+  assert.match(EXPANDER.prompt.revision, /^[a-f0-9]{40}$/);
+  assert.throws(() => expanderPinnedSnapshots({ minimax_h3_image_pe: { product: { downloads: [] } } }), /one Candle/);
+});
+test('a complete expander result is accepted for its own tier', () => {
+  const accepted = validateExpanderResult(expanderResult('q8'), 'q8');
+  assert.equal(accepted.tier, 'q8');
+  assert.equal(accepted.wh_ratio, '9:16');
+  assert.equal(accepted.gpu_memory.peak_mib, 21000);
+});
+for (const [name, mutate, tier] of [
+  ['an unpublished tier', () => {}, 'bf16'],
+  ['a different tier than requested', (copy) => { copy.tier = 'q8'; }, 'q4'],
+  ['a job that ran on another tier', (copy) => { copy.result_tier = 'q8'; }, 'q4'],
+  ['a describer result', (copy) => { copy.job = 'describer'; }, 'q4'],
+  ['another test', (copy) => { copy.test_fqn = 'other::test'; }, 'q4'],
+  ['the MLX backend', (copy) => { copy.backend = 'mlx'; }, 'q4'],
+  ['another cached revision', (copy) => { copy.revision = 'b'.repeat(40); }, 'q4'],
+  ['the other tier folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'candle-q8-full'); }, 'q4'],
+  ['the MLX layout folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'q4-full'); }, 'q4'],
+  ['the older plain folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'candle-q4'); }, 'q4'],
+  ['prompt files from another revision', (copy) => { copy.prompt_files.revision = 'c'.repeat(40); }, 'q4'],
+  ['an empty expansion', (copy) => { copy.expanded_prompt = '  '; }, 'q4'],
+  ['an unexpanded prompt', (copy) => { copy.expanded_prompt = 'a lighthouse'; }, 'q4'],
+  ['a leaked reasoning block', (copy) => { copy.expanded_prompt += ' </think>'; }, 'q4'],
+  ['a malformed ratio', (copy) => { copy.wh_ratio = 'tall'; }, 'q4'],
+  ['the edit workflow', (copy) => { copy.workflow = 'edit'; }, 'q4'],
+  ['a reply cut off at its budget', (copy) => { copy.generation.finishReason = 'length'; }, 'q4'],
+  ['a reply that used the whole budget', (copy) => { copy.generation.usage.generatedTokens = 8192; }, 'q4'],
+  ['an unrecorded tier listing', (copy) => { delete copy.other_tiers_present; }, 'q4'],
+  ['missing peak memory', (copy) => { delete copy.memory.peak_mib; }, 'q4'],
+]) {
+  test(`reject an expander result with ${name}`, () => {
+    const copy = expanderResult();
+    mutate(copy);
+    assert.throws(() => validateExpanderResult(copy, tier));
+  });
+}
+test('the expander summary names the tier, the other tiers present, the ratio and the expansion', () => {
+  const text = summary({ job: 'expander', accepted: true, gpu_admission: 'shared',
+    result: validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'] }, 'q4') });
+  assert.match(text, /## MiniMax-H3-Image prompt expander CUDA validation/);
+  assert.match(text, /Other tier folders present: candle-q8-full/);
+  assert.match(text, /proposed aspect ratio 9:16/);
+  assert.match(text, /> A weathered lighthouse/);
+  assert.match(text, /Peak GPU memory: 21000 MiB/);
+});
+test('staging an expander run reads its own result and keeps the receipt', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(expanderResult()));
+  await fs.writeFile(path.join(directory, 'receipt.json'), JSON.stringify(receipt()));
+  const evidence = await stage(output, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'expander');
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.job, 'expander');
+  assert.equal(evidence.result.gpu_memory.measured_on, 'shared-card');
+  assert.deepEqual((await fs.readdir(path.join(output, 'artifact'))).sort(), ['evidence.json', 'resource-receipt.json']);
+  // A describer result does not satisfy an expander run.
+  const crossed = path.join(directory, 'crossed');
+  await fs.mkdir(crossed);
+  await fs.writeFile(path.join(crossed, 'describer-result.json'), JSON.stringify(result()));
+  const wrong = await stage(crossed, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'expander');
+  assert.equal(wrong.accepted, false);
+  assert.match(wrong.error, /expander-result\.json/);
+  await assert.rejects(stage(output, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'captioner'), /job/);
+}));
+test('main validates the expander when the workflow selects job=expander', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(expanderResult('q8')));
+  const receiptDir = path.join(directory, `sceneworks-cuda-execution-7-1-${GUARD_ACTOR}`);
+  await fs.mkdir(receiptDir);
+  await fs.writeFile(path.join(receiptDir, 'resource-receipt.json'), JSON.stringify(receipt()));
+  const previous = process.exitCode;
+  try {
+    await main({ MODEL_PROOF_OUTPUT_DIR: output, SCENEWORKS_QWEN38_DESCRIBER_TIER: 'q8',
+      SCENEWORKS_QWEN38_VALIDATION_JOB: 'expander', RUNNER_TEMP: directory, GITHUB_RUN_ID: '7', GITHUB_RUN_ATTEMPT: '1' });
+    assert.notEqual(process.exitCode, 1);
+  } finally {
+    process.exitCode = previous;
+  }
+  const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.result.tier, 'q8');
 }));

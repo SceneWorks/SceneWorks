@@ -7,6 +7,11 @@ name: Qwen3.8 27B describer MLX validation
 # external phys_footprint guard. That peak is the MLX floor's measured anchor
 # (floor = ceil(peak GiB / 0.9)). Fetches the tier into the task-owned hub when it is not resident.
 #
+# `job: expander` runs the MiniMax-H3-Image prompt expander smoke instead (SW-7202): one production
+# prompt_refine expand job on the selected MLX tier (q4-full/ or q8-full/ of
+# SceneWorks/minimax-h3-image-pe), with the upstream prompt/ files of MiniMaxAI/MiniMax-H3-Image-PE,
+# both fetched at their catalog revisions; only the selected tier is fetched. q4 and q8 only.
+#
 # GitHub dispatches only workflows that exist on the default branch, so until this file is on main
 # dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
 # reusable workflow from the ref it was dispatched on. Direct `workflow_dispatch` works once on main.
@@ -17,6 +22,11 @@ name: Qwen3.8 27B describer MLX validation
 on:
   workflow_call:
     inputs:
+      job:
+        description: describer or expander
+        required: false
+        type: string
+        default: describer
       tier:
         description: MLX tier to describe with (q4, q8 or bf16)
         required: true
@@ -33,6 +43,12 @@ on:
         default: nax-macos
   workflow_dispatch:
     inputs:
+      job:
+        description: describer (Qwen3.8 27B describer smoke) or expander (MiniMax-H3-Image prompt expander smoke, q4/q8 only)
+        required: true
+        type: choice
+        options: [describer, expander]
+        default: describer
       tier:
         description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -66,6 +82,7 @@ jobs:
       run:
         shell: bash
     env:
+      QWEN38_JOB: ${{ inputs.job }}
       QWEN38_TIER: ${{ inputs.tier }}
       QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
       QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
@@ -100,7 +117,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qwen38-describer-mlx-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && format('h3-expander-mlx-{0}', inputs.tier) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.txt
             ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.log

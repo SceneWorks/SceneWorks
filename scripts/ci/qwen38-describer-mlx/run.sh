@@ -14,20 +14,36 @@
 #     that SIGTERMs it at the cap or the wall limit (MLX is never SIGKILLed mid-buffer from here), and
 #     under the shared Metal execution lease; guarded_run.sh records the guard's summary line.
 #
-# Inputs (env): QWEN38_TIER = q4 | q8 | bf16, QWEN38_IMAGE_SIDE = default | 1536, QWEN38_EVIDENCE_DIR,
-# QWEN38_MAC_RUNNER = nax-macos | nax-macos-2.
+# QWEN38_JOB = expander (default describer) runs the MiniMax-H3-Image prompt expander smoke instead:
+# one production prompt_refine expand job on the selected MLX tier (q4 or q8 only), with only that
+# tier's folder and the upstream prompt/ files fetched, under the same guards and caps (the same
+# 27B model at the same bit widths).
+#
+# Inputs (env): QWEN38_JOB = describer | expander, QWEN38_TIER = q4 | q8 | bf16,
+# QWEN38_IMAGE_SIDE = default | 1536, QWEN38_EVIDENCE_DIR, QWEN38_MAC_RUNNER = nax-macos | nax-macos-2.
 set -euo pipefail
 
 out="${QWEN38_EVIDENCE_DIR:?}"
+job="${QWEN38_JOB:-describer}"
 tier="${QWEN38_TIER:?}"
 side="${QWEN38_IMAGE_SIDE:-1536}"
+case "$job" in
+  describer) ;;
+  expander)
+    [[ "$tier" == q4 || "$tier" == q8 ]] || { echo "::error::the prompt expander has no published $tier tier; use q4 or q8"; exit 1; } ;;
+  *) echo "::error::QWEN38_JOB must be describer or expander, got $job"; exit 1 ;;
+esac
 mkdir -p "$out"
 here="$(cd "$(dirname "$0")" && pwd)"
 guard_dir="$(cd "$here/../iris-mlx-real-weights" && pwd)"
 
 mem_gib=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 {
-  echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) tier=$tier image_side=$side"
+  if [[ "$job" == expander ]]; then
+    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) job=expander tier=$tier"
+  else
+    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) tier=$tier image_side=$side"
+  fi
   echo "unified memory: $mem_gib GiB"
   /usr/bin/memory_pressure -Q || true
   df -h "$HOME" | tail -1
@@ -61,6 +77,50 @@ mkdir -p "$hub"
 python3.12 -m venv "$RUNNER_TEMP/qwen38-hf-venv"
 "$RUNNER_TEMP/qwen38-hf-venv/bin/python" -m pip install --disable-pip-version-check --no-input "huggingface_hub==0.36.0" >/dev/null
 free_gb=$(( $(df -k "$hub" | awk 'NR==2 {print $4}') / 1048576 ))
+if [[ "$job" == expander ]]; then
+# The expander: the catalog's macOS row for the tier (its whole `q4-full/` or `q8-full/` folder) and
+# the `prompt` co-requisite (five upstream files), each at its pinned revision. Each file is checked
+# at its published size, so a partial folder is completed rather than taken as resident.
+HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
+QWEN38_HUB="$hub" QWEN38_TIER="$tier" QWEN38_FREE_GB="$free_gb" \
+  "$RUNNER_TEMP/qwen38-hf-venv/bin/python" - <<'PY' | tee "$out/provision.txt"
+import json, os, sys
+from fnmatch import fnmatchcase
+from huggingface_hub import HfApi, snapshot_download
+specs = json.load(open("config/manifests/registry/specs.json"))
+tier = os.environ["QWEN38_TIER"]
+downloads = specs["minimax_h3_image_pe"]["product"]["downloads"]
+tier_rows = [r for r in downloads if r.get("variant") == tier and not r.get("coRequisite")
+             and not r.get("pendingArtifact") and "macos" in r.get("platforms", [])]
+prompt_rows = [r for r in downloads if r.get("coRequisite") and r.get("componentId") == "prompt"]
+if len(tier_rows) != 1 or len(prompt_rows) != 1:
+    sys.exit(f"expected one macOS {tier} row and one prompt row, found {len(tier_rows)} and {len(prompt_rows)}")
+free = int(os.environ["QWEN38_FREE_GB"])
+for label, row in (("tier " + tier, tier_rows[0]), ("prompt", prompt_rows[0])):
+    info = HfApi().model_info(row["repo"], revision=row["revision"], files_metadata=True, token=False)
+    if info.sha != row["revision"]:
+        sys.exit(f"::error::{row['repo']} resolved {row['revision']} to {info.sha}")
+    expected = {s.rfilename: s.size for s in info.siblings
+                if any(fnmatchcase(s.rfilename, pattern) for pattern in row["files"])}
+    total = sum(expected.values())
+    if not expected or total != row["estimatedSizeBytes"]:
+        sys.exit(f"::error::{row['repo']}@{row['revision']} {row['files']} total {total} bytes, the catalog says {row['estimatedSizeBytes']}")
+    snap = os.path.join(os.environ["QWEN38_HUB"], "models--" + row["repo"].replace("/", "--"), "snapshots", row["revision"])
+    def missing():
+        return [n for n, size in expected.items()
+                if not os.path.isfile(os.path.join(snap, n)) or os.path.getsize(os.path.join(snap, n)) != size]
+    absent = missing()
+    if absent:
+        need = sum(expected[n] for n in absent) / 1e9
+        if free - need < 25:
+            sys.exit(f"::error::{free} GB free; the {need:.1f} GB {label} download would leave less than 25 GB")
+        snapshot_download(repo_id=row["repo"], revision=row["revision"], cache_dir=os.environ["QWEN38_HUB"],
+                          allow_patterns=row["files"], token=False, max_workers=4)
+        if missing():
+            sys.exit(f"::error::{label}: files have the wrong size after download: {missing()}")
+    print(f"{label}: {row['repo']}@{row['revision']} files={row['files']} ({len(expected)} files, {total} bytes) resident={not absent}")
+PY
+else
 HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
 QWEN38_HUB="$hub" QWEN38_TIER="$tier" QWEN38_FREE_GB="$free_gb" \
   "$RUNNER_TEMP/qwen38-hf-venv/bin/python" - <<'PY' | tee "$out/provision.txt"
@@ -85,6 +145,7 @@ if not present:
                       allow_patterns=row["files"], token=False, max_workers=4)
 print(f"tier {tier}: {row['repo']}@{row['revision']} files={row['files']} resident={present}")
 PY
+fi
 
 # ---- build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) -------------------------
 target="$weights_root/sceneworks-qwen38-mlx-target/$(git rev-parse HEAD)"
@@ -105,13 +166,21 @@ if [[ -z "$free_pct" || "$free_gib" -lt $((cap_gib + 10)) ]]; then
   echo "::error::not started: ${free_gib} GiB free < cap ${cap_gib} + 10 GiB"
   exit 1
 fi
-test_name=qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_mlx
-log="$out/describer.log"
+if [[ "$job" == expander ]]; then
+  test_name=h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_mlx
+  log="$out/expander.log"
+  summary="## MiniMax-H3-Image prompt expander, MLX $tier (${RUNNER_NAME:-unknown})"
+else
+  test_name=qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_mlx
+  log="$out/describer.log"
+  summary="## Qwen3.8 27B describer, MLX $tier at image side $side (${RUNNER_NAME:-unknown})"
+fi
 mkdir -p "$out/result"
-echo "## Qwen3.8 27B describer, MLX $tier at image side $side (${RUNNER_NAME:-unknown})" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+echo "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 bash "$here/guarded_run.sh" "$out" "$log" "$test_name" -- \
   python3.12 -I "$here/../metal_execution_lock.py" --wait-seconds 3600 -- \
   env HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" MODEL_PROOF_OUTPUT_DIR="$out/result" \
   SCENEWORKS_QWEN38_DESCRIBER_TIER="$tier" SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE="$side" \
+  SCENEWORKS_H3_EXPANDER_TIER="$tier" \
   python3.12 "$guard_dir/tree_guard.py" "$cap_gib" 2400 "$log" -- \
   "$bin" "$test_name" --ignored --exact --nocapture --test-threads=1

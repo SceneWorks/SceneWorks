@@ -9,9 +9,21 @@ name: Qwen3.8 27B describer CUDA validation
 # `backend: mlx` runs qwen38-describer-mlx-validation.yml (nax-macos or nax-macos-2, per `mac_runner`)
 # as a reusable workflow instead of the CUDA job. It is routed through this file because GitHub only
 # dispatches workflows present on the default branch, and this one is.
+#
+# `job: expander` runs the MiniMax-H3-Image prompt expander smoke instead (SW-7202): one production
+# prompt_refine expand job on the selected q4 or q8 tier (CUDA: candle-q4-full/ or candle-q8-full/,
+# provisioned by qwen38-describer-provision.yml `tiers: expander-q4|expander-q8`; MLX: q4-full/ or
+# q8-full/, fetched by the MLX run script). It fails unless the expansion is complete and
+# well-formed and the job ran on the selected tier. `image_side` does not apply to it.
 on:
   workflow_dispatch:
     inputs:
+      job:
+        description: describer (Qwen3.8 27B describer smoke) or expander (MiniMax-H3-Image prompt expander smoke, q4/q8 only)
+        required: true
+        type: choice
+        options: [describer, expander]
+        default: describer
       backend:
         description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
         required: true
@@ -41,16 +53,27 @@ permissions:
   contents: read
 
 jobs:
+  # The prompt expander's bf16 tier is unpublished (pendingArtifact): refuse it here, before any
+  # runner builds or takes a GPU, instead of failing inside the smoke.
+  refuse-unpublished-expander-tier:
+    if: ${{ inputs.job == 'expander' && inputs.tier == 'bf16' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::the prompt expander's bf16 tier is unpublished; dispatch job=expander with tier q4 or q8"
+          exit 1
+
   qwen38-describer-mlx:
-    if: ${{ inputs.backend == 'mlx' }}
+    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') }}
     uses: ./.github/workflows/qwen38-describer-mlx-validation.yml
     with:
+      job: ${{ inputs.job }}
       tier: ${{ inputs.tier }}
       image_side: ${{ inputs.image_side }}
       mac_runner: ${{ inputs.mac_runner }}
 
   qwen38-describer-smoke:
-    if: ${{ inputs.backend == 'cuda' }}
+    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -72,10 +95,17 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
       SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
+      # job=expander: the prompt expander smoke's tier, the evidence validator's job, and the smoke's
+      # exact test path (the describer's otherwise).
+      SCENEWORKS_H3_EXPANDER_TIER: ${{ inputs.tier }}
+      SCENEWORKS_QWEN38_VALIDATION_JOB: ${{ inputs.job }}
+      SCENEWORKS_QWEN38_SMOKE_TEST: ${{ inputs.job == 'expander' && 'h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_cuda' || 'qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda' }}
       # Free memory the run needs on the card before it starts: at least candle-llm's own load
       # requirement for the tier (21,248 / 33,657 / 66,300 MiB for q4 / q8 / bf16) and its measured
       # peak above baseline (21,995 / 34,409 / 57,319 MiB), plus room for this process's CUDA
       # context. The catalog's Candle floors are 22 / 34 / 65 GiB, set from the same two numbers.
+      # The expander's tiers are the same 27B model at the same bit widths (folders within 0.3 GB
+      # of the describer's), so the run takes the same free-memory need.
       SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB: ${{ inputs.tier == 'bf16' && '70000' || inputs.tier == 'q8' && '40000' || '28000' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,7 +153,7 @@ jobs:
           rem per-GPU lock and the owned child, and with the lock held admits on the card's FREE memory
           rem (the tier's need) and a stable window. The smoke still samples the card and reports the
           rem peak above its own baseline.
-          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 --probe-visible 1 --require-physical-index 1 --min-free-mib %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 --probe-visible 1 --require-physical-index 1 --min-free-mib %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib %SCENEWORKS_QWEN38_SMOKE_TEST% -- --exact --ignored --nocapture --test-threads=1
           if errorlevel 1 exit /b 1
       # Runs even when the smoke failed, so the receipt and the reason are uploaded. An exact-filter
       # mismatch (zero tests run, exit 0) also fails here: only the completed smoke body writes the result.
@@ -136,6 +166,6 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: qwen38-describer-proof-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && format('h3-expander-proof-{0}', inputs.tier) || format('qwen38-describer-proof-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error

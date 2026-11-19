@@ -600,6 +600,10 @@ mod tests {
         "crates/sceneworks-worker/src/smoke_support.rs",
         // sc-26243: off-Mac sibling compiled only under cfg(all(test, not(macos), backend-candle)).
         "crates/sceneworks-worker/src/flux3_candle_footprint.rs",
+        // SW-7202: the MiniMax-H3-Image prompt expander's q4/q8 validation, an #[ignore]d test
+        // module compiled only under cfg(all(test, native_lane)) and run only by its dispatched
+        // workflow (qwen38-describer-validation.yml, job=expander).
+        "crates/sceneworks-worker/src/h3_prompt_expander_gpu_smoke.rs",
         // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an
         // #[ignore]d test module, the same shape as the NVFP4 smoke below.
         "crates/sceneworks-worker/src/imported_comfy_quant_gpu_smoke.rs",

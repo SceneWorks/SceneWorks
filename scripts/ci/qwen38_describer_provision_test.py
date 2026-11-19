@@ -160,6 +160,70 @@ class Bf16Test(unittest.TestCase):
             provision.require_free_space(74_900_000_000, provision.BF16_MIN_FREE_BYTES)
 
 
+EXPANDER_ENTRIES = [
+    (".gitattributes", 5), ("README.md", 7),
+    ("candle-q4-full/config.json", 10), ("candle-q4-full/model-00001-of-00002.safetensors", 30),
+    ("candle-q8-full/config.json", 10), ("candle-q8-full/model-00001-of-00002.safetensors", 50),
+    ("q4-full/model.safetensors", 999),
+    ("prompt/manifest.json", 3), ("prompt/t2i/system_prompt.txt", 4), ("prompt/t2i/task_prompt.txt", 5),
+    ("prompt/t2i/request_params.json", 6), ("prompt/edit/task_prompt.txt", 7), ("prompt/README.md", 99),
+]
+
+
+class ExpanderTest(unittest.TestCase):
+    def test_a_tier_is_every_file_of_its_candle_folder_and_nothing_else(self):
+        self.assertEqual(provision.expander_expected_files(EXPANDER_ENTRIES, "q4", {"q4": 40}), {
+            "candle-q4-full/config.json": 10, "candle-q4-full/model-00001-of-00002.safetensors": 30})
+        with self.assertRaisesRegex(RuntimeError, "candle-q8-full/ .* totals 60 bytes, the catalog says 61"):
+            provision.expander_expected_files(EXPANDER_ENTRIES, "q8", {"q8": 61})
+        with self.assertRaisesRegex(RuntimeError, "no sized files under candle-q4-full/"):
+            provision.expander_expected_files([e for e in EXPANDER_ENTRIES if not e[0].startswith("candle-q4")],
+                                              "q4", {"q4": 40})
+
+    def test_the_prompt_files_are_the_five_named_ones_at_the_catalog_total(self):
+        self.assertEqual(sorted(provision.prompt_expected_files(EXPANDER_ENTRIES, total=25)),
+                         sorted(provision.PROMPT_FILES))
+        with self.assertRaisesRegex(RuntimeError, "total 25 bytes, the catalog says 26"):
+            provision.prompt_expected_files(EXPANDER_ENTRIES, total=26)
+        with self.assertRaisesRegex(RuntimeError, "no sized prompt/manifest.json"):
+            provision.prompt_expected_files([e for e in EXPANDER_ENTRIES if e[0] != "prompt/manifest.json"],
+                                            total=22)
+
+    def test_an_expander_mode_plans_only_its_tier_then_the_prompt_files(self):
+        for tier, folder in (("q4", "candle-q4-full"), ("q8", "candle-q8-full")):
+            (repo, revision, _, read, patterns, minimum), prompt = provision.plans(f"expander-{tier}")
+            self.assertEqual((repo, revision, patterns), (provision.EXPANDER_REPO, provision.EXPANDER_REVISION,
+                                                          [f"{folder}/*"]))
+            self.assertEqual(minimum, provision.EXPANDER_MIN_FREE_BYTES[tier])
+            entries = [(f"{folder}/a", provision.EXPANDER_TIER_BYTES[tier]),
+                       ("candle-q4-full/b" if tier == "q8" else "candle-q8-full/b", 1)]
+            self.assertEqual(read(entries), {f"{folder}/a": provision.EXPANDER_TIER_BYTES[tier]})
+            self.assertEqual(prompt[:2], (provision.PROMPT_REPO, provision.PROMPT_REVISION))
+            self.assertEqual(prompt[4], list(provision.PROMPT_FILES))
+        # The describer's modes stay one snapshot each, exactly `plan`'s.
+        self.assertEqual(provision.plans("quantised"), [provision.plan("quantised")])
+        self.assertEqual(provision.plans("bf16"), [provision.plan("bf16")])
+        with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
+            provision.plans("expander-bf16")
+
+    def test_repositories_revisions_folders_and_totals_match_the_catalog_rows(self):
+        specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
+        rows = specs["minimax_h3_image_pe"]["product"]["downloads"]
+        for tier, folder in provision.EXPANDER_TIER_FOLDERS.items():
+            matches = [row for row in rows if row["repo"] == provision.EXPANDER_REPO and row.get("variant") == tier
+                       and "windows" in row.get("platforms", [])]
+            self.assertEqual(len(matches), 1, tier)
+            row = matches[0]
+            self.assertEqual(row["revision"], provision.EXPANDER_REVISION, tier)
+            self.assertEqual(row["files"], [f"{folder}/*"], tier)
+            self.assertEqual(row["footprint"]["diskSizeBytes"], provision.EXPANDER_TIER_BYTES[tier], tier)
+        prompt = [row for row in rows if row.get("componentId") == "prompt"]
+        self.assertEqual(len(prompt), 1)
+        self.assertEqual((prompt[0]["repo"], prompt[0]["revision"]), (provision.PROMPT_REPO, provision.PROMPT_REVISION))
+        self.assertEqual(prompt[0]["files"], list(provision.PROMPT_FILES))
+        self.assertEqual(prompt[0]["estimatedSizeBytes"], provision.PROMPT_BYTES)
+
+
 class FreeSpaceTest(unittest.TestCase):
     def test_refuses_below_the_minimum(self):
         with self.assertRaisesRegex(RuntimeError, "69.9 GB free; provisioning needs at least 70 GB"):
