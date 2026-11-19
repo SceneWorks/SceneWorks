@@ -406,6 +406,9 @@ pub(super) async fn generate_flux1_dev_control_stream(
         backend,
     } = target;
     let request = &plan.request;
+    request
+        .reject_low_res_start("FLUX.1-dev strict-control")
+        .map_err(WorkerError::InvalidPayload)?;
     let _ = super::sampling::resolve_bespoke_pag(request)?;
     let sampling = super::sampling::explicit_sampling_request(request);
 

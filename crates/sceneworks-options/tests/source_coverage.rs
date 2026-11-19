@@ -1413,6 +1413,7 @@ fn portable_owner_module(file: &str) -> bool {
             | "crates/sceneworks-options/src/image_request/flux3.rs"
             | "crates/sceneworks-options/src/image_sampling_controls.rs"
             | "crates/sceneworks-options/src/limits.rs"
+            | "crates/sceneworks-options/src/low_res_start.rs"
             | "crates/sceneworks-options/src/moss_advanced.rs"
             | "crates/sceneworks-options/src/moss_validation.rs"
             | "crates/sceneworks-options/src/pag.rs"

@@ -368,6 +368,9 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_low_res_start("FLUX.1 XLabs IP-Adapter")
+        .map_err(WorkerError::InvalidPayload)?;
     let _ = super::sampling::resolve_bespoke_pag(request)?;
     let flux_base = resolve_flux_ipadapter_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("FLUX IP-Adapter base (FLUX.1 snapshot) not found".to_owned())

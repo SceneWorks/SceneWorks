@@ -92,6 +92,10 @@ fn main() {
             "advanced",
             json!({"lowResStart":{"version":1,"k":2,"scale":0.5}}),
         ),
+        (
+            "advanced",
+            json!({"steps":4,"lowResStart":{"version":1,"k":4,"scale":0.5}}),
+        ),
         ("advanced", json!({"enhancePrompt":true})),
         ("referenceAssetIds", json!(["source", 8])),
     ] {
@@ -99,6 +103,11 @@ fn main() {
         payload[key] = value.clone();
         add(&format!("image {key} {value}"), "image", payload);
     }
+    add(
+        "image unsupported lowResStart route",
+        "image",
+        json!({"projectId":"p","model":"qwen_image_2_1","prompt":"tree","advanced":{"lowResStart":{"version":1,"k":2,"scale":0.5}}}),
+    );
     add("video model defaults", "video", video.clone());
     add(
         "SVD promptless image animation",

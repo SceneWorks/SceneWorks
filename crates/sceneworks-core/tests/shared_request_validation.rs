@@ -61,12 +61,43 @@ fn defaults_and_capabilities_come_from_real_model_facts() {
     assert_eq!(resolved["height"], request.height);
     assert_eq!(resolved["count"], request.count);
     assert!(payload.get("count").is_none());
-    let mut unsupported = payload.clone();
-    unsupported["advanced"] = json!({"lowResStart":{"version":1,"k":2,"scale":0.5}});
+    let mut supported_low_res = payload.clone();
+    supported_low_res["advanced"] = json!({"lowResStart":{"version":1,"k":2,"scale":0.5}});
+    compare(
+        "image",
+        supported_low_res,
+        facts("flux_dev", "text_to_image"),
+    )
+    .expect("flux_dev supports lowResStart");
+
+    let mut invalid_low_res_k = payload.clone();
+    invalid_low_res_k["advanced"] =
+        json!({"steps":4,"lowResStart":{"version":1,"k":4,"scale":0.5}});
     assert_eq!(
-        compare("image", unsupported, facts("flux_dev", "text_to_image"))
-            .unwrap_err()
-            .field,
+        compare(
+            "image",
+            invalid_low_res_k,
+            facts("flux_dev", "text_to_image")
+        )
+        .unwrap_err()
+        .field,
+        "advanced.lowResStart.k"
+    );
+
+    let unsupported = json!({
+        "projectId": "p",
+        "model": "qwen_image_2_1",
+        "prompt": "a tree",
+        "advanced": {"lowResStart":{"version":1,"k":2,"scale":0.5}}
+    });
+    assert_eq!(
+        compare(
+            "image",
+            unsupported,
+            facts("qwen_image_2_1", "text_to_image")
+        )
+        .unwrap_err()
+        .field,
         "advanced.lowResStart"
     );
 }

@@ -1322,6 +1322,38 @@ pub fn runtime_descriptor_facts_from_snapshot(
                     "runtime capability snapshot {capabilities} contains a descriptor without complete conditioning, adapter, quant, preview, and prompt-enhancement axes"
                 ));
             }
+            if let Some(features) = descriptor.get("features") {
+                let valid = features.as_object().is_some_and(|map| {
+                    map.values().all(|detail| {
+                        detail
+                            .get("applicable")
+                            .is_some_and(serde_json::Value::is_boolean)
+                    })
+                });
+                if !valid {
+                    return Err(format!(
+                        "runtime capability snapshot {capabilities} contains a descriptor with malformed features applicability map"
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(top_features) = snapshot.get("features") {
+        let valid = top_features.as_object().is_some_and(|routes| {
+            routes.values().all(|features| {
+                features.as_object().is_some_and(|map| {
+                    map.values().all(|detail| {
+                        detail
+                            .get("applicable")
+                            .is_some_and(serde_json::Value::is_boolean)
+                    })
+                })
+            })
+        });
+        if !valid {
+            return Err(
+                "runtime capability snapshot top-level features map is malformed".to_owned(),
+            );
         }
     }
     if model_mappings.is_empty() {
@@ -1424,6 +1456,41 @@ pub fn runtime_descriptor_facts_from_snapshot(
     };
     facts.backend()?;
     Ok(facts)
+}
+
+/// Look up the computed Feature applicability detail for `(route_id, feature_id)` from a
+/// `RuntimeCatalogSnapshot` JSON document without any hardcoded model-ID lookup table (`HOOK-4`).
+pub fn runtime_route_feature_detail<'a>(
+    snapshot: &'a serde_json::Value,
+    route_id: &str,
+    feature_id: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(detail) = snapshot
+        .get("features")
+        .and_then(|routes| routes.get(route_id))
+        .and_then(|features| features.get(feature_id))
+    {
+        return Some(detail);
+    }
+    snapshot
+        .get("generator_capabilities")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(route_id))?
+        .get("features")?
+        .get(feature_id)
+}
+
+/// Whether `route_id` structurally supports `feature_id` in `snapshot` (`HOOK-4`, `REG-3`).
+pub fn runtime_route_supports_feature(
+    snapshot: &serde_json::Value,
+    route_id: &str,
+    feature_id: &str,
+) -> bool {
+    runtime_route_feature_detail(snapshot, route_id, feature_id)
+        .and_then(|detail| detail.get("applicable"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Serialize one backend's facts as the exact bytes checked in (pretty JSON + trailing newline),
@@ -2270,5 +2337,96 @@ mod tests {
             "learnedPerChannel"
         );
         assert!(engine("unknown").get("denoiserOutputLatentSpace").is_none());
+    }
+
+    #[test]
+    fn hook4_removing_structural_precondition_flips_feature_availability_without_table_edits() {
+        fn flux_dev_descriptor() -> gen_core::ModelDescriptor {
+            gen_core::ModelDescriptor {
+                encoder_contract: None,
+                denoiser_output_latent_space: Some(&gen_core::FLUX1_LATENT_SPACE),
+                control_kinds: None,
+                required_components: &[],
+                id: "flux1_dev",
+                family: "flux",
+                backend: "mlx",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities {
+                    min_size: 256,
+                    max_size: 2048,
+                    max_count: 8,
+                    supports_guidance: true,
+                    conditioning: vec![gen_core::ConditioningKind::Reference],
+                    samplers: vec!["euler"],
+                    schedulers: vec!["linear"],
+                    ..Default::default()
+                },
+            }
+        }
+
+        fn compile_flux_dev_probe(
+            _spec: &gen_core::LoadSpec,
+            req: &gen_core::GenerationRequest,
+        ) -> gen_core::Result<Option<gen_core::RenderPlan>> {
+            let sigmas: Vec<f32> = (0..=25).map(|i| 1.0 - (i as f32 / 25.0)).collect();
+            gen_core::RenderPlan::base_image(
+                &flux_dev_descriptor(),
+                req,
+                gen_core::render::PackedImagePass {
+                    pixel_stride: 16,
+                    token_width: 64,
+                    sampler: "euler",
+                    guidance: 3.5,
+                    sigmas,
+                    executed_steps: 25,
+                    capture_sigma: 0.0,
+                },
+            )
+            .map(Some)
+        }
+
+        let plan_reg = gen_core::RenderPlanRegistration {
+            provider_id: "flux1_dev",
+            compile: compile_flux_dev_probe,
+        };
+        let with_preconditions = gen_core::FeatureRouteStructure::from_descriptor_and_plan(
+            &flux_dev_descriptor(),
+            Some(&plan_reg),
+        );
+        let eval_with = gen_core::FeatureRegistry::standard().evaluate_route(&with_preconditions);
+        let low_res_with = eval_with["low_res_start"].to_json();
+        assert_eq!(low_res_with["applicable"], true);
+
+        let mut snapshot = runtime_snapshot();
+        snapshot["generator_ids"] = serde_json::json!(["flux1_dev"]);
+        snapshot["generator_capabilities"][0]["id"] = serde_json::json!("flux1_dev");
+        snapshot["generator_capabilities"][0]["features"] = serde_json::json!({
+            "low_res_start": low_res_with
+        });
+        assert!(runtime_route_supports_feature(
+            &snapshot,
+            "flux1_dev",
+            "low_res_start"
+        ));
+
+        // Remove the structural packed-latent precondition: availability flips to false with no table edit.
+        let mut without_latent = flux_dev_descriptor();
+        without_latent.denoiser_output_latent_space = None;
+        let without_precondition = gen_core::FeatureRouteStructure::from_descriptor_and_plan(
+            &without_latent,
+            Some(&plan_reg),
+        );
+        let eval_without =
+            gen_core::FeatureRegistry::standard().evaluate_route(&without_precondition);
+        let low_res_without = eval_without["low_res_start"].to_json();
+        assert_eq!(low_res_without["applicable"], false);
+        snapshot["generator_capabilities"][0]["features"] = serde_json::json!({
+            "low_res_start": low_res_without
+        });
+        assert!(!runtime_route_supports_feature(
+            &snapshot,
+            "flux1_dev",
+            "low_res_start"
+        ));
     }
 }

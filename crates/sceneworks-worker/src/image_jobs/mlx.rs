@@ -484,6 +484,7 @@ pub(super) async fn generate_stream_using(
             flux_ip_dir,
             flux_true_cfg,
             ideogram_edit_mask,
+            flux_source_image,
         },
         edit_refs,
         edit_ref_alpha,
@@ -808,7 +809,15 @@ pub(super) async fn generate_stream_using(
                 native_batch_images,
                 model.descriptor.capabilities.pag.as_ref(),
                 lane_controls.pag.as_ref(),
-            ),
+            )
+            .saturating_add(crate::execution_planner::low_res_start_workspace_bytes(
+                engine_id,
+                width,
+                height,
+                native_batch_images,
+                steps,
+                lane_controls.low_res_start.as_ref(),
+            )?),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -1031,6 +1040,7 @@ pub(super) async fn generate_stream_using(
         let planning_edit_refs = edit_refs.clone();
         let planning_edit_ref_alpha = edit_ref_alpha.clone();
         let planning_edit_mask = ideogram_edit_mask.clone();
+        let planning_flux_source_image = flux_source_image.clone();
         let planning_lane_controls = lane_controls.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
@@ -1042,6 +1052,7 @@ pub(super) async fn generate_stream_using(
                     rgba_output_channels
                 },
                 controls: planning_lane_controls.clone(),
+                source_image: planning_flux_source_image.as_ref(),
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
             };
@@ -1230,6 +1241,7 @@ pub(super) async fn generate_stream_using(
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
                         let pag_report = std::cell::RefCell::new(None);
+                        let low_res_start_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -1264,6 +1276,8 @@ pub(super) async fn generate_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
+                                low_res_start_report: Some(&low_res_start_report),
+                                source_image: None,
                                 prompt_batch: Some(batch),
                                 render_plan: render_plans
                                     .first()
@@ -1289,6 +1303,10 @@ pub(super) async fn generate_stream_using(
                         lane_controls::record_pag_execution_report(
                             &mut facts,
                             pag_report.take().as_ref(),
+                        );
+                        lane_controls::record_low_res_start_execution_report(
+                            &mut facts,
+                            low_res_start_report.take().as_ref(),
                         );
                         Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
@@ -1333,6 +1351,7 @@ pub(super) async fn generate_stream_using(
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
                     let pag_report = std::cell::RefCell::new(None);
+                    let low_res_start_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -1371,6 +1390,8 @@ pub(super) async fn generate_stream_using(
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
+                                low_res_start_report: Some(&low_res_start_report),
+                                source_image: flux_source_image.as_ref(),
                                 prompt_batch: None,
                                 render_plan: render_plans
                                     .get(index)
@@ -1433,6 +1454,10 @@ pub(super) async fn generate_stream_using(
                     lane_controls::record_pag_execution_report(
                         &mut facts,
                         pag_report.take().as_ref(),
+                    );
+                    lane_controls::record_low_res_start_execution_report(
+                        &mut facts,
+                        low_res_start_report.take().as_ref(),
                     );
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(

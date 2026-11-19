@@ -48,6 +48,12 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
             if let Some(pag) = spec.pag_value() {
                 once["pag"] = pag;
             }
+            if let Some(features) = spec.features_value() {
+                once["features"] = features;
+            }
+            if let Some(feature_details) = spec.feature_details_value() {
+                once["feature_details"] = feature_details;
+            }
         }
         project_builtin_memory_evidence(&mut once).unwrap();
         let mut twice = once.clone();
@@ -849,4 +855,140 @@ fn pag_capability_projects_across_all_six_target_families_aliases_and_pulid_with
             "{unsupported} projected pag"
         );
     }
+}
+
+#[test]
+fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_precondition_removed()
+{
+    let low_res_option = crate::options::by_wire("advanced", "lowResStart")
+        .expect("lowResStart OptionSpec must exist");
+    for (id, expected_steps, expected_max_k) in [("flux_schnell", 4, 3), ("flux_dev", 25, 24)] {
+        let spec = builtin_model_spec(id).unwrap_or_else(|| panic!("missing builtin {id}"));
+        assert_eq!(
+            spec.features.get("low_res_start"),
+            Some(&true),
+            "{id} must project features.low_res_start = true from runtime snapshot"
+        );
+        let detail = spec
+            .feature_details
+            .get("low_res_start")
+            .unwrap_or_else(|| panic!("{id} must project feature_details.low_res_start"));
+        assert_eq!(detail["applicable"], json!(true));
+        assert_eq!(detail["class"], json!("recipe"));
+        assert_eq!(detail["version"], json!(1));
+        assert_eq!(
+            detail["parameter_schema"]["k"]["default_executed_steps"],
+            json!(expected_steps)
+        );
+        assert_eq!(
+            detail["parameter_schema"]["k"]["max"],
+            json!(expected_max_k)
+        );
+        assert_eq!(detail["parameter_schema"]["scale"]["min"], json!(0.25));
+        assert_eq!(detail["parameter_schema"]["scale"]["max"], json!(0.9));
+        assert_eq!(detail["parameter_schema"]["scale"]["default"], json!(0.5));
+
+        let projected = spec.project(Some(&json!({
+            "features": { "low_res_start": false, "forged": true },
+            "feature_details": { "low_res_start": { "applicable": false } }
+        })));
+        assert_eq!(
+            projected["features"],
+            json!({ "low_res_start": true }),
+            "{id} projected features must ignore user overrides"
+        );
+        assert_eq!(
+            projected["feature_details"]["low_res_start"]["applicable"],
+            json!(true)
+        );
+
+        for backend in ["mlx", "candle"] {
+            let facts = crate::options_context::for_model(spec, backend, "text_to_image", None);
+            assert!(
+                low_res_option.applies_when.matches(&facts.context()),
+                "{id}/{backend} must satisfy Predicate::Feature(\"low_res_start\")"
+            );
+        }
+    }
+
+    // Conditioned and unmigrated models must omit low_res_start and scrub forged user features.
+    for unsupported in [
+        "pulid_flux_dev",
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux3_klein",
+        "krea_2_raw",
+        "krea_2_turbo",
+        "qwen_image_2_1",
+        "sdxl",
+        "ltx_2_5",
+    ] {
+        let spec = builtin_model_spec(unsupported)
+            .unwrap_or_else(|| panic!("missing builtin {unsupported}"));
+        assert!(
+            !spec.features.contains_key("low_res_start"),
+            "{unsupported} must not advertise low_res_start"
+        );
+        let projected = spec.project(Some(&json!({
+            "features": { "low_res_start": true },
+            "feature_details": { "low_res_start": { "applicable": true } }
+        })));
+        assert!(
+            projected.get("features").is_none(),
+            "{unsupported} must scrub forged features"
+        );
+        assert!(
+            projected.get("feature_details").is_none(),
+            "{unsupported} must scrub forged feature_details"
+        );
+        let facts = crate::options_context::for_model(spec, "mlx", "text_to_image", None);
+        assert!(
+            !low_res_option.applies_when.matches(&facts.context()),
+            "{unsupported} must not match Predicate::Feature(\"low_res_start\")"
+        );
+    }
+
+    // HOOK-4 end-to-end: removing a structural precondition in the engine capability snapshot
+    // flips availability in the assembled spec and catalog projection with no table edits.
+    let mut mlx: Value = serde_json::from_str(MLX).unwrap();
+    let desc = mlx["snapshot"]["generator_capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["id"] == "flux1_dev")
+        .unwrap();
+    desc["features"]["low_res_start"]["applicable"] = json!(false);
+    desc["features"]["low_res_start"]["supported"] = json!(false);
+    desc["features"]["low_res_start"]["available"] = json!(false);
+    desc["features"]["low_res_start"]["inapplicability_reasons"] =
+        json!(["missing_spatial_unpack_repack"]);
+
+    let reassembled = assemble::assemble(
+        &product_json(),
+        EVIDENCE,
+        POLICY,
+        &preview_json(),
+        &[("mlx", &mlx.to_string()), ("candle", CANDLE)],
+    )
+    .unwrap();
+    let flipped_dev = &reassembled["flux_dev"];
+    assert!(
+        !flipped_dev.features.contains_key("low_res_start"),
+        "removing a structural precondition in the snapshot must withdraw features.low_res_start without table edits"
+    );
+    assert!(
+        flipped_dev.project(None).get("features").is_none(),
+        "catalog projection must withdraw features when precondition is removed"
+    );
+    let flipped_facts =
+        crate::options_context::for_model(flipped_dev, "mlx", "text_to_image", None);
+    assert!(
+        !low_res_option.applies_when.matches(&flipped_facts.context()),
+        "OptionSpec Predicate::Feature(\"low_res_start\") must flip to false when precondition is removed"
+    );
+    // Sibling migrated route flux_schnell remains true.
+    assert_eq!(
+        reassembled["flux_schnell"].features.get("low_res_start"),
+        Some(&true)
+    );
 }
