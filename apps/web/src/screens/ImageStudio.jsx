@@ -1,3 +1,4 @@
+import { loopUtilityModel } from "../loopUtility.js";
 import { useAppearance } from "../hooks/useAppearance.js";
 import { composeNegativePrompt } from "../data/appearanceCatalog.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
@@ -319,6 +320,7 @@ export function ImageStudio() {
     () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
     [models],
   );
+  const loopModel = loopUtilityModel(models);
   // Vision-captioner catalog entry (sc-8107) — drives the reference-image caption flow (sc-8108).
   const visionModel = useMemo(
     () => models.find((entry) => entry.id === VISION_CAPTION_MODEL_ID),
@@ -2195,8 +2197,19 @@ export function ImageStudio() {
   // The model is intentionally absent — presets never switch the model.
   const normalizedSelectedPreset = useMemo(() => {
     const base = moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset;
-    if (!base?.defaults || !Object.hasOwn(base.defaults, "pag")) return base;
-    return { ...base, defaults: { ...base.defaults, pag: pagFromRecipe(base.defaults.pag) } };
+    if (!base?.defaults) return base;
+    const hasTopPag = Object.hasOwn(base.defaults, "pag");
+    const hasNestedMossPag = Boolean(base.defaults.mossImage && Object.hasOwn(base.defaults.mossImage, "pag"));
+    if (!hasTopPag && !hasNestedMossPag) return base;
+    const { pag: nestedMossPag, ...restMossImage } = base.defaults.mossImage ?? {};
+    return {
+      ...base,
+      defaults: {
+        ...base.defaults,
+        ...(hasNestedMossPag ? { mossImage: restMossImage } : {}),
+        pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag),
+      },
+    };
   }, [moss, selectedPreset]);
 
   const {
@@ -3072,6 +3085,7 @@ export function ImageStudio() {
             characters={characters}
             importAsset={importAsset}
             visionCaptionReady={visionCaptionReady}
+            loopModel={loopModel}
             visionCaptionOffers={visionCaptionOffers}
             modelDownloadJobs={modelDownloadJobs}
             setActiveView={setActiveView}

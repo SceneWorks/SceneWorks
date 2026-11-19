@@ -997,13 +997,14 @@ async fn generate_candle_registry_stream_using(
         )));
     }
     let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
-    let pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
-        memory_width,
-        memory_height,
+    let pag_workspace_bytes = crate::execution_planner::hires_pag_workspace_bytes(
+        width,
+        height,
+        steps,
+        hires_fix.map(|plan| (plan.width, plan.height, plan.steps)),
         native_batch
             .as_ref()
             .map_or(1, lane_controls::NativePromptBatch::images),
-        hires_fix.as_ref().map_or(steps, |plan| plan.steps),
         model.descriptor.capabilities.pag.as_ref(),
         lane_controls.pag.as_ref(),
     );

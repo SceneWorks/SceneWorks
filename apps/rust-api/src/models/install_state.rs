@@ -497,6 +497,14 @@ pub(super) fn flux3_selected_snapshot(
     sceneworks_worker::flux3_receipted_snapshot(data_dir, repo, revision, model_id)
 }
 
+fn loop_selected_snapshot(data_dir: &FsPath, repo: &str, row: &Value) -> Option<PathBuf> {
+    let revision = row.get("revision").and_then(Value::as_str)?;
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .discover_snapshot(repo, Some(revision))
+        .ok()
+        .map(|(_, path)| path)
+}
+
 // Runtime readiness is separate from whole-repository download completion. A readable DiT is
 // not a usable FLUX 3 bundle when its bundled encoder or an indexed shard is absent. Other
 // families retain their existing cache policy; this card selects only its exact repo/revision.
@@ -508,6 +516,25 @@ pub(super) fn model_cache_health_for_download(
     files: &[String],
     data_dir: &FsPath,
 ) -> Option<HuggingFaceCacheHealth> {
+    if model_id == sceneworks_core::loop_utility::MODEL_ID {
+        let row = download?;
+        let Some(snapshot) = loop_selected_snapshot(data_dir, repo, row) else {
+            return Some(HuggingFaceCacheHealth {
+                installed: false,
+                incomplete: false,
+                missing_files: Vec::new(),
+            });
+        };
+        let missing = sceneworks_core::loop_utility::missing_snapshot_files(row, &snapshot)
+            .unwrap_or_else(|| {
+                vec!["The pinned tier does not enumerate its required files".to_owned()]
+            });
+        return Some(if missing.is_empty() {
+            HuggingFaceCacheHealth::installed()
+        } else {
+            HuggingFaceCacheHealth::missing(missing)
+        });
+    }
     if !is_flux3_runtime_model(model_id) {
         return cache_path.map(|root| huggingface_cache_health(root, files));
     }
@@ -651,6 +678,7 @@ pub(super) fn install_state_for(
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
         let mut tier_dependencies_missing = false;
+        let mut loop_snapshot_path = None;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
@@ -669,6 +697,13 @@ pub(super) fn install_state_for(
                 let torn = variants
                     .iter()
                     .find(|variant| variant.cache_incomplete && !variant.installed);
+                if model_id == sceneworks_core::loop_utility::MODEL_ID {
+                    loop_snapshot_path = variants
+                        .iter()
+                        .find(|variant| variant.installed)
+                        .or(torn)
+                        .and_then(|variant| variant.installed_path.as_ref().map(PathBuf::from));
+                }
                 let incomplete = torn.is_some();
                 // Report the torn tier's missing files so the model-level repair knows what to re-fetch,
                 // even though a sibling tier is complete (`any_installed`).
@@ -747,6 +782,7 @@ pub(super) fn install_state_for(
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
         let stale_files_present = !is_flux3_runtime_model(model_id)
+            && model_id != sceneworks_core::loop_utility::MODEL_ID
             && !cache_installed
             && receipt_file_sets.iter().any(|receipt| {
                 receipt_files_present(
@@ -793,6 +829,8 @@ pub(super) fn install_state_for(
             } else {
                 None
             }
+        } else if model_id == sceneworks_core::loop_utility::MODEL_ID {
+            loop_snapshot_path
         } else if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
         } else {
@@ -1483,7 +1521,9 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
                 .to_owned();
             let files = string_array_field(entry, "files");
             let cache_path = huggingface_repo_cache_path(data_dir, &repo);
-            let cache_health = superseded_revision_tier_cache_health(data_dir, entry, &files)
+            let loop_model = model_id == sceneworks_core::loop_utility::MODEL_ID;
+            let cache_health = (!loop_model)
+                .then(|| superseded_revision_tier_cache_health(data_dir, entry, &files)).flatten()
                 .or_else(|| {
                     model_cache_health_for_download(
                         model_id,
@@ -1509,8 +1549,8 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
             // installed after any single tier's download (sc-9909). Require the tier's own files to
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = if is_flux3_runtime_model(model_id) {
-                false // The shared receipt resolver already judged this root.
+            let managed_installed = if loop_model || is_flux3_runtime_model(model_id) {
+                false // The pinned snapshot rule already judged this source.
             } else {
                 managed_tier_installed(&managed_path, &files)
             };
@@ -1625,7 +1665,9 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
                 }
             }
 
-            let installed_path = if is_flux3_runtime_model(model_id) {
+            let installed_path = if loop_model {
+                loop_selected_snapshot(data_dir, &repo, entry)
+            } else if is_flux3_runtime_model(model_id) {
                 if cache_installed || (cache_incomplete && !managed_installed) {
                     flux3_selected_snapshot(data_dir, &repo, Some(entry), model_id)
                 } else if managed_installed {

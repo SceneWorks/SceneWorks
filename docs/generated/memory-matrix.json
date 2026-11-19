@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4127615e512ced3a636c5951a778e2f39ab20a09d12c5f856eb9bdfd3d1bc2b5",
+    "sceneWorksRevision": "source-tree:9168d0d166c1ca2e8e6d52953f9e27a46da4138b9eedc621ba144c01f327a3ce",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "64c8c5b3ff96d909ca6554ad251b6912a452ea7f1a09657775e41a2ff3666539"
+        "sha256": "b04e989bf386630a19b7f34d8794074b9fab361217908b7108135bf788791383"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
-        "sha256": "0d452f537816055a5f6a0ef20751cfab1a0eb599c4591683f772bb1f22c9b3b4"
+        "sha256": "ec68d46b294f3de966b248be06a44f790ed28a4a108989a71dbdee1cfe0d3ffe"
       },
       "routePolicy": {
         "path": "config/manifests/registry/route-policy.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "624561a46d6367fff28802938414b43e142ef4d38ad78ab166b666ffc2a62593"
+        "sha256": "91438fc5b0d697069a315ec73b0d5bf526ac8bc990e992d206bb56e19186bf3f"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -29,7 +29,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "cc728f9406f7fc1bdbff278d1a5dbbcdc2e54689df8303ecb3382cf8742074ac"
+        "sha256": "c190fabb1fdc21ae2ffb2e25b9c2c65665e4318a7c21af1195e67ade5938f1e3"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -89,7 +89,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "9a2a10e258529324306118faa6386251fe1488cfa7cada804eed38054018c6ac"
+        "sha256": "3e35b8d884604d9db68fa6aaf3afa21bd6994debabd385d6caed406a40e1286c"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",

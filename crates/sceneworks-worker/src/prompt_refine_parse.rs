@@ -236,6 +236,10 @@ pub(super) async fn parse_refine_request(
     };
     let weights_dir = match &expander_dirs {
         Some(dirs) => dirs.weights.clone(),
+        None if model == sceneworks_core::loop_utility::MODEL_REPO => {
+            thinking_mode = gen_core::core_llm::ThinkingMode::Disabled;
+            crate::loop_utility::weights_dir(settings, payload).await?
+        }
         None => resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?,
     };
     let mut h3_expand = None;

@@ -1117,6 +1117,36 @@ pub(crate) fn pag_workspace_bytes(
         .saturating_mul(VELOCITY_COMBINE_BYTES_PER_TOKEN + PERTURBED_ATTN_V_BYTES_PER_TOKEN)
 }
 
+/// Computes the maximum PAG workspace across a base pass and an optional hires-fix refinement pass.
+///
+/// Both passes receive the same PAG configuration, and a narrow `[start, stop)` window may intersect
+/// the base step grid without intersecting a shorter refinement step grid (or vice versa). Taking
+/// the maximum across the executed passes guarantees admission never underprices PAG workspace when
+/// PAG executes in only one of the two passes.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn hires_pag_workspace_bytes(
+    base_width: u32,
+    base_height: u32,
+    base_steps: u32,
+    hires: Option<(u32, u32, u32)>,
+    batch: u32,
+    capability: Option<&gen_core::PagCapability>,
+    pag: Option<&gen_core::PagConfig>,
+) -> u64 {
+    let base = pag_workspace_bytes(base_width, base_height, batch, base_steps, capability, pag);
+    match hires {
+        Some((hires_width, hires_height, hires_steps)) => base.max(pag_workspace_bytes(
+            hires_width,
+            hires_height,
+            batch,
+            hires_steps,
+            capability,
+            pag,
+        )),
+        None => base,
+    }
+}
+
 /// Convenience wrapper computing [`pag_workspace_bytes`] directly from an [`ImageRequest`].
 #[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn request_pag_workspace_bytes(
@@ -1125,6 +1155,20 @@ pub(crate) fn request_pag_workspace_bytes(
     height: u32,
     batch: u32,
     steps: u32,
+    capability: Option<&gen_core::PagCapability>,
+) -> u64 {
+    request_hires_pag_workspace_bytes(request, width, height, steps, None, batch, capability)
+}
+
+/// Convenience wrapper computing [`hires_pag_workspace_bytes`] directly from an [`ImageRequest`].
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn request_hires_pag_workspace_bytes(
+    request: &sceneworks_core::image_request::ImageRequest,
+    base_width: u32,
+    base_height: u32,
+    base_steps: u32,
+    hires: Option<(u32, u32, u32)>,
+    batch: u32,
     capability: Option<&gen_core::PagCapability>,
 ) -> u64 {
     let pag = match capability {
@@ -1139,11 +1183,12 @@ pub(crate) fn request_pag_workspace_bytes(
             .ok()
             .flatten()
     });
-    pag_workspace_bytes(
-        width,
-        height,
+    hires_pag_workspace_bytes(
+        base_width,
+        base_height,
+        base_steps,
+        hires,
         batch,
-        steps,
         fallback_cap.as_ref(),
         pag.as_ref(),
     )
@@ -2271,5 +2316,39 @@ mod corpus_replay_tests {
         assert!(b512 > 0);
         assert_eq!(b1024, b512 * 4);
         assert_eq!(b1024_batch2, b1024 * 2);
+
+        // Hires-fix where PAG intersects the 28-step base pass ([0.90, 0.95)) but misses the
+        // 4-step refinement grid must still reserve the base-pass PAG workspace rather than 0.
+        assert_eq!(
+            pag_workspace_bytes(1024, 1024, 1, 28, Some(&cap), Some(&empty_window)),
+            b1024
+        );
+        assert_eq!(
+            hires_pag_workspace_bytes(
+                1024,
+                1024,
+                28,
+                Some((1536, 1536, 4)),
+                1,
+                Some(&cap),
+                Some(&empty_window),
+            ),
+            b1024
+        );
+        // When both passes execute PAG, the larger refinement geometry dominates.
+        let b1536 = pag_workspace_bytes(1536, 1536, 1, 4, Some(&cap), Some(&active));
+        assert!(b1536 > b1024);
+        assert_eq!(
+            hires_pag_workspace_bytes(
+                1024,
+                1024,
+                28,
+                Some((1536, 1536, 4)),
+                1,
+                Some(&cap),
+                Some(&active),
+            ),
+            b1536
+        );
     }
 }

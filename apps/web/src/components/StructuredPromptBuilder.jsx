@@ -128,6 +128,7 @@ export default function StructuredPromptBuilder({
   // the per-Studio model gates. The parent wires `onImageCaption` for Ideogram 4 + text-to-image;
   // both the captioner and Ideogram now have native MLX and Candle routes.
   visionCaptionReady = true,
+  loopModel,
   visionCaptionOffers = [],
   visionCaptionDownloadJobs = [],
   onDownloadModel,
@@ -415,6 +416,7 @@ export default function StructuredPromptBuilder({
               errorFallback="Could not caption the image."
               gateDescription="Download the vision captioner to turn a reference image into an editable JSON caption. It runs locally on the native worker; the image is only used to write the caption."
               visionCaptionReady={visionCaptionReady}
+              loopModel={loopModel}
               visionCaptionOffers={visionCaptionOffers}
               visionCaptionDownloadJobs={visionCaptionDownloadJobs}
               onDownloadModel={onDownloadModel}

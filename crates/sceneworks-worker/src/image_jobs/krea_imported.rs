@@ -1793,10 +1793,8 @@ pub(super) fn krea_imported_memory_inputs(
     if adapter_count > 0 {
         overlays.push(format!("adapters:{adapter_count}"));
     }
-    let steps = hires_fix.map_or_else(
-        || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
-        |hires| hires.steps,
-    );
+    let base_steps =
+        resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
     crate::mlx_fit_gate::MlxRequestInputs {
         native_batch: 1,
         width,
@@ -1813,8 +1811,14 @@ pub(super) fn krea_imported_memory_inputs(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
-        pag_workspace_bytes: crate::execution_planner::request_pag_workspace_bytes(
-            request, width, height, 1, steps, None,
+        pag_workspace_bytes: crate::execution_planner::request_hires_pag_workspace_bytes(
+            request,
+            request.width,
+            request.height,
+            base_steps,
+            hires_fix.map(|hires| (hires.width, hires.height, hires.steps)),
+            1,
+            None,
         ),
     }
 }

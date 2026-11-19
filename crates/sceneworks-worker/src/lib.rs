@@ -603,6 +603,8 @@ pub mod voice_register;
 // resample / stored-seg-mask load, so the mask-port-vs-Python parity test runs on the
 // Linux CI lane. Its masks are consumed only by the macOS Wan-VACE path in `video_jobs`,
 // so off macOS the items are otherwise unused (the parity tests still build + run).
+#[cfg(native_lane)]
+mod loop_utility;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod person_replace;
 #[cfg(all(feature = "test-support", native_lane))]

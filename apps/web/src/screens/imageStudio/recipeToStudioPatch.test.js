@@ -98,6 +98,28 @@ describe("recipeToStudioPatch", () => {
       stop: "",
       adaptiveScale: "",
     });
+
+    const withNestedMossPag = recipeToStudioPatch(
+      launch(
+        {
+          mossImage: {
+            acceleration: "off",
+            max_sequence_length: 4096,
+            pag: { scale: 1.75, layers: [20, 20], start: 0.1, stop: 0.8 },
+          },
+        },
+        { model: "moss_image_sft", mode: "edit_image" },
+      ),
+      context,
+    );
+    expect(withNestedMossPag.values.pag).toEqual({
+      scale: "1.75",
+      layers: "20",
+      start: "0.1",
+      stop: "0.8",
+      adaptiveScale: "",
+    });
+    expect(withNestedMossPag.values.mossImage).not.toHaveProperty("pag");
   });
 
 });

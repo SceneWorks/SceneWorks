@@ -490,7 +490,7 @@ pub struct PlatformReachabilitySweepStats {
 // SW-7102: version 4 adds `requires_nvfp4` (an NVFP4-frozen MiniMax-H3-Image expansion).
 // SW-7190: version 5 routes by the top-level `variant` (bound over quantTier, mlxQuantize
 // and convRot), so a persisted pre-variant projection must be recomputed.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 5;
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 6;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -6624,9 +6624,7 @@ fn worker_supports_claim_routing_facts(worker: &WorkerSnapshot, job: &ClaimRouti
             // worker refuses to claim, leaving the job for a candle worker.
             return false;
         }
-        // Dataset captioning (sc-3556): the mlx worker claims only JoyCaption jobs
-        // backed by the mlx-gen provider. Any future non-JoyCaption captioner stays
-        // on the worker that advertises that capability.
+        // Dataset captioning has separate provider capabilities for JoyCaption and Loop-9B.
         if matches!(job.job_type, JobType::TrainingCaption) && !job.mlx_eligible {
             return false;
         }
@@ -6714,9 +6712,8 @@ fn worker_supports_claim_routing_facts(worker: &WorkerSnapshot, job: &ClaimRouti
             // otherwise it stays queued (never mis-claimed and failed terminally).
             return false;
         }
-        // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
-        // captioner provider). A non-`joy_caption` caption job is refused and remains queued.
-        // Eligibility is backend-neutral (captioner == joy_caption), so reuse the mlx gate.
+        // Both backends share the captioner request shape. The portable binding restricts
+        // a Loop job to platforms with the exact tier, and the capability check selects the provider.
         if matches!(job.job_type, JobType::TrainingCaption) && !job.candle_eligible {
             return false;
         }
@@ -6828,6 +6825,13 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // SW-7082: the dataset batch describer runs the Vision Captioner on the native
         // `core_llm::TextLlm` provider that serves `prompt_refine`, so it routes by that capability.
         JobType::DatasetBatchDescribe => WorkerCapability::PromptRefine.as_str(),
+        JobType::TrainingCaption
+            if job.payload.get("captioner").and_then(Value::as_str)
+                == Some(crate::loop_utility::CAPTIONER)
+                && job.payload.get("mode").and_then(Value::as_str) != Some("triggerOnly") =>
+        {
+            WorkerCapability::PromptRefine.as_str()
+        }
         // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
         // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
         // may claim it. `audio_generate` is advertised exactly when that lane is linked

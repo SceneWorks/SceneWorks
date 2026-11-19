@@ -800,11 +800,12 @@ pub(super) async fn generate_stream_using(
             reference_resources: flux3_references
                 .as_ref()
                 .map(|references| references.resources.clone()),
-            pag_workspace_bytes: crate::execution_planner::pag_workspace_bytes(
-                memory_width,
-                memory_height,
+            pag_workspace_bytes: crate::execution_planner::hires_pag_workspace_bytes(
+                width,
+                height,
+                steps,
+                hires_fix.map(|hires| (hires.width, hires.height, hires.steps)),
                 native_batch_images,
-                hires_fix.as_ref().map_or(steps, |hires| hires.steps),
                 model.descriptor.capabilities.pag.as_ref(),
                 lane_controls.pag.as_ref(),
             ),

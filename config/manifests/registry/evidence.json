@@ -45887,6 +45887,22 @@
       "minMemoryGb": 64
     }
   },
+  "vision_sensenova_loop_9b": {
+    "mlx": {
+      "minMemoryGbByTier": {
+        "q4": 20,
+        "q8": 26,
+        "bf16": 38
+      }
+    },
+    "candle": {
+      "minMemoryGbByTier": {
+        "q4": 10,
+        "q8": 14,
+        "bf16": 21
+      }
+    }
+  },
   "vision_describe_qwen3_8_27b": {
     "model": {
       "minMemoryGb": 32

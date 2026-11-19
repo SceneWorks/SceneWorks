@@ -10,6 +10,8 @@ export const mossEditGenerationDefaults = () => ({ width: 512, height: 512, step
 export const mossAccelerated = (options) => Boolean(options?.acceleration && options.acceleration !== "off");
 export function mossWireOptions(options) {
   const value = { ...mossDefaults(), ...options };
+  // Shared Studio PAG controls govern outgoing PAG via top-level `advanced.pag`.
+  delete value.pag;
   if (mossAccelerated(value)) {
     delete value.training_shift;
     delete value.uncond_skip_layers;

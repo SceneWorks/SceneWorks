@@ -103,7 +103,7 @@ export function DatasetEditorPanel({
     selectedAssetIds, addAssets, handleImport, captionDialog, updateCaptionSetting,
     runCaptionJob, toggleCaptionExtraOption, displayedCaptionPrompt, captionSettings,
     captionModelMissing = false, onDownloadCaptionModel, captionModelSizeLabel = "",
-    captionModelName = "JoyCaption",
+    captionModelName = "JoyCaption", loopCaptionModel, onDownloadLoopModel,
   } = captionSession;
   const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
   const {
@@ -714,6 +714,8 @@ export function DatasetEditorPanel({
           onDownloadModel={onDownloadCaptionModel}
           modelSizeLabel={captionModelSizeLabel}
           modelName={captionModelName}
+          loopModel={loopCaptionModel}
+          onDownloadLoopModel={onDownloadLoopModel}
           scope={
             captionDialog.type === "item"
               ? {
