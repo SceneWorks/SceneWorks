@@ -24,11 +24,12 @@
 //! SW-7204: the describer names the installed block draft (DFlash2 / DSpine) as a job does, then
 //! condenses the described fields with the product's condense step on the same loaded model. The
 //! evidence records one decode block per phase (proposer, draft, precision, verify, target passes,
-//! rows checked and accepted tokens per pass). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires the
-//! draft to run in both phases (block draft, the tier's draft precision, more than one accepted
-//! token per pass, no fallback): the text-only condense must check a tree; the image describe must
-//! check a tree or, as both engines do at the pinned inference, check linearly and name the
-//! multimodal fallback. `no_fit` caps the engine's load budget so the draft cannot fit beside the
+//! rows checked and accepted tokens per pass). Both phases send `speculative: auto`, checked
+//! linearly. The load names the draft only where `auto` prefers it (MLX q4/q8,
+//! SW-7200). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires linear checking in both phases; where
+//! `auto` prefers the draft it must run (block draft, the tier's draft precision, more than one
+//! accepted token per pass, no fallback), and elsewhere (CUDA, bf16) it must not run and the record
+//! must say why. `no_fit` caps the engine's load budget so the draft cannot fit beside the
 //! target and requires both phases to complete without it, the record saying why. The reply must
 //! be valid describer JSON either way (the strict parse below).
 //!
@@ -83,8 +84,8 @@ async fn smoke_block_draft(
 
 /// Condense the described `fields` with the product's condense step (the `Fit to` rewrite a job
 /// runs on the model the describe left resident: same load, same request), then check the
-/// describer's decode blocks against `check`: the image describe ([`DraftRequest::Image`]) and the
-/// text-only condense ([`DraftRequest::Text`]). Panics with the record when a check fails.
+/// describer's decode blocks (the image describe and the text-only condense) against `check`.
+/// Panics with the record when a check fails.
 ///
 /// The condense runs on the describer directly rather than through a one-image
 /// `run_dataset_batch_describe_job`: that job needs a stub job API, a staged dataset and an
@@ -96,7 +97,6 @@ async fn checked_decode_record(
     fields: &[String; DESCRIBE_FIELDS.len()],
 ) -> Value {
     use crate::batch_describe_jobs::condense::{condense_system, condense_user};
-    use crate::qwen38_block_draft::DraftRequest;
     use sceneworks_core::dataset_batch_describe::{condense_char_bound, condense_word_target};
     let words = condense_word_target(1024, condense_char_bound(), 0);
     let condensed = describer
@@ -120,12 +120,9 @@ async fn checked_decode_record(
         .decode_record()
         .expect("the Qwen3.8 27B describer records its decode");
     eprintln!("DECODE block_draft_check={} {decode}", check.label());
-    for (phase, request) in [
-        ("describe", DraftRequest::Image),
-        ("condense", DraftRequest::Text),
-    ] {
+    for phase in ["describe", "condense"] {
         check
-            .check(&decode[phase], describer.block_draft.as_ref(), request)
+            .check(&decode[phase], describer.block_draft.as_ref())
             .unwrap_or_else(|error| {
                 panic!("block-draft check {} ({phase}): {error}", check.label())
             });
@@ -332,7 +329,11 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
             "fields": fields,
-            "block_draft": { "check": draft_check.label(), "decode": decode },
+            "block_draft": {
+                "check": draft_check.label(),
+                "decode": decode,
+                "auto": crate::qwen38_block_draft::auto_evidence(describer.block_draft.as_ref()),
+            },
             "wall_seconds": wall_seconds,
             "wall_time_scope": "one describe call on a cold process: model load plus one image",
             "gpu_memory": {
@@ -656,7 +657,11 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
             "fields": fields,
-            "block_draft": { "check": draft_check.label(), "decode": decode },
+            "block_draft": {
+                "check": draft_check.label(),
+                "decode": decode,
+                "auto": crate::qwen38_block_draft::auto_evidence(describer.block_draft.as_ref()),
+            },
             "wall_seconds": wall_seconds,
             "wall_time_scope": "one describe call on a cold process: model load plus one image",
             "memory": "measured outside the process by tree_guard.py (root_lifetime_max)"

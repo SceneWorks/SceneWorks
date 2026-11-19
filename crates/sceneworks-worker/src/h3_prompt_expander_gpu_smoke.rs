@@ -41,9 +41,11 @@
 //!
 //! SW-7204: the job names the installed block draft (DFlash2 / DSpine, provisioned with the tier)
 //! and its result's `executionIdentity.decode` records the proposer, draft, precision, target
-//! passes, rows checked and accepted tokens per pass. `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires
-//! the draft to run (block draft, the tier's draft precision, tree checking, more than one
-//! accepted token per pass, no fallback); `no_fit` caps the engine's load budget so the draft
+//! passes, rows checked and accepted tokens per pass. The expansion sends `speculative: auto`,
+//! checked linearly. The job loads the draft only where `auto` prefers it (MLX q4/q8,
+//! SW-7200). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires linear checking; where `auto` prefers the
+//! draft it must run (block draft, the tier's draft precision, more than one accepted token per
+//! pass, no fallback), and elsewhere it must not run and the record must say why; `no_fit` caps the engine's load budget so the draft
 //! cannot fit beside the target and requires the job to complete without it, its record saying
 //! why. The default `record` records it and asserts nothing about it.
 //!
@@ -270,6 +272,8 @@ struct Run {
     wall_seconds: f64,
     /// The block-draft check this run made (SW-7204).
     draft_check: crate::qwen38_block_draft::SmokeDraftCheck,
+    /// The installed block draft the job named, with `auto`'s decision for it.
+    draft: Option<crate::qwen38_block_draft::BlockDraftChoice>,
 }
 
 /// Run one expand job with `expander` on `tier` through the production entry point and check its
@@ -443,12 +447,7 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
     let decode = &result["executionIdentity"]["decode"];
     eprintln!("DECODE block_draft_check={} {decode}", draft_check.label());
     draft_check
-        // A text-only expansion: it must check a tree.
-        .check(
-            decode,
-            draft.as_ref(),
-            crate::qwen38_block_draft::DraftRequest::Text,
-        )
+        .check(decode, draft.as_ref())
         .unwrap_or_else(|error| panic!("block-draft check {}: {error}", draft_check.label()));
 
     Run {
@@ -461,6 +460,7 @@ async fn expand_on_tier(expander: Expander, tier: &'static str) -> Run {
         result,
         wall_seconds,
         draft_check,
+        draft,
     }
 }
 
@@ -497,6 +497,7 @@ fn write_result(run: &Run, backend: &str, memory: Value) -> String {
             "block_draft": {
                 "check": run.draft_check.label(),
                 "decode": run.result["executionIdentity"]["decode"],
+                "auto": crate::qwen38_block_draft::auto_evidence(run.draft.as_ref()),
             },
             "wall_seconds": run.wall_seconds,
             "wall_time_scope": "one prompt_refine job on a cold process: model load plus one expansion",

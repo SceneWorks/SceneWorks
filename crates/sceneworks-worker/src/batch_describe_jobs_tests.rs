@@ -827,8 +827,43 @@ fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others
     assert!(error.to_string().contains(JOYCAPTION_REPO), "{error}");
 }
 
-/// Only the Qwen3.8 27B describer asks for speculative decoding (`auto`: its MTP head, demoted by
-/// the engine when slower); the other describers keep the backend's default.
+/// SW-7204: the describe and condense requests the Qwen3.8 27B builds send `auto` checked linearly
+/// (never an explicit block draft, never tree checking); the other describers send no option.
+#[test]
+fn the_describe_and_condense_requests_send_auto_checked_linearly() {
+    use gen_core::core_llm::{ImageRef, KvCompressionPolicy, Speculative, SpeculativeVerify};
+    let image = ImageRef::new(2, 1, vec![0; 6]).unwrap();
+    for (model, expected) in [
+        (DescribeModel::Qwen38, Some(Speculative::Auto)),
+        (DescribeModel::VisionCaptioner, None),
+    ] {
+        let describe = describe_request(
+            model.speculative(),
+            "system".to_owned(),
+            "user".to_owned(),
+            image.clone(),
+            true,
+            CancelFlag::new(),
+            KvCompressionPolicy::default(),
+        );
+        assert_eq!(describe.speculative, expected, "{model:?} describe");
+        assert_eq!(describe.speculative_verify, SpeculativeVerify::Linear);
+        assert_eq!(describe.max_new_tokens, DESCRIBE_MAX_NEW_TOKENS);
+        let condense = condense_request(
+            model.speculative(),
+            "system".to_owned(),
+            "user".to_owned(),
+            CancelFlag::new(),
+            KvCompressionPolicy::default(),
+        );
+        assert_eq!(condense.speculative, expected, "{model:?} condense");
+        assert_eq!(condense.speculative_verify, SpeculativeVerify::Linear);
+    }
+}
+
+/// Only the Qwen3.8 27B describer asks for speculative decoding (`auto`: a resident block draft on
+/// MLX q4/q8, its MTP head otherwise, demoted by the engine when slower); the other describers keep
+/// the backend's default.
 #[test]
 fn only_the_qwen38_describer_requests_auto_speculation() {
     use gen_core::core_llm::Speculative;
@@ -1553,11 +1588,21 @@ fn the_qwen38_load_names_its_block_draft_and_the_result_carries_the_decode_recor
         revision: "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9".to_owned(),
         dir: PathBuf::from("/hub/dflash2"),
         precision: "q4",
+        decided_for: "Mlx q4".to_owned(),
+        auto_keeps_mtp: None,
     };
     let (spec, _) = vision_describer_load(Path::new("/hub/q4-full"), Some(&draft));
     assert_eq!(spec.source, "/hub/q4-full");
     assert_eq!(spec.draft_source.as_deref(), Some("/hub/dflash2"));
     assert_eq!(spec.draft_quantize, Some(gen_core::core_llm::Quantize::Q4));
+    // A draft `auto` keeps MTP over (Candle/CUDA) is left out of the load.
+    let kept = BlockDraftChoice {
+        decided_for: "CandleCuda q4".to_owned(),
+        auto_keeps_mtp: Some("block draft: auto keeps MTP on CandleCuda q4".to_owned()),
+        ..draft.clone()
+    };
+    let (left_out, _) = vision_describer_load(Path::new("/hub/q4-full"), Some(&kept));
+    assert_eq!(left_out.draft_source, None);
     let (plain, _) = vision_describer_load(Path::new("/hub/q4-full"), None);
     assert_eq!(plain.draft_source, None);
 

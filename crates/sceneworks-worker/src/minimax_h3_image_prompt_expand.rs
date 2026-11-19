@@ -969,6 +969,35 @@ mod tests {
         assert!(error.to_string().contains("modelManifestEntry"), "{error}");
     }
 
+    /// SW-7204: the expansion request the job runs is the engine's, sending `auto` checked
+    /// linearly (never an explicit block draft, never tree checking), its recipe untouched.
+    #[test]
+    fn the_expansion_request_the_job_runs_sends_auto_checked_linearly() {
+        use gen_core::core_llm::{CancelFlag, KvCompressionPolicy, Speculative, SpeculativeVerify};
+        let dir = tempfile::tempdir().unwrap();
+        let digest = synthetic_prompt_tree(dir.path());
+        let files = pe::PromptFiles::load_with_manifest_digest(dir.path(), &digest).unwrap();
+        let engine = build_request(
+            &files,
+            "a harbour at dusk",
+            &[],
+            &pe::AspectSelection::Adaptive,
+        )
+        .unwrap();
+        let request = crate::prompt_refine_jobs::prepare_expansion_request(
+            engine.clone(),
+            CancelFlag::new(),
+            KvCompressionPolicy::default(),
+            true,
+            true,
+        );
+        assert_eq!(request.speculative, Some(Speculative::Auto));
+        assert_eq!(request.speculative_verify, SpeculativeVerify::Linear);
+        assert_eq!(request.messages.len(), engine.messages.len());
+        assert_eq!(request.max_new_tokens, engine.max_new_tokens);
+        assert_eq!(request.sampling.temperature, engine.sampling.temperature);
+    }
+
     #[test]
     fn a_verified_prompt_tree_builds_both_workflows_and_a_changed_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();

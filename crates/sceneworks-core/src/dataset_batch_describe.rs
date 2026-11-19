@@ -110,9 +110,10 @@ pub fn qwen38_tier_dir(repo: &str, tier: &str) -> Option<String> {
 }
 
 /// The Qwen3.8-27B block drafts (SW-F374 E1, E13), in the order the worker prefers them when more
-/// than one is installed: DFlash2 first (its tree checking led the measured runs, 96.0 against
-/// DSpine's 63.6 tok/s on the base 4-bit weights, requirements section 2), then DSpine. The
-/// describer's and the prompt expander's catalog entries ship both as soft co-requisites.
+/// than one is installed: DFlash2 first (it led the measured linear-check runs: against MTP on MLX
+/// it decoded 1.33x cold / 1.84x reused on the 4-bit tier where DSpine managed 1.29x / 1.07x,
+/// SW-7200), then DSpine. The describer's and the prompt expander's catalog entries ship both as
+/// soft co-requisites; the engine's `auto` decides per backend and tier whether a draft runs.
 pub const QWEN38_27B_BLOCK_DRAFT_REPOS: [&str; 2] = [
     "SceneWorks/qwen3.8-27b-dflash2",
     "SceneWorks/qwen3.8-27b-dspine-b16",
