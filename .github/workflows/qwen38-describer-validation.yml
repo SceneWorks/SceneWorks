@@ -5,9 +5,25 @@ name: Qwen3.8 27B describer CUDA validation
 # qwen38-describer-provision.yml) and uploads the seven described fields, wall time and peak GPU
 # memory. Fails if any field other than pose or camera is empty, or if the reply was cut off. `image_side: 1536` draws the same scene at 1536x1536 to
 # measure the peak of a large image; `default` keeps the 512x384 scene.
+#
+# `backend: mlx` runs qwen38-describer-mlx-validation.yml (nax-macos or nax-macos-2, per `mac_runner`)
+# as a reusable workflow instead of the CUDA job. It is routed through this file because GitHub only
+# dispatches workflows present on the default branch, and this one is.
 on:
   workflow_dispatch:
     inputs:
+      backend:
+        description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
+        required: true
+        type: choice
+        options: [cuda, mlx]
+        default: cuda
+      mac_runner:
+        description: Mac for backend=mlx (ignored for cuda)
+        required: true
+        type: choice
+        options: [nax-macos, nax-macos-2]
+        default: nax-macos
       tier:
         description: Candle tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -25,7 +41,16 @@ permissions:
   contents: read
 
 jobs:
+  qwen38-describer-mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    uses: ./.github/workflows/qwen38-describer-mlx-validation.yml
+    with:
+      tier: ${{ inputs.tier }}
+      image_side: ${{ inputs.image_side }}
+      mac_runner: ${{ inputs.mac_runner }}
+
   qwen38-describer-smoke:
+    if: ${{ inputs.backend == 'cuda' }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}

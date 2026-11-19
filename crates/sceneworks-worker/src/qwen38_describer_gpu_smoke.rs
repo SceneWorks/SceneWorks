@@ -2,7 +2,7 @@
 //! and its MLX twin `qwen38_describer_describes_a_synthetic_scene_on_mlx` (SW-7202) at the end of
 //! this file, which `qwen38-describer-mlx-validation.yml` runs on nax-macos-2.
 //!
-//! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow, under the exact-UUID
+//! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow (backend=cuda), under the exact-UUID
 //! CUDA guard (`scripts/ci/windows_cuda_execution.py`); it is never part of ordinary PR or push CI.
 //! It resolves a Candle tier (pre-quantised q4/q8 from the re-host, or full-precision bf16 from the
 //! upstream repository) through the production path (`qwen38_describer_weights_dir`), checks it is

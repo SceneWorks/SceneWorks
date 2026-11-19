@@ -7,10 +7,30 @@ name: Qwen3.8 27B describer MLX validation
 # external phys_footprint guard. That peak is the MLX floor's measured anchor
 # (floor = ceil(peak GiB / 0.9)). Fetches the tier into the task-owned hub when it is not resident.
 #
+# GitHub dispatches only workflows that exist on the default branch, so until this file is on main
+# dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
+# reusable workflow from the ref it was dispatched on. Direct `workflow_dispatch` works once on main.
+#
 # `nax-macos` (label `rw-starvector`, Michael's dev Mac; hub and build target on /Volumes/Models) is
 # the default ONLY while nax-macos-2's model disk is full: Michael approved that loan for SW-7202 on
 # 2026-11-18. Switch the default back to `nax-macos-2` (`rw-llm`) once its new drive is fitted.
 on:
+  workflow_call:
+    inputs:
+      tier:
+        description: MLX tier to describe with (q4, q8 or bf16)
+        required: true
+        type: string
+      image_side:
+        description: Synthetic scene size ("1536" or "default")
+        required: false
+        type: string
+        default: "1536"
+      mac_runner:
+        description: nax-macos or nax-macos-2
+        required: false
+        type: string
+        default: nax-macos
   workflow_dispatch:
     inputs:
       tier:
