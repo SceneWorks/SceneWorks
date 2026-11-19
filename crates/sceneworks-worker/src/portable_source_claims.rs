@@ -619,7 +619,7 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
         }
     }
     external_base_source_claims(settings, &mut publish);
-    registered_digest_source_claims(settings, &mut publish);
+    registered_model_digest_source_claims(settings, &mut publish);
     // Re-sweep priority overlays before `replace_scanned` so any adapter imported mid-scan stays
     // in `scanned` (unchanged files hit `VerifiedSourceCache` without re-reading bytes).
     registered_priority_overlay_source_claims(settings, publish);
@@ -862,7 +862,17 @@ pub(crate) fn registered_text_encoder_path(
     Ok(None)
 }
 
+#[cfg(test)]
 fn registered_digest_source_claims(
+    settings: &Settings,
+    mut publish: impl FnMut(PortableSourceClaim),
+) {
+    registered_priority_overlay_source_claims(settings, &mut publish);
+    registered_model_digest_source_claims(settings, &mut publish);
+    registered_unreceipted_builtin_lora_source_claims(settings, publish);
+}
+
+fn registered_model_digest_source_claims(
     settings: &Settings,
     mut publish: impl FnMut(PortableSourceClaim),
 ) {
@@ -2275,6 +2285,27 @@ mod tests {
         assert!(registered_builtin_lora_path(&settings, "builtin_adapter", &expected).is_none());
         #[cfg(unix)]
         {
+            std::fs::remove_file(&worker_file).unwrap();
+            let blobs = hub.join("models--example--pinned-lora/blobs");
+            std::fs::create_dir_all(&blobs).unwrap();
+            let blob =
+                blobs.join("6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf");
+            std::fs::write(&blob, b"exact adapter bytes").unwrap();
+            std::os::unix::fs::symlink(
+                Path::new(
+                    "../../blobs/6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf",
+                ),
+                &worker_file,
+            )
+            .unwrap();
+            assert!(static_source_claims(&settings)
+                .iter()
+                .any(|claim| claim.source_id == id && claim.files == expected));
+            assert_eq!(
+                registered_builtin_lora_path(&settings, "builtin_adapter", &expected),
+                Some(worker_file.clone())
+            );
+
             std::fs::remove_file(&worker_file).unwrap();
             let outside = temp.path().join("outside.safetensors");
             std::fs::write(&outside, b"exact adapter bytes").unwrap();
