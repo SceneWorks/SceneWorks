@@ -565,6 +565,33 @@ fn finalize_refined_output(raw: &str, emits_json: bool, model_id: Option<&str>) 
     }
 }
 
+#[cfg(any(test, native_lane))]
+fn prepare_image_caption(refined: String, model: &str) -> WorkerResult<String> {
+    let mut caption = serde_json::from_str::<Value>(&refined).map_err(|error| {
+        WorkerError::Engine(format!(
+            "The image-caption model returned output that is not valid JSON: {error}"
+        ))
+    })?;
+    if !sceneworks_core::ideogram_caption::is_caption(&caption) {
+        return Err(WorkerError::Engine(
+            "The image-caption model returned JSON that is not a valid Ideogram caption \
+             (missing the `compositional_deconstruction` section)."
+                .to_owned(),
+        ));
+    }
+    // Loop can emit its explanation in a root _comment field. Keep the caption and its
+    // grounded boxes intact, and let Studio validate every other field as usual.
+    if model == sceneworks_core::loop_utility::MODEL_REPO
+        && caption
+            .as_object_mut()
+            .and_then(|object| object.remove("_comment"))
+            .is_some()
+    {
+        return Ok(caption.to_string());
+    }
+    Ok(refined)
+}
+
 /// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
 /// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
 /// case-insensitively without lowercasing the whole — Unicode-safe — string).
