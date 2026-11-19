@@ -64,7 +64,8 @@ pub(crate) fn record_pag_execution_report(
 }
 
 /// Record a provider's completed [`gen_core::LowResStartExecutionReport`] into per-image facts
-/// under `lowResStartExecutionReport`. Nothing is written when `lowResStart` did not execute (`None`).
+/// under `lowResStartExecutionReport` and as a canonical [`sceneworks_core::execution_receipt::LowResStartReceipt`]
+/// under `workerLowResStartReceipt`. Nothing is written when `lowResStart` did not execute (`None`).
 pub(crate) fn record_low_res_start_execution_report(
     facts: &mut JsonObject,
     low_res_start: Option<&gen_core::LowResStartExecutionReport>,
@@ -74,6 +75,26 @@ pub(crate) fn record_low_res_start_execution_report(
     };
     if let Ok(value) = serde_json::to_value(report) {
         facts.insert(LOW_RES_START_EXECUTION_REPORT_KEY.to_owned(), value);
+    }
+    let receipt = sceneworks_core::execution_receipt::LowResStartReceipt {
+        version: report.version,
+        k: u32::try_from(report.k).unwrap_or(u32::MAX),
+        executed_steps: u32::try_from(report.executed_steps).unwrap_or(u32::MAX),
+        scale: (report.scale as f64 * 1e6).round() / 1e6,
+        low_w: report.low_width,
+        low_h: report.low_height,
+        full_w: report.full_width,
+        full_h: report.full_height,
+        target_pass: report.estimate_provenance.pass_index,
+        estimator: report.estimator.clone(),
+        schedule_policy: sceneworks_core::execution_receipt::LOW_RES_START_SCHEDULE_POLICY_V1
+            .to_owned(),
+        transition_arithmetic: report.transition_arithmetic_id.clone(),
+        transition_seed_scheme: report.transition_seed_derivation_id.clone(),
+        selected_rung: None,
+    };
+    if let Ok(receipt_value) = serde_json::to_value(receipt) {
+        facts.insert("workerLowResStartReceipt".to_owned(), receipt_value);
     }
 }
 

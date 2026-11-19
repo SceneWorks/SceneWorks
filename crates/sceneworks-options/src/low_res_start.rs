@@ -170,19 +170,19 @@ pub fn resolve_executed_steps(
     entry: &JsonObject,
 ) -> Result<u32, ValidationRefusal> {
     let default_steps = entry
-        .get("feature_details")
-        .and_then(|d| d.pointer("/low_res_start/parameter_schema/k/default_executed_steps"))
+        .get("defaults")
+        .and_then(|d| d.get("steps"))
         .and_then(Value::as_u64)
         .or_else(|| {
             entry
-                .get("defaults")
-                .and_then(|d| d.get("steps"))
+                .get("feature_details")
+                .and_then(|d| d.pointer("/low_res_start/parameter_schema/k/default_executed_steps"))
                 .and_then(Value::as_u64)
         })
         .and_then(|steps| u32::try_from(steps).ok())
         .unwrap_or(match model {
             "flux_schnell" | "flux1_schnell" => 4,
-            _ => 25,
+            _ => 28,
         });
     let num_steps = crate::limits::requested_steps(advanced).unwrap_or(default_steps);
 
@@ -571,5 +571,41 @@ mod tests {
             .expect_err(label);
             assert_eq!(err.field, "advanced.lowResStart", "{label}");
         }
+
+        // Catalog-backed request with both defaults.steps=28 and feature_details.low_res_start.parameter_schema.k.default_executed_steps=25
+        // prefers defaults.steps=28 when advanced.steps is omitted, accepting K=27:
+        let mut catalog_entry = flux_dev_entry();
+        catalog_entry.insert(
+            "feature_details".into(),
+            json!({
+                "low_res_start": {
+                    "parameter_schema": {
+                        "k": {
+                            "default_executed_steps": 25
+                        }
+                    }
+                }
+            }),
+        );
+        let k27_payload = json!({
+            "model": "flux_dev",
+            "mode": "text_to_image",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "lowResStart": { "version": 1, "k": 27, "scale": 0.5 }
+            }
+        });
+        let k27_obj = k27_payload.as_object().unwrap();
+        let resolved_k27 = requested_low_res_start(
+            "flux_dev",
+            k27_obj,
+            k27_obj["advanced"].as_object().unwrap(),
+            &catalog_entry,
+        )
+        .expect("K=27 with no step override must succeed against defaults.steps=28")
+        .expect("low_res_start active");
+        assert_eq!(resolved_k27.k, 27);
+        assert_eq!(resolved_k27.executed_steps, 28);
     }
 }

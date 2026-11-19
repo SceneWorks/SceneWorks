@@ -1192,5 +1192,26 @@ describe("Low Res Start share versioning and portable import revalidation (SW-69
     expect(stripped.schemaVersion).toBe(1);
     expect(stripped.advanced.lowResStart).toBeUndefined();
     expect(stripped.omitted).toContain(OMITTED_LOW_RES_START);
+
+    // 512x512 with scale=0.25 produces 128x128 < canonical minDimension 256 when resolution is omitted:
+    const tooSmallGridV2 = share({
+      schemaVersion: 2,
+      model: "flux_dev",
+      width: 512,
+      height: 512,
+      advanced: { steps: 28, lowResStart: { version: 1, k: 3, scale: 0.25 } },
+    });
+    const entryWithoutResolutionOverride = {
+      id: "flux_dev",
+      defaults: { steps: 28 },
+      features: { low_res_start: true },
+    };
+    const strippedSmallGrid = revalidatePortableWorkflowShare(
+      tooSmallGridV2,
+      entryWithoutResolutionOverride,
+    );
+    expect(strippedSmallGrid.schemaVersion).toBe(1);
+    expect(strippedSmallGrid.advanced.lowResStart).toBeUndefined();
+    expect(strippedSmallGrid.omitted).toContain(OMITTED_LOW_RES_START);
   });
 });

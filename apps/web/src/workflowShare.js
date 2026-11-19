@@ -128,10 +128,17 @@ export function revalidatePortableWorkflowShare(share, modelEntry = null) {
   let dimsOk = true;
   if (Number.isFinite(share.width) && Number.isFinite(share.height)) {
     const quantum = Number(modelEntry?.resolution?.multipleOf ?? 16) || 16;
-    const minDim = Number(modelEntry?.resolution?.minDimension ?? 64) || 64;
-    const lowW = Math.round((share.width * lowRes.scale) / quantum) * quantum;
-    const lowH = Math.round((share.height * lowRes.scale) / quantum) * quantum;
-    dimsOk = lowW >= minDim && lowH >= minDim && (lowW < share.width || lowH < share.height);
+    const minDim = Number(modelEntry?.resolution?.minDimension ?? 256) || 256;
+    const scale32 = Math.fround(lowRes.scale);
+    const lowW = Math.floor((share.width * scale32) / quantum) * quantum;
+    const lowH = Math.floor((share.height * scale32) / quantum) * quantum;
+    dimsOk =
+      share.width % quantum === 0 &&
+      share.height % quantum === 0 &&
+      lowW >= minDim &&
+      lowH >= minDim &&
+      lowW < share.width &&
+      lowH < share.height;
   }
   if (!check.ok || !supportsRoute || !stepsOk || hasPhases || !dimsOk) {
     const nextShare = structuredClone(share);

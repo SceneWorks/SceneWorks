@@ -33,9 +33,22 @@ fn native_generators() -> BTreeMap<(String, String), Value> {
             if route["backend"] != backend {
                 continue;
             }
-            assert!(routes
-                .insert((backend.into(), id.into()), route.clone())
-                .is_none());
+            let mut route = route.clone();
+            if let Some(features) = route.get_mut("features").and_then(Value::as_object_mut) {
+                features.retain(|id, detail| {
+                    id == "low_res_start"
+                        && detail
+                            .get("applicable")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                });
+                if features.is_empty() {
+                    if let Some(obj) = route.as_object_mut() {
+                        obj.remove("features");
+                    }
+                }
+            }
+            assert!(routes.insert((backend.into(), id.into()), route).is_none());
         }
     }
     routes

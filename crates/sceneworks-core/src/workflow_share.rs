@@ -3018,19 +3018,18 @@ pub fn revalidate_portable_import(
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok())
                     .filter(|v| *v > 0)
-                    .unwrap_or(16);
+                    .unwrap_or(sceneworks_options::low_res_start::LOW_RES_START_QUANTUM);
                 let min_dim = model_entry
                     .get("resolution")
                     .and_then(|res| res.get("minDimension"))
                     .and_then(Value::as_u64)
                     .and_then(|v| u32::try_from(v).ok())
                     .filter(|v| *v > 0)
-                    .unwrap_or(64);
-                let low_w =
-                    ((f64::from(w) * cfg.scale) / f64::from(quantum)).round() as u32 * quantum;
-                let low_h =
-                    ((f64::from(h) * cfg.scale) / f64::from(quantum)).round() as u32 * quantum;
-                low_w >= min_dim && low_h >= min_dim && (low_w < w || low_h < h)
+                    .unwrap_or(sceneworks_options::low_res_start::LOW_RES_START_MIN_DIM);
+                sceneworks_options::low_res_start::quantize_low_res_dimensions(
+                    w, h, cfg.scale, quantum, min_dim,
+                )
+                .is_ok()
             }
             (Some(_), _, _) => true,
             (None, _, _) => false,
@@ -4936,5 +4935,29 @@ mod tests {
             parsed.advanced.get("lowResStart"),
             Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
         );
+
+        // Portable import rejects a 512x512 recipe with scale=0.25 (128x128 < canonical min_dim 256)
+        // when the model entry has no resolution override:
+        let mut share_512 = parsed.clone();
+        share_512.width = Some(512);
+        share_512.height = Some(512);
+        share_512.advanced.insert(
+            "lowResStart".to_owned(),
+            json!({ "version": 1, "k": 3, "scale": 0.25 }),
+        );
+        let flux_entry = json!({
+            "id": "flux_dev",
+            "defaults": { "steps": 28 },
+            "features": { "low_res_start": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let revalidated = revalidate_portable_import(&share_512, &flux_entry);
+        assert_eq!(revalidated.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+        assert!(!revalidated.advanced.contains_key("lowResStart"));
+        assert!(revalidated
+            .omitted
+            .contains(&OMITTED_LOW_RES_START.to_owned()));
     }
 }

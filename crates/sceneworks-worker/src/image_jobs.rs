@@ -1140,6 +1140,83 @@ async fn run_image_generate_job_unexplained(
     Ok(())
 }
 
+/// Extract or convert a [`sceneworks_core::execution_receipt::LowResStartReceipt`] from a
+/// completed image fact (`serde_json::Value`) or job result map.
+pub(crate) fn extract_low_res_start_receipt_value(
+    fact: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if let Some(direct) = fact
+        .get("workerLowResStartReceipt")
+        .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartReceipt"))
+    {
+        return Some(direct.clone());
+    }
+    let report = fact
+        .get(sceneworks_core::options::low_res_start::LOW_RES_START_REPORT_KEY)
+        .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartExecutionReport"))?;
+    let obj = report.as_object()?;
+    let version = obj
+        .get("version")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let k = obj.get("k")?.as_u64().and_then(|v| u32::try_from(v).ok())?;
+    let executed_steps = obj
+        .get("executed_steps")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let scale = (obj.get("scale")?.as_f64()? * 1e6).round() / 1e6;
+    let low_w = obj
+        .get("low_width")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let low_h = obj
+        .get("low_height")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let full_w = obj
+        .get("full_width")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let full_h = obj
+        .get("full_height")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let target_pass = report
+        .pointer("/estimate_provenance/pass_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0);
+    let estimator = obj.get("estimator")?.as_str()?.to_owned();
+    let transition_arithmetic = obj
+        .get("transition_arithmetic_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(sceneworks_core::execution_receipt::LOW_RES_START_TRANSITION_ARITHMETIC_V1)
+        .to_owned();
+    let transition_seed_scheme = obj
+        .get("transition_seed_derivation_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(sceneworks_core::execution_receipt::LOW_RES_START_TRANSITION_SEED_SCHEME_V1)
+        .to_owned();
+    let receipt = sceneworks_core::execution_receipt::LowResStartReceipt {
+        version,
+        k,
+        executed_steps,
+        scale,
+        low_w,
+        low_h,
+        full_w,
+        full_h,
+        target_pass,
+        estimator,
+        schedule_policy: sceneworks_core::execution_receipt::LOW_RES_START_SCHEDULE_POLICY_V1
+            .to_owned(),
+        transition_arithmetic,
+        transition_seed_scheme,
+        selected_rung: None,
+    };
+    serde_json::to_value(receipt).ok()
+}
+
 /// Build the output map from files already written by this worker, after all
 /// inline variants are appended and before the terminal POST. A provider report
 /// belongs to the asset's producing render; request settings and sidecars never
@@ -1298,11 +1375,7 @@ fn image_execution_receipt(
         stages: Vec::new(),
         low_res_start: asset_writes
             .first()
-            .and_then(|fact| {
-                fact.get("workerLowResStartReceipt")
-                    .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartReceipt"))
-            })
-            .cloned()
+            .and_then(extract_low_res_start_receipt_value)
             .map(serde_json::from_value)
             .transpose()
             .map_err(WorkerError::Json)?,
@@ -1335,6 +1408,75 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
         "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
     })];
     assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+
+    // End-to-end receipt test using actual lane-produced lowResStartExecutionReport facts:
+    let mut lane_facts = crate::JsonObject::new();
+    lane_facts.insert("assetId".into(), serde_json::json!("asset-one"));
+    lane_facts.insert("index".into(), serde_json::json!(0));
+    lane_facts.insert(
+        "mediaPath".into(),
+        serde_json::json!("assets/images/render.png"),
+    );
+    #[cfg(native_lane)]
+    {
+        let resolved_plan = gen_core::LowResStartSpec::new(8, Some(0.5))
+            .with_estimate_source(gen_core::EstimateSource::EndpointEvaluation)
+            .resolve_geometry("flux1_dev", 1024, 1024, 28, 8, 2, 16, 256)
+            .unwrap();
+        let sigmas: Vec<f32> = (0..=28).map(|i| 1.0 - (i as f32 / 28.0)).collect();
+        let report = resolved_plan
+            .execution_report(
+                0,
+                &sigmas,
+                gen_core::sampling::Solver::Euler,
+                "embedded_guidance",
+                3.5,
+                "base_dit",
+                "bf16",
+                2,
+                1,
+                16,
+                64,
+            )
+            .unwrap();
+        lane_controls::record_low_res_start_execution_report(&mut lane_facts, Some(&report));
+    }
+    #[cfg(not(native_lane))]
+    {
+        lane_facts.insert(
+            "lowResStartExecutionReport".into(),
+            serde_json::json!({
+                "recipe_id": "low_res_start",
+                "version": 1,
+                "k": 8,
+                "executed_steps": 28,
+                "scale": 0.5,
+                "low_width": 512,
+                "low_height": 512,
+                "full_width": 1024,
+                "full_height": 1024,
+                "estimator": "endpoint_evaluation_v1",
+                "estimate_provenance": { "pass_index": 0 },
+                "transition_arithmetic_id": "unpack_f32_bilinear_half_pixel_clamp_renoise_repack_v1",
+                "transition_seed_derivation_id": "low_res_start_transition_v1"
+            }),
+        );
+    }
+    let low_res_receipt =
+        image_execution_receipt(project.path(), &[serde_json::Value::Object(lane_facts)], 1)
+            .unwrap();
+    let recorded_low_res = low_res_receipt
+        .low_res_start
+        .expect("lane-produced low_res_start report must populate receipt.low_res_start");
+    assert_eq!(recorded_low_res.version, 1);
+    assert_eq!(recorded_low_res.k, 8);
+    assert_eq!(recorded_low_res.executed_steps, 28);
+    assert_eq!(recorded_low_res.scale, 0.5);
+    assert_eq!(recorded_low_res.low_w, 512);
+    assert_eq!(recorded_low_res.low_h, 512);
+    assert_eq!(recorded_low_res.full_w, 1024);
+    assert_eq!(recorded_low_res.full_h, 1024);
+    assert_eq!(recorded_low_res.estimator, "endpoint_evaluation_v1");
 }
 
 #[cfg(all(test, native_lane))]

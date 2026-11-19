@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(async () => ({})) }));
 import { currentCandidate } from "../testUtils/catalogBaseline/candidate.js";
 import { change, click, mount, submissionButton } from "../testUtils/catalogBaseline/harness.jsx";
+import { applyPresetDefault, clearPresetDefault } from "../presetUtils.js";
 import {
+  lowResStartDefaults,
   lowResStartFromRecipe,
   resolveLowResStart,
   resolveLowResStartDimensions,
@@ -192,5 +194,19 @@ describe("SW-6942 · Low-res start controls & M6 public catalog population prese
       k: 8,
       scale: 0.5,
     });
+
+    // Apply-then-clear preset round-trip preserves snapshot identity and restores previous disabled state:
+    let state = lowResStartDefaults();
+    const setLowResStart = (updater) => {
+      state = typeof updater === "function" ? updater(state) : updater;
+    };
+    const snapshots = { current: {} };
+    const normalizedPresetLowRes = lowResStartFromRecipe({ version: 1, k: 8, scale: 0.5 });
+    applyPresetDefault(snapshots, "lowResStart", setLowResStart, normalizedPresetLowRes);
+    expect(state).toBe(normalizedPresetLowRes);
+    expect(state.enabled).toBe(true);
+    clearPresetDefault(setLowResStart, snapshots, "lowResStart");
+    expect(state).toEqual(lowResStartDefaults());
+    expect(state.enabled).toBe(false);
   });
 });

@@ -538,8 +538,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -775,8 +775,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -940,8 +940,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -1177,8 +1177,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -1342,8 +1342,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -1579,8 +1579,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -1732,8 +1732,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -1974,8 +1974,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -2126,8 +2126,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -2368,8 +2368,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -2535,8 +2535,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -2772,8 +2772,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -2932,8 +2932,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -3169,8 +3169,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -3337,8 +3337,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -3579,8 +3579,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -3743,8 +3743,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -3980,8 +3980,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -4144,8 +4144,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -4381,8 +4381,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -4545,8 +4545,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -4782,8 +4782,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -4936,16 +4936,16 @@
             "version": 1,
             "class": "recipe",
             "classification": "recipe",
-            "applicable": true,
-            "supported": true,
-            "available": true,
+            "applicable": false,
+            "supported": false,
+            "available": false,
             "parameter_schema": {
               "version": 1,
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -4957,24 +4957,7 @@
                 "default": 12
               }
             },
-            "parameters": {
-              "version": 1,
-              "strength": {
-                "type": "float_range",
-                "required": false,
-                "min": 0,
-                "max": 1,
-                "inclusive": true,
-                "default": 0.3
-              },
-              "steps": {
-                "type": "integer_range",
-                "required": true,
-                "min": 1,
-                "max": 1000,
-                "default": 12
-              }
-            },
+            "parameters": null,
             "conflicts": [],
             "requires": [
               "render_plan",
@@ -4992,24 +4975,31 @@
               "introduces_pass_boundary": true,
               "retains_single_pass_schedule": false
             },
-            "reasons": [],
-            "inapplicability_reasons": [],
+            "reasons": [
+              {
+                "code": "missing_produced_reference_support",
+                "message": "route 'flux1_schnell' does not accept a ProducedReference pass-1 input"
+              }
+            ],
+            "inapplicability_reasons": [
+              "missing_produced_reference_support"
+            ],
             "conditioned_routes": {
               "flux1_schnell_ip_adapter": {
                 "id": "hires_fix",
                 "version": 1,
                 "class": "recipe",
                 "classification": "recipe",
-                "applicable": false,
-                "supported": false,
-                "available": false,
+                "applicable": true,
+                "supported": true,
+                "available": true,
                 "parameter_schema": {
                   "version": 1,
                   "strength": {
                     "type": "float_range",
                     "required": false,
-                    "min": 0,
-                    "max": 1,
+                    "min": 0.0,
+                    "max": 1.0,
                     "inclusive": true,
                     "default": 0.3
                   },
@@ -5021,7 +5011,24 @@
                     "default": 12
                   }
                 },
-                "parameters": null,
+                "parameters": {
+                  "version": 1,
+                  "strength": {
+                    "type": "float_range",
+                    "required": false,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "inclusive": true,
+                    "default": 0.3
+                  },
+                  "steps": {
+                    "type": "integer_range",
+                    "required": true,
+                    "min": 1,
+                    "max": 1000,
+                    "default": 12
+                  }
+                },
                 "conflicts": [],
                 "requires": [
                   "render_plan",
@@ -5039,15 +5046,8 @@
                   "introduces_pass_boundary": true,
                   "retains_single_pass_schedule": false
                 },
-                "reasons": [
-                  {
-                    "code": "missing_produced_reference_support",
-                    "message": "route 'flux1_schnell_ip_adapter' does not accept a ProducedReference pass-1 input"
-                  }
-                ],
-                "inapplicability_reasons": [
-                  "missing_produced_reference_support"
-                ]
+                "reasons": [],
+                "inapplicability_reasons": []
               }
             }
           },
@@ -5108,9 +5108,9 @@
                 "version": 1,
                 "class": "equivalent",
                 "classification": "equivalent",
-                "applicable": false,
-                "supported": false,
-                "available": false,
+                "applicable": true,
+                "supported": true,
+                "available": true,
                 "parameter_schema": {
                   "version": 1,
                   "step": {
@@ -5118,10 +5118,23 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 3,
+                    "default_executed_steps": 4
                   }
                 },
-                "parameters": null,
+                "parameters": {
+                  "version": 1,
+                  "step": {
+                    "type": "step_index",
+                    "required": true,
+                    "min": 1,
+                    "max_exclusive": "executed_steps",
+                    "range": "1..executed_steps",
+                    "max": 3,
+                    "default_executed_steps": 4
+                  }
+                },
                 "conflicts": [
                   "krea_multiphase"
                 ],
@@ -5139,15 +5152,8 @@
                   "introduces_pass_boundary": false,
                   "retains_single_pass_schedule": true
                 },
-                "reasons": [
-                  {
-                    "code": "missing_packed_image_trajectory",
-                    "message": "route 'flux1_schnell_ip_adapter' does not compile a packed image trajectory"
-                  }
-                ],
-                "inapplicability_reasons": [
-                  "missing_packed_image_trajectory"
-                ]
+                "reasons": [],
+                "inapplicability_reasons": []
               }
             }
           },
@@ -5344,7 +5350,9 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 3,
+                    "default_executed_steps": 4
                   },
                   "scale": {
                     "type": "float_range",
@@ -5383,26 +5391,11 @@
                 },
                 "reasons": [
                   {
-                    "code": "missing_packed_image_trajectory",
-                    "message": "route 'flux1_schnell_ip_adapter' does not compile a pass-0 packed image trajectory"
-                  },
-                  {
-                    "code": "missing_spatial_unpack_repack",
-                    "message": "route 'flux1_schnell_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-                  },
-                  {
-                    "code": "missing_clean_estimate_renoise_transition",
-                    "message": "route 'flux1_schnell_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-                  },
-                  {
                     "code": "conflicts_with_pass0_reference_conditioning",
                     "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
-                  "missing_packed_image_trajectory",
-                  "missing_spatial_unpack_repack",
-                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_reference_conditioning"
                 ]
               }
@@ -5421,8 +5414,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -5432,8 +5425,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -5469,8 +5462,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -5480,8 +5473,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -5632,7 +5625,9 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 3,
+                    "default_executed_steps": 4
                   }
                 },
                 "parameters": null,
@@ -5669,10 +5664,10 @@
           "default_layers": [
             28
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -5715,16 +5710,16 @@
             "version": 1,
             "class": "recipe",
             "classification": "recipe",
-            "applicable": true,
-            "supported": true,
-            "available": true,
+            "applicable": false,
+            "supported": false,
+            "available": false,
             "parameter_schema": {
               "version": 1,
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -5736,24 +5731,7 @@
                 "default": 12
               }
             },
-            "parameters": {
-              "version": 1,
-              "strength": {
-                "type": "float_range",
-                "required": false,
-                "min": 0,
-                "max": 1,
-                "inclusive": true,
-                "default": 0.3
-              },
-              "steps": {
-                "type": "integer_range",
-                "required": true,
-                "min": 1,
-                "max": 1000,
-                "default": 12
-              }
-            },
+            "parameters": null,
             "conflicts": [],
             "requires": [
               "render_plan",
@@ -5771,8 +5749,15 @@
               "introduces_pass_boundary": true,
               "retains_single_pass_schedule": false
             },
-            "reasons": [],
-            "inapplicability_reasons": [],
+            "reasons": [
+              {
+                "code": "missing_produced_reference_support",
+                "message": "route 'flux1_dev' does not accept a ProducedReference pass-1 input"
+              }
+            ],
+            "inapplicability_reasons": [
+              "missing_produced_reference_support"
+            ],
             "conditioned_routes": {
               "flux1_dev_control": {
                 "id": "hires_fix",
@@ -5787,8 +5772,8 @@
                   "strength": {
                     "type": "float_range",
                     "required": false,
-                    "min": 0,
-                    "max": 1,
+                    "min": 0.0,
+                    "max": 1.0,
                     "inclusive": true,
                     "default": 0.3
                   },
@@ -5833,16 +5818,16 @@
                 "version": 1,
                 "class": "recipe",
                 "classification": "recipe",
-                "applicable": false,
-                "supported": false,
-                "available": false,
+                "applicable": true,
+                "supported": true,
+                "available": true,
                 "parameter_schema": {
                   "version": 1,
                   "strength": {
                     "type": "float_range",
                     "required": false,
-                    "min": 0,
-                    "max": 1,
+                    "min": 0.0,
+                    "max": 1.0,
                     "inclusive": true,
                     "default": 0.3
                   },
@@ -5854,7 +5839,24 @@
                     "default": 12
                   }
                 },
-                "parameters": null,
+                "parameters": {
+                  "version": 1,
+                  "strength": {
+                    "type": "float_range",
+                    "required": false,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "inclusive": true,
+                    "default": 0.3
+                  },
+                  "steps": {
+                    "type": "integer_range",
+                    "required": true,
+                    "min": 1,
+                    "max": 1000,
+                    "default": 12
+                  }
+                },
                 "conflicts": [],
                 "requires": [
                   "render_plan",
@@ -5872,15 +5874,8 @@
                   "introduces_pass_boundary": true,
                   "retains_single_pass_schedule": false
                 },
-                "reasons": [
-                  {
-                    "code": "missing_produced_reference_support",
-                    "message": "route 'flux1_dev_ip_adapter' does not accept a ProducedReference pass-1 input"
-                  }
-                ],
-                "inapplicability_reasons": [
-                  "missing_produced_reference_support"
-                ]
+                "reasons": [],
+                "inapplicability_reasons": []
               },
               "flux1_dev_pulid": {
                 "id": "hires_fix",
@@ -5895,8 +5890,8 @@
                   "strength": {
                     "type": "float_range",
                     "required": false,
-                    "min": 0,
-                    "max": 1,
+                    "min": 0.0,
+                    "max": 1.0,
                     "inclusive": true,
                     "default": 0.3
                   },
@@ -5913,8 +5908,8 @@
                   "strength": {
                     "type": "float_range",
                     "required": false,
-                    "min": 0,
-                    "max": 1,
+                    "min": 0.0,
+                    "max": 1.0,
                     "inclusive": true,
                     "default": 0.3
                   },
@@ -6057,9 +6052,9 @@
                 "version": 1,
                 "class": "equivalent",
                 "classification": "equivalent",
-                "applicable": false,
-                "supported": false,
-                "available": false,
+                "applicable": true,
+                "supported": true,
+                "available": true,
                 "parameter_schema": {
                   "version": 1,
                   "step": {
@@ -6067,10 +6062,23 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 24,
+                    "default_executed_steps": 25
                   }
                 },
-                "parameters": null,
+                "parameters": {
+                  "version": 1,
+                  "step": {
+                    "type": "step_index",
+                    "required": true,
+                    "min": 1,
+                    "max_exclusive": "executed_steps",
+                    "range": "1..executed_steps",
+                    "max": 24,
+                    "default_executed_steps": 25
+                  }
+                },
                 "conflicts": [
                   "krea_multiphase"
                 ],
@@ -6088,15 +6096,8 @@
                   "introduces_pass_boundary": false,
                   "retains_single_pass_schedule": true
                 },
-                "reasons": [
-                  {
-                    "code": "missing_packed_image_trajectory",
-                    "message": "route 'flux1_dev_ip_adapter' does not compile a packed image trajectory"
-                  }
-                ],
-                "inapplicability_reasons": [
-                  "missing_packed_image_trajectory"
-                ]
+                "reasons": [],
+                "inapplicability_reasons": []
               },
               "flux1_dev_pulid": {
                 "id": "inert_phase_split",
@@ -6509,7 +6510,9 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 24,
+                    "default_executed_steps": 25
                   },
                   "scale": {
                     "type": "float_range",
@@ -6548,26 +6551,11 @@
                 },
                 "reasons": [
                   {
-                    "code": "missing_packed_image_trajectory",
-                    "message": "route 'flux1_dev_ip_adapter' does not compile a pass-0 packed image trajectory"
-                  },
-                  {
-                    "code": "missing_spatial_unpack_repack",
-                    "message": "route 'flux1_dev_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-                  },
-                  {
-                    "code": "missing_clean_estimate_renoise_transition",
-                    "message": "route 'flux1_dev_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-                  },
-                  {
                     "code": "conflicts_with_pass0_reference_conditioning",
                     "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
-                  "missing_packed_image_trajectory",
-                  "missing_spatial_unpack_repack",
-                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_reference_conditioning"
                 ]
               },
@@ -6650,8 +6638,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -6661,8 +6649,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -6698,8 +6686,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -6709,8 +6697,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -6746,8 +6734,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -6757,8 +6745,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -6794,8 +6782,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -6805,8 +6793,8 @@
                   "scale": {
                     "type": "float_range",
                     "required": true,
-                    "min": 0,
-                    "max": 15,
+                    "min": 0.0,
+                    "max": 15.0,
                     "inclusive": true,
                     "default": 1.5
                   }
@@ -7066,7 +7054,9 @@
                     "required": true,
                     "min": 1,
                     "max_exclusive": "executed_steps",
-                    "range": "1..executed_steps"
+                    "range": "1..executed_steps",
+                    "max": 24,
+                    "default_executed_steps": 25
                   }
                 },
                 "parameters": null,
@@ -7148,10 +7138,10 @@
           "default_layers": [
             28
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -7206,8 +7196,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -7443,8 +7433,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -7454,8 +7444,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -7565,10 +7555,10 @@
           "default_layers": [
             20
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -7623,8 +7613,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -7860,8 +7850,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -7871,8 +7861,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -7982,10 +7972,10 @@
           "default_layers": [
             28
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -8027,8 +8017,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -8264,8 +8254,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -8275,8 +8265,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -8386,10 +8376,10 @@
           "default_layers": [
             19
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -8431,8 +8421,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -8668,8 +8658,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -8679,8 +8669,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -8790,10 +8780,10 @@
           "default_layers": [
             19
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -8832,8 +8822,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -9069,8 +9059,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -9219,8 +9209,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -9456,8 +9446,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -9604,8 +9594,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -9841,8 +9831,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -10010,8 +10000,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -10247,8 +10237,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -10415,8 +10405,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -10652,8 +10642,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -10663,8 +10653,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -10774,10 +10764,10 @@
           "default_layers": [
             14
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -10834,8 +10824,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -11077,8 +11067,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -11088,8 +11078,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -11199,10 +11189,10 @@
           "default_layers": [
             14
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -11260,8 +11250,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -11502,8 +11492,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -11513,8 +11503,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -11624,10 +11614,10 @@
           "default_layers": [
             14
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -11685,8 +11675,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -11927,8 +11917,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -11938,8 +11928,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -12049,10 +12039,10 @@
           "default_layers": [
             14
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -12108,8 +12098,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -12350,8 +12340,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -12517,8 +12507,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -12754,8 +12744,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -12921,8 +12911,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -13158,8 +13148,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -13321,8 +13311,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -13563,8 +13553,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -13726,8 +13716,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -13968,8 +13958,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -14113,8 +14103,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -14350,8 +14340,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -14495,8 +14485,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -14732,8 +14722,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -14877,8 +14867,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -15114,8 +15104,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -15262,8 +15252,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -15504,8 +15494,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -15652,8 +15642,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -15894,8 +15884,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -16042,8 +16032,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -16284,8 +16274,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -16434,8 +16424,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -16676,8 +16666,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -16827,8 +16817,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -17064,8 +17054,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -17075,8 +17065,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -17186,10 +17176,10 @@
           "default_layers": [
             25
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.6600000262260437,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -17220,8 +17210,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -17462,8 +17452,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -17610,8 +17600,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -17847,8 +17837,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -17858,8 +17848,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -17969,10 +17959,10 @@
           "default_layers": [
             20
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 2.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -18009,8 +17999,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -18246,8 +18236,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -18257,8 +18247,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -18368,10 +18358,10 @@
           "default_layers": [
             20
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 2.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -18423,8 +18413,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -18660,8 +18650,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -18671,8 +18661,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -18782,10 +18772,10 @@
           "default_layers": [
             30
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -18843,8 +18833,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -19080,8 +19070,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -19091,8 +19081,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -19202,10 +19192,10 @@
           "default_layers": [
             16
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -19263,8 +19253,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -19500,8 +19490,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -19511,8 +19501,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -19622,10 +19612,10 @@
           "default_layers": [
             16
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -19678,8 +19668,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -19915,8 +19905,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -20063,8 +20053,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -20300,8 +20290,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -20452,8 +20442,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -20694,8 +20684,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -20861,8 +20851,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -21098,8 +21088,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -21265,8 +21255,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -21502,8 +21492,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -21669,8 +21659,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -21906,8 +21896,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -22075,8 +22065,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -22290,13 +22280,18 @@
               {
                 "code": "missing_clean_estimate_renoise_transition",
                 "message": "route 'sdxl' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
+                "code": "conflicts_with_pass0_control_conditioning",
+                "message": "route 'sdxl' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
               "missing_render_plan",
               "missing_packed_image_trajectory",
               "missing_spatial_unpack_repack",
-              "missing_clean_estimate_renoise_transition"
+              "missing_clean_estimate_renoise_transition",
+              "conflicts_with_pass0_control_conditioning"
             ]
           },
           "pag": {
@@ -22312,8 +22307,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -22464,8 +22459,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -22706,8 +22701,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -22858,8 +22853,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -23100,8 +23095,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -23252,8 +23247,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -23494,8 +23489,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -23642,8 +23637,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -23879,8 +23874,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -24027,8 +24022,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -24264,8 +24259,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -24412,8 +24407,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -24649,8 +24644,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -24804,8 +24799,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -25046,8 +25041,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -25204,8 +25199,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -25446,8 +25441,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -25597,8 +25592,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -25839,8 +25834,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -25992,8 +25987,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -26234,8 +26229,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -26385,8 +26380,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -26627,8 +26622,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -26778,8 +26773,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -27020,8 +27015,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -27184,8 +27179,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -27421,8 +27416,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -27432,8 +27427,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -27543,10 +27538,10 @@
           "default_layers": [
             15
           ],
-          "default_start": 0,
+          "default_start": 0.0,
           "default_stop": 0.75,
           "recommended_scale": 1.2000000476837158,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       },
       {
@@ -27599,8 +27594,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -27836,8 +27831,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -27847,8 +27842,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -27958,10 +27953,10 @@
           "default_layers": [
             15
           ],
-          "default_start": 0,
-          "default_stop": 1,
+          "default_start": 0.0,
+          "default_stop": 1.0,
           "recommended_scale": 1.5,
-          "max_scale": 15
+          "max_scale": 15.0
         }
       }
     ],
@@ -27980,8 +27975,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -28217,8 +28212,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -28344,8 +28339,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -28581,8 +28576,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -28708,8 +28703,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -28945,8 +28940,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -29072,8 +29067,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -29314,8 +29309,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -29441,8 +29436,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -29683,8 +29678,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -29810,8 +29805,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -30047,8 +30042,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -30174,8 +30169,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -30416,8 +30411,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -30543,8 +30538,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -30780,8 +30775,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -30907,8 +30902,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -31144,8 +31139,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -31271,8 +31266,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -31508,8 +31503,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -31635,8 +31630,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -31872,8 +31867,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -31991,16 +31986,16 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": true,
-          "supported": true,
-          "available": true,
+          "applicable": false,
+          "supported": false,
+          "available": false,
           "parameter_schema": {
             "version": 1,
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -32012,24 +32007,7 @@
               "default": 12
             }
           },
-          "parameters": {
-            "version": 1,
-            "strength": {
-              "type": "float_range",
-              "required": false,
-              "min": 0,
-              "max": 1,
-              "inclusive": true,
-              "default": 0.3
-            },
-            "steps": {
-              "type": "integer_range",
-              "required": true,
-              "min": 1,
-              "max": 1000,
-              "default": 12
-            }
-          },
+          "parameters": null,
           "conflicts": [],
           "requires": [
             "render_plan",
@@ -32047,8 +32025,15 @@
             "introduces_pass_boundary": true,
             "retains_single_pass_schedule": false
           },
-          "reasons": [],
-          "inapplicability_reasons": [],
+          "reasons": [
+            {
+              "code": "missing_produced_reference_support",
+              "message": "route 'flux1_dev' does not accept a ProducedReference pass-1 input"
+            }
+          ],
+          "inapplicability_reasons": [
+            "missing_produced_reference_support"
+          ],
           "conditioned_routes": {
             "flux1_dev_control": {
               "id": "hires_fix",
@@ -32063,8 +32048,8 @@
                 "strength": {
                   "type": "float_range",
                   "required": false,
-                  "min": 0,
-                  "max": 1,
+                  "min": 0.0,
+                  "max": 1.0,
                   "inclusive": true,
                   "default": 0.3
                 },
@@ -32109,16 +32094,16 @@
               "version": 1,
               "class": "recipe",
               "classification": "recipe",
-              "applicable": false,
-              "supported": false,
-              "available": false,
+              "applicable": true,
+              "supported": true,
+              "available": true,
               "parameter_schema": {
                 "version": 1,
                 "strength": {
                   "type": "float_range",
                   "required": false,
-                  "min": 0,
-                  "max": 1,
+                  "min": 0.0,
+                  "max": 1.0,
                   "inclusive": true,
                   "default": 0.3
                 },
@@ -32130,7 +32115,24 @@
                   "default": 12
                 }
               },
-              "parameters": null,
+              "parameters": {
+                "version": 1,
+                "strength": {
+                  "type": "float_range",
+                  "required": false,
+                  "min": 0.0,
+                  "max": 1.0,
+                  "inclusive": true,
+                  "default": 0.3
+                },
+                "steps": {
+                  "type": "integer_range",
+                  "required": true,
+                  "min": 1,
+                  "max": 1000,
+                  "default": 12
+                }
+              },
               "conflicts": [],
               "requires": [
                 "render_plan",
@@ -32148,15 +32150,8 @@
                 "introduces_pass_boundary": true,
                 "retains_single_pass_schedule": false
               },
-              "reasons": [
-                {
-                  "code": "missing_produced_reference_support",
-                  "message": "route 'flux1_dev_ip_adapter' does not accept a ProducedReference pass-1 input"
-                }
-              ],
-              "inapplicability_reasons": [
-                "missing_produced_reference_support"
-              ]
+              "reasons": [],
+              "inapplicability_reasons": []
             },
             "flux1_dev_pulid": {
               "id": "hires_fix",
@@ -32171,8 +32166,8 @@
                 "strength": {
                   "type": "float_range",
                   "required": false,
-                  "min": 0,
-                  "max": 1,
+                  "min": 0.0,
+                  "max": 1.0,
                   "inclusive": true,
                   "default": 0.3
                 },
@@ -32189,8 +32184,8 @@
                 "strength": {
                   "type": "float_range",
                   "required": false,
-                  "min": 0,
-                  "max": 1,
+                  "min": 0.0,
+                  "max": 1.0,
                   "inclusive": true,
                   "default": 0.3
                 },
@@ -32333,9 +32328,9 @@
               "version": 1,
               "class": "equivalent",
               "classification": "equivalent",
-              "applicable": false,
-              "supported": false,
-              "available": false,
+              "applicable": true,
+              "supported": true,
+              "available": true,
               "parameter_schema": {
                 "version": 1,
                 "step": {
@@ -32343,10 +32338,23 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 24,
+                  "default_executed_steps": 25
                 }
               },
-              "parameters": null,
+              "parameters": {
+                "version": 1,
+                "step": {
+                  "type": "step_index",
+                  "required": true,
+                  "min": 1,
+                  "max_exclusive": "executed_steps",
+                  "range": "1..executed_steps",
+                  "max": 24,
+                  "default_executed_steps": 25
+                }
+              },
               "conflicts": [
                 "krea_multiphase"
               ],
@@ -32364,15 +32372,8 @@
                 "introduces_pass_boundary": false,
                 "retains_single_pass_schedule": true
               },
-              "reasons": [
-                {
-                  "code": "missing_packed_image_trajectory",
-                  "message": "route 'flux1_dev_ip_adapter' does not compile a packed image trajectory"
-                }
-              ],
-              "inapplicability_reasons": [
-                "missing_packed_image_trajectory"
-              ]
+              "reasons": [],
+              "inapplicability_reasons": []
             },
             "flux1_dev_pulid": {
               "id": "inert_phase_split",
@@ -32785,7 +32786,9 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 24,
+                  "default_executed_steps": 25
                 },
                 "scale": {
                   "type": "float_range",
@@ -32824,26 +32827,11 @@
               },
               "reasons": [
                 {
-                  "code": "missing_packed_image_trajectory",
-                  "message": "route 'flux1_dev_ip_adapter' does not compile a pass-0 packed image trajectory"
-                },
-                {
-                  "code": "missing_spatial_unpack_repack",
-                  "message": "route 'flux1_dev_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-                },
-                {
-                  "code": "missing_clean_estimate_renoise_transition",
-                  "message": "route 'flux1_dev_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-                },
-                {
                   "code": "conflicts_with_pass0_reference_conditioning",
                   "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
-                "missing_packed_image_trajectory",
-                "missing_spatial_unpack_repack",
-                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_reference_conditioning"
               ]
             },
@@ -32926,8 +32914,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -32937,8 +32925,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -32974,8 +32962,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -32985,8 +32973,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -33022,8 +33010,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -33033,8 +33021,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -33070,8 +33058,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -33081,8 +33069,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -33342,7 +33330,9 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 24,
+                  "default_executed_steps": 25
                 }
               },
               "parameters": null,
@@ -33432,8 +33422,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -33652,8 +33642,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -33663,8 +33653,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -33771,16 +33761,16 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": false,
-          "supported": false,
-          "available": false,
+          "applicable": true,
+          "supported": true,
+          "available": true,
           "parameter_schema": {
             "version": 1,
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -33792,7 +33782,24 @@
               "default": 12
             }
           },
-          "parameters": null,
+          "parameters": {
+            "version": 1,
+            "strength": {
+              "type": "float_range",
+              "required": false,
+              "min": 0.0,
+              "max": 1.0,
+              "inclusive": true,
+              "default": 0.3
+            },
+            "steps": {
+              "type": "integer_range",
+              "required": true,
+              "min": 1,
+              "max": 1000,
+              "default": 12
+            }
+          },
           "conflicts": [],
           "requires": [
             "render_plan",
@@ -33810,24 +33817,17 @@
             "introduces_pass_boundary": true,
             "retains_single_pass_schedule": false
           },
-          "reasons": [
-            {
-              "code": "missing_produced_reference_support",
-              "message": "route 'flux1_dev_ip_adapter' does not accept a ProducedReference pass-1 input"
-            }
-          ],
-          "inapplicability_reasons": [
-            "missing_produced_reference_support"
-          ]
+          "reasons": [],
+          "inapplicability_reasons": []
         },
         "inert_phase_split": {
           "id": "inert_phase_split",
           "version": 1,
           "class": "equivalent",
           "classification": "equivalent",
-          "applicable": false,
-          "supported": false,
-          "available": false,
+          "applicable": true,
+          "supported": true,
+          "available": true,
           "parameter_schema": {
             "version": 1,
             "step": {
@@ -33835,10 +33835,23 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 24,
+              "default_executed_steps": 25
             }
           },
-          "parameters": null,
+          "parameters": {
+            "version": 1,
+            "step": {
+              "type": "step_index",
+              "required": true,
+              "min": 1,
+              "max_exclusive": "executed_steps",
+              "range": "1..executed_steps",
+              "max": 24,
+              "default_executed_steps": 25
+            }
+          },
           "conflicts": [
             "krea_multiphase"
           ],
@@ -33856,15 +33869,8 @@
             "introduces_pass_boundary": false,
             "retains_single_pass_schedule": true
           },
-          "reasons": [
-            {
-              "code": "missing_packed_image_trajectory",
-              "message": "route 'flux1_dev_ip_adapter' does not compile a packed image trajectory"
-            }
-          ],
-          "inapplicability_reasons": [
-            "missing_packed_image_trajectory"
-          ]
+          "reasons": [],
+          "inapplicability_reasons": []
         },
         "krea_multiphase": {
           "id": "krea_multiphase",
@@ -33931,7 +33937,9 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 24,
+              "default_executed_steps": 25
             },
             "scale": {
               "type": "float_range",
@@ -33970,26 +33978,11 @@
           },
           "reasons": [
             {
-              "code": "missing_packed_image_trajectory",
-              "message": "route 'flux1_dev_ip_adapter' does not compile a pass-0 packed image trajectory"
-            },
-            {
-              "code": "missing_spatial_unpack_repack",
-              "message": "route 'flux1_dev_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-            },
-            {
-              "code": "missing_clean_estimate_renoise_transition",
-              "message": "route 'flux1_dev_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-            },
-            {
               "code": "conflicts_with_pass0_reference_conditioning",
               "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
-            "missing_packed_image_trajectory",
-            "missing_spatial_unpack_repack",
-            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_reference_conditioning"
           ]
         },
@@ -34006,8 +33999,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -34017,8 +34010,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -34088,7 +34081,9 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 24,
+              "default_executed_steps": 25
             }
           },
           "parameters": null,
@@ -34131,8 +34126,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -34149,8 +34144,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -34361,8 +34356,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -34372,8 +34367,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -34480,16 +34475,16 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": true,
-          "supported": true,
-          "available": true,
+          "applicable": false,
+          "supported": false,
+          "available": false,
           "parameter_schema": {
             "version": 1,
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -34501,24 +34496,7 @@
               "default": 12
             }
           },
-          "parameters": {
-            "version": 1,
-            "strength": {
-              "type": "float_range",
-              "required": false,
-              "min": 0,
-              "max": 1,
-              "inclusive": true,
-              "default": 0.3
-            },
-            "steps": {
-              "type": "integer_range",
-              "required": true,
-              "min": 1,
-              "max": 1000,
-              "default": 12
-            }
-          },
+          "parameters": null,
           "conflicts": [],
           "requires": [
             "render_plan",
@@ -34536,24 +34514,31 @@
             "introduces_pass_boundary": true,
             "retains_single_pass_schedule": false
           },
-          "reasons": [],
-          "inapplicability_reasons": [],
+          "reasons": [
+            {
+              "code": "missing_produced_reference_support",
+              "message": "route 'flux1_schnell' does not accept a ProducedReference pass-1 input"
+            }
+          ],
+          "inapplicability_reasons": [
+            "missing_produced_reference_support"
+          ],
           "conditioned_routes": {
             "flux1_schnell_ip_adapter": {
               "id": "hires_fix",
               "version": 1,
               "class": "recipe",
               "classification": "recipe",
-              "applicable": false,
-              "supported": false,
-              "available": false,
+              "applicable": true,
+              "supported": true,
+              "available": true,
               "parameter_schema": {
                 "version": 1,
                 "strength": {
                   "type": "float_range",
                   "required": false,
-                  "min": 0,
-                  "max": 1,
+                  "min": 0.0,
+                  "max": 1.0,
                   "inclusive": true,
                   "default": 0.3
                 },
@@ -34565,7 +34550,24 @@
                   "default": 12
                 }
               },
-              "parameters": null,
+              "parameters": {
+                "version": 1,
+                "strength": {
+                  "type": "float_range",
+                  "required": false,
+                  "min": 0.0,
+                  "max": 1.0,
+                  "inclusive": true,
+                  "default": 0.3
+                },
+                "steps": {
+                  "type": "integer_range",
+                  "required": true,
+                  "min": 1,
+                  "max": 1000,
+                  "default": 12
+                }
+              },
               "conflicts": [],
               "requires": [
                 "render_plan",
@@ -34583,15 +34585,8 @@
                 "introduces_pass_boundary": true,
                 "retains_single_pass_schedule": false
               },
-              "reasons": [
-                {
-                  "code": "missing_produced_reference_support",
-                  "message": "route 'flux1_schnell_ip_adapter' does not accept a ProducedReference pass-1 input"
-                }
-              ],
-              "inapplicability_reasons": [
-                "missing_produced_reference_support"
-              ]
+              "reasons": [],
+              "inapplicability_reasons": []
             }
           }
         },
@@ -34652,9 +34647,9 @@
               "version": 1,
               "class": "equivalent",
               "classification": "equivalent",
-              "applicable": false,
-              "supported": false,
-              "available": false,
+              "applicable": true,
+              "supported": true,
+              "available": true,
               "parameter_schema": {
                 "version": 1,
                 "step": {
@@ -34662,10 +34657,23 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 3,
+                  "default_executed_steps": 4
                 }
               },
-              "parameters": null,
+              "parameters": {
+                "version": 1,
+                "step": {
+                  "type": "step_index",
+                  "required": true,
+                  "min": 1,
+                  "max_exclusive": "executed_steps",
+                  "range": "1..executed_steps",
+                  "max": 3,
+                  "default_executed_steps": 4
+                }
+              },
               "conflicts": [
                 "krea_multiphase"
               ],
@@ -34683,15 +34691,8 @@
                 "introduces_pass_boundary": false,
                 "retains_single_pass_schedule": true
               },
-              "reasons": [
-                {
-                  "code": "missing_packed_image_trajectory",
-                  "message": "route 'flux1_schnell_ip_adapter' does not compile a packed image trajectory"
-                }
-              ],
-              "inapplicability_reasons": [
-                "missing_packed_image_trajectory"
-              ]
+              "reasons": [],
+              "inapplicability_reasons": []
             }
           }
         },
@@ -34888,7 +34889,9 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 3,
+                  "default_executed_steps": 4
                 },
                 "scale": {
                   "type": "float_range",
@@ -34927,26 +34930,11 @@
               },
               "reasons": [
                 {
-                  "code": "missing_packed_image_trajectory",
-                  "message": "route 'flux1_schnell_ip_adapter' does not compile a pass-0 packed image trajectory"
-                },
-                {
-                  "code": "missing_spatial_unpack_repack",
-                  "message": "route 'flux1_schnell_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-                },
-                {
-                  "code": "missing_clean_estimate_renoise_transition",
-                  "message": "route 'flux1_schnell_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-                },
-                {
                   "code": "conflicts_with_pass0_reference_conditioning",
                   "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
-                "missing_packed_image_trajectory",
-                "missing_spatial_unpack_repack",
-                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_reference_conditioning"
               ]
             }
@@ -34965,8 +34953,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -34976,8 +34964,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -35013,8 +35001,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -35024,8 +35012,8 @@
                 "scale": {
                   "type": "float_range",
                   "required": true,
-                  "min": 0,
-                  "max": 15,
+                  "min": 0.0,
+                  "max": 15.0,
                   "inclusive": true,
                   "default": 1.5
                 }
@@ -35176,7 +35164,9 @@
                   "required": true,
                   "min": 1,
                   "max_exclusive": "executed_steps",
-                  "range": "1..executed_steps"
+                  "range": "1..executed_steps",
+                  "max": 3,
+                  "default_executed_steps": 4
                 }
               },
               "parameters": null,
@@ -35213,16 +35203,16 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": false,
-          "supported": false,
-          "available": false,
+          "applicable": true,
+          "supported": true,
+          "available": true,
           "parameter_schema": {
             "version": 1,
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -35234,7 +35224,24 @@
               "default": 12
             }
           },
-          "parameters": null,
+          "parameters": {
+            "version": 1,
+            "strength": {
+              "type": "float_range",
+              "required": false,
+              "min": 0.0,
+              "max": 1.0,
+              "inclusive": true,
+              "default": 0.3
+            },
+            "steps": {
+              "type": "integer_range",
+              "required": true,
+              "min": 1,
+              "max": 1000,
+              "default": 12
+            }
+          },
           "conflicts": [],
           "requires": [
             "render_plan",
@@ -35252,24 +35259,17 @@
             "introduces_pass_boundary": true,
             "retains_single_pass_schedule": false
           },
-          "reasons": [
-            {
-              "code": "missing_produced_reference_support",
-              "message": "route 'flux1_schnell_ip_adapter' does not accept a ProducedReference pass-1 input"
-            }
-          ],
-          "inapplicability_reasons": [
-            "missing_produced_reference_support"
-          ]
+          "reasons": [],
+          "inapplicability_reasons": []
         },
         "inert_phase_split": {
           "id": "inert_phase_split",
           "version": 1,
           "class": "equivalent",
           "classification": "equivalent",
-          "applicable": false,
-          "supported": false,
-          "available": false,
+          "applicable": true,
+          "supported": true,
+          "available": true,
           "parameter_schema": {
             "version": 1,
             "step": {
@@ -35277,10 +35277,23 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 3,
+              "default_executed_steps": 4
             }
           },
-          "parameters": null,
+          "parameters": {
+            "version": 1,
+            "step": {
+              "type": "step_index",
+              "required": true,
+              "min": 1,
+              "max_exclusive": "executed_steps",
+              "range": "1..executed_steps",
+              "max": 3,
+              "default_executed_steps": 4
+            }
+          },
           "conflicts": [
             "krea_multiphase"
           ],
@@ -35298,15 +35311,8 @@
             "introduces_pass_boundary": false,
             "retains_single_pass_schedule": true
           },
-          "reasons": [
-            {
-              "code": "missing_packed_image_trajectory",
-              "message": "route 'flux1_schnell_ip_adapter' does not compile a packed image trajectory"
-            }
-          ],
-          "inapplicability_reasons": [
-            "missing_packed_image_trajectory"
-          ]
+          "reasons": [],
+          "inapplicability_reasons": []
         },
         "krea_multiphase": {
           "id": "krea_multiphase",
@@ -35373,7 +35379,9 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 3,
+              "default_executed_steps": 4
             },
             "scale": {
               "type": "float_range",
@@ -35412,26 +35420,11 @@
           },
           "reasons": [
             {
-              "code": "missing_packed_image_trajectory",
-              "message": "route 'flux1_schnell_ip_adapter' does not compile a pass-0 packed image trajectory"
-            },
-            {
-              "code": "missing_spatial_unpack_repack",
-              "message": "route 'flux1_schnell_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
-            },
-            {
-              "code": "missing_clean_estimate_renoise_transition",
-              "message": "route 'flux1_schnell_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
-            },
-            {
               "code": "conflicts_with_pass0_reference_conditioning",
               "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
-            "missing_packed_image_trajectory",
-            "missing_spatial_unpack_repack",
-            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_reference_conditioning"
           ]
         },
@@ -35448,8 +35441,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -35459,8 +35452,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -35530,7 +35523,9 @@
               "required": true,
               "min": 1,
               "max_exclusive": "executed_steps",
-              "range": "1..executed_steps"
+              "range": "1..executed_steps",
+              "max": 3,
+              "default_executed_steps": 4
             }
           },
           "parameters": null,
@@ -35573,8 +35568,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -35810,8 +35805,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -35821,8 +35816,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -35940,8 +35935,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -36177,8 +36172,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -36188,8 +36183,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -36307,8 +36302,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -36544,8 +36539,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -36555,8 +36550,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -36674,8 +36669,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -36911,8 +36906,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -36922,8 +36917,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -37041,8 +37036,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -37278,8 +37273,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -37405,8 +37400,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -37642,8 +37637,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -37769,8 +37764,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -38006,8 +38001,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -38133,8 +38128,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -38370,8 +38365,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -38497,8 +38492,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -38739,8 +38734,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -38750,8 +38745,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -38869,8 +38864,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -39112,8 +39107,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -39123,8 +39118,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -39242,8 +39237,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -39479,8 +39474,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -39490,8 +39485,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -39609,8 +39604,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -39851,8 +39846,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -39978,8 +39973,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -40220,8 +40215,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -40231,8 +40226,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -40350,8 +40345,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -40587,8 +40582,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -40714,8 +40709,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -40951,8 +40946,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -41078,8 +41073,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -41320,8 +41315,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -41447,8 +41442,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -41689,8 +41684,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -41816,8 +41811,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -42053,8 +42048,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -42180,8 +42175,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -42417,8 +42412,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -42544,8 +42539,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -42786,8 +42781,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -42913,8 +42908,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -43155,8 +43150,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -43282,8 +43277,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -43524,8 +43519,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -43651,8 +43646,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -43888,8 +43883,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -44015,8 +44010,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -44257,8 +44252,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -44384,8 +44379,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -44621,8 +44616,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -44632,8 +44627,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -44751,8 +44746,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -44993,8 +44988,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -45120,8 +45115,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -45357,8 +45352,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -45368,8 +45363,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -45487,8 +45482,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -45724,8 +45719,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -45735,8 +45730,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -45854,8 +45849,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -46091,8 +46086,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46102,8 +46097,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46221,8 +46216,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -46458,8 +46453,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46469,8 +46464,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46588,8 +46583,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -46825,8 +46820,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46836,8 +46831,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -46955,8 +46950,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -47192,8 +47187,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -47319,8 +47314,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -47556,8 +47551,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -47683,8 +47678,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -47925,8 +47920,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -48052,8 +48047,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -48289,8 +48284,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -48416,8 +48411,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -48653,8 +48648,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -48780,8 +48775,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -49017,8 +49012,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -49144,8 +49139,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -49359,13 +49354,18 @@
             {
               "code": "missing_clean_estimate_renoise_transition",
               "message": "route 'sdxl' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
+              "code": "conflicts_with_pass0_control_conditioning",
+              "message": "route 'sdxl' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
             "missing_render_plan",
             "missing_packed_image_trajectory",
             "missing_spatial_unpack_repack",
-            "missing_clean_estimate_renoise_transition"
+            "missing_clean_estimate_renoise_transition",
+            "conflicts_with_pass0_control_conditioning"
           ]
         },
         "pag": {
@@ -49381,8 +49381,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -49508,8 +49508,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -49750,8 +49750,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -49877,8 +49877,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -50119,8 +50119,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -50246,8 +50246,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -50488,8 +50488,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -50615,8 +50615,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -50852,8 +50852,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -50979,8 +50979,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -51216,8 +51216,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -51343,8 +51343,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -51580,8 +51580,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -51707,8 +51707,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -51949,8 +51949,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -52076,8 +52076,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -52318,8 +52318,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -52445,8 +52445,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -52687,8 +52687,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -52814,8 +52814,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -53056,8 +53056,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -53183,8 +53183,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -53425,8 +53425,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -53552,8 +53552,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -53794,8 +53794,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -53921,8 +53921,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -54158,8 +54158,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -54169,8 +54169,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -54288,8 +54288,8 @@
             "strength": {
               "type": "float_range",
               "required": false,
-              "min": 0,
-              "max": 1,
+              "min": 0.0,
+              "max": 1.0,
               "inclusive": true,
               "default": 0.3
             },
@@ -54525,8 +54525,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -54536,8 +54536,8 @@
             "scale": {
               "type": "float_range",
               "required": true,
-              "min": 0,
-              "max": 15,
+              "min": 0.0,
+              "max": 15.0,
               "inclusive": true,
               "default": 1.5
             }
@@ -55295,8 +55295,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -55537,8 +55537,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -55679,8 +55679,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -55921,8 +55921,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -56065,8 +56065,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -56307,8 +56307,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -56462,8 +56462,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -56704,8 +56704,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -56859,8 +56859,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -57101,8 +57101,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -57256,8 +57256,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -57498,8 +57498,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -57653,8 +57653,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -57895,8 +57895,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -58050,8 +58050,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -58292,8 +58292,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -58447,8 +58447,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -58689,8 +58689,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -58834,8 +58834,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -59076,8 +59076,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -59221,8 +59221,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -59463,8 +59463,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -59607,8 +59607,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -59849,8 +59849,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -59993,8 +59993,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -60235,8 +60235,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -60377,8 +60377,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -60619,8 +60619,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -60764,8 +60764,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -61006,8 +61006,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -61153,8 +61153,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -61395,8 +61395,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -61540,8 +61540,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -61782,8 +61782,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -61929,8 +61929,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -62171,8 +62171,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -62316,8 +62316,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -62558,8 +62558,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -62705,8 +62705,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -62947,8 +62947,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }
@@ -63092,8 +63092,8 @@
               "strength": {
                 "type": "float_range",
                 "required": false,
-                "min": 0,
-                "max": 1,
+                "min": 0.0,
+                "max": 1.0,
                 "inclusive": true,
                 "default": 0.3
               },
@@ -63334,8 +63334,8 @@
               "scale": {
                 "type": "float_range",
                 "required": true,
-                "min": 0,
-                "max": 15,
+                "min": 0.0,
+                "max": 15.0,
                 "inclusive": true,
                 "default": 1.5
               }

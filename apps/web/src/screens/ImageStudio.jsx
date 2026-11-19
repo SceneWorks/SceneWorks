@@ -2230,14 +2230,20 @@ export function ImageStudio() {
     if (!base?.defaults) return base;
     const hasTopPag = Object.hasOwn(base.defaults, "pag");
     const hasNestedMossPag = Boolean(base.defaults.mossImage && Object.hasOwn(base.defaults.mossImage, "pag"));
-    if (!hasTopPag && !hasNestedMossPag) return base;
+    const hasLowResStart = Object.hasOwn(base.defaults, "lowResStart");
+    if (!hasTopPag && !hasNestedMossPag && !hasLowResStart) return base;
     const { pag: nestedMossPag, ...restMossImage } = base.defaults.mossImage ?? {};
     return {
       ...base,
       defaults: {
         ...base.defaults,
         ...(hasNestedMossPag ? { mossImage: restMossImage } : {}),
-        pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag),
+        ...(hasTopPag || hasNestedMossPag
+          ? { pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag) }
+          : {}),
+        ...(hasLowResStart
+          ? { lowResStart: lowResStartFromRecipe(base.defaults.lowResStart) }
+          : {}),
       },
     };
   }, [moss, selectedPreset]);
@@ -2288,7 +2294,7 @@ export function ImageStudio() {
       // The preset machinery applies through a functional update (to snapshot the prior value).
       ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
       ["pag", setPag],
-      ["lowResStart", (update) => setLowResStart((current) => lowResStartFromRecipe(typeof update === "function" ? update(current) : update))],
+      ["lowResStart", setLowResStart],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
