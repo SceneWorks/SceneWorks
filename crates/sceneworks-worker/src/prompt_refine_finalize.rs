@@ -183,6 +183,18 @@ pub(super) async fn finalize_refine_job(
     if let Some(block) = rewrite_suggestion {
         result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
     }
+    // SW-7202: the expander's executed weights folder (its `LoadSpec` source), beside the model.
+    if let Some(reply) = &h3_expand {
+        if let Some(identity) = result
+            .get_mut("executionIdentity")
+            .and_then(Value::as_object_mut)
+        {
+            identity.insert(
+                "weightsDir".to_owned(),
+                Value::from(reply.weights_source.clone()),
+            );
+        }
+    }
     update_job(
         api,
         &job.id,
@@ -197,4 +209,83 @@ pub(super) async fn finalize_refine_job(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SW-7202: an expansion's result names the weights folder the job LOADED (its `LoadSpec`
+    /// source) on `executionIdentity.weightsDir`, so a check of which tier ran reads the folder
+    /// rather than the requested tier echoed back on the suggestion block. No model runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expansion_result_names_the_weights_folder_it_loaded() {
+        const STAMP: &str = "2026-11-19T00:00:00Z";
+        let (api_url, posts) = crate::test_api_stub::smoke_api(
+            crate::test_api_stub::smoke_job("", "prompt_refine", None, None, "w", STAMP),
+            crate::test_api_stub::smoke_worker("", "job_h3_expand", STAMP),
+            None,
+        )
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().to_path_buf());
+        settings.api_url = api_url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(crate::test_api_stub::smoke_job(
+            "job_h3_expand",
+            "prompt_refine",
+            None,
+            None,
+            "w",
+            STAMP,
+        ))
+        .unwrap();
+        let loaded = "/hub/models--SceneWorks--minimax-h3-image-pe/snapshots/rev/q4-full";
+        let output = gen_core::core_llm::TextLlmOutput {
+            text: r#"{"expanded_caption": "A lighthouse on a basalt headland.", "aspect_ratio": "9:16"}"#
+                .to_owned(),
+            finish_reason: Some(gen_core::core_llm::FinishReason::Stop),
+            ..Default::default()
+        };
+        finalize_refine_job(
+            &api,
+            &job,
+            RefineCompletion {
+                task: RefineTask::MiniMaxH3ImageExpand,
+                original_prompt: "a lighthouse".to_owned(),
+                target_model_id: None,
+                model: "MiniMaxAI/MiniMax-H3-Image-PE".to_owned(),
+                thinking_mode_name: "enabled",
+                max_new_tokens: 4096,
+                done_message: "done",
+                qwen_rewriter: None,
+                h3_expand: Some(H3ExpandReply {
+                    workflow: crate::minimax_h3_image_prompt_expand::Workflow::TextToImage,
+                    aspect: gen_core::core_llm::minimax_h3_image_pe::AspectSelection::Adaptive,
+                    allowed_ratios: vec!["9:16".to_owned()],
+                    tier: Some("q4"),
+                    weights_source: loaded.to_owned(),
+                }),
+                image_reference_count: 0,
+                emits_json: true,
+                output,
+                kv_cache: Value::Null,
+            },
+        )
+        .await
+        .expect("the expansion completes");
+        let posts = posts.lock().unwrap().clone();
+        let result = posts
+            .iter()
+            .rev()
+            .find(|(_, body)| body["status"] == "completed")
+            .map(|(_, body)| body["result"].clone())
+            .expect("a completed result");
+        assert_eq!(result["executionIdentity"]["weightsDir"], loaded);
+        assert_eq!(result["rewriteSuggestion"]["tier"], "q4");
+        assert_eq!(
+            result["refinedPrompt"],
+            "A lighthouse on a basalt headland."
+        );
+    }
 }

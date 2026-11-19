@@ -1,10 +1,15 @@
-"""Provision the pinned Candle tiers of the Qwen3.8 27B describer (SW-7120).
+"""Provision the pinned Candle tiers of the Qwen3.8 27B describer (SW-7120) and of the
+MiniMax-H3-Image prompt expander (SW-7202).
 
 `SCENEWORKS_QWEN38_DESCRIBER_PROVISION` picks what is provisioned: `quantised` (the default) is the
 files the catalog's q4 and q8 rows name in the re-host's fully quantized `q4-full/` and `q8-full/`
 folders (SW-7202: config, tokenizer and template sidecars, the shard index and every shard);
 `bf16` is the full-precision upstream snapshot, the files the
-catalog's bf16 row names. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
+catalog's bf16 row names. `expander-q4` / `expander-q8` is ONE expander tier: every file of its
+Candle folder (`candle-q4-full/` or `candle-q8-full/`, the folder its catalog row names) plus the
+five upstream `prompt/` files the catalog's `prompt` co-requisite names, each at its own pinned
+revision. Only the selected tier is fetched, so a cache provisioned this way holds no other
+expander tier. Run only by the dispatch-only `qwen38-describer-provision.yml` workflow on the CUDA real-weights
 runner. Downloads into the standard hub layout under HF_HUB_CACHE, anonymously, at one exact
 revision. Does nothing when every file is already present at its published size; refuses before
 downloading when the cache volume has less than MIN_FREE_BYTES free; checks every file's size after
@@ -65,7 +70,30 @@ BF16_ESTIMATED_BYTES = 55_575_900_000
 BF16_TOLERANCE = 0.01
 # ~55.6 GB of files; about the same ~20 GB of headroom as the quantised tiers.
 BF16_MIN_FREE_BYTES = 75 * 10**9
-MODES = ("quantised", "bf16")
+
+# The MiniMax-H3-Image prompt expander (catalog `minimax_h3_image_pe`): its Candle tiers' re-host
+# and revision, and per tier the folder its row names (`candle-q4-full/*`: every file of it) and
+# that folder's total, the row's `footprint.diskSizeBytes`.
+EXPANDER_REPO = "SceneWorks/minimax-h3-image-pe"
+EXPANDER_REVISION = "b0efd86df40968dcdcaebfbf4267ae1bce9431b5"
+EXPANDER_TIER_FOLDERS = {"q4": "candle-q4-full", "q8": "candle-q8-full"}
+EXPANDER_TIER_BYTES = {"q4": 17_357_728_848, "q8": 29_521_202_308}
+# The tier plus about 20 GB of headroom, as for the describer's tiers.
+EXPANDER_MIN_FREE_BYTES = {"q4": 40 * 10**9, "q8": 52 * 10**9}
+# The upstream `prompt/` files the worker reads at run time and verifies against
+# `prompt/manifest.json`: the catalog's `prompt` co-requisite row and its exact total.
+PROMPT_REPO = "MiniMaxAI/MiniMax-H3-Image-PE"
+PROMPT_REVISION = "35603d4b63949afa12cb098227fffefedf081afa"
+PROMPT_FILES = (
+    "prompt/manifest.json",
+    "prompt/t2i/system_prompt.txt",
+    "prompt/t2i/task_prompt.txt",
+    "prompt/t2i/request_params.json",
+    "prompt/edit/task_prompt.txt",
+)
+PROMPT_BYTES = 56_282
+PROMPT_MIN_FREE_BYTES = 1 * 10**9
+MODES = ("quantised", "bf16", "expander-q4", "expander-q8")
 
 
 def tier_patterns(folder, tier_files=TIER_FILES):
@@ -108,6 +136,33 @@ def bf16_expected_files(entries, estimated=BF16_ESTIMATED_BYTES, tolerance=BF16_
     total = sum(expected.values())
     if abs(total - estimated) > estimated * tolerance:
         raise RuntimeError(f"bf16 files at {BF16_REVISION} total {total} bytes, the catalog estimates {estimated}")
+    return expected
+
+
+def expander_expected_files(entries, tier, tier_bytes=EXPANDER_TIER_BYTES,
+                            tier_folders=EXPANDER_TIER_FOLDERS):
+    """Every file of the expander tier's folder, as {path: size}, with the folder's total equal to
+    the catalog's."""
+    folder = tier_folders[tier]
+    files = {name: size for name, size in entries if name.startswith(f"{folder}/")}
+    if not files or any(not isinstance(size, int) or size <= 0 for size in files.values()):
+        raise RuntimeError(f"{EXPANDER_REPO}@{EXPANDER_REVISION} lists no sized files under {folder}/")
+    if sum(files.values()) != tier_bytes[tier]:
+        raise RuntimeError(f"{folder}/ at {EXPANDER_REVISION} totals {sum(files.values())} bytes, "
+                           f"the catalog says {tier_bytes[tier]}")
+    return files
+
+
+def prompt_expected_files(entries, names=PROMPT_FILES, total=PROMPT_BYTES):
+    """The upstream prompt files the co-requisite names, as {path: size}, totalling the catalog's."""
+    sized = {name: size for name, size in entries}
+    missing = [name for name in names if not isinstance(sized.get(name), int) or sized[name] <= 0]
+    if missing:
+        raise RuntimeError(f"{PROMPT_REPO}@{PROMPT_REVISION} lists no sized {', '.join(missing)}")
+    expected = {name: sized[name] for name in names}
+    if sum(expected.values()) != total:
+        raise RuntimeError(f"prompt files at {PROMPT_REVISION} total {sum(expected.values())} bytes, "
+                           f"the catalog says {total}")
     return expected
 
 
@@ -155,12 +210,35 @@ def plan(mode):
     raise RuntimeError(f"unknown provisioning mode {mode!r}; use one of {', '.join(MODES)}")
 
 
+def plans(mode):
+    """Every snapshot `mode` provisions, each in `plan`'s shape: a describer mode is one snapshot;
+    an expander tier is its Candle folder, then the upstream prompt files."""
+    tier = mode.removeprefix("expander-")
+    if mode.startswith("expander-") and tier in EXPANDER_TIER_FOLDERS:
+        folder = EXPANDER_TIER_FOLDERS[tier]
+        return [
+            (EXPANDER_REPO, EXPANDER_REVISION, f"expander tier {tier} ({folder}/)",
+             lambda entries: expander_expected_files(entries, tier), [f"{folder}/*"],
+             EXPANDER_MIN_FREE_BYTES[tier]),
+            (PROMPT_REPO, PROMPT_REVISION, "expander prompt files (prompt/)", prompt_expected_files,
+             list(PROMPT_FILES), PROMPT_MIN_FREE_BYTES),
+        ]
+    return [plan(mode)]
+
+
 def main():
     cache = Path(os.environ.get("HF_HUB_CACHE", ""))
     if not cache.is_absolute() or not cache.is_dir():
         raise RuntimeError(f"HF_HUB_CACHE must name an existing absolute hub directory, got {str(cache)!r}")
     mode = os.environ.get("SCENEWORKS_QWEN38_DESCRIBER_PROVISION", "").strip() or "quantised"
-    repo, revision, label, read_expected, patterns, min_free = plan(mode)
+    for part in plans(mode):
+        provision_snapshot(cache, *part)
+    return 0
+
+
+def provision_snapshot(cache, repo, revision, label, read_expected, patterns, min_free):
+    """Provision one pinned snapshot; nothing is downloaded when every file is present at its
+    published size."""
     from huggingface_hub import HfApi, snapshot_download
 
     info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=False)
@@ -172,7 +250,7 @@ def main():
     if not missing:
         report([f"Already present: {repo}@{revision} {label} "
                 f"({len(expected)} files) at `{snapshot}`. Nothing downloaded."])
-        return 0
+        return
     free = shutil.disk_usage(cache).free
     require_free_space(free, min_free)
     print(f"{len(missing)} of {len(expected)} files missing or incomplete; {free / 1e9:.1f} GB free. Downloading.")
@@ -191,7 +269,6 @@ def main():
                            + "; ".join(f"{name} expected {size}, found {found}" for name, size, found in still))
     report([f"Provisioned {repo}@{revision} {label} at `{snapshot}`.",
             f"- {sum(expected.values())} bytes in {len(expected)} files, checked at their published sizes"])
-    return 0
 
 
 if __name__ == "__main__":

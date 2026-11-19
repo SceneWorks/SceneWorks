@@ -962,6 +962,12 @@ pub(crate) async fn run_prompt_refine_job(
         // existing behaviour; every other load option keeps its default as well.
         ..Default::default()
     };
+    // SW-7202: an expansion records the source it actually loads, so its result names the tier
+    // folder that ran rather than echoing the requested tier.
+    let h3_expand_reply = h3_expand_reply.map(|mut reply| {
+        reply.weights_source = refine_spec.source.clone();
+        reply
+    });
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
     // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
     // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture

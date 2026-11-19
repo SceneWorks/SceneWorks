@@ -1249,3 +1249,120 @@ async fn minimax_h3_image_plans_the_same_text_encoder_fetch_as_h3_at_every_tier(
         );
     }
 }
+
+/// SW-7202 AC3 through the real download route on this host: installing q4 or q8 of the prompt
+/// expander or of the Qwen3.8 27B describer queues exactly that tier's own folder row (this OS's
+/// layout) plus the entry's co-requisites — the expander's upstream `prompt/` files and both
+/// models' block drafts — and no job names another tier's folder. The all-OS twin of this plan is
+/// `installing_a_qwen38_tier_plans_only_that_tier_and_its_co_requisites_on_every_os` in
+/// sceneworks-core's `artifact_selection`.
+#[tokio::test]
+async fn installing_a_qwen38_tier_queues_only_that_tiers_folder_and_its_co_requisites() {
+    let _hf = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("builtin.models.jsonc embedded")
+        .1;
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
+    let shipped = |id: &str| {
+        manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is in the builtin catalog"))
+    };
+    let models = ["minimax_h3_image_pe", "vision_describe_qwen3_8_27b"];
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": models.map(shipped) }).to_string(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    let app = create_app(test_settings(&temp)).unwrap();
+    let mac = cfg!(target_os = "macos");
+
+    let mut seen = std::collections::BTreeSet::new();
+    for id in models {
+        let mut host = shipped(id);
+        crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+        let co_requisites: Vec<Value> = host["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["coRequisite"] == true)
+            .map(|row| json!([row["repo"], row["revision"], row["files"]]))
+            .collect();
+        for tier in ["q4", "q8"] {
+            let other = if tier == "q4" { "q8" } else { "q4" };
+            let folder = |tier: &str| match (id, mac) {
+                ("minimax_h3_image_pe", false) => format!("candle-{tier}-full"),
+                _ => format!("{tier}-full"),
+            };
+            let (status, job) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/models/{id}/download"),
+                json!({ "requestedGpu": "auto", "variant": tier, "licenseAcknowledged": true }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{id} {tier}: {job}");
+            let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+            let queued: Vec<Value> = jobs
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|job| seen.insert(job["id"].as_str().unwrap().to_owned()))
+                .map(|job| job["payload"].clone())
+                .collect();
+            let fetches: Vec<Value> = queued
+                .iter()
+                .map(|payload| json!([payload["repo"], payload["revision"], payload["files"]]))
+                .collect();
+            let tier_jobs: Vec<&Value> = queued
+                .iter()
+                .filter(|payload| {
+                    payload["files"]
+                        .to_string()
+                        .contains(&format!("\"{}/", folder(tier)))
+                })
+                .collect();
+            assert_eq!(
+                tier_jobs.len(),
+                1,
+                "{id} {tier}: one tier job: {fetches:#?}"
+            );
+            let row = crate::models::model_download_for_variant(&host, tier).unwrap();
+            assert_eq!(
+                fetches
+                    .iter()
+                    .filter(|fetch| **fetch == json!([row["repo"], row["revision"], row["files"]]))
+                    .count(),
+                1,
+                "{id} {tier}: the tier job is the catalog's {tier} row: {fetches:#?}"
+            );
+            for co_requisite in &co_requisites {
+                assert!(
+                    fetches.contains(co_requisite),
+                    "{id} {tier}: co-requisite {co_requisite} queued: {fetches:#?}"
+                );
+            }
+            assert_eq!(
+                fetches.len(),
+                1 + co_requisites.len(),
+                "{id} {tier}: the tier and its co-requisites, nothing else: {fetches:#?}"
+            );
+            assert!(
+                !fetches
+                    .iter()
+                    .any(|fetch| fetch.to_string().contains(&format!("\"{}/", folder(other)))),
+                "{id} {tier}: a job names {other}'s folder: {fetches:#?}"
+            );
+        }
+    }
+}

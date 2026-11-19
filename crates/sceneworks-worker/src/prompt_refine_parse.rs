@@ -37,6 +37,9 @@ pub(crate) struct H3ExpandReply {
     pub(crate) aspect: gen_core::core_llm::minimax_h3_image_pe::AspectSelection,
     pub(crate) allowed_ratios: Vec<String>,
     pub(crate) tier: Option<&'static str>,
+    /// The `LoadSpec` source the expander was loaded from (set by the job once it builds the load
+    /// spec), recorded on the result's `executionIdentity.weightsDir`.
+    pub(crate) weights_source: String,
 }
 
 pub(super) async fn parse_refine_request(
@@ -319,6 +322,7 @@ pub(super) async fn parse_refine_request(
                     aspect,
                     allowed_ratios: files.params().aspect_ratios.clone(),
                     tier: dirs.tier,
+                    weights_source: String::new(),
                 },
             });
             (String::new(), String::new())
