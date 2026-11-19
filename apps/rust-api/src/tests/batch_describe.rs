@@ -805,6 +805,82 @@ async fn a_qwen38_tier_in_an_older_revision_is_not_installed() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
 }
 
+/// The Model Manager badge agrees with the job: with an older, fuller revision of the re-host
+/// cached (and recorded by a download receipt) but the pinned revision absent, the 27B and its q4
+/// tier do not read installed, and the card offers the update to the pinned revision instead.
+#[tokio::test]
+async fn an_older_fuller_revision_badges_the_qwen38_tier_as_an_update_not_installed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    serve_builtin_models(&temp_dir, &[QWEN38_27B_DESCRIBER_MODEL_ID]);
+    let (app, _, _, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let row = qwen38_tier_row(std::env::consts::OS, "q4");
+    let repo = row["repo"].as_str().expect("repo");
+    let older_revision = "0123456789abcdef0123456789abcdef01234567";
+    let cache = huggingface_repo_cache_path(&state.settings.data_dir, repo).unwrap();
+    let older = cache.join("snapshots").join(older_revision);
+    let mut resolved = Vec::new();
+    for selector in row["files"].as_array().expect("files") {
+        let file = selector.as_str().expect("selector").replace('*', "fixture");
+        let path = older.join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("older dir");
+        let body = if file.ends_with(".safetensors.index.json") {
+            json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
+        } else {
+            "fixture".to_owned()
+        };
+        std::fs::write(path, body).expect("older tier file");
+        resolved.push(file);
+    }
+    for index in 0..12 {
+        let file = format!("q4/file-{index}.json");
+        let path = older.join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("older q4 dir");
+        std::fs::write(path, "{}").expect("older q4 file");
+        resolved.push(file);
+    }
+    std::fs::create_dir_all(cache.join("refs")).expect("refs dir");
+    std::fs::write(cache.join("refs/main"), older_revision).expect("ref");
+    let managed = state
+        .settings
+        .data_dir
+        .join("models")
+        .join(sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(repo));
+    std::fs::create_dir_all(&managed).expect("managed dir");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        json!({ "receipts": [{
+            "repo": repo,
+            "modelId": QWEN38_27B_DESCRIBER_MODEL_ID,
+            "variant": "q4",
+            "snapshotRevision": older_revision,
+            "resolvedFiles": resolved,
+        }]})
+        .to_string(),
+    )
+    .expect("receipt");
+
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = catalog
+        .as_array()
+        .expect("catalog rows")
+        .iter()
+        .find(|entry| entry["id"] == QWEN38_27B_DESCRIBER_MODEL_ID)
+        .expect("the 27B is listed")
+        .clone();
+    let q4 = entry["variants"]
+        .as_array()
+        .expect("tier states")
+        .iter()
+        .find(|variant| variant["variant"] == "q4")
+        .expect("a q4 state")
+        .clone();
+    assert_ne!(q4["installState"], "installed", "{q4}");
+    assert_ne!(entry["installState"], "installed", "{entry}");
+    assert_eq!(entry["updateAvailable"], true, "{entry}");
+}
+
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
 /// message that names the tier and what to do. Another installed tier does not stand in for it.
 #[tokio::test]

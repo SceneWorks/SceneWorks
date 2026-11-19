@@ -4368,15 +4368,16 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
         by_platforms = {tuple(row["platforms"]): row for row in rows}
         assert len(rows) == len(by_platforms) == 2, tier
         # SW-7202: the fully quantized tiers (`prepare_snapshot` q8-full / q4-full), each backend's
-        # folders at its own publication commit. PENDING-SW-7202: the 7202000...000N revisions are
-        # placeholders replaced by the qwen38-full-tiers.yml publication reports.
-        for platforms, directory, revision in (
-            (("macos",), f"{tier}-full", "7202000000000000000000000000000000000003"),
-            (("windows", "linux"), f"candle-{tier}-full", "7202000000000000000000000000000000000004"),
+        # folders at its own publication commit. The exact commits come from the qwen38-full-tiers.yml
+        # publication reports; this test asserts only a full commit SHA, and the single gate
+        # `test_no_placeholder_pins_in_the_shipped_manifest` refuses placeholder values.
+        for platforms, directory in (
+            (("macos",), f"{tier}-full"),
+            (("windows", "linux"), f"candle-{tier}-full"),
         ):
             row = by_platforms[platforms]
             assert row.get("pendingArtifact") is None, (tier, platforms)
-            assert row["revision"] == revision, (tier, platforms)
+            assert _FULL_SHA_RE.fullmatch(row["revision"]), (tier, platforms)
             assert row["files"] == [f"{directory}/*"], (tier, platforms)
     prompt_rows = [
         download
@@ -5422,3 +5423,62 @@ def test_flux3_both_checkpoints_declare_the_owned_reference_editing_surface():
         assert model["limits"]["requiresDimensionsMultipleOf"] == 16
         assert model["ui"]["hideReferenceStrength"] is True
         assert model["ui"]["promptEnhance"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# SW-7202 — NO PLACEHOLDER PINS gate. While the fully quantized tiers await publication, the
+# manifest carries placeholder revisions (`7202` + zeros + a digit) and `PENDING-SW-7202` markers.
+# Both are valid-looking to every other check, so this test fails until each one is replaced by the
+# real publication commit: nothing merges to main with a placeholder pin.
+# ---------------------------------------------------------------------------------------------
+
+_PLACEHOLDER_REVISION_RE = re.compile(r"^72020+[0-9a-f]?$")
+_PENDING_MARKER = "PENDING-SW-7202"
+_PENDING_MARKER_SCAN_PATHS = (
+    ROOT / "config" / "manifests",
+    ROOT / "scripts" / "ci" / "qwen38_describer_provision.py",
+)
+
+
+def _placeholder_revisions(node, path="$"):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = f"{path}.{key}"
+            if key == "revision" and isinstance(value, str) and _PLACEHOLDER_REVISION_RE.fullmatch(value):
+                yield child, value
+            yield from _placeholder_revisions(value, child)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _placeholder_revisions(value, f"{path}[{index}]")
+
+
+def _pending_marker_hits():
+    files = []
+    for root in _PENDING_MARKER_SCAN_PATHS:
+        files.extend(sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else [root])
+    for file in files:
+        for line_number, line in enumerate(file.read_text(errors="ignore").splitlines(), 1):
+            if _PENDING_MARKER in line:
+                yield f"{file.relative_to(ROOT)}:{line_number}"
+
+
+def test_placeholder_revision_pattern_matches_only_placeholders():
+    assert _PLACEHOLDER_REVISION_RE.fullmatch("7202000000000000000000000000000000000003")
+    assert not _PLACEHOLDER_REVISION_RE.fullmatch(_PE_REVISION)
+    assert not _PLACEHOLDER_REVISION_RE.fullmatch("7202abc000000000000000000000000000000003")
+
+
+def test_no_placeholder_pins_in_the_shipped_manifest():
+    """NO PLACEHOLDER PINS gate (SW-7202): fails while any manifest revision is a `7202000…000N`
+    placeholder or any `PENDING-SW-7202` marker remains in config/manifests or the describer
+    provisioning script. Replace them with the publication commits; never relax this test."""
+    revisions = [
+        f"{model['id']}{path}={value}"
+        for model in _load_builtin_models_manifest()["models"]
+        for path, value in _placeholder_revisions(model)
+    ]
+    markers = list(_pending_marker_hits())
+    assert not revisions and not markers, (
+        "placeholder pins must be replaced by real publication commits before merging to main:\n"
+        + "\n".join(["placeholder revisions:", *revisions, f"{_PENDING_MARKER} markers:", *markers])
+    )

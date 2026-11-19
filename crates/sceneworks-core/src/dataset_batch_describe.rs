@@ -74,7 +74,8 @@ pub fn qwen38_tier_revision(repo: &str, tier: &str) -> Option<String> {
 /// Whether `snapshot` holds every file in `files` (a tier's [`qwen38_tier_files`]). A shard glob
 /// (`model-*.safetensors`, or `q4-full/model-*.safetensors`) is satisfied by the shards the
 /// `model.safetensors.index.json` in the glob's own folder names, every one of them present in
-/// that folder: one shard on disk never stands for a sharded checkpoint.
+/// that folder ([`crate::safetensors::missing_indexed_shards`]): one shard on disk never stands for
+/// a sharded checkpoint.
 pub fn qwen38_snapshot_holds(snapshot: &std::path::Path, files: &[String]) -> bool {
     files.iter().all(|file| {
         if !file.contains('*') {
@@ -85,21 +86,13 @@ pub fn qwen38_snapshot_holds(snapshot: &std::path::Path, files: &[String]) -> bo
             Some(_) => return false,
             None => snapshot.to_path_buf(),
         };
-        let Some(shards) = std::fs::read_to_string(folder.join("model.safetensors.index.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|index| {
-                index.get("weight_map")?.as_object().map(|map| {
-                    map.values()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<std::collections::BTreeSet<_>>()
-                })
-            })
-        else {
-            return false;
-        };
-        !shards.is_empty() && shards.iter().all(|shard| folder.join(shard).is_file())
+        // The same index check the API's install state runs: a non-string `weight_map` value, an
+        // escaping (`../`) shard name, an empty map or an unreadable index is never a checkpoint.
+        crate::safetensors::missing_indexed_shards(
+            &folder,
+            &folder.join("model.safetensors.index.json"),
+        )
+        .is_empty()
     })
 }
 
@@ -502,6 +495,32 @@ mod tests {
         std::fs::write(root.join("model-00002-of-00002.safetensors"), "").expect("stray shard");
         assert!(!qwen38_snapshot_holds(root, &files));
         std::fs::write(root.join("q4-full/model-00002-of-00002.safetensors"), "").expect("shard 2");
+        assert!(qwen38_snapshot_holds(root, &files));
+        let index = |weight_map: serde_json::Value| {
+            std::fs::write(
+                root.join("q4-full/model.safetensors.index.json"),
+                serde_json::json!({ "weight_map": weight_map }).to_string(),
+            )
+            .expect("index");
+        };
+        // A non-string `weight_map` value is not a usable index, even beside every real shard.
+        index(serde_json::json!({
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00002-of-00002.safetensors",
+            "c": 7,
+        }));
+        assert!(!qwen38_snapshot_holds(root, &files));
+        // A shard name that escapes the folder (`../`) is never held, though the file it names
+        // exists at the snapshot root.
+        index(serde_json::json!({
+            "a": "model-00001-of-00002.safetensors",
+            "b": "../model-00002-of-00002.safetensors",
+        }));
+        assert!(!qwen38_snapshot_holds(root, &files));
+        index(serde_json::json!({
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00002-of-00002.safetensors",
+        }));
         assert!(qwen38_snapshot_holds(root, &files));
         // A named file still has to be present.
         std::fs::remove_file(root.join("q4-full/config.json")).expect("drop config");

@@ -1156,16 +1156,40 @@ impl BatchDescriber for StubDescriber {
 
 /// A dataset dir with item_1 (12x8), item_2 (no file on disk) and item_3 (6x10).
 struct Stage {
+    /// This stage's own Hugging Face hub cache, registered for its data directory through the
+    /// fixture cache-root seam, so a job never reads the developer's real `HF_HOME` (hashing a
+    /// real snapshot, or a background source inventory walking it) and no test mutates the
+    /// process environment to redirect it.
+    hub: tempfile::TempDir,
+    _hub_root: sceneworks_core::hf_home::test_support::CacheRootGuard,
     _dir: tempfile::TempDir,
     settings: Settings,
     dataset_root: PathBuf,
 }
 
-fn stage(api_url: String) -> Stage {
+/// A stage with no dataset images: settings, a dataset root and its own hub cache.
+fn bare_stage() -> Stage {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut settings = test_settings(dir.path());
-    settings.api_url = api_url;
+    let settings = test_settings(dir.path());
     let dataset_root = dir.path().join("datasets").join("ds-1");
+    let hub = tempfile::tempdir().expect("hub tempdir");
+    let hub_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.path().to_path_buf(),
+    );
+    Stage {
+        hub,
+        _hub_root: hub_root,
+        _dir: dir,
+        settings,
+        dataset_root,
+    }
+}
+
+fn stage(api_url: String) -> Stage {
+    let mut stage = bare_stage();
+    stage.settings.api_url = api_url;
+    let dataset_root = stage.dataset_root.clone();
     std::fs::create_dir_all(dataset_root.join("images")).expect("dataset root");
     image::RgbImage::from_pixel(12, 8, image::Rgb([200, 40, 40]))
         .save(dataset_root.join("images/item_1.png"))
@@ -1173,11 +1197,7 @@ fn stage(api_url: String) -> Stage {
     image::RgbImage::from_pixel(6, 10, image::Rgb([40, 200, 40]))
         .save(dataset_root.join("images/item_3.png"))
         .expect("item 3 writes");
-    Stage {
-        _dir: dir,
-        settings,
-        dataset_root,
-    }
+    stage
 }
 
 fn payload(stage: &Stage, prompt: Option<&str>) -> Value {
@@ -1443,12 +1463,7 @@ async fn a_model_that_cannot_load_fails_the_job() {
 
 #[test]
 fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stage = Stage {
-        settings: test_settings(dir.path()),
-        dataset_root: dir.path().join("datasets").join("ds-1"),
-        _dir: dir,
-    };
+    let stage = bare_stage();
     let base = payload(&stage, None);
     let refuse = |payload: Value, expect: &str| {
         let error = parse_batch_describe_request(
@@ -1504,12 +1519,7 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
 /// The payload with only item_1 (12x8), for `model`.
 #[test]
 fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_prompt() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let stage = Stage {
-        settings: test_settings(dir.path()),
-        dataset_root: dir.path().join("datasets").join("ds-1"),
-        _dir: dir,
-    };
+    let stage = bare_stage();
     let parse = |tier: Option<&str>| {
         let mut payload = payload(&stage, None);
         payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
@@ -2032,7 +2042,6 @@ async fn a_describer_failure_names_the_model_in_use() {
 async fn a_qwen38_condense_only_job_uses_its_tier_and_refuses_one_not_installed() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
-    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
     let condense_payload = |mode: &str| {
         let mut payload = qwen38_job_payload(&stage, "q8");
         let entry = fit_entry(1024);
@@ -2067,10 +2076,6 @@ async fn a_qwen38_condense_only_job_uses_its_tier_and_refuses_one_not_installed(
         let settings = stage.settings.clone();
         async move { run_dataset_batch_describe_job(&api_client, &settings, &job).await }
     };
-    let _env = crate::test_env::EnvVars::set(&[(
-        "HF_HUB_CACHE",
-        hf_cache.path().to_str().expect("utf-8"),
-    )]);
     let error = run(condense_payload("condenseOnly"))
         .await
         .expect_err("an uninstalled tier is refused");
@@ -2139,7 +2144,7 @@ fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
 async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
-    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let hf_cache = &stage.hub;
     let run = |payload: Value| {
         let api_client = ApiClient::new(&stage.settings);
         let mut job: JobSnapshot =
@@ -2150,14 +2155,9 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
     };
 
     // Nothing installed: refused by name, before the first image.
-    let error = {
-        let _env = crate::test_env::EnvVars::set(&[(
-            "HF_HUB_CACHE",
-            hf_cache.path().to_str().expect("utf-8"),
-        )]);
-        run(qwen38_job_payload(&stage, "q8")).await
-    }
-    .expect_err("an uninstalled tier is refused");
+    let error = run(qwen38_job_payload(&stage, "q8"))
+        .await
+        .expect_err("an uninstalled tier is refused");
     assert!(
         error.to_string().ends_with(
             "The q8 tier of the Qwen3.8 27B describer is not installed. Download that tier in \
@@ -2193,14 +2193,9 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
             .join(weights);
         std::fs::remove_file(weights).expect("drop the q8 weights");
     }
-    let error = {
-        let _env = crate::test_env::EnvVars::set(&[(
-            "HF_HUB_CACHE",
-            hf_cache.path().to_str().expect("utf-8"),
-        )]);
-        run(qwen38_job_payload(&stage, "q8")).await
-    }
-    .expect_err("a partial tier is refused");
+    let error = run(qwen38_job_payload(&stage, "q8"))
+        .await
+        .expect_err("a partial tier is refused");
     assert!(
         error
             .to_string()
@@ -2217,10 +2212,8 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
             "q4",
         );
         let error = {
-            let _env = crate::test_env::EnvVars::set(&[
-                ("HF_HUB_CACHE", hf_cache.path().to_str().expect("utf-8")),
-                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16"),
-            ]);
+            let _env =
+                crate::test_env::EnvVars::set(&[(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16")]);
             run(qwen38_job_payload(&stage, "q4")).await
         }
         .expect_err("a tier above the machine is refused");
@@ -3324,8 +3317,10 @@ fn the_limit_comes_from_the_carried_catalog_entry_never_the_request() {
 
 #[test]
 fn the_exact_counter_needs_an_installed_tier_tokenizer_and_a_known_adapter() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let settings = test_settings(dir.path());
+    // The stage's own hub cache, so a Krea tokenizer in the developer's real HF_HOME is not
+    // "installed" here.
+    let stage = bare_stage();
+    let settings = stage.settings.clone();
     let entry = json!({
         "downloads": [{
             "repo": "SceneWorks/krea-2-turbo-mlx",
