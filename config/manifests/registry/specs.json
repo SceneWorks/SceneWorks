@@ -67839,7 +67839,8 @@
             "q4-full/chat_template.jinja",
             "q4-full/tokenizer.json",
             "q4-full/tokenizer_config.json",
-            "q4-full/model.safetensors"
+            "q4-full/model.safetensors.index.json",
+            "q4-full/model-*.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 17611498331
@@ -67861,7 +67862,8 @@
             "q8-full/chat_template.jinja",
             "q8-full/tokenizer.json",
             "q8-full/tokenizer_config.json",
-            "q8-full/model.safetensors"
+            "q8-full/model.safetensors.index.json",
+            "q8-full/model-*.safetensors"
           ],
           "footprint": {
             "diskSizeBytes": 29987316675

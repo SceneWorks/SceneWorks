@@ -1620,15 +1620,13 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
     } else {
         QWEN38_27B_DESCRIBER_CANDLE_REPO
     };
-    let snapshot = |repo: &str, revision: &str| {
-        hf_cache
-            .path()
-            .join(format!("models--{}", repo.replace('/', "--")))
-            .join("snapshots")
-            .join(revision)
-    };
-    let rehost = snapshot(rehost_repo, "aaa111");
-    let upstream = snapshot(QWEN38_27B_DESCRIBER_REPO, "bbb222");
+    let rehost = pinned_tier_snapshot(hf_cache.path(), rehost_repo, "q4");
+    assert_eq!(
+        rehost,
+        pinned_tier_snapshot(hf_cache.path(), rehost_repo, "q8"),
+        "q4 and q8 share the re-host's pinned revision"
+    );
+    let upstream = pinned_tier_snapshot(hf_cache.path(), QWEN38_27B_DESCRIBER_REPO, "bf16");
     stage_tier_files(&rehost, rehost_repo, "q4");
     // q8 holds only its config, as a download cancelled after its small files leaves it.
     let folder = |tier: &str| qwen38_tier_dir(rehost_repo, tier).expect("quantised row folder");
@@ -1664,6 +1662,56 @@ fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
              the Model Manager, or choose a tier that is installed."
         ),
         "{error}"
+    );
+}
+
+/// A tier loads from the revision its catalog row pins. An older revision of the same re-host
+/// holding MORE files (its plain `q4/` folder of a superseded pin, plus a `q4-full/` of its own)
+/// never stands in for it: with the pinned revision installed the worker loads that one, and with
+/// the pinned revision absent the tier is not installed, whatever else the cache holds.
+#[test]
+fn a_qwen38_tier_loads_its_pinned_revision_not_a_fuller_older_one() {
+    use sceneworks_core::dataset_batch_describe::{
+        qwen38_tier_dir, QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let repo = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let folder = qwen38_tier_dir(repo, "q4").expect("q4 folder");
+    let pinned = pinned_tier_snapshot(hf_cache.path(), repo, "q4");
+    // The older revision: a complete plain `q4/` folder of twelve files and a complete copy of
+    // the tier's own folder, more files than the pinned revision holds.
+    let older = pinned.with_file_name("0123456789abcdef0123456789abcdef01234567");
+    for index in 0..12 {
+        let path = older.join("q4").join(format!("file-{index}.json"));
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("older q4 dir");
+        std::fs::write(path, "{}").expect("older q4 file");
+    }
+    stage_tier_files(&older, repo, "q4");
+
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    // Only the older revision is cached: the pinned tier is not installed.
+    let error = qwen38_describer_weights_dir(&settings, "q4")
+        .expect_err("an older revision is not the pinned tier");
+    assert!(error.to_string().contains("q4 tier"), "{error}");
+
+    stage_tier_files(&pinned, repo, "q4");
+    let resolved = qwen38_describer_weights_dir(&settings, "q4").expect("the pinned q4");
+    assert_eq!(
+        resolved.canonicalize().expect("resolved exists"),
+        pinned
+            .join(&folder)
+            .canonicalize()
+            .expect("pinned folder exists"),
+        "q4 resolves to snapshots/<pinned>/{folder}"
     );
 }
 
@@ -2046,7 +2094,8 @@ async fn a_qwen38_condense_only_job_uses_its_tier_and_refuses_one_not_installed(
 }
 
 /// Stage every file the catalog row of `repo`'s `tier` pins in `snapshot`, as a finished tier
-/// download leaves it: a shard glob becomes one shard named by the index. Marked `cfg(test)` so the
+/// download leaves it: a shard glob becomes one shard, named by the index in its own folder (the
+/// snapshot root for bf16, the tier folder for a sharded Candle tier). Marked `cfg(test)` so the
 /// model-artifact inventory scan reads it as a test-only item.
 #[cfg(test)]
 fn stage_tier_files(snapshot: &Path, repo: &str, tier: &str) {
@@ -2056,7 +2105,7 @@ fn stage_tier_files(snapshot: &Path, repo: &str, tier: &str) {
         let file = file.replace('*', "fixture");
         let path = snapshot.join(&file);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("snapshot dir");
-        let body = if file == "model.safetensors.index.json" {
+        let body = if file.ends_with("model.safetensors.index.json") {
             json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
         } else {
             "{}".to_owned()
@@ -2065,15 +2114,23 @@ fn stage_tier_files(snapshot: &Path, repo: &str, tier: &str) {
     }
 }
 
-/// Stage `tier` fully in a re-host snapshot of `hf_cache`. Marked `cfg(test)` like the above.
+/// The snapshot of `repo` in `hf_cache` at the revision the catalog row of `tier` pins: the one
+/// the worker loads that tier from. Marked `cfg(test)` like the above.
 #[cfg(test)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
-    let snapshot = hf_cache
+fn pinned_tier_snapshot(hf_cache: &Path, repo: &str, tier: &str) -> std::path::PathBuf {
+    let revision = sceneworks_core::dataset_batch_describe::qwen38_tier_revision(repo, tier)
+        .unwrap_or_else(|| panic!("{repo} {tier} pins a revision"));
+    hf_cache
         .join(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots")
-        .join("aaa111");
-    stage_tier_files(&snapshot, repo, tier);
+        .join(revision)
+}
+
+/// Stage `tier` fully in its pinned re-host snapshot of `hf_cache`. Marked `cfg(test)` like the
+/// above.
+#[cfg(test)]
+fn stage_installed_tier(hf_cache: &Path, repo: &str, tier: &str) {
+    stage_tier_files(&pinned_tier_snapshot(hf_cache, repo, tier), repo, tier);
 }
 
 /// AC3: a tier that is not installed, or that cannot fit, ends the job before any image is
@@ -2121,15 +2178,19 @@ async fn a_qwen38_job_refuses_an_uninstalled_or_oversized_tier_before_any_image(
             QWEN38_27B_DESCRIBER_CANDLE_REPO
         };
         stage_installed_tier(hf_cache.path(), repo, "q8");
-        let weights = hf_cache
-            .path()
-            .join(format!("models--{}", repo.replace('/', "--")))
-            .join("snapshots/aaa111")
+        // The MLX folder's one weights file, or one of the Candle folder's indexed shards (its
+        // index stays, naming the shard that is gone).
+        let weights = if cfg!(target_os = "macos") {
+            "model.safetensors"
+        } else {
+            "model-fixture.safetensors"
+        };
+        let weights = pinned_tier_snapshot(hf_cache.path(), repo, "q8")
             .join(
                 sceneworks_core::dataset_batch_describe::qwen38_tier_dir(repo, "q8")
                     .expect("q8 folder"),
             )
-            .join("model.safetensors");
+            .join(weights);
         std::fs::remove_file(weights).expect("drop the q8 weights");
     }
     let error = {

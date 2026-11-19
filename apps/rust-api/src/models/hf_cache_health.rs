@@ -167,12 +167,16 @@ pub(super) fn huggingface_filtered_cache_health(
     // 15-shard model installed. Evaluate every candidate revision as one coherent snapshot and fold
     // in the shard set declared by its selected index. This reuses the whole-repo/receipt validator;
     // no tensor bytes or headers are read, only the small index and one stat per named shard.
-    let has_flat_shard_glob = files.iter().any(|pattern| {
-        !pattern.contains('/')
-            && pattern_contains_glob(pattern)
-            && pattern.to_ascii_lowercase().ends_with(".safetensors")
+    // The same holds for a sharded tier folder: `q4-full/model-*.safetensors` beside
+    // `q4-full/model.safetensors.index.json` (the Qwen3.8 describer's Candle tiers). Only a literal
+    // folder qualifies, so the index is the one in the glob's own folder.
+    let has_shard_glob = files.iter().any(|pattern| {
+        let (folder, name) = pattern.rsplit_once('/').unwrap_or(("", pattern));
+        !pattern_contains_glob(folder)
+            && pattern_contains_glob(name)
+            && name.to_ascii_lowercase().ends_with(".safetensors")
     });
-    let indexed_health = has_flat_shard_glob.then(|| {
+    let indexed_health = has_shard_glob.then(|| {
         snapshots
             .iter()
             .filter_map(|snapshot| {

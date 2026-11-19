@@ -12,31 +12,44 @@ _spec = importlib.util.spec_from_file_location(
 provision = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(provision)
 
-TIERS = {"q4": 30, "q8": 50}
+TIERS = {"q4": 40, "q8": 60}
 FOLDERS = {"q4": "q4", "q8": "q8"}
+NAMES = ("config.json", "model.safetensors.index.json", "model-*.safetensors")
 ENTRIES = [
     (".gitattributes", 5), ("README.md", 7),
-    ("q4/config.json", 10), ("q4/model.safetensors", 20),
-    ("q8/config.json", 10), ("q8/model.safetensors", 40),
+    # A sidecar the preparer copied that the row does not name: neither downloaded nor totalled.
+    ("q4/special_tokens_map.json", 3),
+    ("q4/config.json", 10), ("q4/model.safetensors.index.json", 4),
+    ("q4/model-00001-of-00002.safetensors", 16), ("q4/model-00002-of-00002.safetensors", 10),
+    ("q8/config.json", 10), ("q8/model.safetensors.index.json", 4),
+    ("q8/model-00001-of-00002.safetensors", 26), ("q8/model-00002-of-00002.safetensors", 20),
 ]
 
 
 class ExpectedFilesTest(unittest.TestCase):
-    def test_keeps_only_tier_files(self):
-        self.assertEqual(provision.expected_files(ENTRIES, TIERS, FOLDERS), {
-            "q4/config.json": 10, "q4/model.safetensors": 20,
-            "q8/config.json": 10, "q8/model.safetensors": 40,
+    def test_keeps_only_the_files_the_rows_name(self):
+        self.assertEqual(provision.expected_files(ENTRIES, TIERS, FOLDERS, NAMES), {
+            "q4/config.json": 10, "q4/model.safetensors.index.json": 4,
+            "q4/model-00001-of-00002.safetensors": 16, "q4/model-00002-of-00002.safetensors": 10,
+            "q8/config.json": 10, "q8/model.safetensors.index.json": 4,
+            "q8/model-00001-of-00002.safetensors": 26, "q8/model-00002-of-00002.safetensors": 20,
         })
 
     def test_refuses_a_tier_total_that_differs_from_the_catalog(self):
-        with self.assertRaisesRegex(RuntimeError, "q8/ .* totals 50 bytes, the catalog says 51"):
-            provision.expected_files(ENTRIES, {"q4": 30, "q8": 51}, FOLDERS)
+        with self.assertRaisesRegex(RuntimeError, "q8/ .* totals 60 bytes, the catalog says 61"):
+            provision.expected_files(ENTRIES, {"q4": 40, "q8": 61}, FOLDERS, NAMES)
 
-    def test_refuses_a_missing_tier_or_unsized_file(self):
+    def test_refuses_a_missing_tier_named_file_shards_or_unsized_file(self):
         with self.assertRaisesRegex(RuntimeError, "no sized files under q4/"):
-            provision.expected_files([e for e in ENTRIES if not e[0].startswith("q4/")], TIERS, FOLDERS)
+            provision.expected_files([e for e in ENTRIES if not e[0].startswith("q4/")], TIERS, FOLDERS, NAMES)
+        with self.assertRaisesRegex(RuntimeError, "no sized files under q4/ for q4/model.safetensors.index.json"):
+            provision.expected_files([e for e in ENTRIES if e[0] != "q4/model.safetensors.index.json"],
+                                     TIERS, FOLDERS, NAMES)
+        with self.assertRaisesRegex(RuntimeError, "no sized files under q8/ for q8/model-\\*.safetensors"):
+            provision.expected_files([e for e in ENTRIES if not e[0].startswith("q8/model-")],
+                                     TIERS, FOLDERS, NAMES)
         with self.assertRaisesRegex(RuntimeError, "no sized files under q4/"):
-            provision.expected_files([("q4/config.json", None), *ENTRIES[3:]], TIERS, FOLDERS)
+            provision.expected_files([("q4/config.json", None), *ENTRIES[4:]], TIERS, FOLDERS, NAMES)
 
     def test_pins_an_exact_revision_and_both_quantised_tiers(self):
         self.assertRegex(provision.REVISION, r"^[0-9a-f]{40}$")
@@ -50,7 +63,7 @@ class MismatchedFilesTest(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory(dir=Path(__file__).parent, prefix="qwen38-provision-unit-")
         self.cache = Path(self.scratch.name)
         self.snapshot = provision.snapshot_dir(self.cache)
-        self.expected = provision.expected_files(ENTRIES, TIERS, FOLDERS)
+        self.expected = provision.expected_files(ENTRIES, TIERS, FOLDERS, NAMES)
 
     def tearDown(self):
         self.scratch.cleanup()
@@ -66,7 +79,7 @@ class MismatchedFilesTest(unittest.TestCase):
             ("models--SceneWorks--qwen3.8-27b-abliterated-candle", "snapshots", provision.REVISION))
 
     def test_empty_cache_lists_every_file(self):
-        self.assertEqual(len(provision.mismatched_files(self.snapshot, self.expected)), 4)
+        self.assertEqual(len(provision.mismatched_files(self.snapshot, self.expected)), 8)
 
     def test_complete_snapshot_needs_nothing(self):
         for name, size in self.expected.items():
@@ -76,9 +89,9 @@ class MismatchedFilesTest(unittest.TestCase):
     def test_a_truncated_file_is_reported_with_its_size(self):
         for name, size in self.expected.items():
             self.write(name, size)
-        self.write("q8/model.safetensors", 39)
+        self.write("q8/model-00001-of-00002.safetensors", 25)
         self.assertEqual(provision.mismatched_files(self.snapshot, self.expected),
-                         [("q8/model.safetensors", 40, 39)])
+                         [("q8/model-00001-of-00002.safetensors", 26, 25)])
 
 
 BF16_ENTRIES = [
@@ -126,14 +139,15 @@ class Bf16Test(unittest.TestCase):
             row = rows[tier]
             self.assertEqual(row["revision"], provision.REVISION, tier)
             self.assertEqual(row["estimatedSizeBytes"], total, tier)
-            # The download fetches the tier folder; the catalog names every file in it.
+            # The download fetches exactly the files the catalog row names.
             folder = provision.TIER_FOLDERS[tier]
-            self.assertTrue(all(name.startswith(f"{folder}/") for name in row["files"]), tier)
+            self.assertEqual(row["files"], provision.tier_patterns(folder), tier)
 
     def test_plans_keep_quantised_as_the_default_and_size_bf16_disk(self):
         repo, revision, _, read, patterns, minimum = provision.plan("quantised")
         self.assertEqual((repo, revision, read, patterns, minimum),
-                         (provision.REPO, provision.REVISION, provision.expected_files, ["q4-full/*", "q8-full/*"], 70 * 10**9))
+                         (provision.REPO, provision.REVISION, provision.expected_files,
+                          [*provision.tier_patterns("q4-full"), *provision.tier_patterns("q8-full")], 70 * 10**9))
         repo, revision, _, read, patterns, minimum = provision.plan("bf16")
         self.assertEqual((repo, read, minimum), (provision.BF16_REPO, provision.bf16_expected_files, 75 * 10**9))
         self.assertEqual(patterns, [*provision.BF16_FILES, "model-*.safetensors"])

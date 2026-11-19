@@ -173,16 +173,18 @@ impl DescribeModel {
 /// Where a Qwen3.8 27B tier's snapshot lives. Full precision (`bf16`) is the upstream repository's
 /// snapshot. A quantised tier is a folder of this engine's re-host repository (the one its catalog
 /// row's files name, e.g. `q4-full/`): it was quantised ahead of time, so loading it never reads
-/// or load-quantises the full-precision files.
+/// or load-quantises the full-precision files. Either way the snapshot is the exact revision the
+/// tier's catalog row pins, never another cached revision of the same repository (an older pin's
+/// plain `q4/` folder beside the shipped `q4-full/` one is not this tier).
 #[cfg(native_lane)]
 pub(crate) fn qwen38_describer_weights_dir(
     settings: &Settings,
     tier: &str,
 ) -> WorkerResult<PathBuf> {
     use sceneworks_core::dataset_batch_describe::{
+        qwen38_snapshot_holds, qwen38_tier_dir, qwen38_tier_files, qwen38_tier_revision,
         QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
     };
-    let label = "Qwen3.8 27B describer model path";
     let not_installed = || {
         WorkerError::InvalidPayload(format!(
             "The {tier} tier of the Qwen3.8 27B describer is not installed. Download that tier \
@@ -196,48 +198,22 @@ pub(crate) fn qwen38_describer_weights_dir(
     } else {
         QWEN38_27B_DESCRIBER_CANDLE_REPO
     };
+    let revision = qwen38_tier_revision(repo, tier).ok_or_else(not_installed)?;
     let snapshot =
-        resolve_app_managed_model_dir(settings, repo, label).map_err(|_| not_installed())?;
+        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, &revision)
+            .ok_or_else(not_installed)?;
     // Installed means every file the catalog row pins is in this snapshot, the same rule the API's
     // install state and the job's tier check apply: a cancelled download leaves a folder with
     // some of them, never an install.
-    let files = sceneworks_core::dataset_batch_describe::qwen38_tier_files(repo, tier);
+    let files = qwen38_tier_files(repo, tier);
     if files.is_empty() || !qwen38_snapshot_holds(&snapshot, &files) {
         return Err(not_installed());
     }
     // A quantised tier loads from the folder its catalog row's files name (`q4-full/`), never a
     // folder guessed from the tier's name.
-    Ok(
-        match sceneworks_core::dataset_batch_describe::qwen38_tier_dir(repo, tier) {
-            Some(dir) => snapshot.join(dir),
-            None => snapshot,
-        },
-    )
-}
-
-/// Whether `snapshot` holds every file in `files`. A `model-*.safetensors` shard glob is satisfied
-/// by the shards the snapshot's `model.safetensors.index.json` names, every one of them present.
-#[cfg(native_lane)]
-fn qwen38_snapshot_holds(snapshot: &Path, files: &[String]) -> bool {
-    files.iter().all(|file| {
-        if !file.contains('*') {
-            return snapshot.join(file).is_file();
-        }
-        let Some(shards) = std::fs::read_to_string(snapshot.join("model.safetensors.index.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|index| {
-                index.get("weight_map")?.as_object().map(|map| {
-                    map.values()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<std::collections::BTreeSet<_>>()
-                })
-            })
-        else {
-            return false;
-        };
-        !shards.is_empty() && shards.iter().all(|shard| snapshot.join(shard).is_file())
+    Ok(match qwen38_tier_dir(repo, tier) {
+        Some(dir) => snapshot.join(dir),
+        None => snapshot,
     })
 }
 

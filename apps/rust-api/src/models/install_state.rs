@@ -1439,6 +1439,55 @@ pub(crate) fn installed_variant_keys(model: &Value, data_dir: &FsPath) -> Vec<St
         .collect()
 }
 
+/// Whether `tier` of `model` (already narrowed to this host's platform) is installed at the exact
+/// revision its download row pins: every file the row names is present in THAT snapshot, a shard
+/// glob only with every shard its index names. Unlike [`installed_variant_keys`] (the Model
+/// Manager's badge, which accepts any cached revision of the repository), an older revision of
+/// the same repository never stands in for the pinned one, so a job admitted on this answer runs
+/// on the files the row pins. `false` when the row is missing, pins no immutable revision, or
+/// names no files.
+pub(crate) fn pinned_variant_installed(model: &Value, tier: &str, data_dir: &FsPath) -> bool {
+    let Some(row) = model_variant_downloads(model)
+        .into_iter()
+        .find(|row| row.get("variant").and_then(Value::as_str).map(str::trim) == Some(tier))
+    else {
+        return false;
+    };
+    let (Some(repo), Some(revision)) = (
+        row.get("repo").and_then(Value::as_str),
+        row.get("revision").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    let files = string_array_field(row, "files");
+    if files.is_empty() {
+        return false;
+    }
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+        return false;
+    };
+    if !huggingface_filtered_cache_health(std::slice::from_ref(&snapshot), &files).installed {
+        return false;
+    }
+    // A whole tier folder glob (`candle-q4-full/*`, the H3 expander's Candle tiers) is satisfied by
+    // any one file, so a torn sharded folder would pass: every shard the indexes it holds name
+    // must be present too.
+    let on_disk = snapshot_files(&snapshot);
+    let indexes = on_disk
+        .iter()
+        .filter(|file| {
+            files.iter().any(|pattern| {
+                whole_subdir_glob_tier(pattern).is_some() && pattern_matches(pattern, file)
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    torn_shard_indexes_in(&snapshot, &indexes).is_empty()
+}
+
 // Build the per-variant install state for every selected download entry. Each entry is probed
 // independently against the HF cache using that tier's own `files` filter, so the catalog can
 // advertise (e.g.) bf16 installed while q4 is missing.

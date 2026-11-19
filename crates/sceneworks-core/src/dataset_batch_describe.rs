@@ -34,24 +34,73 @@ pub const QWEN38_27B_DESCRIBER_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
 /// The tier a Qwen3.8 27B request without a `tier` describes with.
 pub const QWEN38_27B_DESCRIBER_DEFAULT_TIER: &str = "q4";
 
-/// The file selectors the shipped catalog row of the Qwen3.8 27B `tier` served from `repo` names:
-/// the exact files of a quantised tier's folder, or full precision's named files plus its
-/// `model-*.safetensors` shard glob. Empty when the catalog has no such row. The API's install
-/// state, the job's tier check and the worker all require every one of these to be present.
-pub fn qwen38_tier_files(repo: &str, tier: &str) -> Vec<String> {
-    crate::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)
-        .and_then(|entry| entry.get("downloads")?.as_array().cloned())
-        .into_iter()
-        .flatten()
+/// The shipped catalog row of the Qwen3.8 27B `tier` served from `repo`, when the catalog has one.
+fn qwen38_tier_row(repo: &str, tier: &str) -> Option<Value> {
+    crate::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)?
+        .get("downloads")?
+        .as_array()?
+        .iter()
         .find(|row| {
             row.get("repo").and_then(Value::as_str) == Some(repo)
                 && row.get("variant").and_then(Value::as_str) == Some(tier)
         })
+        .cloned()
+}
+
+/// The file selectors the shipped catalog row of the Qwen3.8 27B `tier` served from `repo` names:
+/// a quantised tier's folder files (the MLX folder's one `model.safetensors`, or the Candle
+/// folder's shard index plus its `model-*.safetensors` shard glob), or full precision's named
+/// files plus its shard glob. Empty when the catalog has no such row. The API's install state, the
+/// job's tier check and the worker all require every one of these to be present.
+pub fn qwen38_tier_files(repo: &str, tier: &str) -> Vec<String> {
+    qwen38_tier_row(repo, tier)
         .and_then(|row| row.get("files")?.as_array().cloned())
         .into_iter()
         .flatten()
         .filter_map(|file| file.as_str().map(str::to_owned))
         .collect()
+}
+
+/// The revision the shipped catalog row of the Qwen3.8 27B `tier` served from `repo` pins: the
+/// one snapshot of `repo` that tier is loaded from, whatever other revisions the cache holds.
+/// `None` when the catalog has no such row or the row pins no revision.
+pub fn qwen38_tier_revision(repo: &str, tier: &str) -> Option<String> {
+    qwen38_tier_row(repo, tier)?
+        .get("revision")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Whether `snapshot` holds every file in `files` (a tier's [`qwen38_tier_files`]). A shard glob
+/// (`model-*.safetensors`, or `q4-full/model-*.safetensors`) is satisfied by the shards the
+/// `model.safetensors.index.json` in the glob's own folder names, every one of them present in
+/// that folder: one shard on disk never stands for a sharded checkpoint.
+pub fn qwen38_snapshot_holds(snapshot: &std::path::Path, files: &[String]) -> bool {
+    files.iter().all(|file| {
+        if !file.contains('*') {
+            return snapshot.join(file).is_file();
+        }
+        let folder = match file.rsplit_once('/') {
+            Some((folder, _)) if !folder.contains('*') => snapshot.join(folder),
+            Some(_) => return false,
+            None => snapshot.to_path_buf(),
+        };
+        let Some(shards) = std::fs::read_to_string(folder.join("model.safetensors.index.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|index| {
+                index.get("weight_map")?.as_object().map(|map| {
+                    map.values()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+            })
+        else {
+            return false;
+        };
+        !shards.is_empty() && shards.iter().all(|shard| folder.join(shard).is_file())
+    })
 }
 
 /// The folder of the re-host snapshot that holds the Qwen3.8 27B `tier` served from `repo`: the
@@ -369,18 +418,34 @@ mod tests {
                     qwen38_tier_dir(rehost, tier).expect("a quantised row names its folder");
                 assert_eq!(folder, format!("{tier}-full"), "{platform} {tier}");
                 // Every file of the tier's folder, named one by one (never a `<folder>/*` glob,
-                // which one file satisfies), the list every install check requires.
+                // which one file satisfies), the list every install check requires. The MLX
+                // folder holds one `model.safetensors`; the Candle folder is sharded like its
+                // bf16 source (candle-llm `prepare_snapshot` keeps each source shard), so its row
+                // names the index and the shard glob the index is checked against.
+                let weights: &[&str] = if rehost == QWEN38_27B_DESCRIBER_MLX_REPO {
+                    &["model.safetensors"]
+                } else {
+                    &["model.safetensors.index.json", "model-*.safetensors"]
+                };
                 let expected = [
                     "config.json",
                     "generation_config.json",
                     "chat_template.jinja",
                     "tokenizer.json",
                     "tokenizer_config.json",
-                    "model.safetensors",
                 ]
-                .map(|name| format!("{folder}/{name}"));
+                .iter()
+                .chain(weights)
+                .map(|name| format!("{folder}/{name}"))
+                .collect::<Vec<_>>();
                 assert_eq!(files, expected, "{platform} {tier}");
                 assert_eq!(files, qwen38_tier_files(rehost, tier));
+                // Each tier is pinned to one exact revision of its re-host.
+                let revision = qwen38_tier_revision(rehost, tier).expect("a pinned revision");
+                assert!(
+                    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "{platform} {tier}: {revision}"
+                );
             }
             assert_eq!(
                 selected(platform, Some("bf16")).0,
@@ -403,6 +468,44 @@ mod tests {
                 assert_eq!(closure["downloads"][0]["variant"], tier, "{platform}");
             }
         }
+    }
+
+    /// A shard glob is satisfied only by every shard the index in the glob's own folder names:
+    /// a torn sharded tier (one shard of two) and a shard beside no index are not installed.
+    #[test]
+    fn a_sharded_tier_holds_only_when_every_indexed_shard_is_in_its_folder() {
+        let snapshot = tempfile::tempdir().expect("snapshot dir");
+        let root = snapshot.path();
+        let files = [
+            "q4-full/config.json",
+            "q4-full/model.safetensors.index.json",
+            "q4-full/model-*.safetensors",
+        ]
+        .map(str::to_owned);
+        std::fs::create_dir_all(root.join("q4-full")).expect("tier folder");
+        std::fs::write(root.join("q4-full/config.json"), "{}").expect("config");
+        std::fs::write(root.join("q4-full/model-00001-of-00002.safetensors"), "").expect("shard 1");
+        // A shard but no index: not installed.
+        assert!(!qwen38_snapshot_holds(root, &files));
+        std::fs::write(
+            root.join("q4-full/model.safetensors.index.json"),
+            serde_json::json!({ "weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .expect("index");
+        // The index names a shard that is missing: torn.
+        assert!(!qwen38_snapshot_holds(root, &files));
+        // The missing shard at the snapshot root does not count for the folder's index.
+        std::fs::write(root.join("model-00002-of-00002.safetensors"), "").expect("stray shard");
+        assert!(!qwen38_snapshot_holds(root, &files));
+        std::fs::write(root.join("q4-full/model-00002-of-00002.safetensors"), "").expect("shard 2");
+        assert!(qwen38_snapshot_holds(root, &files));
+        // A named file still has to be present.
+        std::fs::remove_file(root.join("q4-full/config.json")).expect("drop config");
+        assert!(!qwen38_snapshot_holds(root, &files));
     }
 
     #[test]

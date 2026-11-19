@@ -353,8 +353,10 @@ fn can_run_nvfp4_expansion(workers: &[WorkerSnapshot]) -> bool {
 
 /// The expander tier an unselected expansion runs: the worker's own order
 /// ([`sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS`]) over the tiers installed for this
-/// host's platform, with NVFP4 only when a registered worker can run it. `None` when no tier is
-/// installed, which leaves the worker's "install the expander" refusal to explain it.
+/// host's platform, with NVFP4 only when a registered worker can run it. A tier is installed when
+/// its row's pinned revision holds every file the row names, the snapshot the worker loads.
+/// `None` when no tier is installed, which leaves the worker's "install the expander" refusal to
+/// explain it.
 fn expander_tier(
     entry: &Value,
     data_dir: &std::path::Path,
@@ -362,11 +364,10 @@ fn expander_tier(
 ) -> Option<&'static str> {
     let mut host = entry.clone();
     crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
-    let installed = crate::models::installed_variant_keys(&host, data_dir);
     sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS
         .into_iter()
         .filter(|tier| *tier != "nvfp4" || nvfp4_worker)
-        .find(|tier| installed.iter().any(|variant| variant == tier))
+        .find(|tier| crate::models::pinned_variant_installed(&host, tier, data_dir))
 }
 
 /// Whether `value` is a positive-integer `W:H`.
@@ -415,6 +416,70 @@ mod tests {
             assert!(!is_positive_ratio(value), "{value}");
         }
         assert_eq!(MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, 16);
+    }
+
+    /// The tier an unselected expansion freezes is installed only at its row's pinned revision:
+    /// an older revision of the re-host holding MORE files in the same folder never stands in
+    /// for it, and a pinned folder whose shard index names a missing shard is not installed.
+    #[test]
+    fn the_expander_tier_is_installed_only_at_its_pinned_revision() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let _hub = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.path().to_path_buf(),
+            data_dir.path().join("hub"),
+        );
+        let entry = Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3_image_pe")
+                .expect("the expander is a builtin")
+                .clone(),
+        );
+        let mut host = entry.clone();
+        crate::models::retain_downloads_for_os(&mut host, std::env::consts::OS);
+        let q4 = sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+            &host, "q4",
+        )
+        .expect("q4 row");
+        let repo = q4["repo"].as_str().unwrap();
+        let folder = q4["files"][0].as_str().unwrap().trim_end_matches("/*");
+        let cache =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir.path(), repo).unwrap();
+        let write = |revision: &str, file: &str, body: &str| {
+            let path = cache
+                .join("snapshots")
+                .join(revision)
+                .join(folder)
+                .join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        // An older revision, `refs/main`, with a complete twelve-file folder of its own.
+        let older = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), older).unwrap();
+        write(older, "config.json", "{}");
+        write(older, "model.safetensors", "");
+        for index in 0..10 {
+            write(older, &format!("extra-{index}.json"), "{}");
+        }
+        assert_eq!(expander_tier(&entry, data_dir.path(), false), None);
+
+        // The pinned revision, its index naming two shards with one on disk: torn.
+        let pinned = q4["revision"].as_str().unwrap();
+        write(pinned, "config.json", "{}");
+        write(
+            pinned,
+            "model.safetensors.index.json",
+            &serde_json::json!({ "weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        );
+        write(pinned, "model-00001-of-00002.safetensors", "");
+        assert_eq!(expander_tier(&entry, data_dir.path(), false), None);
+
+        write(pinned, "model-00002-of-00002.safetensors", "");
+        assert_eq!(expander_tier(&entry, data_dir.path(), false), Some("q4"));
     }
 
     /// NVFP4 is offered to an expansion only when ONE available worker advertises both the

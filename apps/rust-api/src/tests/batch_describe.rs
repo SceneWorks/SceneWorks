@@ -697,12 +697,19 @@ async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
     let cache =
         huggingface_repo_cache_path(&state.settings.data_dir, row["repo"].as_str().unwrap())
             .unwrap();
+    // The MLX folder's one weights file, or the Candle folder's indexed shard (its index stays,
+    // naming the shard that is gone).
+    let weights = if cfg!(target_os = "macos") {
+        "model.safetensors"
+    } else {
+        "model-fixture.safetensors"
+    };
     std::fs::remove_file(
         cache
             .join("snapshots")
             .join(row["revision"].as_str().unwrap())
             .join(format!(
-                "{}model.safetensors",
+                "{}{weights}",
                 qwen38_tier_folder(std::env::consts::OS, "q4")
             )),
     )
@@ -739,6 +746,63 @@ async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
             .starts_with("The q4 tier of Vision Describer (Qwen3.8-27B) is not installed."),
         "{body}"
     );
+}
+
+/// A tier is installed only at the revision its row pins. An older revision of the re-host that
+/// `refs/main` names and that holds MORE files (every file of the tier's folder plus a plain
+/// twelve-file `q4/` folder of a superseded pin) does not install the tier: the request is refused
+/// until the pinned revision is present, then accepted.
+#[tokio::test]
+async fn a_qwen38_tier_in_an_older_revision_is_not_installed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let row = qwen38_tier_row(std::env::consts::OS, "q4");
+    let cache =
+        huggingface_repo_cache_path(&state.settings.data_dir, row["repo"].as_str().unwrap())
+            .unwrap();
+    let older = cache
+        .join("snapshots")
+        .join("0123456789abcdef0123456789abcdef01234567");
+    for selector in row["files"].as_array().expect("files") {
+        let file = selector.as_str().expect("selector").replace('*', "fixture");
+        let path = older.join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("older dir");
+        let body = if file.ends_with(".safetensors.index.json") {
+            json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
+        } else {
+            "fixture".to_owned()
+        };
+        std::fs::write(path, body).expect("older tier file");
+    }
+    for index in 0..12 {
+        let path = older.join("q4").join(format!("file-{index}.json"));
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("older q4 dir");
+        std::fs::write(path, "{}").expect("older q4 file");
+    }
+    std::fs::create_dir_all(cache.join("refs")).expect("refs dir");
+    std::fs::write(
+        cache.join("refs/main"),
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    .expect("ref");
+
+    let body = json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": "q4" });
+    let (status, refused) = request(app.clone(), "POST", &route, body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .expect("detail")
+            .starts_with("The q4 tier of Vision Describer (Qwen3.8-27B) is not installed."),
+        "{refused}"
+    );
+
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    let (status, job) = request(app.clone(), "POST", &route, body).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
 }
 
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a

@@ -16186,11 +16186,16 @@
       //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
       //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 28).
       //
-      // Each row names every file the loader reads (the q4/q8 rows list the six files of their
-      // tier folder rather than a `<tier>/*` glob), so a tier counts as installed only when every
-      // listed file is present in one cached revision: the API's install state, the job's tier
-      // check and the worker all apply that rule, so a cancelled tier download never looks
-      // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
+      // Each row names every file the loader reads rather than a `<tier>/*` glob (which one file
+      // satisfies), so a tier counts as installed only when every listed file is present in the
+      // row's pinned revision: the API's install state, the job's tier check and the worker all
+      // apply that rule, so a cancelled tier download never looks installed (the lesson recorded
+      // on `film_planner_qwen3_6_27b`). The MLX q4/q8 folders hold one `model.safetensors`. The
+      // Candle q4/q8 folders are sharded like their bf16 source: candle-llm `prepare_snapshot`
+      // writes one output shard per source shard under the source's name (18 for this model) plus
+      // a fresh `model.safetensors.index.json`, so those rows name the index and the
+      // `model-*.safetensors` shard glob, as the bf16 row does, and every shard the index names
+      // must be present.
       "id": "vision_describe_qwen3_8_27b",
       "autoDownload": false,
       "macOnly": false,
@@ -16211,7 +16216,9 @@
           "platforms": ["macos"],
           // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
           // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
-          // embedding save); replace with the publication report's prefixBytes.
+          // embedding save); replace with the total of the files this row names, summed from the
+          // publication report's `files` list (its prefixBytes counts every file in the folder,
+          // which differs when the preparer copied a sidecar this row does not name).
           "estimatedSizeBytes": 17611605764,
           "footprint": { "diskSizeBytes": 17611605764 }
         },
@@ -16224,7 +16231,9 @@
           "platforms": ["macos"],
           // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
           // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
-          // embedding save); replace with the publication report's prefixBytes.
+          // embedding save); replace with the total of the files this row names, summed from the
+          // publication report's `files` list (its prefixBytes counts every file in the folder,
+          // which differs when the preparer copied a sidecar this row does not name).
           "estimatedSizeBytes": 29987425322,
           "footprint": { "diskSizeBytes": 29987425322 }
         },
@@ -16234,11 +16243,21 @@
           "revision": "7202000000000000000000000000000000000002",
           "variant": "q4",
           "default": true,
-          "files": ["q4-full/config.json", "q4-full/generation_config.json", "q4-full/chat_template.jinja", "q4-full/tokenizer.json", "q4-full/tokenizer_config.json", "q4-full/model.safetensors"],
+          "files": [
+            "q4-full/config.json",
+            "q4-full/generation_config.json",
+            "q4-full/chat_template.jinja",
+            "q4-full/tokenizer.json",
+            "q4-full/tokenizer_config.json",
+            "q4-full/model.safetensors.index.json",
+            "q4-full/model-*.safetensors"
+          ],
           "platforms": ["windows", "linux"],
           // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
           // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
-          // embedding save); replace with the publication report's prefixBytes.
+          // embedding save); replace with the total of the files this row names, summed from the
+          // publication report's `files` list (its prefixBytes counts every file in the folder,
+          // which differs when the preparer copied a sidecar this row does not name).
           "estimatedSizeBytes": 17611498331,
           "footprint": { "diskSizeBytes": 17611498331 }
         },
@@ -16247,11 +16266,21 @@
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
           "revision": "7202000000000000000000000000000000000002",
           "variant": "q8",
-          "files": ["q8-full/config.json", "q8-full/generation_config.json", "q8-full/chat_template.jinja", "q8-full/tokenizer.json", "q8-full/tokenizer_config.json", "q8-full/model.safetensors"],
+          "files": [
+            "q8-full/config.json",
+            "q8-full/generation_config.json",
+            "q8-full/chat_template.jinja",
+            "q8-full/tokenizer.json",
+            "q8-full/tokenizer_config.json",
+            "q8-full/model.safetensors.index.json",
+            "q8-full/model-*.safetensors"
+          ],
           "platforms": ["windows", "linux"],
           // PENDING-SW-7202: the revision 72020000…000N is a PLACEHOLDER for the publication commit, and the size is a
           // DERIVED estimate (plain tier minus the 2,383,872,000 B the int8 head and
-          // embedding save); replace with the publication report's prefixBytes.
+          // embedding save); replace with the total of the files this row names, summed from the
+          // publication report's `files` list (its prefixBytes counts every file in the folder,
+          // which differs when the preparer copied a sidecar this row does not name).
           "estimatedSizeBytes": 29987316675,
           "footprint": { "diskSizeBytes": 29987316675 }
         },
