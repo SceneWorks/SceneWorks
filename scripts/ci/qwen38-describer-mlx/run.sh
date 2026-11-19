@@ -12,7 +12,7 @@
 #   * >= 128 GiB unified memory, and `memory_pressure` free GiB >= the cap + 10 GiB right before the run;
 #   * the test binary runs under the external phys_footprint guard (iris-mlx-real-weights/tree_guard.py)
 #     that SIGTERMs it at the cap or the wall limit (MLX is never SIGKILLed mid-buffer from here), and
-#     under the shared Metal execution lease.
+#     under the shared Metal execution lease; guarded_run.sh records the guard's summary line.
 #
 # Inputs (env): QWEN38_TIER = q4 | q8 | bf16, QWEN38_IMAGE_SIDE = default | 1536, QWEN38_EVIDENCE_DIR,
 # QWEN38_MAC_RUNNER = nax-macos | nax-macos-2.
@@ -108,24 +108,10 @@ fi
 test_name=qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_mlx
 log="$out/describer.log"
 mkdir -p "$out/result"
-set +e
-guard="$(python3.12 -I "$here/../metal_execution_lock.py" --wait-seconds 3600 -- \
+echo "## Qwen3.8 27B describer, MLX $tier at image side $side (${RUNNER_NAME:-unknown})" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+bash "$here/guarded_run.sh" "$out" "$log" "$test_name" -- \
+  python3.12 -I "$here/../metal_execution_lock.py" --wait-seconds 3600 -- \
   env HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" MODEL_PROOF_OUTPUT_DIR="$out/result" \
   SCENEWORKS_QWEN38_DESCRIBER_TIER="$tier" SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE="$side" \
   python3.12 "$guard_dir/tree_guard.py" "$cap_gib" 2400 "$log" -- \
-  "$bin" "$test_name" --ignored --exact --nocapture --test-threads=1)"
-rc=$?
-set -e
-cat "$log"
-grep '^GUARD:' <<<"$guard" | tee "$out/guard.txt" || true
-if [[ "$rc" != 0 ]] || ! grep -q "test result: ok. 1 passed" "$log"; then
-  echo "::error::$test_name did not run exactly one passing test"
-  exit 1
-fi
-{
-  echo "## Qwen3.8 27B describer, MLX $tier at image side $side (nax-macos-2)"
-  echo
-  grep '^GUARD:' <<<"$guard" | sed 's/^/    /'
-  echo
-  echo "The MLX floor is ceil(root_lifetime_max GiB / 0.9)."
-} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  "$bin" "$test_name" --ignored --exact --nocapture --test-threads=1
