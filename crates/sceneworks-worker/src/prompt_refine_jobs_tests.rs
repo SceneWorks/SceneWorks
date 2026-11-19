@@ -2927,14 +2927,7 @@ async fn an_expansion_runs_only_the_named_expander_model_under_its_own_entry() {
         .and_then(|file| file.split_once('/'))
         .map(|(folder, _)| folder.to_owned())
         .expect("the q4 row names a folder");
-    let tier = crate::huggingface_hub_cache_dir(&data)
-        .join(format!(
-            "models--{}",
-            q4["repo"].as_str().unwrap().replace('/', "--")
-        ))
-        .join("snapshots")
-        .join(q4["revision"].as_str().unwrap())
-        .join(folder);
+    let tier = pinned_row_snapshot(&data, &q4).join(folder);
     std::fs::create_dir_all(&tier).unwrap();
     std::fs::write(tier.join("config.json"), "{}").unwrap();
     let error =
@@ -2946,4 +2939,18 @@ async fn an_expansion_runs_only_the_named_expander_model_under_its_own_entry() {
         error.contains("declares no `prompt` co-requisite"),
         "{error}"
     );
+}
+
+/// The pinned snapshot of catalog download `row` (its repo at its revision) in `data`'s hub cache.
+/// Marked `cfg(test)`, as `batch_describe_jobs_tests`' snapshot helpers are, so the model-artifact
+/// inventory reads it as a test fixture rather than a production model root.
+#[cfg(test)]
+fn pinned_row_snapshot(data: &Path, row: &Value) -> std::path::PathBuf {
+    crate::huggingface_hub_cache_dir(data)
+        .join(format!(
+            "models--{}",
+            row["repo"].as_str().unwrap().replace('/', "--")
+        ))
+        .join("snapshots")
+        .join(row["revision"].as_str().unwrap())
 }

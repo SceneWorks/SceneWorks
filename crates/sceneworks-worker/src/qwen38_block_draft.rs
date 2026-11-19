@@ -105,6 +105,11 @@ pub(crate) fn block_draft_speculation(
     capabilities: &TextLlmCapabilities,
     otherwise: Option<Speculative>,
 ) -> (Option<Speculative>, SpeculativeVerify) {
+    // INTERIM: the worker names `block_draft` explicitly instead of sending `auto`, because at the
+    // pinned inference revision `auto` never resolves to a block draft. This stays until SW-7200's
+    // measured AUTO_BLOCK_DRAFT_DECISIONS table lands and `auto` chooses the proposer itself; then
+    // the request should send `auto`. Tree checking stays an explicit request either way: per
+    // SW-F328, `auto` never turns on `SpeculativeVerify::Tree`.
     match capabilities.proposer(SpeculativeProposer::BlockDraft) {
         Some(cap) => (
             Some(Speculative::proposer(
