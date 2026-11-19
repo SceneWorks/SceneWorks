@@ -13,9 +13,9 @@
 //!
 //! Both are fine-tuned Qwen3.5/3.6 (`model_type` `qwen3_5`) 9.41B VLM checkpoints under the Qwen
 //! RESEARCH LICENSE (non-commercial). That is the SAME architecture the optional
-//! `film_planner_qwen3_6_27b` catalog entry already runs, so they load on the EXISTING native
-//! `core_llm::TextLlm` lane — `Architecture::Qwen35` → `Qwen35Config`/`Qwen35Model` on `mlx-llama`
-//! (macOS) and `candle-llama` (Windows/CUDA), with `Qwen35VisionModel` + DeepStack serving the I2I
+//! `vision_describe_qwen3_8_27b` catalog entry (Qwen3.8, also the film planner) already runs, so
+//! they load on the EXISTING native `core_llm::TextLlm` lane — `Architecture::Qwen35` →
+//! `Qwen35Config`/`Qwen35Model` on `mlx-llama` (macOS) and `candle-llama` (Windows/CUDA), with `Qwen35VisionModel` + DeepStack serving the I2I
 //! image turns. No second LLM runtime is built, and nothing here loads weights: this module is the
 //! pure adapter — which rewriter, which template, what the reply means — that
 //! [`crate::prompt_refine_jobs`] drives through the ordinary `prompt_refine` job.

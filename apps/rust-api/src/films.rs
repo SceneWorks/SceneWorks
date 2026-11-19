@@ -499,12 +499,11 @@ fn validate_planning_selection(draft: &FilmDraft) -> Result<(), ApiError> {
             }
         }
         "native" => {
-            if draft.planning.model_id.as_deref()
-                != Some(sceneworks_core::film_workspace::QWEN36_FILM_PLANNER_MODEL_ID)
-            {
-                return Err(ApiError::bad_request(
-                    "Native film planning requires modelId film_planner_qwen3_6_27b",
-                ));
+            use sceneworks_core::film_workspace::NATIVE_FILM_PLANNER_MODEL_ID;
+            if draft.planning.model_id.as_deref() != Some(NATIVE_FILM_PLANNER_MODEL_ID) {
+                return Err(ApiError::bad_request(format!(
+                    "Native film planning requires modelId {NATIVE_FILM_PLANNER_MODEL_ID}"
+                )));
             }
         }
         "openai_compatible" => {

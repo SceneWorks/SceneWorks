@@ -676,7 +676,8 @@ draft that drops a beat is refused, never accepted as a shorter film.
   running-time window, but it must retain every required beat and pass the same full validation.
 - **Workspace planner selection is separate from the video model.** New drafts use the built-in
   `prompt_refine_anubis_8b` planner without downloading Qwen. The optional local
-  `film_planner_qwen3_6_27b` is available only after an explicit install and selection. Planner
+  Qwen3.8-27B planner (`vision_describe_qwen3_8_27b`, shared with dataset describing) is
+  available only after an explicit install and selection. Planner
   provider, actual LLM model identity and thinking mode are persisted independently of the target
   video model. An unavailable, canceled or exhausted operation preserves the draft and manual
   editing path; it does not render or substitute another planner. See

@@ -212,7 +212,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // SW-F373 adds three SenseNova-Loop-9B listings. The 159 prior rows and Illustrious file lists match.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "bae4337d06281e02fedb9fdae6d624528dd0e673f591584ba0b191a9eb8b3da1";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "763683c3e46cd385743af1d152f9950235da4564bbc585ddcb7a37b971864506";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

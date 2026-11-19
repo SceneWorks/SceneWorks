@@ -75,7 +75,7 @@ planning. There is no value in rendering a misunderstood story.
 ### 2. Generate and inspect a plan
 
 On **Plan**, keep **Built-in prompt refiner (default)** and choose an installed, compatible
-**Video model**. The local prompt-refiner also needs its weights and a compatible worker; Qwen3.6-27B
+**Video model**. The local prompt-refiner also needs its weights and a compatible worker; Qwen3.8-27B
 is not required. Check Models and Workers if availability is unclear.
 
 Choose **Generate candidate plan**. This uses the planning model but does not render video. Inspect
@@ -173,7 +173,7 @@ After the silent example works, duplicate the experiment as a new draft so you c
 2. Add one short dialogue line and verify its placement and audibility before adding a music bed.
 3. Try a longer scene or more complex camera motion only after these simpler runs are understood.
 4. Compare a different planner only after keeping the script, video model, and settings stable.
-   Qwen3.6-27B is an optional large local model; an external connection is an explicit separate choice.
+   Qwen3.8-27B is an optional large local model; an external connection is an explicit separate choice.
 
 For a reusable starting structure, write two to four short paragraphs describing setting, subject,
 visible action, and the state left for the next beat. Add visual direction in its own field. Avoid

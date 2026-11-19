@@ -15114,66 +15114,6 @@
       }
     },
     {
-      // Optional high-capability film-planning checkpoint (sc-23733). It rides the same native
-      // TextLlm provider as the built-in Anubis prompt refiner; the pinned inference engines already
-      // implement the Qwen3.6 (`qwen3_5`) architecture on MLX and Candle. This entry only makes the
-      // upstream weights explicitly installable and availability-readable. It is never selected or
-      // downloaded automatically: a new film draft continues to use prompt_refine_anubis_8b.
-      //
-      // The first published pin held only README.md and .gitattributes. A whole-repo `files: []`
-      // claim consequently made that 1.5 KB metadata snapshot look installed. Pin the first complete
-      // official snapshot and name the loader's required files so no metadata-only revision can ever
-      // advertise as usable. `breaking` applies specifically to that unusable old receipt: it must
-      // not preserve the README-only revision through the normal usable-stale path.
-      "id": "film_planner_qwen3_6_27b",
-      "autoDownload": false,
-      "macOnly": false,
-
-      "name": "Film Planner (Qwen3.6-27B)",
-      "family": "film-planner",
-      "type": "utility",
-      "adapter": "prompt-refine",
-      "capabilities": [],
-      "downloads": [
-        {
-          "provider": "huggingface",
-          "repo": "Qwen/Qwen3.6-27B",
-          "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
-          "files": [
-            "config.json",
-            "generation_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "model.safetensors.index.json",
-            "model-*.safetensors"
-          ],
-          "breaking": true,
-          "estimatedSizeBytes": 57000000000
-        }
-      ],
-      "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen3.6-27B"
-      },
-      "defaults": {},
-      "limits": {},
-      "loraCompatibility": {
-        "families": [],
-        "types": []
-      },
-      "ui": {
-        "label": "Film Planner (Qwen3.6-27B)",
-        "description": "Optional native film-planning LLM. Large explicit download; never required by the built-in prompt-refiner planning path.",
-        "recommendedFor": ["film_planning"],
-        "promptGuide": {
-          "title": "Qwen3.6-27B model card",
-          "path": "/prompt-guides/prompt-refine.md",
-          "sources": [
-            { "label": "Qwen/Qwen3.6-27B model card", "url": "https://huggingface.co/Qwen/Qwen3.6-27B" }
-          ]
-        }
-      }
-    },
-    {
       // Qwen-Image 2.1 OFFICIAL PROMPT REWRITER — text-to-image half (sc-24113, epic 24107).
       //
       // Upstream ships prompt rewriting as a SEPARATE pair of checkpoints, not as anything inside
@@ -15183,7 +15123,7 @@
       // never by a user-facing model picker.
       //
       // Both are fine-tuned Qwen3.5/3.6 (`model_type` `qwen3_5`) 9.41B VLM checkpoints, which is
-      // the SAME architecture the optional `film_planner_qwen3_6_27b` entry above already runs:
+      // the SAME architecture the `vision_describe_qwen3_8_27b` entry (Qwen3.8) already runs:
       // they load on the existing native TextLlm lane (`adapter: "prompt-refine"` →
       // `mlx-llama` on macOS / `candle-llama` off-Mac, through `Architecture::Qwen35` →
       // `Qwen35Config`/`Qwen35Model`, with `Qwen35VisionModel` + DeepStack serving the I2I image
@@ -15195,8 +15135,9 @@
       // install prompt, no degraded path. The rewrite affordance simply does not render unless the
       // matching checkpoint is already present, and the image model never consults it.
       //
-      // `files` names the loader's required set rather than `[]`, for the reason the film-planner
-      // entry gives: a metadata-only revision must never advertise as usable. `system_prompt.txt`
+      // `files` names the loader's required set rather than `[]`: a metadata-only revision must
+      // never advertise as usable (the retired Qwen3.6-27B film planner's first pin held only
+      // README.md and .gitattributes, and a whole-repo `files: []` claim made it look installed). `system_prompt.txt`
       // is in that set because it IS the frozen template — the worker reads the system prompt from
       // the installed snapshot instead of vendoring a copy of Qwen-licensed Materials into this
       // repo, and pins the expected SHA-256 of the pinned revision's file in
@@ -16343,7 +16284,13 @@
       // tier folder rather than a `<tier>/*` glob), so a tier counts as installed only when every
       // listed file is present in one cached revision: the API's install state, the job's tier
       // check and the worker all apply that rule, so a cancelled tier download never looks
-      // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
+      // installed (the lesson of the retired Qwen3.6-27B film planner's README-only pin).
+      //
+      // FILM PLANNER. This entry is also the Video Editor's native film planner
+      // (`film_workspace::NATIVE_FILM_PLANNER_MODEL_ID`): one Qwen3.8 27B download serves both
+      // features, and the planner runs whichever tier is installed (q4, then q8, then bf16). It
+      // replaced the separate 57 GB Qwen3.6-27B planner entry (`film_planner_qwen3_6_27b`), whose
+      // id a saved draft still reads as this one.
       "id": "vision_describe_qwen3_8_27b",
       "autoDownload": false,
       "macOnly": false,
@@ -16429,8 +16376,8 @@
       },
       "ui": {
         "label": "Vision Describer (Qwen3.8-27B)",
-        "description": "Larger vision-language model for Create Prompt Batch from Dataset. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
-        "recommendedFor": ["dataset_batch_describe"],
+        "description": "Larger vision-language model for Create Prompt Batch from Dataset and the Video Editor's native film planner. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
+        "recommendedFor": ["dataset_batch_describe", "film_planning"],
         "promptGuide": {
           "title": "Vision Captioner Guide",
           "path": "/prompt-guides/vision-caption.md",

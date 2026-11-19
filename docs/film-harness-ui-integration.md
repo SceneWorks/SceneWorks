@@ -116,8 +116,8 @@ not silently post a second planner request: startup reconciles the recorded oper
   positive-seconds setting and persists its effective value with the durable operation. Minutes on
   the dev Mac.
 
-The workspace starts new drafts with the built-in `prompt_refine_anubis_8b` planner. Qwen3.6-27B is
-an optional local planner that must be explicitly installed and selected; it is never downloaded or
+The workspace starts new drafts with the built-in `prompt_refine_anubis_8b` planner. Qwen3.8-27B (the
+model shared with dataset describing) is an optional local planner that must be explicitly installed and selected; it is never downloaded or
 selected automatically. A saved OpenAI-compatible connection is a third, explicit provider. Its
 disclosure is shown before dispatch, its secret stays in the backend, and reference pixels are sent
 only after a separate opt-in. The planner selection is independent of the plan's target video model,

@@ -236,6 +236,28 @@ pub(super) async fn parse_refine_request(
     };
     let weights_dir = match &expander_dirs {
         Some(dirs) => dirs.weights.clone(),
+        // The native film planner is the shared Qwen3.8 27B checkpoint: its quantised tiers are
+        // `<tier>/` folders of a per-engine re-host, not the upstream repository's snapshot root, so
+        // it loads through the describer's tier resolution (the API froze the tier as `variant`).
+        None if task == RefineTask::FilmPlan
+            && sceneworks_core::dataset_batch_describe::is_qwen38_27b_describer(Some(&model)) =>
+        {
+            use sceneworks_core::dataset_batch_describe as describe;
+            // A non-string tier is refused, never read as "no tier": that would run the default.
+            let requested = match payload.get("variant") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(tier)) => Some(tier.as_str()),
+                Some(other) => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "Film planning variant (the model tier) must be a string, got {other}."
+                    )))
+                }
+            };
+            let tier = describe::resolve_describe_tier(Some(&model), requested)
+                .map_err(WorkerError::InvalidPayload)?
+                .unwrap_or(describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER);
+            crate::batch_describe_jobs::qwen38_describer_weights_dir(settings, tier)?
+        }
         None if model == sceneworks_core::loop_utility::MODEL_REPO => {
             thinking_mode = gen_core::core_llm::ThinkingMode::Disabled;
             crate::loop_utility::weights_dir(settings, payload).await?

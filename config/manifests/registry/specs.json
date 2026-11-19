@@ -7776,66 +7776,6 @@
     },
     "routes": {}
   },
-  "film_planner_qwen3_6_27b": {
-    "evidence": {},
-    "modelEvidence": {
-      "minMemoryGb": 96
-    },
-    "product": {
-      "adapter": "prompt-refine",
-      "autoDownload": false,
-      "capabilities": [],
-      "defaults": {},
-      "downloads": [
-        {
-          "breaking": true,
-          "estimatedSizeBytes": 57000000000,
-          "files": [
-            "config.json",
-            "generation_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "model.safetensors.index.json",
-            "model-*.safetensors"
-          ],
-          "provider": "huggingface",
-          "repo": "Qwen/Qwen3.6-27B",
-          "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"
-        }
-      ],
-      "family": "film-planner",
-      "id": "film_planner_qwen3_6_27b",
-      "limits": {},
-      "loraCompatibility": {
-        "families": [],
-        "types": []
-      },
-      "macOnly": false,
-      "name": "Film Planner (Qwen3.6-27B)",
-      "paths": {
-        "model": "${HF_CACHE}/Qwen/Qwen3.6-27B"
-      },
-      "type": "utility",
-      "ui": {
-        "description": "Optional native film-planning LLM. Large explicit download; never required by the built-in prompt-refiner planning path.",
-        "label": "Film Planner (Qwen3.6-27B)",
-        "promptGuide": {
-          "path": "/prompt-guides/prompt-refine.md",
-          "sources": [
-            {
-              "label": "Qwen/Qwen3.6-27B model card",
-              "url": "https://huggingface.co/Qwen/Qwen3.6-27B"
-            }
-          ],
-          "title": "Qwen3.6-27B model card"
-        },
-        "recommendedFor": [
-          "film_planning"
-        ]
-      }
-    },
-    "routes": {}
-  },
   "flux2_dev": {
     "downloadEvidence": [
       {
@@ -68465,7 +68405,7 @@
       },
       "type": "utility",
       "ui": {
-        "description": "Larger vision-language model for Create Prompt Batch from Dataset. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
+        "description": "Larger vision-language model for Create Prompt Batch from Dataset and the Video Editor's native film planner. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
         "label": "Vision Describer (Qwen3.8-27B)",
         "promptGuide": {
           "path": "/prompt-guides/vision-caption.md",
@@ -68482,7 +68422,8 @@
           "title": "Vision Captioner Guide"
         },
         "recommendedFor": [
-          "dataset_batch_describe"
+          "dataset_batch_describe",
+          "film_planning"
         ]
       }
     },

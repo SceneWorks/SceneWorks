@@ -242,7 +242,7 @@ fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity(
         "brief",
         "{\"shots\":[]}",
         Some("private reasoning"),
-        "Qwen/Qwen3.6-27B",
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
         "mlx",
         "enabled",
         Some(gen_core::core_llm::FinishReason::Stop),
@@ -256,7 +256,10 @@ fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity(
     assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
     assert_eq!(result["thinking"], "private reasoning");
     assert_eq!(result["executionIdentity"]["provider"], "native");
-    assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        result["executionIdentity"]["model"],
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+    );
     assert_eq!(result["executionIdentity"]["backend"], "mlx");
     assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
     assert!(!result["refinedPrompt"]
@@ -408,7 +411,7 @@ fn empty_length_result_preserves_reasoning_usage_and_actionable_failure() {
 
     let result = refine_failure_result(
         Some("private bounded reasoning"),
-        "Qwen/Qwen3.6-27B",
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
         "mlx",
         "enabled",
         Some(FinishReason::Length),
@@ -424,7 +427,10 @@ fn empty_length_result_preserves_reasoning_usage_and_actionable_failure() {
     assert_eq!(result["generation"]["usage"]["promptTokens"], 2_048);
     assert_eq!(result["generation"]["usage"]["generatedTokens"], 4_096);
     assert_eq!(result["generation"]["maxNewTokens"], 4_096);
-    assert_eq!(result["executionIdentity"]["model"], "Qwen/Qwen3.6-27B");
+    assert_eq!(
+        result["executionIdentity"]["model"],
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+    );
     assert_eq!(result["executionIdentity"]["thinkingMode"], "enabled");
     assert!(result.get("refinedPrompt").is_none());
 
