@@ -163,6 +163,24 @@ describe("BatchExpandPromptsControl", () => {
     expect(container.textContent).toContain("Prompt 2 would contain {{…}} text");
   });
 
+  // A resolved prompt of just `---` is the batch list's block delimiter, so writing it back would
+  // merge or drop prompts; Apply refuses rather than change the batch.
+  it("refuses to apply a result that would split into different prompts", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => {
+      if (prompt !== "a fox") throw new Error("worker exploded");
+      return { refinedPrompt: "Expanded fox" };
+    });
+    const initial = "a fox\n{{---|a heron}}";
+    await act(async () => root.render(<Harness initial={initial} expandPrompt={expandPrompt} onText={(value) => { text = value; }} />));
+    await act(async () => click(button("Expand all 3 prompts")));
+    await settle();
+    expect(container.textContent).toContain("Expanded 1 of 3 prompts.");
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe(initial);
+    expect(container.textContent).toContain("Prompt 2 contains a line of just ---");
+  });
+
   it("keeps finished expansions when stopped", async () => {
     let text = "";
     let release;

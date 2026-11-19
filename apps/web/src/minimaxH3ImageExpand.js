@@ -91,6 +91,8 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
     apply: "Apply to batch",
     applied: (count) => `Replaced ${count} prompt${count === 1 ? "" : "s"} with the expansion.`,
     changed: "The batch prompts changed while expanding. Expand again to use the current list.",
+    unrepresentable: (items) =>
+      `${items.length ? `Prompt${items.length === 1 ? "" : "s"} ${items.slice(0, 8).join(", ")}${items.length > 8 ? ` and ${items.length - 8} more` : ""} contain${items.length === 1 ? "s" : ""} a line of just ---, which` : "The result"} would split the batch list into different prompts. Change that value (or expand again) before applying.`,
     literalPlaceholders: (items) =>
       `Prompt${items.length === 1 ? "" : "s"} ${items.slice(0, 8).join(", ")}${items.length > 8 ? ` and ${items.length - 8} more` : ""} would contain {{…}} text, which the batch list would read as a variable again and render differently. Change that value (or expand again) before applying.`,
   }),

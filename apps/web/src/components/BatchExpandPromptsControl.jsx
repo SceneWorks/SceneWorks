@@ -171,6 +171,18 @@ export function BatchExpandPromptsControl({
       return;
     }
     const nextText = joinPromptLines(next);
+    // The written list must read back as exactly these prompts. A prompt that is (or contains) a
+    // standalone `---` line would split or merge prompts in block mode, so the batch would render
+    // a different set; refuse rather than alter it.
+    const expected = next.map((line) => line.trim()).filter((line) => line !== "");
+    const readBack = splitPromptLines(nextText);
+    if (readBack.length !== expected.length || readBack.some((line, index) => line !== expected[index])) {
+      const delimiters = next
+        .map((line, index) => (line.split(/\r?\n/).some((part) => part.trim() === "---") ? index + 1 : null))
+        .filter((item) => item !== null);
+      setError(copy.batch.unrepresentable(delimiters));
+      return;
+    }
     onPromptsTextChange(nextText);
     setApplied({ previous: run.text, next: nextText, count });
     setRun(null);
