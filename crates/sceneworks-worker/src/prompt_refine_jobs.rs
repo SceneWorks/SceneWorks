@@ -114,6 +114,27 @@ fn resolve_max_new_tokens(
         })
 }
 
+/// The engine-built H3 expansion `request` (SW-7102) as the job runs it: it keeps its messages,
+/// sampling recipe, budget and reasoning knobs and gains this job's `cancel` flag, progress
+/// observer, KV opt-in and decode constraint, and sends `auto` checked linearly (SW-7204: the
+/// engine runs a resident block draft where it measured faster, MTP otherwise).
+#[cfg(any(test, native_lane))]
+pub(crate) fn prepare_expansion_request(
+    mut request: gen_core::core_llm::TextLlmRequest,
+    cancel: gen_core::core_llm::CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+    emits_json: bool,
+    supports_thinking: bool,
+) -> gen_core::core_llm::TextLlmRequest {
+    request.cancel = cancel;
+    request.progress = Some(crate::load_progress::text_observer());
+    request.kv_compression = kv_compression;
+    request.constraint = json_decode_constraint(emits_json, supports_thinking, request.thinking);
+    (request.speculative, request.speculative_verify) =
+        crate::qwen38_block_draft::expansion_speculation();
+    request
+}
+
 /// Apply the JSON grammar only when it cannot capture a reasoning model inside its thinking
 /// channel. Qwen3.6 opens `<think>` in the rendered generation prompt for both `Enabled` and
 /// `Auto`; a JSON mask then rejects the `</think>` marker, so the complete JSON value lands in
@@ -1047,20 +1068,14 @@ pub(crate) async fn run_prompt_refine_job(
                 // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
                 // budget and reasoning knobs; it gains this job's cancel flag, progress observer,
                 // KV opt-in and decode constraint, as the request built below does.
-                let request = if let Some(mut request) = prepared_request {
-                    request.cancel = blocking_cancel.clone();
-                    request.progress = Some(crate::load_progress::text_observer());
-                    request.kv_compression = kv_compression;
-                    request.constraint = json_decode_constraint(
+                let request = if let Some(request) = prepared_request {
+                    prepare_expansion_request(
+                        request,
+                        blocking_cancel.clone(),
+                        kv_compression,
                         emits_json,
                         refiner.descriptor().capabilities.supports_thinking,
-                        request.thinking,
-                    );
-                    // SW-7204: `auto`, checked linearly (the engine runs a resident block draft
-                    // where it measured faster, MTP otherwise).
-                    (request.speculative, request.speculative_verify) =
-                        crate::qwen38_block_draft::expansion_speculation();
-                    request
+                    )
                 } else {
                     let mut messages = Vec::with_capacity(2);
                     if !system.trim().is_empty() {

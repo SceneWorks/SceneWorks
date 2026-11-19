@@ -3,8 +3,10 @@
 //!
 //! Both products load a Qwen3.8-27B tier through the refine cache. When one of the catalog's block
 //! drafts (DFlash2, DSpine; soft co-requisites of both entries, SW-7203) is installed at its pinned
-//! revision, the load names it in [`LoadSpec::draft_source`] at the tier's precision (the 4-bit
-//! tier runs a 4-bit draft, every other an 8-bit one).
+//! revision and `auto` prefers it on this backend and tier ([`auto_keeps_mtp`]), the load names it
+//! in [`LoadSpec::draft_source`] at the tier's precision (the 4-bit tier runs a 4-bit draft, every
+//! other an 8-bit one). Where `auto` keeps MTP the load leaves the draft out, so it is neither
+//! loaded nor priced, and the job record says why.
 //!
 //! Every describe, condense and expansion request sends `speculative: auto`, checked linearly
 //! ([`request_speculation`]). Since SW-7200 the engine's `auto` chooses the proposer from measured
@@ -28,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gen_core::core_llm::{
-    DecodeReport, LoadReport, LoadSpec, Quantize, Speculative, SpeculativeVerify,
-    AUTO_BLOCK_DRAFT_NOT_ADMITTED,
+    auto_block_draft_decision, BlockDraftFormat, DecodeBackend, DecodeReport, LoadReport, LoadSpec,
+    Quantize, Speculative, SpeculativeVerify, AUTO_BLOCK_DRAFT_NOT_ADMITTED,
 };
 use serde_json::{json, Value};
 
@@ -37,7 +39,14 @@ use serde_json::{json, Value};
 pub(crate) const NO_DRAFT_INSTALLED: &str =
     "block draft: none installed (the DFlash2 and DSpine drafts download with the model's tiers)";
 
-/// The installed block draft a Qwen3.8-27B load names.
+/// The decode backend this build's Qwen3.8-27B loads run on: MLX on macOS, Candle/CUDA elsewhere.
+const DRAFT_BACKEND: DecodeBackend = if cfg!(target_os = "macos") {
+    DecodeBackend::Mlx
+} else {
+    DecodeBackend::CandleCuda
+};
+
+/// An installed block draft of a Qwen3.8-27B entry, and whether `auto` runs it here.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BlockDraftChoice {
     /// The draft's repository (`SceneWorks/qwen3.8-27b-dflash2`).
@@ -48,6 +57,11 @@ pub(crate) struct BlockDraftChoice {
     pub(crate) dir: PathBuf,
     /// The load precision (`q8`, `q4`).
     pub(crate) precision: &'static str,
+    /// The backend and target tier `auto`'s decision was taken for (`Mlx q4`).
+    pub(crate) decided_for: String,
+    /// `None` when `auto` prefers this draft on [`decided_for`](Self::decided_for), so the load
+    /// names it; otherwise why `auto` keeps MTP there, and the load leaves the draft out.
+    pub(crate) auto_keeps_mtp: Option<String>,
 }
 
 impl BlockDraftChoice {
@@ -58,13 +72,58 @@ impl BlockDraftChoice {
             Quantize::Q8
         }
     }
+
+    /// Whether `auto` runs this draft (the load names it).
+    pub(crate) fn auto_runs(&self) -> bool {
+        self.auto_keeps_mtp.is_none()
+    }
+}
+
+/// Why `auto` keeps MTP instead of a resident `format` draft beside a `tier` target on `backend`, or
+/// `None` when the engine's measured decision (`core_llm::auto_block_draft_decision`, SW-7200)
+/// prefers the draft.
+pub(crate) fn auto_keeps_mtp(
+    backend: DecodeBackend,
+    format: Option<BlockDraftFormat>,
+    tier: Option<&str>,
+) -> Option<String> {
+    let Some(format) = format else {
+        return Some(
+            "block draft: its config.json names no block-draft format; auto keeps MTP".to_owned(),
+        );
+    };
+    let Some(tier) = tier else {
+        return Some(format!(
+            "block draft: auto keeps MTP on {backend:?} (no target tier named)"
+        ));
+    };
+    match auto_block_draft_decision(backend, format, tier) {
+        Some(decision) if decision.prefer => None,
+        Some(decision) => Some(format!(
+            "block draft: auto keeps MTP on {backend:?} {tier} ({})",
+            decision.reason
+        )),
+        None => Some(format!(
+            "block draft: auto keeps MTP on {backend:?} {tier} (no measured decision)"
+        )),
+    }
 }
 
 /// The first of `model_id`'s catalog block drafts (preference order:
 /// [`sceneworks_core::dataset_batch_describe::QWEN38_27B_BLOCK_DRAFT_REPOS`]) whose pinned snapshot
-/// holds every file its row names, at the precision `tier` runs it at. `None` when none is
-/// installed.
+/// holds every file its row names, at the precision `tier` runs it at, with `auto`'s decision for
+/// it on this build's backend. `None` when none is installed.
 pub(crate) fn installed_block_draft(
+    data_dir: &Path,
+    model_id: &str,
+    tier: Option<&str>,
+) -> Option<BlockDraftChoice> {
+    installed_block_draft_on(DRAFT_BACKEND, data_dir, model_id, tier)
+}
+
+/// [`installed_block_draft`] with `auto`'s decision taken for `backend`.
+pub(crate) fn installed_block_draft_on(
+    backend: DecodeBackend,
     data_dir: &Path,
     model_id: &str,
     tier: Option<&str>,
@@ -84,6 +143,8 @@ pub(crate) fn installed_block_draft(
                 .iter()
                 .all(|file| dir.join(file).is_file())
                 .then(|| BlockDraftChoice {
+                    auto_keeps_mtp: auto_keeps_mtp(backend, BlockDraftFormat::of_dir(&dir), tier),
+                    decided_for: format!("{backend:?} {}", tier.unwrap_or("(no tier)")),
                     repo: row.repo,
                     revision: row.revision,
                     dir,
@@ -92,9 +153,10 @@ pub(crate) fn installed_block_draft(
         })
 }
 
-/// `spec` naming `draft` (when there is one) at its precision.
+/// `spec` naming `draft` at its precision when there is one and `auto` runs it; a draft `auto`
+/// keeps MTP over is left out of the load, so it is neither loaded nor priced.
 pub(crate) fn with_block_draft(mut spec: LoadSpec, draft: Option<&BlockDraftChoice>) -> LoadSpec {
-    if let Some(draft) = draft {
+    if let Some(draft) = draft.filter(|draft| draft.auto_runs()) {
         spec.draft_source = Some(draft.dir.to_string_lossy().into_owned());
         spec.draft_quantize = Some(draft.quantize());
     }
@@ -117,18 +179,21 @@ pub(crate) fn expansion_speculation() -> (Option<Speculative>, SpeculativeVerify
     request_speculation(Some(Speculative::Auto))
 }
 
-/// Why the block draft did not run: none installed, the engine refused it at load (it did not fit
-/// beside the target, or its config does not match; from the load report), or the request's own
-/// memory withdrew `auto`'s block draft (the decode report's
-/// [`AUTO_BLOCK_DRAFT_NOT_ADMITTED`] fallback).
+/// Why the block draft did not run: none installed, `auto` keeps MTP over it on this backend and
+/// tier (so the load left it out), the engine refused it at load (it did not fit beside the
+/// target, or its config does not match; from the load report), or the request's own memory
+/// withdrew `auto`'s block draft (the decode report's [`AUTO_BLOCK_DRAFT_NOT_ADMITTED`] fallback).
 pub(crate) fn draft_fallback(
     draft: Option<&BlockDraftChoice>,
     load: Option<&LoadReport>,
     decode: Option<&DecodeReport>,
 ) -> Option<String> {
-    let Some(_) = draft else {
+    let Some(draft) = draft else {
         return Some(NO_DRAFT_INSTALLED.to_owned());
     };
+    if let Some(reason) = &draft.auto_keeps_mtp {
+        return Some(reason.clone());
+    }
     match load.and_then(|load| load.draft.as_ref()) {
         Some(report) => report.refusal.clone().or_else(|| {
             decode?
@@ -209,7 +274,11 @@ impl DecodeTally {
         draft: Option<&BlockDraftChoice>,
     ) {
         self.generations += 1;
-        self.draft_fallback = draft_fallback(draft, load, decode);
+        // The phase's first fallback stays: a later generation never erases why an earlier one ran
+        // without the draft.
+        if self.draft_fallback.is_none() {
+            self.draft_fallback = draft_fallback(draft, load, decode);
+        }
         let Some(decode) = decode else {
             return;
         };
@@ -217,15 +286,16 @@ impl DecodeTally {
         if !self.proposers.contains(&proposer) {
             self.proposers.push(proposer);
         }
-        self.draft = decode.draft.as_ref().map(|ran| {
-            json!({
+        // Once any generation ran the draft, the phase names it.
+        if let Some(ran) = &decode.draft {
+            self.draft = Some(json!({
                 "repo": draft.map(|d| d.repo.as_str()),
                 "revision": draft.map(|d| d.revision.as_str()),
                 "source": ran.source,
                 "format": ran.format,
                 "precision": ran.precision,
-            })
-        });
+            }));
+        }
         match &decode.tree_verify {
             Some(tree) => {
                 self.tree_generations += 1;
@@ -301,30 +371,14 @@ pub(crate) fn decode_record(
     tally.record()
 }
 
-/// Whether `auto` runs the installed `draft` beside a `tier` target on this smoke's backend (MLX on
-/// macOS, Candle/CUDA elsewhere): the engine's own measured decision for the draft's format
-/// (`core_llm::auto_block_draft_decision`, SW-7200). `false` when the draft's `config.json` names
-/// no block-draft format or nothing is recorded (`auto` then keeps MTP).
-#[cfg(test)]
-pub(crate) fn auto_runs_draft(draft: &BlockDraftChoice, tier: &str) -> bool {
-    use gen_core::core_llm::{auto_block_draft_decision, BlockDraftFormat, DecodeBackend};
-    let backend = if cfg!(target_os = "macos") {
-        DecodeBackend::Mlx
-    } else {
-        DecodeBackend::CandleCuda
-    };
-    BlockDraftFormat::of_dir(&draft.dir)
-        .and_then(|format| auto_block_draft_decision(backend, format, tier))
-        .is_some_and(|decision| decision.prefer)
-}
-
 /// What a real-weight smoke checks about the block drafter (SW-7204):
 /// `$SCENEWORKS_QWEN38_BLOCK_DRAFT` = `record` (the default: the decode block is recorded, nothing
-/// is asserted about it), `on` (an installed draft must load and be admitted, checked linearly;
-/// where `auto` prefers it ([`auto_runs_draft`]) the record must name `block_draft`, the draft and
-/// its precision and more than one accepted token per target pass, and elsewhere `auto` must keep
-/// its MTP head with the draft unused) or `no_fit` (the engine's load budget is capped so the draft
-/// cannot fit beside the target: the job must complete without it and its record must say why).
+/// is asserted about it), `on` (a draft must be installed and the target checked linearly; where
+/// `auto` prefers the draft ([`BlockDraftChoice::auto_runs`]) the record must name `block_draft`,
+/// the draft and its precision, more than one accepted token per target pass and no fallback, and
+/// elsewhere the draft must not run and the record must say why) or `no_fit` (the engine's load
+/// budget is capped so the draft cannot fit beside the target: the job must complete without it
+/// and its record must say why).
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SmokeDraftCheck {
@@ -381,32 +435,37 @@ impl SmokeDraftCheck {
         draft
     }
 
-    /// Check one phase's `decode` block against this mode. `auto_runs_draft` is whether `auto`
-    /// prefers the installed draft here ([`auto_runs_draft`]).
+    /// Check one phase's `decode` block against this mode; a failure names the backend and tier
+    /// `auto`'s decision was taken for.
     pub(crate) fn check(
         self,
         record: &Value,
         draft: Option<&BlockDraftChoice>,
-        auto_runs_draft: bool,
     ) -> Result<(), String> {
-        let fail = |what: &str| Err(format!("{what}: {record}"));
+        let fail = |what: &str| {
+            let decided = draft.map_or("no draft installed", |draft| draft.decided_for.as_str());
+            Err(format!("{what} (auto decided for {decided}): {record}"))
+        };
         match self {
             Self::Record => Ok(()),
             Self::On => {
                 let Some(draft) = draft else {
                     return fail("no block draft is installed");
                 };
-                if !record["draftFallback"].is_null() {
-                    return fail("the draft fell back");
-                }
                 if record["verify"] != "linear" {
                     return fail("the target did not check linearly");
                 }
-                if !auto_runs_draft {
+                if !draft.auto_runs() {
                     if record["proposer"] == "block_draft" || !record["draft"].is_null() {
                         return fail("auto ran the block draft where it keeps MTP");
                     }
+                    if record["draftFallback"].is_null() {
+                        return fail("the record does not say why the draft did not run");
+                    }
                     return Ok(());
+                }
+                if !record["draftFallback"].is_null() {
+                    return fail("the draft fell back");
                 }
                 if record["proposer"] != "block_draft" {
                     return fail("the proposer is not block_draft");
@@ -437,16 +496,31 @@ impl SmokeDraftCheck {
                 if record["proposer"] == "block_draft" || !record["draft"].is_null() {
                     return fail("the draft ran although it could not fit");
                 }
-                if !record["draftFallback"]
-                    .as_str()
-                    .is_some_and(|why| why.contains("beside the target"))
-                {
+                // Where `auto` keeps MTP the load never names the draft, so its reason stands in
+                // for the load refusal.
+                let named = record["draftFallback"].as_str().is_some_and(|why| {
+                    why.contains("beside the target")
+                        || draft.is_some_and(|draft| !draft.auto_runs())
+                });
+                if !named {
                     return fail("the record does not say the draft did not fit");
                 }
                 Ok(())
             }
         }
     }
+}
+
+/// `auto`'s decision about the installed draft, for a smoke's evidence (the CI validator branches
+/// on `runsDraft`): whether it runs the draft, the backend and tier it decided for, and why it keeps
+/// MTP when it does.
+#[cfg(test)]
+pub(crate) fn auto_evidence(draft: Option<&BlockDraftChoice>) -> Value {
+    json!({
+        "runsDraft": draft.is_some_and(BlockDraftChoice::auto_runs),
+        "decidedFor": draft.map(|draft| draft.decided_for.as_str()),
+        "keepsMtp": draft.and_then(|draft| draft.auto_keeps_mtp.as_deref()),
+    })
 }
 
 /// The target's load estimate an engine load refusal names ("requires an estimated N bytes").

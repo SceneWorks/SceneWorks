@@ -16,12 +16,14 @@
 // folder, the same upstream prompt files and output contract, and a result that names the
 // describer as the model that ran.
 //
-// `SCENEWORKS_QWEN38_BLOCK_DRAFT` (SW-7204) re-checks the smoke's block-draft record: `record` (the
-// default) only carries it into the evidence; `on` requires the block draft to have run with a
-// named draft and precision, more than one accepted token per target pass and no fallback, and the
-// target to check a tree (the describer's image describe may instead check linearly when the engine
-// names its multimodal fallback; its condense and the expander must check a tree); `no_fit`
-// requires the job to have run without the draft and to name why.
+// `SCENEWORKS_QWEN38_BLOCK_DRAFT` (SW-7204) re-checks the smoke's block-draft record. Every request
+// sends `speculative: auto`, checked linearly, and the smoke records auto's decision for the
+// installed draft (`block_draft.auto.runsDraft`, from core-llm's measured AUTO_BLOCK_DRAFT_DECISIONS:
+// MLX q4/q8 prefer the draft, Candle/CUDA and bf16 keep MTP). `record` (the default) only carries
+// the record into the evidence; `on` requires linear checking in every phase and, where auto runs
+// the draft, the block draft to have run with a named pinned draft and precision, more than one
+// accepted token per target pass and no fallback, and elsewhere the draft not to have run, with the
+// record saying why; `no_fit` requires the job to have run without the draft and to name why.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -207,29 +209,30 @@ export function validateExpanderResult(result, tier, pinned = expanderPinnedSnap
 // What a run checks about the block drafter (SW-7204), and the record the smoke wrote.
 export const BLOCK_DRAFT_CHECKS = Object.freeze(['record', 'on', 'no_fit']);
 
-// What both engines name in a decode's fallbacks when an image request's tree checking ran linearly
-// (the multimodal decode path, at the pinned inference).
-export const TREE_MULTIMODAL_LINEAR = 'tree verification is not available on the multimodal decode path';
-
-// One phase's decode block. `image`: the image describe, which may check linearly when the engine
-// names the multimodal fallback (and passes unchanged once it checks a tree); otherwise (condense,
-// the expander) the target must check a tree.
-function validateDecodeBlock(decode, check, phase, image) {
+// One phase's decode block. `runsDraft`: auto's decision for the installed draft on the run's
+// backend and tier (the smoke's `block_draft.auto`).
+function validateDecodeBlock(decode, check, phase, runsDraft) {
   if (check === 'on') {
-    assert.equal(decode?.proposer, 'block_draft', `${phase}: the block draft did not run`);
-    assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
-      `${phase}: the record names no pinned draft`);
-    assert(['q8', 'q4'].includes(decode.draft?.precision), `${phase}: the record names no draft precision`);
-    const multimodalLinear = decode.verify === 'linear'
-      && (decode.fallbacks ?? []).some((reason) => String(reason).includes(TREE_MULTIMODAL_LINEAR));
-    assert(decode.verify === 'tree' || (image && multimodalLinear),
-      `${phase}: the target did not check a tree${image ? ' (nor name the multimodal fallback)' : ''}`);
-    assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
-      `${phase}: accepted tokens per target pass is not above 1.0`);
-    assert.equal(decode.draftFallback, null, `${phase}: the draft fell back`);
+    assert.equal(decode?.verify, 'linear', `${phase}: the target did not check linearly`);
+    if (runsDraft) {
+      assert.equal(decode.proposer, 'block_draft', `${phase}: the block draft did not run`);
+      assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
+        `${phase}: the record names no pinned draft`);
+      assert(['q8', 'q4'].includes(decode.draft?.precision), `${phase}: the record names no draft precision`);
+      assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
+        `${phase}: accepted tokens per target pass is not above 1.0`);
+      assert.equal(decode.draftFallback, null, `${phase}: the draft fell back`);
+    } else {
+      assert(decode.proposer !== 'block_draft' && decode.draft == null,
+        `${phase}: auto ran the block draft where it keeps MTP`);
+      assert(typeof decode.draftFallback === 'string' && decode.draftFallback.length > 0,
+        `${phase}: the record does not say why the draft did not run`);
+    }
   } else {
     assert.notEqual(decode?.proposer, 'block_draft', `${phase}: the draft ran although it could not fit`);
-    assert(typeof decode?.draftFallback === 'string' && decode.draftFallback.includes('beside the target'),
+    // Where auto keeps MTP the load never names the draft, so auto's reason stands in for the refusal.
+    assert(typeof decode?.draftFallback === 'string'
+      && (decode.draftFallback.includes('beside the target') || !runsDraft),
       `${phase}: the record does not say the draft did not fit`);
   }
 }
@@ -240,12 +243,14 @@ export function validateBlockDraft(blockDraft, check = 'record', job = 'describe
   assert(BLOCK_DRAFT_CHECKS.includes(check), `block-draft check must be one of ${BLOCK_DRAFT_CHECKS.join(', ')}`);
   if (check === 'record') return blockDraft ?? null;
   assert.equal(blockDraft?.check, check, `the smoke ran the ${blockDraft?.check ?? 'no'} block-draft check, not ${check}`);
+  const runsDraft = blockDraft.auto?.runsDraft;
+  assert.equal(typeof runsDraft, 'boolean', "the record does not carry auto's decision for the draft");
   const decode = blockDraft.decode;
   if (job === 'expander') {
-    validateDecodeBlock(decode, check, 'expand', false);
+    validateDecodeBlock(decode, check, 'expand', runsDraft);
   } else {
-    validateDecodeBlock(decode?.describe, check, 'describe', true);
-    validateDecodeBlock(decode?.condense, check, 'condense', false);
+    validateDecodeBlock(decode?.describe, check, 'describe', runsDraft);
+    validateDecodeBlock(decode?.condense, check, 'condense', runsDraft);
   }
   return blockDraft;
 }

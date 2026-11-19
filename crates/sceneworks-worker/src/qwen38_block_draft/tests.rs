@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::core_llm::{
-    DecodeDraft, DecodeReport, DraftReport, LoadReport, LoadSpec, ProposerKind, Quantize,
-    Speculative, SpeculativeVerify, TreeVerifyReport, AUTO_BLOCK_DRAFT_NOT_ADMITTED,
+    BlockDraftFormat, DecodeBackend, DecodeDraft, DecodeReport, DraftReport, LoadReport, LoadSpec,
+    ProposerKind, Quantize, TreeVerifyReport, AUTO_BLOCK_DRAFT_NOT_ADMITTED,
 };
 use sceneworks_core::dataset_batch_describe::{
     qwen38_block_draft_rows, QWEN38_27B_BLOCK_DRAFT_REPOS, QWEN38_27B_DESCRIBER_MODEL_ID,
@@ -41,8 +41,19 @@ fn install(data: &Path, repo: &str, skip: Option<&str>) -> PathBuf {
         .join("snapshots")
         .join(&row.revision);
     std::fs::create_dir_all(&dir).unwrap();
+    let architecture = if repo == DFLASH2 {
+        BlockDraftFormat::DFlash2
+    } else {
+        BlockDraftFormat::DSpine
+    }
+    .architecture();
     for file in row.files.iter().filter(|file| Some(file.as_str()) != skip) {
-        std::fs::write(dir.join(file), b"x").unwrap();
+        let body = if file == "config.json" {
+            format!(r#"{{"architectures": ["{architecture}"]}}"#)
+        } else {
+            "x".to_owned()
+        };
+        std::fs::write(dir.join(file), body).unwrap();
     }
     dir
 }
@@ -109,6 +120,19 @@ fn choice(precision: &'static str) -> BlockDraftChoice {
         revision: "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9".to_owned(),
         dir: PathBuf::from("/hub/dflash2"),
         precision,
+        decided_for: format!("Mlx {precision}"),
+        auto_keeps_mtp: None,
+    }
+}
+
+/// [`choice`] where `auto` keeps MTP (Candle/CUDA).
+fn kept(precision: &'static str) -> BlockDraftChoice {
+    BlockDraftChoice {
+        decided_for: format!("CandleCuda {precision}"),
+        auto_keeps_mtp: Some(format!(
+            "block draft: auto keeps MTP on CandleCuda {precision} (measured slower)"
+        )),
+        ..choice(precision)
     }
 }
 
@@ -126,25 +150,11 @@ fn the_load_names_the_draft_at_its_precision() {
         assert_eq!(spec.source, "/hub/tier", "the target is unchanged");
         assert_eq!(spec.draft_source.as_deref(), Some("/hub/dflash2"));
         assert_eq!(spec.draft_quantize, Some(quantize));
+        // A draft `auto` keeps MTP over is neither loaded nor priced.
+        let left_out = with_block_draft(base.clone(), Some(&kept(precision)));
+        assert_eq!(left_out.draft_source, None);
+        assert_eq!(left_out.draft_quantize, None);
     }
-}
-
-/// Every describe, condense and expansion request sends the product's option checked linearly:
-/// `auto` on the Qwen3.8-27B (the describer's and the expander's), never an explicit block draft
-/// and never tree checking, whatever the loaded model advertises.
-#[test]
-fn every_request_sends_auto_checked_linearly() {
-    // The Qwen3.8 27B describer's option is `auto` (`DescribeModel::speculative`).
-    assert_eq!(
-        request_speculation(Some(Speculative::Auto)),
-        (Some(Speculative::Auto), SpeculativeVerify::Linear)
-    );
-    assert_eq!(
-        expansion_speculation(),
-        (Some(Speculative::Auto), SpeculativeVerify::Linear)
-    );
-    // The other describers keep the backend default, also checked linearly.
-    assert_eq!(request_speculation(None), (None, SpeculativeVerify::Linear));
 }
 
 /// What `auto` ran a resident block draft as: one linear pass per anchor.
@@ -274,27 +284,20 @@ fn the_on_check_needs_the_draft_its_precision_linear_checking_and_more_than_one_
     assert_eq!(ran["targetPasses"], 10);
     assert_eq!(ran["rowsChecked"], 50);
     assert_eq!(ran["acceptedTokensPerPass"], 1.8);
-    assert_eq!(SmokeDraftCheck::On.check(&ran, Some(&draft), true), Ok(()));
-    assert_eq!(
-        SmokeDraftCheck::Record.check(&Value::Null, None, true),
-        Ok(())
-    );
+    assert_eq!(SmokeDraftCheck::On.check(&ran, Some(&draft)), Ok(()));
+    assert_eq!(SmokeDraftCheck::Record.check(&Value::Null, None), Ok(()));
     // An 8-bit draft is not the 4-bit tier's.
     assert!(SmokeDraftCheck::On
-        .check(&ran, Some(&choice("q8")), true)
+        .check(&ran, Some(&choice("q8")))
         .is_err());
     // Tree checking is never requested, so a tree record fails `on`.
     let tree = decode_record(Some(&tree_report()), Some(&load), Some(&draft));
-    assert!(SmokeDraftCheck::On
-        .check(&tree, Some(&draft), true)
-        .is_err());
+    assert!(SmokeDraftCheck::On.check(&tree, Some(&draft)).is_err());
     // One accepted token per pass or fewer is no speed-up to show.
     let mut slow = linear_draft_report("q4");
     slow.accepted_tokens = 10;
     let slow = decode_record(Some(&slow), Some(&load), Some(&draft));
-    assert!(SmokeDraftCheck::On
-        .check(&slow, Some(&draft), true)
-        .is_err());
+    assert!(SmokeDraftCheck::On.check(&slow, Some(&draft)).is_err());
     // A draft that did not fit fails `on` and passes `no_fit`.
     let refused = LoadReport {
         draft: Some(DraftReport::refused(
@@ -311,27 +314,19 @@ fn the_on_check_needs_the_draft_its_precision_linear_checking_and_more_than_one_
         ..Default::default()
     };
     let fell_back = decode_record(Some(&alone), Some(&refused), Some(&draft));
-    assert!(SmokeDraftCheck::On
-        .check(&fell_back, Some(&draft), true)
-        .is_err());
+    assert!(SmokeDraftCheck::On.check(&fell_back, Some(&draft)).is_err());
     assert_eq!(
-        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft), true),
+        SmokeDraftCheck::NoFit.check(&fell_back, Some(&draft)),
         Ok(())
     );
-    assert!(SmokeDraftCheck::NoFit
-        .check(&ran, Some(&draft), true)
-        .is_err());
+    assert!(SmokeDraftCheck::NoFit.check(&ran, Some(&draft)).is_err());
 }
 
-/// `on` where `auto` keeps MTP (Candle/CUDA, an unmeasured tier): the draft loads but must not
-/// run, and the target checks linearly.
+/// `on` where `auto` keeps MTP (Candle/CUDA, an unmeasured tier): the load leaves the draft out,
+/// the target checks linearly and the record says why the draft did not run.
 #[test]
-fn the_on_check_requires_mtp_where_auto_does_not_prefer_the_draft() {
-    let draft = choice("q8");
-    let load = LoadReport {
-        draft: Some(DraftReport::resident("/hub/dflash2")),
-        ..Default::default()
-    };
+fn the_on_check_requires_mtp_and_its_reason_where_auto_does_not_prefer_the_draft() {
+    let draft = kept("q8");
     let mtp = DecodeReport {
         proposer: ProposerKind::Mtp,
         verify_steps: 10,
@@ -339,18 +334,28 @@ fn the_on_check_requires_mtp_where_auto_does_not_prefer_the_draft() {
         accepted_tokens: 15,
         ..Default::default()
     };
-    let kept_mtp = decode_record(Some(&mtp), Some(&load), Some(&draft));
-    assert_eq!(kept_mtp["draftFallback"], Value::Null);
+    // No draft in the load report: the load never named it.
+    let kept_mtp = decode_record(Some(&mtp), Some(&LoadReport::default()), Some(&draft));
     assert_eq!(
-        SmokeDraftCheck::On.check(&kept_mtp, Some(&draft), false),
+        kept_mtp["draftFallback"].as_str(),
+        draft.auto_keeps_mtp.as_deref()
+    );
+    assert_eq!(SmokeDraftCheck::On.check(&kept_mtp, Some(&draft)), Ok(()));
+    // `no_fit` passes too: the job ran without the draft and says why.
+    assert_eq!(
+        SmokeDraftCheck::NoFit.check(&kept_mtp, Some(&draft)),
         Ok(())
     );
-    let ran = decode_record(Some(&linear_draft_report("q8")), Some(&load), Some(&draft));
+    let ran = decode_record(
+        Some(&linear_draft_report("q8")),
+        Some(&LoadReport::default()),
+        Some(&draft),
+    );
+    let error = SmokeDraftCheck::On.check(&ran, Some(&draft)).unwrap_err();
+    assert!(error.contains("auto decided for CandleCuda q8"), "{error}");
+    // Where `auto` prefers the draft, an MTP run fails `on`.
     assert!(SmokeDraftCheck::On
-        .check(&ran, Some(&draft), false)
-        .is_err());
-    assert!(SmokeDraftCheck::On
-        .check(&kept_mtp, Some(&draft), true)
+        .check(&kept_mtp, Some(&choice("q8")))
         .is_err());
 }
 
@@ -376,29 +381,102 @@ fn a_draft_auto_withdrew_for_the_requests_memory_is_recorded_with_the_engines_re
     assert_eq!(record["draft"], Value::Null);
     assert_eq!(record["draftFallback"], AUTO_BLOCK_DRAFT_NOT_ADMITTED);
     assert_eq!(record["fallbacks"], json!([AUTO_BLOCK_DRAFT_NOT_ADMITTED]));
-    assert!(SmokeDraftCheck::On
-        .check(&record, Some(&draft), true)
-        .is_err());
+    assert!(SmokeDraftCheck::On.check(&record, Some(&draft)).is_err());
 }
 
-/// `auto_runs_draft` follows the engine's recorded decision for the draft's format on this
-/// backend: MLX prefers a DFlash2 draft on the q4 and q8 tiers; Candle/CUDA never does; a draft
-/// whose config names no block-draft format, or an unrecorded tier, keeps MTP.
+/// `auto_keeps_mtp` follows core-llm's recorded decision (`auto_block_draft_decision`): MLX
+/// prefers a DFlash2 draft on the q4 and q8 tiers; Candle/CUDA keeps MTP and says why; an
+/// unmeasured tier, an unnamed tier or a config naming no block-draft format keeps MTP too.
 #[test]
-fn auto_runs_the_draft_where_the_engine_recorded_it_faster() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut draft = choice("q4");
-    draft.dir = dir.path().to_path_buf();
-    assert!(!auto_runs_draft(&draft, "q4"), "no config.json");
-    std::fs::write(
-        dir.path().join("config.json"),
-        r#"{"architectures": ["DFlash2DraftModel"]}"#,
+fn auto_keeps_mtp_except_where_the_engine_recorded_the_draft_faster() {
+    let dflash2 = Some(BlockDraftFormat::DFlash2);
+    assert_eq!(
+        auto_keeps_mtp(DecodeBackend::Mlx, dflash2, Some("q4")),
+        None
+    );
+    assert_eq!(
+        auto_keeps_mtp(DecodeBackend::Mlx, dflash2, Some("q8")),
+        None
+    );
+    let bf16 = auto_keeps_mtp(DecodeBackend::Mlx, dflash2, Some("bf16")).unwrap();
+    assert!(bf16.contains("auto keeps MTP on Mlx bf16"), "{bf16}");
+    for tier in ["q4", "q8"] {
+        let cuda = auto_keeps_mtp(DecodeBackend::CandleCuda, dflash2, Some(tier)).unwrap();
+        assert!(
+            cuda.contains(&format!("auto keeps MTP on CandleCuda {tier}")),
+            "{cuda}"
+        );
+    }
+    assert!(auto_keeps_mtp(DecodeBackend::Mlx, dflash2, None).is_some());
+    assert!(auto_keeps_mtp(DecodeBackend::Mlx, None, Some("q4")).is_some());
+}
+
+/// The installed draft carries `auto`'s decision for the backend, read from its config's format:
+/// MLX q4 names it at load; Candle/CUDA leaves it out and records why.
+#[test]
+fn the_installed_draft_carries_autos_decision_for_the_backend() {
+    let (data, _guard) = isolated();
+    install(data.path(), DFLASH2, None);
+    let mlx = installed_block_draft_on(
+        DecodeBackend::Mlx,
+        data.path(),
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some("q4"),
     )
     .unwrap();
-    let mlx = cfg!(target_os = "macos");
-    assert_eq!(auto_runs_draft(&draft, "q4"), mlx);
-    assert_eq!(auto_runs_draft(&draft, "q8"), mlx);
-    assert!(!auto_runs_draft(&draft, "bf16"));
+    assert!(mlx.auto_runs());
+    assert_eq!(mlx.decided_for, "Mlx q4");
+    let spec = with_block_draft(LoadSpec::default(), Some(&mlx));
+    assert!(spec.draft_source.is_some());
+    let cuda = installed_block_draft_on(
+        DecodeBackend::CandleCuda,
+        data.path(),
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some("q4"),
+    )
+    .unwrap();
+    assert!(!cuda.auto_runs());
+    assert_eq!(cuda.decided_for, "CandleCuda q4");
+    assert_eq!(
+        with_block_draft(LoadSpec::default(), Some(&cuda)).draft_source,
+        None
+    );
+    assert_eq!(
+        draft_fallback(Some(&cuda), None, None),
+        cuda.auto_keeps_mtp.clone()
+    );
+}
+
+/// A phase whose generations differ keeps the draft once any ran it and its first fallback, so its
+/// record never contradicts itself, in either order.
+#[test]
+fn a_phase_keeps_its_first_fallback_and_the_draft_any_generation_ran() {
+    let draft = choice("q4");
+    let load = LoadReport {
+        draft: Some(DraftReport::resident("/hub/dflash2")),
+        ..Default::default()
+    };
+    let withdrawn = DecodeReport {
+        proposer: ProposerKind::Mtp,
+        verify_steps: 4,
+        accepted_tokens: 6,
+        fallbacks: vec![AUTO_BLOCK_DRAFT_NOT_ADMITTED.to_owned()],
+        ..Default::default()
+    };
+    let ran = linear_draft_report("q4");
+    for order in [[&ran, &withdrawn], [&withdrawn, &ran]] {
+        let mut tally = DecodeTally::default();
+        for decode in order {
+            tally.note(Some(decode), Some(&load), Some(&draft));
+        }
+        let record = tally.record();
+        assert_eq!(record["proposer"], "mixed");
+        assert_eq!(record["draft"]["repo"], DFLASH2, "{record}");
+        assert_eq!(
+            record["draftFallback"], AUTO_BLOCK_DRAFT_NOT_ADMITTED,
+            "{record}"
+        );
+    }
 }
 
 /// Describe and condense get their own decode blocks: their generations are never blended.

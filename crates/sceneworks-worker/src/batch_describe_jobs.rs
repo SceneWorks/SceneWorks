@@ -1183,6 +1183,86 @@ impl VisionCaptionerDescriber {
     }
 }
 
+/// One image describe request: the system and user prompts with the image, the JSON constraint,
+/// thinking off, and the describer's speculative option (`product`; `auto` on the Qwen3.8 27B, so
+/// the engine runs a resident block draft where it measured faster), checked linearly (SW-7204).
+#[cfg(native_lane)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn describe_request(
+    product: Option<gen_core::core_llm::Speculative>,
+    system: String,
+    user: String,
+    image: gen_core::core_llm::ImageRef,
+    supports_thinking: bool,
+    cancel: CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> gen_core::core_llm::TextLlmRequest {
+    use gen_core::core_llm::{Content, Message, Role, Sampling, TextLlmRequest, ThinkingMode};
+    // Thinking is always off: the 8B Vision Captioner has no thinking mode, and the Qwen3.8 27B
+    // has one that this request disables. A no-think request keeps the JSON mask safe to apply
+    // from the first token.
+    let thinking = ThinkingMode::Disabled;
+    let constraint =
+        crate::prompt_refine_jobs::json_decode_constraint(true, supports_thinking, thinking);
+    let (speculative, speculative_verify) = crate::qwen38_block_draft::request_speculation(product);
+    TextLlmRequest {
+        progress: Some(crate::load_progress::text_observer()),
+        messages: vec![
+            Message::system(system),
+            Message {
+                role: Role::User,
+                content: vec![Content::Image(image), Content::text(user)],
+                thinking: None,
+                tool_calls: Vec::new(),
+            },
+        ],
+        sampling: Sampling {
+            temperature: 0.4,
+            top_p: 0.9,
+            ..Sampling::default()
+        },
+        max_new_tokens: DESCRIBE_MAX_NEW_TOKENS,
+        constraint,
+        cancel,
+        thinking,
+        speculative,
+        speculative_verify,
+        kv_compression,
+        ..Default::default()
+    }
+}
+
+/// One text-only condense request: plain text, thinking off, the describer's speculative option
+/// checked linearly (SW-7204).
+#[cfg(native_lane)]
+pub(crate) fn condense_request(
+    product: Option<gen_core::core_llm::Speculative>,
+    system: String,
+    user: String,
+    cancel: CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> gen_core::core_llm::TextLlmRequest {
+    use gen_core::core_llm::{Message, Sampling, TextLlmRequest, ThinkingMode};
+    let (speculative, speculative_verify) = crate::qwen38_block_draft::request_speculation(product);
+    TextLlmRequest {
+        progress: Some(crate::load_progress::text_observer()),
+        messages: vec![Message::system(system), Message::user(user)],
+        sampling: Sampling {
+            temperature: 0.4,
+            top_p: 0.9,
+            ..Sampling::default()
+        },
+        max_new_tokens: condense::CONDENSE_MAX_NEW_TOKENS,
+        constraint: None,
+        cancel,
+        thinking: ThinkingMode::Disabled,
+        speculative,
+        speculative_verify,
+        kv_compression,
+        ..Default::default()
+    }
+}
+
 #[cfg(native_lane)]
 impl BatchDescriber for VisionCaptionerDescriber {
     fn describe(
@@ -1191,9 +1271,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         prompt: &DescribePrompt,
         cancel: CancelFlag,
     ) -> DescribeFuture {
-        use gen_core::core_llm::{
-            Content, Message, Role, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
-        };
+        use gen_core::core_llm::StreamEvent;
         let (spec, requirements) = self.load_key();
         let system = prompt.system();
         let user = prompt.user.clone();
@@ -1214,44 +1292,15 @@ impl BatchDescriber for VisionCaptionerDescriber {
                         return Ok(Err(format!("The image could not be prepared: {error}")))
                     }
                 };
-                // Thinking is always off: the 8B Vision Captioner has no thinking mode, and the
-                // Qwen3.8 27B has one that this request disables. A no-think request keeps the
-                // JSON mask safe to apply from the first token.
-                let thinking = ThinkingMode::Disabled;
-                let constraint = crate::prompt_refine_jobs::json_decode_constraint(
-                    true,
+                let request = describe_request(
+                    product_speculative,
+                    system,
+                    user,
+                    image,
                     model.descriptor().capabilities.supports_thinking,
-                    thinking,
-                );
-                // SW-7204: the product's option (`auto` on the Qwen3.8 27B: the engine runs a
-                // resident block draft where it measured faster), checked linearly.
-                let (speculative, speculative_verify) =
-                    crate::qwen38_block_draft::request_speculation(product_speculative);
-                let request = TextLlmRequest {
-                    progress: Some(crate::load_progress::text_observer()),
-                    messages: vec![
-                        Message::system(system),
-                        Message {
-                            role: Role::User,
-                            content: vec![Content::Image(image), Content::text(user)],
-                            thinking: None,
-                            tool_calls: Vec::new(),
-                        },
-                    ],
-                    sampling: Sampling {
-                        temperature: 0.4,
-                        top_p: 0.9,
-                        ..Sampling::default()
-                    },
-                    max_new_tokens: DESCRIBE_MAX_NEW_TOKENS,
-                    constraint,
                     cancel,
-                    thinking,
-                    speculative,
-                    speculative_verify,
                     kv_compression,
-                    ..Default::default()
-                };
+                );
                 // sc-24029: bound MLX's process-global freed-buffer cache across the decode.
                 let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                 let generation =
@@ -1302,9 +1351,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
     /// The text-only rewrite on the model the describe call left resident (same cache key, so no
     /// second load and no new memory admission): plain text, thinking disabled.
     fn condense(&self, system: String, user: String, cancel: CancelFlag) -> CondenseFuture {
-        use gen_core::core_llm::{
-            FinishReason, Message, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
-        };
+        use gen_core::core_llm::{FinishReason, StreamEvent};
         let (spec, requirements) = self.load_key();
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
@@ -1317,25 +1364,8 @@ impl BatchDescriber for VisionCaptionerDescriber {
             requirements,
             format!("{name} load failed"),
             move |model| -> WorkerResult<Result<CondenseReply, String>> {
-                let (speculative, speculative_verify) =
-                    crate::qwen38_block_draft::request_speculation(product_speculative);
-                let request = TextLlmRequest {
-                    progress: Some(crate::load_progress::text_observer()),
-                    messages: vec![Message::system(system), Message::user(user)],
-                    sampling: Sampling {
-                        temperature: 0.4,
-                        top_p: 0.9,
-                        ..Sampling::default()
-                    },
-                    max_new_tokens: condense::CONDENSE_MAX_NEW_TOKENS,
-                    constraint: None,
-                    cancel,
-                    thinking: ThinkingMode::Disabled,
-                    speculative,
-                    speculative_verify,
-                    kv_compression,
-                    ..Default::default()
-                };
+                let request =
+                    condense_request(product_speculative, system, user, cancel, kv_compression);
                 let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
                 let generation =
                     crate::load_progress::generate_text(model, &request, &mut |event| {
@@ -1986,8 +2016,8 @@ pub(crate) async fn run_dataset_batch_describe_job(
                 sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
             );
             let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
-            // SW-7204: the installed block draft rides the load; the engine prices it beside the
-            // target and drops it (never the tier) when it does not fit.
+            // SW-7204: the installed block draft rides the load where `auto` prefers it; the
+            // engine prices it beside the target and drops it (never the tier) when it does not fit.
             let block_draft = crate::qwen38_block_draft::installed_block_draft(
                 &settings.data_dir,
                 sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID,
