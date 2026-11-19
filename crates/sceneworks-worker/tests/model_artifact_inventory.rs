@@ -175,7 +175,12 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs",
+            // SW-7204: the Qwen3.8-27B block draft the describer and the expander load beside the
+            // tier, resolved at its catalog-pinned revision.
+            "crates/sceneworks-worker/src/qwen38_block_draft.rs",
+        ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::WorkerSnapshot,

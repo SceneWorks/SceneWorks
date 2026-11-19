@@ -671,6 +671,10 @@ mod qwen_prompt_rewrite;
 // (`core_llm::minimax_h3_image_pe`); `prompt_refine_jobs` drives it on the same TextLlm lane.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod minimax_h3_image_prompt_expand;
+// SW-7204 — the Qwen3.8-27B block drafter (DFlash2 / DSpine) on the describer and the H3 prompt
+// expander: which installed draft a load names, the request's proposer, and the job's decode record.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+mod qwen38_block_draft;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]

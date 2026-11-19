@@ -1543,6 +1543,59 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
     assert_eq!(result["variant"], "q8");
 }
 
+/// SW-7204: the 27B's load names its installed block draft at the tier's precision (and the
+/// Vision Captioner's names none), and the job result carries the describer's `decode` block.
+#[test]
+fn the_qwen38_load_names_its_block_draft_and_the_result_carries_the_decode_record() {
+    use crate::qwen38_block_draft::BlockDraftChoice;
+    let draft = BlockDraftChoice {
+        repo: "SceneWorks/qwen3.8-27b-dflash2".to_owned(),
+        revision: "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9".to_owned(),
+        dir: PathBuf::from("/hub/dflash2"),
+        precision: "q4",
+    };
+    let (spec, _) = vision_describer_load(Path::new("/hub/q4-full"), Some(&draft));
+    assert_eq!(spec.source, "/hub/q4-full");
+    assert_eq!(spec.draft_source.as_deref(), Some("/hub/dflash2"));
+    assert_eq!(spec.draft_quantize, Some(gen_core::core_llm::Quantize::Q4));
+    let (plain, _) = vision_describer_load(Path::new("/hub/q4-full"), None);
+    assert_eq!(plain.draft_source, None);
+
+    let stage = bare_stage();
+    let mut payload = payload(&stage, None);
+    payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    payload["variant"] = json!("q4");
+    let request =
+        parse_batch_describe_request(&stage.settings, payload.as_object().expect("object"))
+            .expect("accepted");
+    let qwen = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
+        PathBuf::from("/hub/q4-full"),
+        "decode-record".to_owned(),
+    )
+    .with_block_draft(Some(draft.clone()));
+    qwen.decode.lock().unwrap().note(
+        crate::qwen38_block_draft::DecodePhase::Describe,
+        None,
+        None,
+        Some(&draft),
+    );
+    let result = with_decode_record(batch_describe_result(&request, &[], false), &qwen);
+    assert_eq!(result["decode"]["describe"]["generations"], 1);
+    assert_eq!(result["decode"]["condense"]["generations"], 0);
+    assert!(result["decode"]["describe"]["draftFallback"]
+        .as_str()
+        .is_some_and(|reason| reason.starts_with("block draft:")));
+
+    let captioner = VisionCaptionerDescriber::new(
+        DescribeModel::VisionCaptioner,
+        PathBuf::from("/hub/vc"),
+        "decode-record".to_owned(),
+    );
+    let result = with_decode_record(batch_describe_result(&request, &[], false), &captioner);
+    assert!(!result.contains_key("decode"));
+}
+
 /// The pinned snapshot the CUDA smoke checks for each tier comes from the shipped catalog's rows:
 /// the engine's re-host folder its row names for q4 and q8, the upstream repository's root for bf16.
 /// The production resolver lands on exactly that folder when it is the cached snapshot.
@@ -2025,11 +2078,11 @@ async fn a_describer_failure_names_the_model_in_use() {
             "Vision Captioner load failed",
         ),
     ] {
-        let describer = VisionCaptionerDescriber {
+        let describer = VisionCaptionerDescriber::new(
             model,
-            weights_dir: empty.path().join("no-model"),
-            job_id: "label-test".to_owned(),
-        };
+            empty.path().join("no-model"),
+            "label-test".to_owned(),
+        );
         let error = describer
             .describe(
                 image::DynamicImage::new_rgb8(8, 8),

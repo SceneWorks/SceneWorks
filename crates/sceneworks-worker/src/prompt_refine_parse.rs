@@ -29,6 +29,9 @@ pub(super) struct RefineRequest {
 pub(super) struct H3Expand {
     pub(super) request: gen_core::core_llm::TextLlmRequest,
     pub(super) reply: H3ExpandReply,
+    /// The installed Qwen3.8-27B block draft the expander's load names (SW-7204), at its tier's
+    /// precision; `None` when none is installed.
+    pub(super) block_draft: Option<crate::qwen38_block_draft::BlockDraftChoice>,
 }
 
 /// What an expansion reply is parsed against.
@@ -42,6 +45,9 @@ pub(crate) struct H3ExpandReply {
     /// The `LoadSpec` source the expander was loaded from (set by the job once it builds the load
     /// spec), recorded on the result's `executionIdentity.weightsDir`.
     pub(crate) weights_source: String,
+    /// What the expansion decoded with (SW-7204, set by the job after the generation): proposer,
+    /// block draft and per-pass counts, recorded on `executionIdentity.decode`. `Null` until set.
+    pub(crate) decode: Value,
 }
 
 pub(super) async fn parse_refine_request(
@@ -352,7 +358,13 @@ pub(super) async fn parse_refine_request(
                     model_id: dirs.model_id,
                     tier: dirs.tier,
                     weights_source: String::new(),
+                    decode: Value::Null,
                 },
+                block_draft: crate::qwen38_block_draft::installed_block_draft(
+                    &settings.data_dir,
+                    dirs.model_id,
+                    dirs.tier,
+                ),
             });
             (String::new(), String::new())
         }

@@ -24,6 +24,11 @@
 # the abliterated describer's own MLX tier folder (q4-full/ or q8-full/ of
 # SceneWorks/qwen3.8-27b-abliterated-mlx) and the same upstream prompt files instead.
 #
+# QWEN38_BLOCK_DRAFT = record (default) | on | no_fit picks what the smoke checks about the drafter
+# (SW-7204, see the workflow); on and no_fit also fetch the two Qwen3.8-27B block drafts (the DFlash2
+# and DSpine soft co-requisites of the entry that runs), each at its pinned revision. record keeps the
+# old footprint.
+#
 # Inputs (env): QWEN38_JOB = describer | expander, QWEN38_FRESH_HUB = true | false (default false),
 # QWEN38_EXPANDER_MODEL = minimax | abliterated (default minimax),
 # QWEN38_TIER = q4 | q8 | bf16,
@@ -47,6 +52,11 @@ case "$expander_model" in
     [[ "$job" == expander ]] || { echo "::error::QWEN38_EXPANDER_MODEL applies only to the expander job"; exit 1; } ;;
   *) echo "::error::QWEN38_EXPANDER_MODEL must be minimax or abliterated, got $expander_model"; exit 1 ;;
 esac
+block_draft="${QWEN38_BLOCK_DRAFT:-record}"
+case "$block_draft" in
+  record|on|no_fit) ;;
+  *) echo "::error::QWEN38_BLOCK_DRAFT must be record, on or no_fit, got $block_draft"; exit 1 ;;
+esac
 fresh_hub="${QWEN38_FRESH_HUB:-false}"
 case "$fresh_hub" in
   false) ;;
@@ -63,9 +73,9 @@ guard_dir="$(cd "$here/../iris-mlx-real-weights" && pwd)"
 mem_gib=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 {
   if [[ "$job" == expander ]]; then
-    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) job=expander expander_model=$expander_model tier=$tier"
+    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) job=expander expander_model=$expander_model tier=$tier block_draft=$block_draft"
   else
-    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) tier=$tier image_side=$side"
+    echo "runner=${RUNNER_NAME:-unknown} source_sha=$(git rev-parse HEAD) tier=$tier image_side=$side block_draft=$block_draft"
   fi
   echo "unified memory: $mem_gib GiB"
   /usr/bin/memory_pressure -Q || true
@@ -182,6 +192,49 @@ print(f"tier {tier}: {row['repo']}@{row['revision']} files={row['files']} reside
 PY
 fi
 
+# ---- the block drafts (SW-7204, on / no_fit only): the running entry's co-requisite rows ----------
+if [[ "$block_draft" != record ]]; then
+if [[ "$job" == expander && "$expander_model" == minimax ]]; then draft_entry=minimax_h3_image_pe
+else draft_entry=vision_describe_qwen3_8_27b; fi
+free_gb=$(( $(df -k "$hub" | awk 'NR==2 {print $4}') / 1048576 ))
+HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_IMPLICIT_TOKEN=1 HF_HUB_DISABLE_TELEMETRY=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
+QWEN38_HUB="$hub" QWEN38_FREE_GB="$free_gb" QWEN38_DRAFT_ENTRY="$draft_entry" \
+  "$RUNNER_TEMP/qwen38-hf-venv/bin/python" - <<'PY' | tee -a "$out/provision.txt"
+import json, os, sys
+from huggingface_hub import HfApi, snapshot_download
+specs = json.load(open("config/manifests/registry/specs.json"))
+drafts = ("SceneWorks/qwen3.8-27b-dflash2", "SceneWorks/qwen3.8-27b-dspine-b16")
+rows = [r for r in specs[os.environ["QWEN38_DRAFT_ENTRY"]]["product"]["downloads"]
+        if r.get("coRequisite") and r.get("repo") in drafts]
+if len(rows) != len(drafts):
+    sys.exit(f"::error::expected {len(drafts)} block-draft rows, found {len(rows)}")
+free = int(os.environ["QWEN38_FREE_GB"])
+for row in rows:
+    info = HfApi().model_info(row["repo"], revision=row["revision"], files_metadata=True, token=False)
+    if info.sha != row["revision"]:
+        sys.exit(f"::error::{row['repo']} resolved {row['revision']} to {info.sha}")
+    expected = {s.rfilename: s.size for s in info.siblings if s.rfilename in row["files"]}
+    total = sum(expected.values())
+    if set(expected) != set(row["files"]) or total != row["footprint"]["diskSizeBytes"]:
+        sys.exit(f"::error::{row['repo']}@{row['revision']} {row['files']} total {total} bytes, the catalog says {row['footprint']['diskSizeBytes']}")
+    snap = os.path.join(os.environ["QWEN38_HUB"], "models--" + row["repo"].replace("/", "--"), "snapshots", row["revision"])
+    def missing():
+        return [n for n, size in expected.items()
+                if not os.path.isfile(os.path.join(snap, n)) or os.path.getsize(os.path.join(snap, n)) != size]
+    absent = missing()
+    if absent:
+        need = sum(expected[n] for n in absent) / 1e9
+        if free - need < 25:
+            sys.exit(f"::error::{free} GB free; the {need:.1f} GB block-draft download would leave less than 25 GB")
+        snapshot_download(repo_id=row["repo"], revision=row["revision"], cache_dir=os.environ["QWEN38_HUB"],
+                          allow_patterns=row["files"], token=False, max_workers=4)
+        if missing():
+            sys.exit(f"::error::{row['repo']}: files have the wrong size after download: {missing()}")
+        free -= int(need)
+    print(f"block draft: {row['repo']}@{row['revision']} ({len(expected)} files, {total} bytes) resident={not absent}")
+PY
+fi
+
 # ---- build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) -------------------------
 target="$weights_root/sceneworks-qwen38-mlx-target/$(git rev-parse HEAD)"
 mkdir -p "$target"
@@ -217,5 +270,6 @@ bash "$here/guarded_run.sh" "$out" "$log" "$test_name" -- \
   env HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 TMPDIR="$RUNNER_TEMP" MODEL_PROOF_OUTPUT_DIR="$out/result" \
   SCENEWORKS_QWEN38_DESCRIBER_TIER="$tier" SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE="$side" \
   SCENEWORKS_H3_EXPANDER_TIER="$tier" SCENEWORKS_H3_EXPANDER_MODEL="$expander_model" \
+  SCENEWORKS_QWEN38_BLOCK_DRAFT="$block_draft" \
   python3.12 "$guard_dir/tree_guard.py" "$cap_gib" 2400 "$log" -- \
   "$bin" "$test_name" --ignored --exact --nocapture --test-threads=1

@@ -191,7 +191,7 @@ class ExpanderTest(unittest.TestCase):
 
     def test_an_expander_mode_plans_only_its_tier_then_the_prompt_files(self):
         for tier, folder in (("q4", "candle-q4-full"), ("q8", "candle-q8-full")):
-            (repo, revision, _, read, patterns, minimum), prompt = provision.plans(f"expander-{tier}")
+            (repo, revision, _, read, patterns, minimum), prompt = provision.weight_plans(f"expander-{tier}")
             self.assertEqual((repo, revision, patterns), (provision.EXPANDER_REPO, provision.EXPANDER_REVISION,
                                                           [f"{folder}/*"]))
             self.assertEqual(minimum, provision.EXPANDER_MIN_FREE_BYTES[tier])
@@ -201,17 +201,17 @@ class ExpanderTest(unittest.TestCase):
             self.assertEqual(prompt[:2], (provision.PROMPT_REPO, provision.PROMPT_REVISION))
             self.assertEqual(prompt[4], list(provision.PROMPT_FILES))
         # The describer's modes stay one snapshot each, exactly `plan`'s.
-        self.assertEqual(provision.plans("quantised"), [provision.plan("quantised")])
-        self.assertEqual(provision.plans("bf16"), [provision.plan("bf16")])
+        self.assertEqual(provision.weight_plans("quantised"), [provision.plan("quantised")])
+        self.assertEqual(provision.weight_plans("bf16"), [provision.plan("bf16")])
         with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
-            provision.plans("expander-bf16")
+            provision.weight_plans("expander-bf16")
 
     # SW-7208: the expander run by the abliterated describer needs ONE describer tier and the prompt
     # files, never MiniMax-H3-Image-PE's weights.
     def test_an_abliterated_expander_mode_plans_one_describer_tier_then_the_prompt_files(self):
         for tier, other in (("q4", "q8"), ("q8", "q4")):
             folder = provision.TIER_FOLDERS[tier]
-            (repo, revision, _, read, patterns, minimum), prompt = provision.plans(f"expander-abliterated-{tier}")
+            (repo, revision, _, read, patterns, minimum), prompt = provision.weight_plans(f"expander-abliterated-{tier}")
             self.assertEqual((repo, revision), (provision.REPO, provision.REVISION))
             self.assertEqual(patterns, provision.tier_patterns(folder))
             self.assertEqual(minimum, provision.EXPANDER_MIN_FREE_BYTES[tier])
@@ -224,7 +224,7 @@ class ExpanderTest(unittest.TestCase):
             self.assertEqual(set(read(entries)), {name for name, _ in entries[:-1]})
             self.assertEqual(prompt, provision.prompt_plan())
         with self.assertRaisesRegex(RuntimeError, "unknown provisioning mode"):
-            provision.plans("expander-abliterated-bf16")
+            provision.weight_plans("expander-abliterated-bf16")
 
     def test_repositories_revisions_folders_and_totals_match_the_catalog_rows(self):
         specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
@@ -249,6 +249,51 @@ class ExpanderTest(unittest.TestCase):
         self.assertEqual((alone[0]["repo"], alone[0]["revision"], alone[0]["files"], alone[0]["estimatedSizeBytes"]),
                          (provision.PROMPT_REPO, provision.PROMPT_REVISION, list(provision.PROMPT_FILES),
                           provision.PROMPT_BYTES))
+
+
+class DraftTest(unittest.TestCase):
+    """SW-7204: a drafter-checking run (`on`, `no_fit`) provisions the two block drafts after a
+    mode's weights; `record` (the default) keeps the old footprint; `drafts` is only them."""
+
+    def test_drafts_follow_the_weights_only_for_a_drafter_check(self):
+        drafts = [(repo, revision) for repo, revision, _ in provision.DRAFTS]
+        for mode in provision.MODES:
+            weights = [] if mode == "drafts" else provision.weight_plans(mode)
+            for check in provision.DRAFT_CHECKS:
+                planned = provision.plans(mode, check)
+                tail = [(repo, revision) for repo, revision, *_ in planned[-2:]]
+                self.assertEqual(tail, drafts, (mode, check))
+                self.assertEqual(len(planned), len(weights) + 2, (mode, check))
+            for planned in (provision.plans(mode), provision.plans(mode, "record")):
+                if mode == "drafts":
+                    self.assertEqual([(r, v) for r, v, *_ in planned], drafts)
+                else:
+                    self.assertEqual([(r, v) for r, v, *_ in planned],
+                                     [(r, v) for r, v, *_ in weights], mode)
+        for _, _, _, read, patterns, minimum in provision.draft_plans():
+            self.assertEqual(patterns, list(provision.DRAFT_FILES))
+            self.assertEqual(minimum, provision.DRAFT_MIN_FREE_BYTES)
+
+    def test_a_draft_is_its_three_files_at_the_catalog_total(self):
+        entries = [("config.json", 2), ("model.safetensors", 7), ("LICENSE", 1), ("README.md", 50)]
+        self.assertEqual(provision.draft_expected_files(entries, "r", 10),
+                         {"config.json": 2, "model.safetensors": 7, "LICENSE": 1})
+        with self.assertRaisesRegex(RuntimeError, "the catalog says 11"):
+            provision.draft_expected_files(entries, "r", 11)
+        with self.assertRaisesRegex(RuntimeError, "lists no sized LICENSE"):
+            provision.draft_expected_files(entries[:2], "r", 9)
+
+    def test_drafts_match_both_catalog_entries(self):
+        specs = json.loads((Path(__file__).parents[2] / "config/manifests/registry/specs.json").read_text())
+        for entry in ("vision_describe_qwen3_8_27b", "minimax_h3_image_pe"):
+            rows = specs[entry]["product"]["downloads"]
+            for repo, revision, total in provision.DRAFTS:
+                matches = [row for row in rows if row["repo"] == repo and row.get("coRequisite")]
+                self.assertEqual(len(matches), 1, (entry, repo))
+                row = matches[0]
+                self.assertEqual(row["revision"], revision, (entry, repo))
+                self.assertEqual(row["files"], list(provision.DRAFT_FILES), (entry, repo))
+                self.assertEqual(row["footprint"]["diskSizeBytes"], total, (entry, repo))
 
 
 class FreeSpaceTest(unittest.TestCase):

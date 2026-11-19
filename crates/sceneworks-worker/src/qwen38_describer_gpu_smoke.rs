@@ -21,6 +21,17 @@
 //! The scene is 512x384 by default; `SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE=1536` draws the same
 //! scene at 1536x1536, so the peak of a large image can be measured.
 //!
+//! SW-7204: the describer names the installed block draft (DFlash2 / DSpine) as a job does, then
+//! condenses the described fields with the product's condense step on the same loaded model. The
+//! evidence records one decode block per phase (proposer, draft, precision, verify, target passes,
+//! rows checked and accepted tokens per pass). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires the
+//! draft to run in both phases (block draft, the tier's draft precision, more than one accepted
+//! token per pass, no fallback): the text-only condense must check a tree; the image describe must
+//! check a tree or, as both engines do at the pinned inference, check linearly and name the
+//! multimodal fallback. `no_fit` caps the engine's load budget so the draft cannot fit beside the
+//! target and requires both phases to complete without it, the record saying why. The reply must
+//! be valid describer JSON either way (the strict parse below).
+//!
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
 //! $env:SCENEWORKS_QWEN38_DESCRIBER_TIER = "q4"
@@ -42,6 +53,85 @@ use crate::batch_describe_jobs::{
     qwen38_describer_weights_dir, BatchDescriber, DescribeModel, DescribePrompt,
     VisionCaptionerDescriber,
 };
+use crate::qwen38_block_draft::SmokeDraftCheck;
+use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+
+/// The block draft the describe names, as a job resolves it, and (`no_fit`) the load-budget cap
+/// that keeps it from fitting, held for the describe.
+async fn smoke_block_draft(
+    check: SmokeDraftCheck,
+    settings: &Settings,
+    tier: &str,
+    weights_dir: &std::path::Path,
+) -> (
+    Option<crate::qwen38_block_draft::BlockDraftChoice>,
+    Option<crate::qwen38_block_draft::EnvOverride>,
+) {
+    let draft = check.installed_draft(
+        &settings.data_dir,
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some(tier),
+    );
+    let cap = match (check, &draft) {
+        (SmokeDraftCheck::NoFit, Some(draft)) => {
+            Some(crate::qwen38_block_draft::force_draft_no_fit(weights_dir, draft).await)
+        }
+        _ => None,
+    };
+    (draft, cap)
+}
+
+/// Condense the described `fields` with the product's condense step (the `Fit to` rewrite a job
+/// runs on the model the describe left resident: same load, same request), then check the
+/// describer's decode blocks against `check`: the image describe ([`DraftRequest::Image`]) and the
+/// text-only condense ([`DraftRequest::Text`]). Panics with the record when a check fails.
+///
+/// The condense runs on the describer directly rather than through a one-image
+/// `run_dataset_batch_describe_job`: that job needs a stub job API, a staged dataset and an
+/// installed `Fit to` target tokenizer, none of which this smoke's runners carry. The describe and
+/// condense loads and requests are the job's own (`VisionCaptionerDescriber`).
+async fn checked_decode_record(
+    check: SmokeDraftCheck,
+    describer: &VisionCaptionerDescriber,
+    fields: &[String; DESCRIBE_FIELDS.len()],
+) -> Value {
+    use crate::batch_describe_jobs::condense::{condense_system, condense_user};
+    use crate::qwen38_block_draft::DraftRequest;
+    use sceneworks_core::dataset_batch_describe::{condense_char_bound, condense_word_target};
+    let words = condense_word_target(1024, condense_char_bound(), 0);
+    let condensed = describer
+        .condense(
+            condense_system(words),
+            condense_user(fields),
+            CancelFlag::new(),
+        )
+        .await
+        .expect("the describer stays loaded for the condense")
+        .expect("the describer condenses");
+    assert!(
+        !condensed.text.trim().is_empty(),
+        "the condensed prompt is empty"
+    );
+    eprintln!(
+        "condensed ({} tokens):\n{}",
+        condensed.generated_tokens, condensed.text
+    );
+    let decode = describer
+        .decode_record()
+        .expect("the Qwen3.8 27B describer records its decode");
+    eprintln!("DECODE block_draft_check={} {decode}", check.label());
+    for (phase, request) in [
+        ("describe", DraftRequest::Image),
+        ("condense", DraftRequest::Text),
+    ] {
+        check
+            .check(&decode[phase], describer.block_draft.as_ref(), request)
+            .unwrap_or_else(|error| {
+                panic!("block-draft check {} ({phase}): {error}", check.label())
+            });
+    }
+    decode
+}
 
 const TIER_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_TIER";
 const IMAGE_SIDE_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE";
@@ -147,6 +237,8 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         weights_dir.display(),
         pinned_suffix.display()
     );
+    let draft_check = SmokeDraftCheck::from_env();
+    let (draft, _no_fit_cap) = smoke_block_draft(draft_check, &settings, &tier, &weights_dir).await;
 
     // The worker reads the job's card by its nvidia-smi (PCI-bus-ordered) index; under
     // `CUDA_VISIBLE_DEVICES` that is the visible device's index.
@@ -175,11 +267,12 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
 
     let (scene_width, scene_height) = scene_size();
     let scene = synthetic_scene(scene_width, scene_height);
-    let describer = VisionCaptionerDescriber {
-        model: DescribeModel::Qwen38,
-        weights_dir: weights_dir.clone(),
-        job_id: "sw-7120-qwen38-describer-smoke".to_owned(),
-    };
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
+        weights_dir.clone(),
+        "sw-7120-qwen38-describer-smoke".to_owned(),
+    )
+    .with_block_draft(draft);
     let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
     let started = std::time::Instant::now();
     let reply = describer.describe(scene, &prompt, CancelFlag::new()).await;
@@ -216,6 +309,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
 
     let test_fqn = std::thread::current()
         .name()
@@ -238,6 +332,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
             "fields": fields,
+            "block_draft": { "check": draft_check.label(), "decode": decode },
             "wall_seconds": wall_seconds,
             "wall_time_scope": "one describe call on a cold process: model load plus one image",
             "gpu_memory": {
@@ -319,11 +414,18 @@ async fn qwen38_describer_throughput_on_cuda() {
     let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
         .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
     let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
-    let describer = VisionCaptionerDescriber {
-        model: DescribeModel::Qwen38,
+    // As a job does: the installed block draft rides the load (SW-7204).
+    let draft = crate::qwen38_block_draft::installed_block_draft(
+        &settings.data_dir,
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some(&tier),
+    );
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
         weights_dir,
-        job_id: "qwen38-describer-bench".to_owned(),
-    };
+        "qwen38-describer-bench".to_owned(),
+    )
+    .with_block_draft(draft);
 
     // Warm-up: the load and first-call graph capture are paid here, not by a measured image.
     let started = std::time::Instant::now();
@@ -394,7 +496,8 @@ async fn qwen38_decode_paths_on_cuda() {
         ("t0.4_json_mtp", 0.4, Some(Constraint::Json), mtp),
     ];
     for (label, temperature, constraint, speculative) in cases {
-        let (spec, requirements) = crate::batch_describe_jobs::vision_describer_load(&weights_dir);
+        let (spec, requirements) =
+            crate::batch_describe_jobs::vision_describer_load(&weights_dir, None);
         let started = std::time::Instant::now();
         let output = crate::refine_model_cache::with_cached_refiner(
             spec,
@@ -486,13 +589,16 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
         weights_dir.display(),
         pinned.relative_dir.display()
     );
+    let draft_check = SmokeDraftCheck::from_env();
+    let (draft, _no_fit_cap) = smoke_block_draft(draft_check, &settings, &tier, &weights_dir).await;
 
     let (scene_width, scene_height) = scene_size();
-    let describer = VisionCaptionerDescriber {
-        model: DescribeModel::Qwen38,
-        weights_dir: weights_dir.clone(),
-        job_id: "sw-7202-qwen38-describer-mlx-smoke".to_owned(),
-    };
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
+        weights_dir.clone(),
+        "sw-7202-qwen38-describer-mlx-smoke".to_owned(),
+    )
+    .with_block_draft(draft);
     let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
     let started = std::time::Instant::now();
     let reply = describer
@@ -527,6 +633,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
     let test_fqn = std::thread::current()
         .name()
         .expect("the libtest case has an actual FQN")
@@ -549,6 +656,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
             "fields": fields,
+            "block_draft": { "check": draft_check.label(), "decode": decode },
             "wall_seconds": wall_seconds,
             "wall_time_scope": "one describe call on a cold process: model load plus one image",
             "memory": "measured outside the process by tree_guard.py (root_lifetime_max)"
