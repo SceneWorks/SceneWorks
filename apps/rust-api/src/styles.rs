@@ -236,12 +236,17 @@ pub(crate) async fn apply_appearance_to_payload(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
+    let limit = model_entry.as_object().map_or(
+        sceneworks_core::MAX_PROMPT_CHARS,
+        sceneworks_core::image_prompt_char_limit,
+    );
     let compose = |prompt: &str| -> Result<Value, ApiError> {
         let text = compose_prompt_with_directives(&style, prompt, &resolved.directives);
-        if text.chars().count() > 4000 {
-            return Err(ApiError::bad_request(
-                "Appearance-composed prompt must be at most 4000 characters.",
-            ));
+        // The selected model's own prompt ceiling: 4000, or its declared encoder window.
+        if text.chars().count() > limit {
+            return Err(ApiError::bad_request(format!(
+                "Appearance-composed prompt must be at most {limit} characters."
+            )));
         }
         Ok(Value::String(text))
     };

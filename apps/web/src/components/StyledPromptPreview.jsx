@@ -23,11 +23,11 @@ import { promptBudget } from "../styleComposer.js";
 // "N / 4000" readout beside the string it measures, flipping to an over-budget warning before the
 // user submits. The measurement is on the SAME composed string shown above, so the count and the
 // blocking Generate error (imageGenerateValidation) can never disagree.
-export function StyledPromptPreview({ active, composedPrompt, appearanceActive = false, negativePrompt }) {
+export function StyledPromptPreview({ active, composedPrompt, appearanceActive = false, negativePrompt, maxChars }) {
   if (!active) {
     return null;
   }
-  const budget = promptBudget(composedPrompt ?? "");
+  const budget = promptBudget(composedPrompt ?? "", maxChars);
   return (
     <div className="preset-stack-preview styled-prompt-preview" data-testid="styled-prompt-preview">
       <div className="preset-stack-prompt">

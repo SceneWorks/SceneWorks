@@ -1386,11 +1386,16 @@ fn shareable_label(value: &str) -> Option<String> {
 ///
 /// 16 KiB is the widest UTF-8 encoding of the API's own ceiling on this field class:
 /// `MAX_PROMPT_CHARS` in `apps/rust-api/src/lib.rs` rejects a `prompt` or `negativePrompt` over
-/// 4,000 characters, and 4,000 characters is at most 16,000 bytes. So a prompt this app accepted
-/// cannot be truncated here, in any script — but a non-Latin prompt does get fewer CHARACTERS than a
-/// Latin one out of the same allowance (5,461 for 3-byte CJK, 4,096 for 4-byte scalars), which is
-/// the cost of bounding the thing that is actually persisted. All four are above the API's own
-/// 4,000, so the bound the user can hit is still the API's, not this one.
+/// 4,000 characters, and 4,000 characters is at most 16,000 bytes. So such a prompt cannot be
+/// truncated here, in any script — but a non-Latin prompt does get fewer CHARACTERS than a Latin
+/// one out of the same allowance (5,461 for 3-byte CJK, 4,096 for 4-byte scalars), which is the
+/// cost of bounding the thing that is actually persisted.
+///
+/// The one wider field is an image `prompt` for a model that declares a long encoder window
+/// (`image_prompt_char_limit`, up to `MAX_IMAGE_PROMPT_CHARS` = 16,384 for MiniMax-H3-Image's
+/// 4,096 tokens). Every ASCII prompt at that ceiling still fits byte for byte; a non-ASCII prompt
+/// longer than this allowance is shortened at a character boundary in the share (the generation
+/// itself is unaffected), rather than growing the envelope that older readers cap.
 ///
 /// The four `advanced` slots have no per-field validator of their own — they are bounded only by
 /// `MAX_ADVANCED_JSON_BYTES`, the API's 64 KiB ceiling on the whole serialized `advanced` map — so
@@ -3674,6 +3679,8 @@ mod tests {
         // prompt this app accepted cannot be truncated here in ANY script.
         assert_eq!(PROSE_MAX_BYTES, 16 * 1024);
         const _: () = assert!(PROSE_MAX_BYTES >= 4_000 * 4);
+        // Every ASCII image prompt at the widest model-aware ceiling survives byte for byte.
+        const _: () = assert!(PROSE_MAX_BYTES >= crate::MAX_IMAGE_PROMPT_CHARS);
         // And prose-sized rather than label-sized: the two must never be conflated.
         const _: () = assert!(PROSE_MAX_BYTES > LABEL_MAX_CHARS * 4);
     }

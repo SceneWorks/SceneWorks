@@ -2997,6 +2997,33 @@ label {
   gap: 8px;
 }
 
+/* Batch-mode prompt expansion (BatchExpandPromptsControl): every batch prompt's expansion in one
+   scrollable, read-only list; edits happen in the batch list after Apply. */
+.batch-expand-preview ol {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 8px 0 0;
+  padding-left: 24px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.batch-expand-preview li + li {
+  margin-top: 8px;
+}
+
+.batch-expand-failures {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.batch-expand-sizes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
 /* Qwen-Image 2.1's official prompt rewriter (sc-24113).
    The rewrite is EDITABLE, unlike the generic refiner's read-only paragraph, so the suggestion is a
    real textarea. It inherits `.refine-review-text`'s type, then takes the affordances a text field

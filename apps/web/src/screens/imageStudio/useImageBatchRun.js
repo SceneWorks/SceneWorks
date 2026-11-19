@@ -3,7 +3,6 @@ import { iterateBatch, parsePromptResolution } from "../../promptBatch.js";
 import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../../batchOps.js";
 import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
 import { promptBatchSize } from "./samplingControls.js";
-import { batchPromptBudgetMessage, batchPromptBudgetOverages } from "../../imageStudioValidation.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
 import { validatePortableRequest } from "../../portableValidation.js";
 
@@ -23,11 +22,8 @@ export function useImageBatchRun({
   batchPrompts,
   batchVariables,
   resolutionOptions,
-  composeJobPrompt,
-  stylePreviewActive,
   structuredPromptModel,
   batchJobCount,
-  BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
   token = "",
   buildBatchJobRequest,
@@ -112,21 +108,8 @@ export function useImageBatchRun({
       setBatchConfirmPending(true);
       return;
     }
-    const styledBatchPrompts = () => (function* composedBatchPrompts() {
-      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
-        yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
-      }
-    })();
-    // An ordinary batch remains eager so its warning retains every actionable item.
-    // Only a confirmed high-cardinality product needs the cancelable streaming path below.
-    if (stylePreviewActive && !structuredPromptModel && batchJobCount <= BATCH_RENDER_CAP) {
-      const promptBudgetOverages = batchPromptBudgetOverages(styledBatchPrompts());
-      if (promptBudgetOverages.length) {
-        setBatchError(batchPromptBudgetMessage(promptBudgetOverages));
-        return;
-      }
-    }
+    // No length gate: `buildBatchJobRequest` shortens an item past the model's prompt ceiling,
+    // and the panel lists those items before the run.
     setBatchError("");
     setBatchConfirmPending(false);
     const owner = { stopped: false, projectId: activeProject.id, jobs: new Map(), controller: new AbortController() };
@@ -143,37 +126,6 @@ export function useImageBatchRun({
       failed: 0,
       activeJobIds: [],
     });
-    // Validate styled prompts before any job is admitted. This is deliberately a stream:
-    // a high-cardinality all-under-cap Cartesian product used to synchronously exhaust here,
-    // before React could paint the run and make Stop usable. The state above establishes the
-    // cancel owner first; bounded cooperative yields preserve truthful preflight enforcement
-    // without retaining every prompt or letting any job through before validation completes.
-    if (stylePreviewActive && !structuredPromptModel && batchJobCount > BATCH_RENDER_CAP) {
-      let inspected = 0;
-      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        if (stopped()) {
-          const current = batchRunRef.current;
-          if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false });
-          return;
-        }
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
-        const promptBudgetOverages = batchPromptBudgetOverages(
-          [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
-          1,
-        );
-        if (promptBudgetOverages.length) {
-          const [{ item: _item, ...budget }] = promptBudgetOverages;
-          replaceBatchRun(null);
-          setBatchError(batchPromptBudgetMessage([{ item: inspected + 1, ...budget }]));
-          return;
-        }
-        inspected += 1;
-        if (batchJobCount > BATCH_RENDER_CAP && inspected % BATCH_PREFLIGHT_YIELD_INTERVAL === 0) {
-          // A macrotask, rather than a microtask, gives the browser an event turn to deliver Stop.
-          await new Promise((resolve) => window.setTimeout(resolve, 0));
-        }
-      }
-    }
     // sc-25681: a model with a native prompt batch (Iris-3B) packs consecutive same-size prompts
     // into one job of up to `promptBatchSize` prompts; every other model keeps one job per prompt.
     // The job's own `count` (a preset stack may override the studio's), so prompts × count fits.
