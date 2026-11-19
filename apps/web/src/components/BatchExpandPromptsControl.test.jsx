@@ -141,6 +141,28 @@ describe("BatchExpandPromptsControl", () => {
     expect(expandPrompt).not.toHaveBeenCalled();
   });
 
+  // The batch list has no escape for `{{…}}`, so a resolved line carrying placeholder text (here
+  // from a named value, its expansion failed) would be re-read as a template on Apply.
+  it("refuses to apply a line that would be read as a template again", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => {
+      if (prompt.includes("sign")) throw new Error("worker exploded");
+      return { refinedPrompt: `Expanded ${prompt}` };
+    });
+    const initial = "a fox\n{{label}} on a sign";
+    await act(async () =>
+      root.render(
+        <Harness initial={initial} expandPrompt={expandPrompt} variableValues={{ label: ["{{red|blue}}"] }} onText={(value) => { text = value; }} />,
+      ),
+    );
+    await act(async () => click(button("Expand all 2 prompts")));
+    await settle();
+    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox", "{{red|blue}} on a sign"]);
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe(initial);
+    expect(container.textContent).toContain("Prompt 2 would contain {{…}} text");
+  });
+
   it("keeps finished expansions when stopped", async () => {
     let text = "";
     let release;

@@ -30,6 +30,8 @@ import { Icon } from "./Icons.jsx";
 // directive of their own, off by default — the same separate opt-in the single-prompt control gives.
 
 const DIRECTIVE = /^\s*\[\s*\d{1,5}\s*[x×X:]\s*\d{1,5}\s*\]\s*/;
+// The batch's placeholder syntax (promptBatch.js `keyPattern`, non-blank inner text).
+const PLACEHOLDER = /\{\{[^{}]*\S[^{}]*\}\}/;
 // Past this many resolved prompts the expander asks before starting (each is a worker job).
 export const BATCH_EXPAND_CONFIRM_AT = 100;
 // More than this is refused: the user should narrow the variables first.
@@ -158,6 +160,16 @@ export function BatchExpandPromptsControl({
       const prefix = run.plans[index].directive || (size ? `[${size}]` : "");
       return prefix ? `${prefix} ${result.text}` : result.text;
     });
+    // The batch list has no escape for `{{…}}`: a written line that contains placeholder syntax
+    // (from a variable's value or from the expansion itself) would be read as a template again and
+    // change what the batch renders. Refuse and name those prompts rather than alter the batch.
+    const reparsed = next
+      .map((line, index) => (PLACEHOLDER.test(line) ? index + 1 : null))
+      .filter((item) => item !== null);
+    if (reparsed.length) {
+      setError(copy.batch.literalPlaceholders(reparsed));
+      return;
+    }
     const nextText = joinPromptLines(next);
     onPromptsTextChange(nextText);
     setApplied({ previous: run.text, next: nextText, count });
