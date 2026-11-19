@@ -170,11 +170,20 @@ export function BatchExpandPromptsControl({
       setError(copy.batch.literalPlaceholders(reparsed));
       return;
     }
+    // An empty resolved choice (`{{|a fox}}`) is a prompt of its own in the batch, but the list
+    // cannot hold an empty line; writing it would silently drop that item.
+    const empty = next
+      .map((line, index) => (line.trim() === "" ? index + 1 : null))
+      .filter((item) => item !== null);
+    if (empty.length) {
+      setError(copy.batch.emptyPrompts(empty));
+      return;
+    }
     const nextText = joinPromptLines(next);
     // The written list must read back as exactly these prompts. A prompt that is (or contains) a
     // standalone `---` line would split or merge prompts in block mode, so the batch would render
     // a different set; refuse rather than alter it.
-    const expected = next.map((line) => line.trim()).filter((line) => line !== "");
+    const expected = next.map((line) => line.trim());
     const readBack = splitPromptLines(nextText);
     if (readBack.length !== expected.length || readBack.some((line, index) => line !== expected[index])) {
       const delimiters = next

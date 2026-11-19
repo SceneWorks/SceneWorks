@@ -181,6 +181,20 @@ describe("BatchExpandPromptsControl", () => {
     expect(container.textContent).toContain("Prompt 2 contains a line of just ---");
   });
 
+  // An empty inline choice resolves to an empty prompt that the batch list cannot hold, so Apply
+  // refuses rather than drop it.
+  it("refuses to apply when an empty resolved choice would be dropped", async () => {
+    let text = "";
+    const expandPrompt = vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` }));
+    await act(async () => root.render(<Harness initial="{{|a fox}}" expandPrompt={expandPrompt} onText={(value) => { text = value; }} />));
+    await act(async () => click(button("Expand all 2 prompts")));
+    await settle();
+    expect(expandPrompt.mock.calls.map(([request]) => request.prompt)).toEqual(["a fox"]);
+    await act(async () => click(button("Apply to batch")));
+    expect(text).toBe("{{|a fox}}");
+    expect(container.textContent).toContain("Prompt 1 is empty");
+  });
+
   it("keeps finished expansions when stopped", async () => {
     let text = "";
     let release;
