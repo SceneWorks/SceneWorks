@@ -933,13 +933,23 @@ fn builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider() {
 /// This is the production failure reproduced in-process: it goes RED the moment the shipped stamp
 /// drifts from the provider, whatever the reason, and no fixture surgery can hide it because the
 /// manifest is read unpatched.
+///
+/// Every shipped tier, not just q4: sc-22735 keyed the provider's identity per tier, and a context
+/// built from the q4 scalar rejected every bf16/q8 resident render in production while this test —
+/// which then exercised q4 alone — stayed green.
 #[test]
 fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
+    for tier in ["q4", "q8", "bf16"] {
+        builtin_krea_turbo_resident_admission_passes_the_provider_handshake_at(tier);
+    }
+}
+
+fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake_at(tier: &str) {
     let manifest = builtin_krea_turbo_manifest_at_live_closure();
     let turbo_fit = manifest["candle"]["turboFit"]
         .as_object()
         .expect("Krea turbo fit");
-    let provider_contract = krea_test_provider_contract("q4");
+    let provider_contract = krea_test_provider_contract(tier);
     let identity = provider_contract
         .calibration
         .as_ref()
@@ -951,12 +961,14 @@ fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
         free_gb: 90.0,
         total_gb: 96.0,
     });
-    let fit = krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true);
+    let fit = krea_turbo_fit(&manifest, tier, 1024, 1024, budget, true);
     let Some(KreaTurboFit::Resident {
         peak_gb, selection, ..
     }) = fit
     else {
-        panic!("expected the shipped Krea manifest to select the resident rung, got {fit:?}");
+        panic!(
+            "{tier}: expected the shipped Krea manifest to select the resident rung, got {fit:?}"
+        );
     };
 
     let gb_to_bytes = |gb: f64| {
@@ -974,10 +986,14 @@ fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
                 .expect("shipped calibrationAbi"),
         )
         .expect("calibrationAbi fits u32"),
-        calibration_fingerprint: turbo_fit["calibrationFingerprint"]
-            .as_str()
-            .expect("shipped calibrationFingerprint")
-            .to_owned(),
+        // Through the SAME per-tier lookup `image_jobs::candle` uses, so a production read of the
+        // q4 scalar for a bf16/q8 load cannot hide behind a test that spells its own lookup.
+        calibration_fingerprint: krea_turbo_calibration_fingerprint(
+            &manifest["candle"]["turboFit"],
+            tier,
+        )
+        .expect("shipped calibration fingerprint")
+        .to_owned(),
         // From the MANIFEST, exactly as `image_jobs::base` does. Reading it back off `identity`
         // would compare the provider against itself and could never catch a shape mismatch -
         // which is the whole reason calibration ABI 2 added this axis.
@@ -1016,10 +1032,13 @@ fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
     assert_eq!(
         decision,
         gen_core::MemorySafetyDecision::Accept,
-        "the shipped Krea Turbo opt-in must satisfy the pinned provider's calibration handshake \
-             (manifest ABI {}, provider ABI {})",
+        "{tier}: the shipped Krea Turbo opt-in must satisfy the pinned provider's calibration \
+             handshake (manifest ABI {}, provider ABI {}; manifest identity {}, provider identity \
+             {})",
         context.calibration_abi,
-        identity.abi
+        identity.abi,
+        context.calibration_fingerprint,
+        identity.fingerprint
     );
 }
 
