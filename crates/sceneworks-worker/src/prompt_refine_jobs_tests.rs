@@ -2977,3 +2977,26 @@ fn pinned_row_snapshot(data: &Path, row: &Value) -> std::path::PathBuf {
         .join("snapshots")
         .join(row["revision"].as_str().unwrap())
 }
+
+/// An expansion whose reasoning used up the budget is asked again on the same request with
+/// reasoning off — same messages, recipe, budget and reply schema — so the schema constraint
+/// applies from the first token and the whole budget goes to the caption.
+#[test]
+fn the_answer_only_retry_keeps_the_request_and_turns_reasoning_off() {
+    use gen_core::core_llm::{Constraint, JsonSchema, Message, TextLlmRequest, ThinkingMode};
+    let mut request = TextLlmRequest::new(vec![Message::user("a lighthouse")], 4096);
+    request.thinking = ThinkingMode::Enabled;
+    request.reasoning_effort = Some(gen_core::core_llm::ReasoningEffort::XHigh);
+    request.preserve_thinking = Some(true);
+    request.constraint = Some(Constraint::JsonSchema(
+        JsonSchema::compile(&json!({"type": "object", "additionalProperties": false})).unwrap(),
+    ));
+    let retry = answer_only_expansion_request(&request);
+    assert_eq!(retry.thinking, ThinkingMode::Disabled);
+    assert_eq!(retry.reasoning_effort, None);
+    assert_eq!(retry.max_new_tokens, 4096);
+    assert_eq!(retry.messages.len(), 1);
+    assert!(matches!(retry.constraint, Some(Constraint::JsonSchema(_))));
+    // The first attempt's request is untouched.
+    assert_eq!(request.thinking, ThinkingMode::Enabled);
+}

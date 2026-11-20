@@ -88,6 +88,10 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
   suggestionLabel: "Proposed size",
   applyResolution: "Use this size",
   again: "Expand again",
+  // Shown when the expander's token budget ran out mid-caption: the worker keeps the caption up to
+  // its last whole sentence instead of failing (and offers a size only if the reply reached one).
+  truncated:
+    "The expander ran out of room before it finished, so this expansion is cut to its last complete sentence. Review it, or expand again.",
   defaultModelName: "MiniMax-H3-Image Prompt Expander",
   // Batch mode: Run batch expands every resolved prompt first, then queues the images with the
   // expansions (useImageBatchRun). The batch list itself is never rewritten.

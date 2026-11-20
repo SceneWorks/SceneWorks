@@ -48,6 +48,9 @@ pub(crate) struct H3ExpandReply {
     /// What the expansion decoded with (SW-7204, set by the job after the generation): proposer,
     /// block draft and per-pass counts, recorded on `executionIdentity.decode`. `Null` until set.
     pub(crate) decode: Value,
+    /// Whether the job had to ask again with reasoning off because the first reply's reasoning
+    /// used up the budget (set by the job after the generation).
+    pub(crate) recovery: crate::minimax_h3_image_prompt_expand::Recovery,
 }
 
 pub(super) async fn parse_refine_request(
@@ -385,6 +388,7 @@ pub(super) async fn parse_refine_request(
                     tier: dirs.tier,
                     weights_source: String::new(),
                     decode: Value::Null,
+                    recovery: expand::Recovery::None,
                 },
                 block_draft: crate::qwen38_block_draft::installed_block_draft(
                     &settings.data_dir,
