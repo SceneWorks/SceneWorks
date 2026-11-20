@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "fd91147c4069d8ad8fedace3847e01415efaedc8",
+    "inferenceRevision": "571767ce01514644d01273de41d63b66eda403a9",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -19335,9 +19335,16 @@
         "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
-          "lcm"
+          "lcm",
+          "euler_ancestral"
         ],
-        "schedulers": [],
+        "schedulers": [
+          "simple",
+          "sgm_uniform",
+          "beta",
+          "normal",
+          "beta_1_1"
+        ],
         "supported_guidance_methods": [],
         "features": {
           "hires_fix": {
