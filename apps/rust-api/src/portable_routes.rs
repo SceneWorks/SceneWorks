@@ -1102,6 +1102,11 @@ fn selected_decoder_available_on_route_resolved(
     })
 }
 
+fn is_soft_co_requisite(download: &Value) -> bool {
+    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+        && download.get("required").and_then(Value::as_str) == Some("soft")
+}
+
 fn entries_support_route(
     job_type: &JobType,
     payload: &JsonObject,
@@ -1140,8 +1145,19 @@ fn entries_support_route(
             .filter_map(|field| entry.get(field).and_then(Value::as_array))
             .flatten()
             .collect();
-        let downloads_support_platform = downloads.is_empty()
-            || downloads.iter().any(|download| {
+        // A soft co-requisite is an OPTIONAL component — e.g. the MLX-only standalone VAE that
+        // `inherit_provider_decoder_downloads` gives an imported Krea entry so its decoder picker
+        // resolves the provider's pinned source. Its `platforms` say where that component applies,
+        // never where the model runs. An imported entry's weights are local (`downloads: []`), so
+        // counting the inherited row made it the entry's ONLY platform row and vetoed every Candle
+        // route on Windows and Linux; the request then reported the MLX route's missing macOS worker.
+        let platform_rows: Vec<&Value> = downloads
+            .iter()
+            .copied()
+            .filter(|download| !is_soft_co_requisite(download))
+            .collect();
+        let downloads_support_platform = platform_rows.is_empty()
+            || platform_rows.iter().any(|download| {
                 download
                     .get("platforms")
                     .and_then(Value::as_array)
