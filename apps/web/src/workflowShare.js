@@ -121,11 +121,9 @@ const BUILTIN_LOW_RES_START_MODELS = {
   },
 };
 
-function resolveLowResStartTargetModel(
-  share,
-  report = null,
-  { substituteModelId = null, models = [] } = {},
-) {
+function resolveLowResStartTargetModel(share, report = null, options = null) {
+  const substituteModelId = options?.substituteModelId ?? null;
+  const models = options?.models ?? [];
   const modelId = workflowModelId(report) ?? (substituteModelId || share?.model || null);
   if (!modelId) return null;
   const fromCatalog = Array.isArray(models)
@@ -622,14 +620,14 @@ export const ADVANCED_PREFILL = {
   },
 };
 
-function canRestoreLowResStart(share, report = null, options = {}) {
+function canRestoreLowResStart(share, report = null, options = null) {
   if (!isLowResStartActive(share?.advanced?.lowResStart)) return false;
   const targetModel = resolveLowResStartTargetModel(share, report, options);
   const revalidated = revalidatePortableWorkflowShare(share, targetModel);
   return isLowResStartActive(revalidated?.advanced?.lowResStart);
 }
 
-function prefillDisposition(key, share, report = null, options = {}) {
+function prefillDisposition(key, share, report = null, options = null) {
   if (key === "lowResStart") {
     return canRestoreLowResStart(share, report, options) ? PREFILL_CONTROL : PREFILL_NONE;
   }
@@ -924,7 +922,7 @@ export function workflowModeLabel(share) {
 // `report` is what makes `styleId` honest. It is a `control` key, but the recipe carries it ONLY
 // when the style resolved here (see `recipeFromWorkflowShare`) — so with the style absent from this
 // catalog the row has to say so rather than inherit the table's optimism.
-export function workflowSettingRows(share, report = null, options = {}) {
+export function workflowSettingRows(share, report = null, options = null) {
   const settings = share?.advanced;
   if (!settings || typeof settings !== "object") {
     return [];
@@ -981,7 +979,7 @@ export function workflowSettingRows(share, report = null, options = {}) {
 // The panel's verdict counts this list, which is what stops successful transport being punished:
 // a pose selection DROPPED over the writer's cap lands in `omitted` and forces `runnable: false`,
 // so before this existed the only silent case was the one where the poses arrived intact.
-export function workflowNotRestored(share, report = null, options = {}) {
+export function workflowNotRestored(share, report = null, options = null) {
   const rows = workflowSettingRows(share, report, options)
     .filter((row) => !row.restored)
     .map((row) => ({
