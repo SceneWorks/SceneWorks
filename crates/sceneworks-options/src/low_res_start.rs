@@ -374,16 +374,77 @@ pub fn resolve_executed_steps(
         });
     let num_steps = crate::limits::requested_steps(advanced).unwrap_or(default_steps);
 
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
+    let has_source = has_nonempty_str(payload, "sourceAssetId")
+        || (has_nonempty_str(payload, "referenceAssetId")
+            && route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry));
     let authored_strength = resolve_raw_img2img_strength(payload, advanced)?;
     Ok(executed_steps_after_img2img_strength(
         num_steps,
         has_source,
         authored_strength,
     ))
+}
+
+fn route_uses_reference_asset_for_plain_img2img(
+    model: &str,
+    payload: &JsonObject,
+    advanced: &JsonObject,
+    entry: &JsonObject,
+) -> bool {
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if family == "flux"
+        || matches!(
+            model,
+            "flux_dev" | "flux_schnell" | "flux1_dev" | "flux1_schnell" | "pulid_flux_dev"
+        )
+        || model.starts_with("flux1_")
+        || model.starts_with("flux3")
+        || model.contains("ip_adapter")
+        || model.contains("kontext")
+        || model.contains("edit")
+        || model.contains("fill")
+        || model.contains("redux")
+        || model.contains("inpaint")
+        || has_nonempty_str(advanced, "ipAdapterRepo")
+        || has_nonempty_str(payload, "sourceAssetId")
+    {
+        return false;
+    }
+    if let Some(ui_img2img) = entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+    {
+        return ui_img2img;
+    }
+    matches!(
+        model,
+        "sd3_5_medium"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "flux2_dev"
+            | "flux2_klein_9b"
+            | "z_image_turbo"
+            | "z_image"
+            | "sana_1_6b"
+            | "sana_sprint_1_6b"
+            | "boogu_image"
+            | "qwen_image"
+            | "krea_2_turbo"
+            | "krea_2_raw"
+            | "sdxl"
+            | "realvisxl"
+            | "realvisxl_lightning"
+            | "kolors"
+            | "illustrious_xl_v1"
+            | "illustrious_xl_v2"
+            | "chroma"
+            | "anima"
+            | "pixart_sigma"
+    )
 }
 
 fn has_nonempty_str(map: &JsonObject, key: &str) -> bool {
@@ -476,7 +537,9 @@ pub fn requested_low_res_start_with_pid_active(
         ));
     }
 
-    let has_forbidden_conditioning = has_nonempty_str(payload, "referenceAssetId")
+    let disallow_reference_asset_id = has_nonempty_str(payload, "referenceAssetId")
+        && !route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry);
+    let has_forbidden_conditioning = disallow_reference_asset_id
         || has_nonempty_array(payload, "referenceAssetIds")
         || has_nonempty_array(payload, "sourceAssetIds")
         || has_nonempty_str(payload, "maskAssetId")
@@ -914,5 +977,108 @@ mod tests {
         .expect("present");
         assert_eq!((resolved.low_width, resolved.low_height), (256, 256));
         assert_eq!((resolved.full_width, resolved.full_height), (512, 512));
+    }
+
+    #[test]
+    fn sw_6946_plain_img2img_reference_asset_id_truncates_executed_steps_on_sd3_5_and_flux2() {
+        for (model, family) in [
+            ("sd3_5_medium", "sd3"),
+            ("sd3_5_large", "sd3"),
+            ("sd3_5_large_turbo", "sd3"),
+            ("flux2_dev", "flux2"),
+            ("flux2_klein_9b", "flux2"),
+        ] {
+            let entry = json!({
+                "id": model,
+                "family": family,
+                "defaults": {
+                    "steps": 28,
+                    "resolution": "1024x1024"
+                },
+                "ui": {
+                    "img2img": true
+                },
+                "features": {
+                    "low_res_start": true
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+
+            // M3 non-square strength fixture: 1200x700 source -> 1024x768 full target,
+            // steps=10, strength=0.4 => start_step=4, M=6, K=3, scale=0.5 => phase-0 512x384.
+            let m3_payload = json!({
+                "model": model,
+                "mode": "text_to_image",
+                "referenceAssetId": "src_1200x700",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "strength": 0.4,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let resolved = requested_low_res_start(
+                model,
+                &m3_payload,
+                m3_payload["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect("M3 plain single-reference img2img lowResStart must succeed")
+            .expect("present");
+            assert_eq!(resolved.executed_steps, 6, "{model}");
+            assert_eq!(resolved.k, 3, "{model}");
+            assert_eq!(
+                (resolved.low_width, resolved.low_height),
+                (512, 384),
+                "{model}"
+            );
+            assert_eq!(
+                (resolved.full_width, resolved.full_height),
+                (1024, 768),
+                "{model}"
+            );
+
+            // k >= M (e.g. k = 6 when M = 6 after strength truncation) must be refused:
+            let mut k_too_large = m3_payload.clone();
+            k_too_large["advanced"]["lowResStart"]["k"] = json!(6);
+            let err = requested_low_res_start(
+                model,
+                &k_too_large,
+                k_too_large["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("k == M must be refused after referenceAssetId strength truncation");
+            assert_eq!(err.field, "advanced.lowResStart.k", "{model}");
+
+            // Multi-reference array or combined sourceAssetId + referenceAssetId must still be refused:
+            let mut multi_ref = m3_payload.clone();
+            multi_ref.remove("referenceAssetId");
+            multi_ref.insert("referenceAssetIds".into(), json!(["ref_1", "ref_2"]));
+            let err = requested_low_res_start(
+                model,
+                &multi_ref,
+                multi_ref["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("referenceAssetIds must be refused");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
+
+            let mut dual_source = m3_payload.clone();
+            dual_source.insert("sourceAssetId".into(), json!("src_other"));
+            let err = requested_low_res_start(
+                model,
+                &dual_source,
+                dual_source["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("combined sourceAssetId + referenceAssetId must be refused");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
+        }
     }
 }
