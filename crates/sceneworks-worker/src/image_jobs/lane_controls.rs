@@ -1380,18 +1380,22 @@ mod tests {
         );
 
         // 3. Worker img2img source resolver (`resolve_flux1_ordinary_img2img_source`) resolves 0.25 (not default 0.5):
-        let (_img, worker_strength) =
-            crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
-                &req,
-                &settings,
-                &project_path,
-            )
-            .expect("ordinary img2img source resolves")
-            .expect("source present");
-        assert!(
-            (worker_strength - 0.25).abs() < 1e-6,
-            "got {worker_strength}"
-        );
+        let _ = (&settings, &project_path);
+        #[cfg(native_lane)]
+        {
+            let (_img, worker_strength) =
+                crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
+                    &req,
+                    &settings,
+                    &project_path,
+                )
+                .expect("ordinary img2img source resolves")
+                .expect("source present");
+            assert!(
+                (worker_strength - 0.25).abs() < 1e-6,
+                "got {worker_strength}"
+            );
+        }
     }
 
     #[test]

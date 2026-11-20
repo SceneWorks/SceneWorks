@@ -1816,11 +1816,6 @@ pub(super) fn supports_eng2_ordinary_img2img_source(model: &str) -> bool {
             | "sd3_5_large"
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
-            | "sana_1600m"
-            | "boogu_image"
-            | "qwen_image"
-            | "qwen_image_2_1"
-            | "qwen_image_2_1_turbo"
             | "z_image"
             | "z_image_turbo"
             | "kolors"
@@ -1829,6 +1824,7 @@ pub(super) fn supports_eng2_ordinary_img2img_source(model: &str) -> bool {
     )
 }
 
+#[cfg(native_lane)]
 pub(super) fn resolve_flux1_ordinary_img2img_source(
     request: &ImageRequest,
     settings: &Settings,
@@ -1890,13 +1886,15 @@ pub(super) fn resolve_generic_lane_conditioning(
         } else {
             resolve_identity_init(request, settings, project_path)?
         };
+        let flux_source_image = if init.is_none() && !has_reference && request.mode != "edit_image"
+        {
+            resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
+        } else {
+            None
+        };
         Ok(LaneConditioning {
             identity_init: init,
-            flux_source_image: if !has_reference && request.mode != "edit_image" {
-                resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
-            } else {
-                None
-            },
+            flux_source_image,
             ..Default::default()
         })
     } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {

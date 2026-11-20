@@ -61,6 +61,7 @@ pub(crate) struct OwnedReferenceBinding {
     pub(crate) content_sha256: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct ResolvedReferences {
     pub(crate) conditioning: Vec<Conditioning>,
     pub(crate) bindings: Vec<OwnedReferenceBinding>,
@@ -184,6 +185,7 @@ pub(crate) fn validated_request(
 }
 
 /// Lossless authored layout and the exact locked rows resolved before either native lane loads.
+#[derive(Clone)]
 pub(crate) struct ResolvedLayout {
     layout: gen_core_flux3::layouts::Layout,
     bindings: Vec<gen_core_flux3::layouts::ReferenceBinding>,

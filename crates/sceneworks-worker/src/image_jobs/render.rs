@@ -960,15 +960,10 @@ pub(super) fn resolve_hires_fix_plan(
     // SDXL and Ideogram expose conventional denoising strength (higher means more regeneration).
     // The other current img2img providers expose reference fidelity (higher means preserve more),
     // so translate the user-facing A1111 denoising value at this boundary.
-    let provider_reference_strength = if matches!(
-        request.model.as_str(),
-        "qwen_image_2_1" | "qwen_image_2_1_turbo"
-    ) {
-        1.0
-    } else if matches!(family.as_str(), "sdxl" | "ideogram") {
+    let provider_reference_strength = if matches!(family.as_str(), "sdxl" | "ideogram") {
         denoising_strength
     } else {
-        1.0 - denoising_strength
+        (1.0 - denoising_strength).clamp(0.0, 1.0)
     };
     let cfg = request
         .hires_fix
@@ -2698,8 +2693,6 @@ mod hires_report_tests {
             ("sana_1600m", &base_spec, None, None, Some(4.5), None),
             ("boogu_image", &base_spec, None, None, Some(3.5), None),
             ("qwen_image", &base_spec, None, None, None, Some(4.0)),
-            ("qwen_image_2_1", &base_spec, None, None, None, Some(4.0)),
-            ("qwen_image_2_1_turbo", &base_spec, None, None, None, None),
             ("z_image", &base_spec, None, None, Some(4.0), None),
             ("z_image_turbo", &base_spec, None, None, None, None),
             (
@@ -2734,8 +2727,6 @@ mod hires_report_tests {
             ("sana_1600m", &base_spec, None, None, Some(4.5), None),
             ("boogu_image", &base_spec, None, None, Some(3.5), None),
             ("qwen_image", &base_spec, None, None, None, Some(4.0)),
-            ("qwen_image_2_1", &base_spec, None, None, None, Some(4.0)),
-            ("qwen_image_2_1_turbo", &base_spec, None, None, None, None),
             ("z_image", &base_spec, None, None, Some(4.0), None),
             ("z_image_turbo", &base_spec, None, None, None, None),
             (
@@ -2775,9 +2766,6 @@ mod hires_report_tests {
             route_hires.height = hires_dim;
             route_hires.guidance = guidance;
             route_hires.true_cfg = true_cfg;
-            if matches!(route, "qwen_image_2_1" | "qwen_image_2_1_turbo") {
-                route_hires.provider_reference_strength = 1.0;
-            }
             let stretched_hires = gen_core::Image {
                 width: hires_dim,
                 height: hires_dim,
@@ -2877,8 +2865,65 @@ mod hires_report_tests {
             );
         }
 
-        // 4. T2I-only ENG-2 routes (chroma1_hd, lens, anima_base, base flux1_dev without IP-Adapter)
-        // refuse two-pass Hires.fix before load with InvalidPayload.
+        // 4. T2I-only / non-img2img-noise-blend ENG-2 routes (chroma1_hd, lens, anima_base,
+        // qwen_image_2_1, qwen_image_2_1_turbo, base flux1_dev without IP-Adapter)
+        // refuse two-pass Hires.fix with fractional denoising_strength before load with InvalidPayload.
+        for qwen_model in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            let payload = serde_json::json!({
+                "projectId": "p",
+                "model": qwen_model,
+                "prompt": "a portrait",
+                "width": 512,
+                "height": 512,
+                "hiresFix": {
+                    "enabled": true,
+                    "upscaleBy": 2.0,
+                    "denoisingStrength": 0.55
+                }
+            });
+            let obj = payload.as_object().unwrap();
+            let req = ImageRequest::from_resolved(obj, obj).unwrap();
+            let qwen_hires =
+                resolve_hires_fix_plan(&req, 6, None, Some(4.0)).expect("hires fix plan");
+            assert!(
+                (qwen_hires.provider_reference_strength - 0.45).abs() < 1e-6,
+                "{qwen_model}: resolve_hires_fix_plan must translate denoising_strength without silent 1.0 override"
+            );
+            let first = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 512,
+                height: 512,
+                count: 1,
+                seed: Some(7),
+                steps: Some(4),
+                true_cfg: (qwen_model == "qwen_image_2_1").then_some(4.0),
+                ..Default::default()
+            };
+            let refine = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 1024,
+                height: 1024,
+                count: 1,
+                seed: Some(7),
+                steps: Some(6),
+                true_cfg: (qwen_model == "qwen_image_2_1").then_some(4.0),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    compile_hires_render_plans(
+                        registry,
+                        qwen_model,
+                        &base_spec,
+                        &first,
+                        &refine,
+                        &qwen_hires,
+                    ),
+                    Err(WorkerError::InvalidPayload(_))
+                ),
+                "{qwen_model}: compile_hires_render_plans must reject fractional denoising_strength pre-load"
+            );
+        }
         for t2i_only_route in ["flux1_dev", "chroma1_hd", "lens", "anima_base"] {
             let first = gen_core::GenerationRequest {
                 prompt: "a portrait".to_owned(),

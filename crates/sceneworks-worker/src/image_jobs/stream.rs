@@ -883,10 +883,7 @@ pub(super) struct CachedGeneratorFactory<L> {
     pub(super) load: L,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) type PreparedRenderPlans = Box<
     dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<super::render::PreparedRender>> + Send,
 >;

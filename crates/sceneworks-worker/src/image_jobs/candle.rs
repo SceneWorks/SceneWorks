@@ -1010,22 +1010,85 @@ async fn generate_candle_registry_stream_using(
         model.descriptor.capabilities.pag.as_ref(),
         lane_controls.pag.as_ref(),
     )
-    .saturating_add(
-        crate::execution_planner::low_res_start_workspace_bytes_with_source(
-            engine_id,
-            flux_source_image
+    .saturating_add({
+        let native_batch_images = native_batch
+            .as_ref()
+            .map_or(1, lane_controls::NativePromptBatch::images);
+        let low_res_workspace_bytes =
+            crate::execution_planner::low_res_start_workspace_bytes_with_source(
+                engine_id,
+                flux_source_image
+                    .as_ref()
+                    .or(img2img_reference.as_ref())
+                    .map(|(img, _)| (img.width, img.height)),
+                width,
+                height,
+                native_batch_images,
+                steps,
+                lane_controls.low_res_start.as_ref(),
+            )?;
+        if let Some(hires) =
+            hires_fix.filter(|_| super::render::is_eng2_preload_planned_engine(engine_id))
+        {
+            let mut pass0_reference_canvases = Vec::new();
+            if let Some((img, _)) = flux_source_image
                 .as_ref()
+                .or(edit_reference.as_ref())
                 .or(img2img_reference.as_ref())
-                .map(|(img, _)| (img.width, img.height)),
-            width,
-            height,
-            native_batch
-                .as_ref()
-                .map_or(1, lane_controls::NativePromptBatch::images),
-            steps,
-            lane_controls.low_res_start.as_ref(),
-        )?,
-    );
+            {
+                pass0_reference_canvases.push((img.width, img.height));
+            }
+            pass0_reference_canvases.extend(edit_refs.iter().map(|img| (img.width, img.height)));
+            if let Some(references) = flux3_references.as_ref() {
+                pass0_reference_canvases.extend(references.conditioning.iter().filter_map(|c| {
+                    match c {
+                        gen_core::Conditioning::Reference { image, .. } => {
+                            Some((image.width, image.height))
+                        }
+                        gen_core::Conditioning::ReferenceRgba { image, .. } => {
+                            Some((image.width, image.height))
+                        }
+                        _ => None,
+                    }
+                }));
+            }
+            let enhance_workspace_bytes = if enhance.enabled {
+                128 * 1024 * 1024
+            } else {
+                0
+            };
+            crate::execution_planner::price_eng2_hires_fix_request_live_set_plan(
+                engine_id,
+                gen_core::MemoryBudgetDomain::DeviceVram,
+                width,
+                height,
+                steps,
+                hires.width,
+                hires.height,
+                hires.steps,
+                native_batch_images,
+                &pass0_reference_canvases,
+                lane_controls.low_res_start.as_ref(),
+                enhance.enabled,
+                use_pid,
+                0,
+                0,
+                0,
+                0,
+                enhance_workspace_bytes,
+                0,
+                0,
+                0,
+                0,
+            )?
+            .incremental_workspace_bytes_over_pass1_baseline(
+                enhance_workspace_bytes,
+                low_res_workspace_bytes,
+            )
+        } else {
+            low_res_workspace_bytes
+        }
+    });
     // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
     // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
     // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces

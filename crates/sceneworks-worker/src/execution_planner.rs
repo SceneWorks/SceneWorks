@@ -1202,6 +1202,7 @@ pub(crate) const FLUX1_HEAD_DIM: u32 = 128;
 
 /// Architecture and latent-space parameters for an `ENG-2` route that admits `low_res_start`
 /// (`SW-6942`, `SW-6945`, `SW-6946`, `SW-6947`, `SW-6948`).
+#[cfg_attr(not(native_lane), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Eng2LowResArchitectureParams {
     pub(crate) latent_channels: u32,
@@ -1219,6 +1220,7 @@ pub(crate) struct Eng2LowResArchitectureParams {
 /// Returns `None` for non-`ENG-2` routes and for `ENG-2` conditioned-only / `ENG-5` sibling routes
 /// (`flux1_dev_control`, `pulid_flux`, `qwen_image_edit`, `qwen_image_control`, `z_image_control`,
 /// `z_image_turbo_control`, `sana_sprint_1600m`, `boogu_image_turbo`, `boogu_image_edit`).
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn eng2_low_res_architecture_params(
     route_id: &str,
 ) -> Option<Eng2LowResArchitectureParams> {
@@ -1241,34 +1243,37 @@ pub(crate) fn eng2_low_res_architecture_params(
             max_text_tokens: 512,
             head_dim: FLUX1_HEAD_DIM,
         }),
-        "flux2_dev" | "flux2_klein_4b" | "flux2_klein_9b" | "lens" | "lens_turbo" => {
-            Some(Eng2LowResArchitectureParams {
-                latent_channels: 32,
-                vae_spatial_scale: 8,
-                patch_size: 2,
-                requires_multiple: 16,
-                min_dim: 256,
-                max_text_tokens: 512,
-                head_dim: 128,
-            })
-        }
-        "chroma1_hd"
-        | "chroma1_base"
-        | "chroma1_flash"
-        | "anima"
-        | "anima_base"
-        | "anima_aesthetic"
-        | "anima_turbo"
-        | "boogu_image"
-        | "qwen_image"
-        | "qwen_image_2_1"
-        | "qwen_image_2_1_turbo"
-        | "z_image"
-        | "z_image_turbo" => Some(Eng2LowResArchitectureParams {
+        "flux2_dev"
+        | "flux2_klein_4b"
+        | "flux2_klein_9b"
+        | "flux2_klein_9b_kv"
+        | "flux2_klein_9b_true_v2"
+        | "lens"
+        | "lens_turbo" => Some(Eng2LowResArchitectureParams {
+            latent_channels: 32,
+            vae_spatial_scale: 8,
+            patch_size: 2,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 512,
+            head_dim: 128,
+        }),
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "anima" | "anima_base"
+        | "anima_aesthetic" | "anima_turbo" | "boogu_image" | "qwen_image" | "z_image"
+        | "z_image_turbo" | "z_image_edit" => Some(Eng2LowResArchitectureParams {
             latent_channels: 16,
             vae_spatial_scale: 8,
             patch_size: 2,
             requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 512,
+            head_dim: 128,
+        }),
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => Some(Eng2LowResArchitectureParams {
+            latent_channels: 64,
+            vae_spatial_scale: 16,
+            patch_size: 1,
+            requires_multiple: 32,
             min_dim: 256,
             max_text_tokens: 512,
             head_dim: 128,
@@ -1293,15 +1298,17 @@ pub(crate) fn eng2_low_res_architecture_params(
             max_text_tokens: 300,
             head_dim: 70,
         }),
-        "kolors" | "sdxl" | "realvisxl" => Some(Eng2LowResArchitectureParams {
-            latent_channels: 4,
-            vae_spatial_scale: 8,
-            patch_size: 2,
-            requires_multiple: 16,
-            min_dim: 256,
-            max_text_tokens: 77,
-            head_dim: 64,
-        }),
+        "kolors" | "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2" => {
+            Some(Eng2LowResArchitectureParams {
+                latent_channels: 4,
+                vae_spatial_scale: 8,
+                patch_size: 2,
+                requires_multiple: 16,
+                min_dim: 256,
+                max_text_tokens: 77,
+                head_dim: 64,
+            })
+        }
         _ => None,
     }
 }
@@ -1472,6 +1479,7 @@ pub(crate) fn low_res_start_workspace_bytes_with_source(
 
 /// Complete pass-scoped [`gen_core::RequestLiveSetPlan`] pricing result for an `ENG-2` two-pass
 /// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
+#[cfg_attr(not(native_lane), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Eng2HiresFixLiveSetPricing {
     pub(crate) route_id: String,
@@ -1495,6 +1503,49 @@ pub(crate) struct Eng2HiresFixLiveSetPricing {
     pub(crate) priced_domain_peak: gen_core::PricedDomainPeak,
 }
 
+impl Eng2HiresFixLiveSetPricing {
+    /// Compute the incremental workspace bytes above the baseline single-pass Pass-1 estimate
+    /// across Pass 0 (multi-reference conditioning + optional `low_res_start`), the Pass 0 -> Pass 1
+    /// `PixelRoundTrip` transition, and Pass 1 (refinement + optional prompt enhancement) (`SW-6948`).
+    #[cfg_attr(not(native_lane), allow(dead_code))]
+    pub(crate) fn incremental_workspace_bytes_over_pass1_baseline(
+        &self,
+        enhance_workspace_bytes: u64,
+        pass0_low_res_workspace_bytes: u64,
+    ) -> u64 {
+        debug_assert!(!self.route_id.is_empty());
+        debug_assert_eq!(self.priced_domain_peak.domain, self.domain);
+        debug_assert!(self.pass0_width > 0 && self.pass0_height > 0);
+        debug_assert!(self.pass1_width > 0 && self.pass1_height > 0);
+        debug_assert_eq!(self.pass1_reference_count, 1);
+        debug_assert!(!self.pass1_low_res_active);
+        debug_assert!(!self.pass0_enhance_active);
+        debug_assert!(!self.pass1_use_pid);
+        debug_assert!(!self.request_live_set_plan.operations.is_empty());
+        let _ = (
+            self.pass0_reference_count,
+            self.pass0_low_res_active,
+            self.pass0_use_pid,
+        );
+        let domain_peak = self
+            .priced_domain_peak
+            .request_peak_bytes
+            .max(self.pass0_peak_bytes)
+            .max(self.transition_peak_bytes)
+            .max(self.pass1_peak_bytes);
+        let pass1_baseline = self
+            .pass1_peak_bytes
+            .saturating_sub(if self.pass1_enhance_active {
+                enhance_workspace_bytes
+            } else {
+                0
+            });
+        domain_peak
+            .saturating_sub(pass1_baseline)
+            .max(pass0_low_res_workspace_bytes)
+    }
+}
+
 /// Build and price the pass-scoped [`gen_core::RequestLiveSetPlan`] for an `ENG-2` two-pass
 /// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
 ///
@@ -1513,7 +1564,7 @@ pub(crate) struct Eng2HiresFixLiveSetPricing {
 ///   and final decode (`use_pid = false` on refinement decode).
 /// - Takes the domain max across Pass 0, the `PixelRoundTrip` transition, and Pass 1.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
     route_id: &str,
     domain: gen_core::MemoryBudgetDomain,
@@ -3580,6 +3631,8 @@ mod corpus_replay_tests {
             "flux2_dev",
             "flux2_klein_4b",
             "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
             "chroma1_hd",
             "chroma1_base",
             "chroma1_flash",
@@ -3599,8 +3652,12 @@ mod corpus_replay_tests {
             "qwen_image_2_1_turbo",
             "z_image",
             "z_image_turbo",
+            "z_image_edit",
             "kolors",
             "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
         ] {
             let delta = low_res_start_workspace_bytes(route, 1024, 1024, 1, 8, Some(&spec))
                 .unwrap_or_else(|e| panic!("{route}: must price low_res_start: {e}"));
@@ -3622,6 +3679,30 @@ mod corpus_replay_tests {
                 "{route}: M3 plain img2img initial codec workspace must increase priced bytes above T2I"
             );
         }
+
+        assert_eq!(
+            eng2_low_res_architecture_params("qwen_image_2_1"),
+            Some(Eng2LowResArchitectureParams {
+                latent_channels: 64,
+                vae_spatial_scale: 16,
+                patch_size: 1,
+                requires_multiple: 32,
+                min_dim: 256,
+                max_text_tokens: 512,
+                head_dim: 128,
+            })
+        );
+        // Qwen-Image 2.1 requires a multiple of 32 (64-ch /16 unpacked latent space):
+        // 1008 is divisible by 16 (accepted by 16-ch /8 packed routes) but not by 32.
+        let odd_scale = LowResStartSpec::new(2, Some(0.5));
+        assert!(
+            low_res_start_workspace_bytes("flux1_dev", 1008, 1008, 1, 8, Some(&odd_scale)).is_ok()
+        );
+        assert!(
+            low_res_start_workspace_bytes("qwen_image_2_1", 1008, 1008, 1, 8, Some(&odd_scale))
+                .is_err(),
+            "qwen_image_2_1 must enforce requires_multiple=32 (1008 is divisible by 16, not 32)"
+        );
 
         // Verify architecture-specific latent space scaling:
         // FLUX.2 / Lens (32-ch at /8) has 2x the 6-buffer ceiling of FLUX.1 / SD3.5 (16-ch at /8),
@@ -3703,12 +3784,28 @@ mod corpus_replay_tests {
                 hires_dominated.priced_domain_peak.dominant_stage_id,
                 "pass1_denoise"
             );
+            let pass0_low_res_delta = low_res_start_workspace_bytes_with_source(
+                "flux2_dev",
+                Some((512, 512)),
+                512,
+                512,
+                1,
+                6,
+                Some(&spec),
+            )
+            .unwrap();
+            assert!(
+                hires_dominated.incremental_workspace_bytes_over_pass1_baseline(
+                    128 * 1024 * 1024,
+                    pass0_low_res_delta,
+                ) >= pass0_low_res_delta
+            );
 
             // When Pass 0 carries heavy multi-reference conditioning (e.g. 4 large references on
-            // qwen_image_2_1) that Pass 1 replaces with the single stretched pass-0 output, Pass 0
+            // qwen_image_edit) that Pass 1 replaces with the single stretched pass-0 output, Pass 0
             // can dominate Pass 1 and the domain max captures Pass 0's peak!
             let pass0_dominated = price_eng2_hires_fix_request_live_set_plan(
-                "qwen_image_2_1",
+                "qwen_image_edit",
                 domain,
                 1024,
                 1024,
@@ -3743,6 +3840,12 @@ mod corpus_replay_tests {
             assert_eq!(
                 pass0_dominated.priced_domain_peak.dominant_stage_id,
                 "pass0_conditioning"
+            );
+            assert_eq!(
+                pass0_dominated.incremental_workspace_bytes_over_pass1_baseline(0, 0),
+                pass0_dominated
+                    .pass0_peak_bytes
+                    .saturating_sub(pass0_dominated.pass1_peak_bytes)
             );
         }
     }
