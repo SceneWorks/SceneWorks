@@ -13,6 +13,9 @@ const BACKBONE_REPO: &str = "speridlabs/iris-3b";
 const BACKBONE_REVISION: &str = "7445443349bc9abe3c96f01ff793e2098ca012b3";
 const RELEASE_CONFIG: &str =
     include_str!("../../../../crates/sceneworks-worker/tests/fixtures/iris/config.yaml");
+/// Whether this build links the Iris engine resolver the plan check consults
+/// (`iris_curricula::engine_check`): MLX on macOS, Candle elsewhere with `backend-candle`.
+const ENGINE_LINKED: bool = cfg!(any(target_os = "macos", feature = "backend-candle"));
 
 fn snapshot_file(
     data_dir: &std::path::Path,
@@ -172,7 +175,7 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
     assert_eq!(check["shareDevice"], true);
     assert_eq!(check["timeoutSecs"], 600);
     assert_eq!(check["ok"], true, "{check}");
-    assert_eq!(check["engineChecked"], cfg!(target_os = "macos"));
+    assert_eq!(check["engineChecked"], ENGINE_LINKED, "{check}");
     // sc-25690: one rank's floor in GiB with the provenance of the row it was read from (the
     // default 256² adapter row is a declaration) — no blanket `measured` flag.
     let memory = &check["memory"];
@@ -191,7 +194,7 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
         "measured",
         "a single-rank full 512² run reads a measured row"
     );
-    if cfg!(target_os = "macos") {
+    if ENGINE_LINKED {
         assert_eq!(check["resolved"]["globalBatch"], 8, "{check}");
         assert!(check["resolved"]["dataIdentity"].is_string(), "{check}");
     }
@@ -212,7 +215,7 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
     let mut repa = defaults.clone();
     repa["advanced"]["iris"]["repa"] = json!({"weight": 0.5, "layer": 99});
     let check = plan_check(&app, repa).await;
-    if cfg!(target_os = "macos") {
+    if ENGINE_LINKED {
         assert_eq!(check["ok"], false, "{check}");
         assert!(
             check["refusal"]["message"]
