@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   H3_IMAGE_LCM_FIELDS,
+  H3_IMAGE_SAMPLER_LABELS,
   h3ImageSamplerDefaults,
   h3ImageSamplerFromRecipe,
   pagDefaults,
@@ -101,6 +102,18 @@ describe("MiniMax-H3-Image sampler", () => {
     ]) {
       expect(resolveH3ImageSampler({ model: h3, options: { ...lcm, ...patch } })).toEqual({ block: null, error: label });
     }
+  });
+
+  // SW-7224: Euler ancestral is a plain `{sampler}` block, like Euler, and replays as itself.
+  it("sends and restores Euler ancestral as a plain block", () => {
+    expect(H3_IMAGE_SAMPLER_LABELS.euler_ancestral).toBe("Euler ancestral");
+    expect(
+      resolveH3ImageSampler({ model: h3, options: { ...h3ImageSamplerDefaults(), sampler: "euler_ancestral", sNoise: "" } }),
+    ).toEqual({ block: { sampler: "euler_ancestral" }, error: null });
+    expect(h3ImageSamplerFromRecipe({ sampler: "euler_ancestral" })).toEqual({
+      ...h3ImageSamplerDefaults(),
+      sampler: "euler_ancestral",
+    });
   });
 
   it("restores a recorded block, with the engine's defaults for omitted LCM fields", () => {

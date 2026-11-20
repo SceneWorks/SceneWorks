@@ -756,8 +756,8 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
     allow(
         "h3ImageSampler",
         AdvancedShape::H3ImageSampler,
-        "Authored MiniMax-H3-Image sampler (SW-7106): Euler or LCM with its noise-scale ramp and \
-         clip. It changes the denoising recipe and names nothing local; a malformed or unknown \
+        "Authored MiniMax-H3-Image sampler (SW-7106, SW-7224): Euler, Euler ancestral, or LCM \
+         with its noise-scale ramp and clip. It changes the denoising recipe and names nothing local; a malformed or unknown \
          member drops the whole block rather than replaying a different sampler.",
     ),
     allow(

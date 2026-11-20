@@ -114,6 +114,7 @@ pub(crate) fn record_effective_h3_image_sampler(
     };
     let block = match sampler {
         H3ImageSampler::Euler => json!({ "sampler": "euler" }),
+        H3ImageSampler::EulerAncestral => json!({ "sampler": "euler_ancestral" }),
         H3ImageSampler::Lcm {
             s_noise,
             s_noise_end,
@@ -820,6 +821,14 @@ mod tests {
         assert_eq!(
             recorded(json!({ "h3ImageSampler": { "sampler": "euler" } }), &h3),
             Some(json!({ "sampler": "euler" }))
+        );
+        // SW-7224: Euler ancestral records as itself.
+        assert_eq!(
+            recorded(
+                json!({ "h3ImageSampler": { "sampler": "euler_ancestral" } }),
+                &h3
+            ),
+            Some(json!({ "sampler": "euler_ancestral" }))
         );
         // An engine without the sampler, or a request naming Euler through `advanced.sampler`,
         // runs no H3-Image sampler, so nothing is recorded.
