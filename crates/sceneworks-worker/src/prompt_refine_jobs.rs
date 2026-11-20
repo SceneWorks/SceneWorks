@@ -1065,7 +1065,12 @@ pub(crate) async fn run_prompt_refine_job(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
-        move |refiner| -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value, Value)> {
+        move |refiner| -> WorkerResult<(
+            gen_core::core_llm::TextLlmOutput,
+            Value,
+            Value,
+            crate::minimax_h3_image_prompt_expand::Recovery,
+        )> {
             emit_event(
                 "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
@@ -1233,8 +1238,32 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                let (output, kv_cache) =
+                let (mut output, mut kv_cache) =
                     generate_refined(refiner, &request, &mut on_event, &job_id)?;
+                // An expansion whose reasoning used up the whole budget wrote no caption (or not
+                // one whole sentence of it). Rather than fail, ask again on the same resident model
+                // with reasoning off: the schema constraint then applies from the first token, so
+                // the full budget goes to the answer. Whatever the second reply keeps is finalized
+                // the same way (a cut caption is kept to its last whole sentence).
+                let mut recovery = crate::minimax_h3_image_prompt_expand::Recovery::None;
+                if is_h3_expand
+                    && output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
+                    && crate::minimax_h3_image_prompt_expand::needs_answer_only_retry(&output.text)
+                {
+                    if blocking_cancel.is_cancelled() {
+                        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                    }
+                    tracing::warn!(
+                        event = "minimax_h3_image_expansion_reasoning_exhausted_budget",
+                        job_id = %job_id,
+                        max_new_tokens = request.max_new_tokens,
+                        "MiniMax-H3-Image prompt expansion: the reasoning used the whole budget; \
+                         asking again with reasoning off"
+                    );
+                    let retry = answer_only_expansion_request(&request);
+                    (output, kv_cache) = generate_refined(refiner, &retry, &mut on_event, &job_id)?;
+                    recovery = crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry;
+                }
                 // SW-7204: an expansion records what it decoded with.
                 let decode = if is_h3_expand {
                     crate::qwen38_block_draft::decode_record(
@@ -1245,7 +1274,7 @@ pub(crate) async fn run_prompt_refine_job(
                 } else {
                     Value::Null
                 };
-                (output, kv_cache, decode)
+                (output, kv_cache, decode, recovery)
             };
 
             Ok(output)
@@ -1285,10 +1314,11 @@ pub(crate) async fn run_prompt_refine_job(
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    let (output, kv_cache, decode) =
+    let (output, kv_cache, decode, recovery) =
         result.map_err(|error| task_join_error("prompt refine task join", error))??;
     let h3_expand_reply = h3_expand_reply.map(|mut reply| {
         reply.decode = decode;
+        reply.recovery = recovery;
         reply
     });
     // Preserve the terminal coalesced snapshot even when generation finishes between ticks.
@@ -1438,6 +1468,20 @@ pub(crate) fn adopt_prepared_request(
     request.progress = Some(crate::load_progress::text_observer());
     request.kv_compression = kv_compression;
     request
+}
+
+/// The second attempt of an expansion whose reasoning used up the budget: the same engine-built
+/// request (messages, recipe, budget, reply schema, cancel flag and progress observer) with
+/// reasoning off, so the chat template closes an empty reasoning block and the schema constraint
+/// applies from the first token. `reasoning_effort` is a knob of the reasoning and goes with it.
+#[cfg(any(test, native_lane))]
+pub(crate) fn answer_only_expansion_request(
+    request: &gen_core::core_llm::TextLlmRequest,
+) -> gen_core::core_llm::TextLlmRequest {
+    let mut retry = request.clone();
+    retry.thinking = gen_core::core_llm::ThinkingMode::Disabled;
+    retry.reasoning_effort = None;
+    retry
 }
 
 /// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever

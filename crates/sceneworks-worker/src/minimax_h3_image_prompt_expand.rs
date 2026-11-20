@@ -409,36 +409,202 @@ pub(crate) fn parse_reply(
     }
 }
 
-/// The error for a reply the decoder ran out of budget on — distinct from a parse failure, because
-/// the model reasons first and emits the JSON object last, so a short budget loses the object.
+/// The error for a reply the decoder ran out of budget on that left nothing usable, even after the
+/// answer-only retry ([`needs_answer_only_retry`]). Only reachable when the answer itself never
+/// started a caption, so it names no setting to change: there is none in the app.
 pub(crate) fn truncated_reply_error(max_new_tokens: u32) -> String {
     format!(
-        "the MiniMax-H3-Image prompt expander's reply was cut off at {max_new_tokens} tokens \
-         before it finished — raise `maxNewTokens` and try again (the model reasons first and \
-         emits the JSON object last, so a budget that runs out loses the whole object rather than \
-         shortening it)"
+        "the MiniMax-H3-Image prompt expander ran out of its {max_new_tokens}-token budget before \
+         it wrote any of the expanded prompt, and a second, answer-only attempt did not produce \
+         one either — try Expand again"
     )
 }
 
+/// The part of an expansion reply that survives when the decoder ran out of budget in the answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PartialExpansion {
+    /// The caption, cut back to its last whole sentence (or, with none, its last whole word).
+    pub(crate) expanded_caption: String,
+    /// Whether `expanded_caption` ends on a whole sentence (or is the model's complete caption).
+    pub(crate) whole_sentences: bool,
+    /// The proposed ratio, only when the reply got as far as writing a valid one.
+    pub(crate) aspect_ratio: Option<String>,
+}
+
+/// The answer part of a reply: whatever follows the last `</think>`, if a provider left one in.
+fn answer_part(text: &str) -> &str {
+    text.rsplit_once("</think>")
+        .map_or(text, |(_, answer)| answer)
+}
+
+/// The JSON string value of `key` in a (possibly unterminated) JSON object: the decoded value and
+/// whether its closing quote was reached. A dangling escape at the cut is dropped.
+fn partial_json_string(text: &str, key: &str) -> Option<(String, bool)> {
+    let needle = format!("\"{key}\"");
+    let after_key = &text[text.find(&needle)? + needle.len()..];
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    let body = after_colon.strip_prefix('"')?;
+    let mut end = body.len();
+    let mut closed = false;
+    let mut chars = body.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                end = index;
+                closed = true;
+                break;
+            }
+            '\\' => {
+                let escape_complete = match chars.next() {
+                    Some((_, 'u')) => (0..4).all(|_| {
+                        chars
+                            .next()
+                            .is_some_and(|(_, digit)| digit.is_ascii_hexdigit())
+                    }),
+                    Some(_) => true,
+                    None => false,
+                };
+                if !escape_complete {
+                    end = index;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut raw = &body[..end];
+    loop {
+        if let Ok(value) = serde_json::from_str::<String>(&format!("\"{raw}\"")) {
+            return Some((value, closed));
+        }
+        // A lone high surrogate (`\ud83d` whose pair was cut off) does not decode: drop the last
+        // escape and try again.
+        raw = &raw[..raw.rfind('\\')?];
+    }
+}
+
+/// `text` cut back to its last whole sentence, and whether one was found; with none, its last
+/// whole word.
+fn trim_to_sentence(text: &str) -> (String, bool) {
+    let text = text.trim_end();
+    let sentence_end = text
+        .char_indices()
+        .rev()
+        .find(|&(index, ch)| {
+            matches!(ch, '.' | '!' | '?' | '。' | '！' | '？')
+                && text[index + ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| next.is_whitespace() || matches!(next, '"' | '\'' | ')'))
+        })
+        .map(|(index, ch)| index + ch.len_utf8());
+    if let Some(end) = sentence_end {
+        return (text[..end].trim().to_owned(), true);
+    }
+    let word_end = text
+        .rfind(char::is_whitespace)
+        .map_or(text, |index| &text[..index]);
+    (
+        word_end
+            .trim_end_matches(|ch: char| ch.is_whitespace() || ",;:-–—".contains(ch))
+            .trim()
+            .to_owned(),
+        false,
+    )
+}
+
+/// What can be kept of a reply cut off by the token budget: the caption up to its last whole
+/// sentence, and the ratio when the reply reached a valid one. `None` when the answer never began
+/// a caption — the budget ran out inside the reasoning.
+pub(crate) fn salvage_truncated_reply(
+    text: &str,
+    workflow: Workflow,
+    allowed_ratios: &[String],
+    aspect: &pe::AspectSelection,
+) -> Option<PartialExpansion> {
+    let answer = answer_part(text);
+    let (caption, closed) = partial_json_string(answer, "expanded_caption")?;
+    let (expanded_caption, whole_sentences) = if closed {
+        (caption.trim().to_owned(), true)
+    } else {
+        trim_to_sentence(&caption)
+    };
+    if expanded_caption.is_empty() {
+        return None;
+    }
+    let ratio_key = match workflow {
+        Workflow::TextToImage => "aspect_ratio",
+        Workflow::Edit => "target_aspect_ratio",
+    };
+    let aspect_ratio = partial_json_string(answer, ratio_key)
+        .filter(|(_, closed)| *closed)
+        .map(|(ratio, _)| ratio)
+        .filter(|ratio| match workflow {
+            Workflow::TextToImage => allowed_ratios.iter().any(|allowed| allowed == ratio),
+            Workflow::Edit => {
+                pe::is_ratio(ratio)
+                    && match aspect {
+                        pe::AspectSelection::Adaptive => true,
+                        pe::AspectSelection::Explicit(selected) => selected == ratio,
+                    }
+            }
+        });
+    Some(PartialExpansion {
+        expanded_caption,
+        whole_sentences,
+        aspect_ratio,
+    })
+}
+
+/// Whether a reply cut off by the budget should be asked again with reasoning off: the budget ran
+/// out inside the reasoning (no caption at all), or so early in the answer that not one sentence
+/// of the caption survives. The workflow does not matter: both name the caption first.
+pub(crate) fn needs_answer_only_retry(text: &str) -> bool {
+    salvage_truncated_reply(
+        text,
+        Workflow::TextToImage,
+        &[],
+        &pe::AspectSelection::Adaptive,
+    )
+    .is_none_or(|partial| !partial.whole_sentences)
+}
+
+/// How an expansion that ran out of budget was recovered, for the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Recovery {
+    /// The reply finished within its budget.
+    None,
+    /// The reasoning used up the budget, so the expander was asked again with reasoning off.
+    AnswerOnlyRetry,
+}
+
 /// The suggestion block the job result carries beside `refinedPrompt`:
-/// `{ whRatio, workflow, rewriterModelId, tier? }`, `rewriterModelId` being the expander model that
-/// ran. The UI maps `whRatio` to a size of the image model's own envelope and offers it; nothing
-/// here changes the request's size.
+/// `{ whRatio?, workflow, rewriterModelId, tier?, truncated? }`, `rewriterModelId` being the
+/// expander model that ran. The UI maps `whRatio` to a size of the image model's own envelope and
+/// offers it; nothing here changes the request's size. `whRatio` is absent when a reply cut off by
+/// its budget never reached a ratio; `truncated` is `true` when the caption itself was cut short.
 pub(crate) fn suggestion_result_block(
-    expansion: &pe::Expansion,
+    aspect_ratio: Option<&str>,
     workflow: Workflow,
     model_id: &str,
     tier: Option<&str>,
+    truncated: bool,
+    recovery: Recovery,
 ) -> Map<String, Value> {
     let mut block = Map::new();
-    block.insert(
-        "whRatio".to_owned(),
-        Value::from(expansion.aspect_ratio.clone()),
-    );
+    if let Some(ratio) = aspect_ratio {
+        block.insert("whRatio".to_owned(), Value::from(ratio));
+    }
     block.insert("workflow".to_owned(), Value::from(workflow.name()));
     block.insert("rewriterModelId".to_owned(), Value::from(model_id));
     if let Some(tier) = tier {
         block.insert("tier".to_owned(), Value::from(tier));
+    }
+    if truncated {
+        block.insert("truncated".to_owned(), Value::Bool(true));
+    }
+    if recovery == Recovery::AnswerOnlyRetry {
+        block.insert("reasoningSkipped".to_owned(), Value::Bool(true));
     }
     block
 }
@@ -1116,14 +1282,19 @@ mod tests {
             "A wide harbour at dusk, boats on a stone quay."
         );
         let block = suggestion_result_block(
-            &expansion,
+            Some(&expansion.aspect_ratio),
             Workflow::TextToImage,
             PE_MODEL_ID,
             Some("nvfp4"),
+            false,
+            Recovery::None,
         );
         assert_eq!(block.get("whRatio"), Some(&json!("16:9")));
         assert_eq!(block.get("workflow"), Some(&json!("t2i")));
         assert_eq!(block.get("rewriterModelId"), Some(&json!(PE_MODEL_ID)));
+        // A complete reply carries no truncation or retry markers.
+        assert!(!block.contains_key("truncated"));
+        assert!(!block.contains_key("reasoningSkipped"));
         // The block names a ratio only; the size is offered by the UI from the image model's own
         // presets, so nothing here can rewrite the request's geometry.
         assert!(!block.contains_key("resolution"));
@@ -1165,10 +1336,138 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_reply_names_the_ceiling() {
+    fn a_reply_with_nothing_to_keep_names_the_budget_and_no_setting() {
         let message = truncated_reply_error(4096);
-        assert!(message.contains("cut off at 4096 tokens"), "{message}");
-        assert!(message.contains("maxNewTokens"), "{message}");
+        assert!(message.contains("4096-token budget"), "{message}");
+        // There is no budget control in the app, so the error must not send the user to one.
+        assert!(!message.contains("maxNewTokens"), "{message}");
+    }
+
+    #[test]
+    fn a_reply_cut_inside_the_caption_keeps_its_whole_sentences() {
+        let ratios = vec!["1:1".to_owned(), "16:9".to_owned()];
+        let partial = salvage_truncated_reply(
+            r#"{"expanded_caption": "A wide harbour at dusk. Boats rest on a \"stone\" quay! Gulls wh"#,
+            Workflow::TextToImage,
+            &ratios,
+            &pe::AspectSelection::Adaptive,
+        )
+        .expect("a caption survives");
+        assert_eq!(
+            partial.expanded_caption,
+            r#"A wide harbour at dusk. Boats rest on a "stone" quay!"#
+        );
+        assert!(partial.whole_sentences);
+        // The ratio comes after the caption, so a cut caption never reached one; none is invented.
+        assert_eq!(partial.aspect_ratio, None);
+        assert!(!needs_answer_only_retry(
+            r#"{"expanded_caption": "A wide harbour at dusk. Gulls wh"#
+        ));
+    }
+
+    #[test]
+    fn a_reply_cut_after_the_caption_keeps_the_caption_and_a_valid_ratio() {
+        let ratios = vec!["1:1".to_owned(), "16:9".to_owned()];
+        let partial = salvage_truncated_reply(
+            "<think>plan</think>{\"expanded_caption\": \"A harbour at dusk\", \"aspect_ratio\": \"16:9\"",
+            Workflow::TextToImage,
+            &ratios,
+            &pe::AspectSelection::Adaptive,
+        )
+        .unwrap();
+        assert_eq!(partial.expanded_caption, "A harbour at dusk");
+        assert!(partial.whole_sentences, "a closed caption is complete");
+        assert_eq!(partial.aspect_ratio.as_deref(), Some("16:9"));
+        // A ratio cut mid-value, outside the enum, or not the explicit edit selection is dropped.
+        for (text, workflow, aspect) in [
+            (
+                r#"{"expanded_caption": "x.", "aspect_ratio": "16:"#,
+                Workflow::TextToImage,
+                pe::AspectSelection::Adaptive,
+            ),
+            (
+                r#"{"expanded_caption": "x.", "aspect_ratio": "5:4""#,
+                Workflow::TextToImage,
+                pe::AspectSelection::Adaptive,
+            ),
+            (
+                r#"{"expanded_caption": "x.", "target_aspect_ratio": "4:3""#,
+                Workflow::Edit,
+                pe::AspectSelection::Explicit("3:2".to_owned()),
+            ),
+        ] {
+            let partial = salvage_truncated_reply(text, workflow, &ratios, &aspect).unwrap();
+            assert_eq!(partial.aspect_ratio, None, "{text}");
+        }
+        let edit = salvage_truncated_reply(
+            r#"{"expanded_caption": "x.", "target_aspect_ratio": "4:3""#,
+            Workflow::Edit,
+            &ratios,
+            &pe::AspectSelection::Adaptive,
+        )
+        .unwrap();
+        assert_eq!(edit.aspect_ratio.as_deref(), Some("4:3"));
+    }
+
+    #[test]
+    fn a_reply_cut_in_the_reasoning_or_the_first_sentence_is_asked_again() {
+        // The budget ran out inside the reasoning: no answer text at all.
+        assert!(needs_answer_only_retry(""));
+        assert!(salvage_truncated_reply(
+            "",
+            Workflow::TextToImage,
+            &[],
+            &pe::AspectSelection::Adaptive
+        )
+        .is_none());
+        // The answer opened but no caption text was written.
+        assert!(needs_answer_only_retry(r#"{"expanded_caption": ""#));
+        // A caption with no whole sentence yet is kept only as a last resort, cut to a whole word.
+        assert!(needs_answer_only_retry(
+            r#"{"expanded_caption": "A wide harbour at dusk, with"#
+        ));
+        let words = salvage_truncated_reply(
+            r#"{"expanded_caption": "A wide harbour at dusk, with gu"#,
+            Workflow::TextToImage,
+            &[],
+            &pe::AspectSelection::Adaptive,
+        )
+        .unwrap();
+        assert_eq!(words.expanded_caption, "A wide harbour at dusk, with");
+        assert!(!words.whole_sentences);
+    }
+
+    #[test]
+    fn a_cut_escape_is_dropped_rather_than_failing_the_caption() {
+        for text in [
+            r#"{"expanded_caption": "A quay at dusk. Then \"#,
+            r#"{"expanded_caption": "A quay at dusk. Then \u00"#,
+            r#"{"expanded_caption": "A quay at dusk. Then \ud83d"#,
+        ] {
+            let partial = salvage_truncated_reply(
+                text,
+                Workflow::TextToImage,
+                &[],
+                &pe::AspectSelection::Adaptive,
+            )
+            .unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(partial.expanded_caption, "A quay at dusk.", "{text}");
+        }
+    }
+
+    #[test]
+    fn a_recovered_expansion_says_so_on_its_suggestion_block() {
+        let block = suggestion_result_block(
+            None,
+            Workflow::Edit,
+            DESCRIBER_MODEL_ID,
+            None,
+            true,
+            Recovery::AnswerOnlyRetry,
+        );
+        assert!(!block.contains_key("whRatio"));
+        assert_eq!(block.get("truncated"), Some(&json!(true)));
+        assert_eq!(block.get("reasoningSkipped"), Some(&json!(true)));
     }
 
     #[test]

@@ -61,6 +61,9 @@ const QWEN_COPY = Object.freeze({
 
 const suggestedPreset = (suggestion) => suggestion?.resolution || "";
 
+const DEFAULT_TRUNCATED_NOTE =
+  "The model ran out of room before it finished, so this is cut to its last complete sentence. Review it, or try again.";
+
 export function QwenRewritePromptControl({
   prompt,
   modelId,
@@ -195,6 +198,13 @@ export function QwenRewritePromptControl({
             rows={8}
             value={draft}
           />
+          {/* The worker keeps a reply its token budget cut off (to the last whole sentence) rather
+              than failing it; say so, since the draft may end earlier than the model meant. */}
+          {suggestion?.truncated ? (
+            <p className="refine-hint" role="status">
+              {copy.truncated ?? DEFAULT_TRUNCATED_NOTE}
+            </p>
+          ) : null}
           {suggestedResolution ? (
             <div className="qwen-rewrite-aspect">
               <p className="qwen-rewrite-aspect-label">

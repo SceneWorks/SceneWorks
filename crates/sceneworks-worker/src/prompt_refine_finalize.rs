@@ -38,20 +38,45 @@ pub(super) async fn finalize_refine_job(
         kv_cache,
     } = completion;
     let backend = REFINE_BACKEND;
-    // SW-7102: an expansion that ran out of budget is reported as truncation, before the empty and
-    // parse checks below would report it as a missing or garbled answer. The expander reasons first
-    // and emits the JSON object last, so a short budget loses the object (often leaving no answer
-    // text at all, which the empty check would otherwise claim).
-    if h3_expand.is_some() && output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
-    {
-        return Err(WorkerError::Engine(
-            crate::minimax_h3_image_prompt_expand::truncated_reply_error(max_new_tokens),
-        ));
-    }
+    // SW-7102: an expansion that ran out of budget keeps what it wrote rather than failing, before
+    // the empty and parse checks below would refuse the unterminated object. The expander reasons
+    // first and emits the JSON object last, so the cut lands in the caption (kept to its last whole
+    // sentence) or, when the reasoning used the whole budget, before it (the job has already asked
+    // again with reasoning off, `Recovery::AnswerOnlyRetry`). Only a reply with no caption at all is
+    // an error.
+    let truncated_expansion = match &h3_expand {
+        Some(reply) if output.finish_reason == Some(gen_core::core_llm::FinishReason::Length) => {
+            let partial = crate::minimax_h3_image_prompt_expand::salvage_truncated_reply(
+                &output.text,
+                reply.workflow,
+                &reply.allowed_ratios,
+                &reply.aspect,
+            )
+            .ok_or_else(|| {
+                WorkerError::Engine(
+                    crate::minimax_h3_image_prompt_expand::truncated_reply_error(max_new_tokens),
+                )
+            })?;
+            tracing::warn!(
+                event = "minimax_h3_image_expansion_truncated",
+                job_id = %job.id,
+                max_new_tokens,
+                whole_sentences = partial.whole_sentences,
+                kept_chars = partial.expanded_caption.len(),
+                "MiniMax-H3-Image prompt expansion ran out of budget; kept the caption written so far"
+            );
+            Some(partial)
+        }
+        _ => None,
+    };
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
-    let refined = finalize_refined_output(&output.text, emits_json, target_model_id.as_deref());
+    let refined = match &truncated_expansion {
+        // The kept caption is already clean text; the unterminated object is not.
+        Some(partial) => partial.expanded_caption.clone(),
+        None => finalize_refined_output(&output.text, emits_json, target_model_id.as_deref()),
+    };
     if refined.is_empty() {
         let detail = empty_refine_failure_detail(
             task,
@@ -131,30 +156,43 @@ pub(super) async fn finalize_refine_job(
     // SW-7102: the expansion's reply is the engine's strict two-field object. The expanded caption
     // takes the usual `refinedPrompt` slot, beside the untouched `originalPrompt`; the proposed
     // ratio rides `rewriteSuggestion` for the UI to offer. A reply that is not exactly the schema
-    // is refused, never repaired.
+    // is refused, never repaired. A reply the budget cut off is the one exception: its caption was
+    // kept above, flagged `truncated` for the UI, and it offers a ratio only if it reached one.
     if let Some(reply) = &h3_expand {
-        let expansion = crate::minimax_h3_image_prompt_expand::parse_reply(
-            &refined,
-            reply.workflow,
-            &reply.allowed_ratios,
-            &reply.aspect,
-        )
-        .map_err(|error| {
-            WorkerError::Engine(format!(
-                "The MiniMax-H3-Image prompt expander returned output this build cannot read: \
-                 {error}. The reply began: {}",
-                crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
-            ))
-        })?;
+        let (caption, aspect_ratio, truncated) = match truncated_expansion {
+            Some(partial) => (partial.expanded_caption, partial.aspect_ratio, true),
+            None => {
+                let expansion = crate::minimax_h3_image_prompt_expand::parse_reply(
+                    &refined,
+                    reply.workflow,
+                    &reply.allowed_ratios,
+                    &reply.aspect,
+                )
+                .map_err(|error| {
+                    WorkerError::Engine(format!(
+                        "The MiniMax-H3-Image prompt expander returned output this build cannot \
+                         read: {error}. The reply began: {}",
+                        crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
+                    ))
+                })?;
+                (
+                    expansion.expanded_caption,
+                    Some(expansion.aspect_ratio),
+                    false,
+                )
+            }
+        };
         rewrite_suggestion = Some(
             crate::minimax_h3_image_prompt_expand::suggestion_result_block(
-                &expansion,
+                aspect_ratio.as_deref(),
                 reply.workflow,
                 reply.model_id,
                 reply.tier,
+                truncated,
+                reply.recovery,
             ),
         );
-        result_refined = expansion.expanded_caption;
+        result_refined = caption;
     }
     // sc-24029 widened this to carry the finish reason, usage and the ceiling on every refine
     // result; sc-24113 builds it eagerly so the rewrite's suggestion block can ride alongside.
@@ -293,6 +331,7 @@ mod tests {
                         tier: Some("q4"),
                         weights_source: loaded.to_owned(),
                         decode: json!({ "proposer": "block_draft" }),
+                        recovery: crate::minimax_h3_image_prompt_expand::Recovery::None,
                     }),
                     image_reference_count: 0,
                     emits_json: true,
@@ -323,5 +362,115 @@ mod tests {
                 "A lighthouse on a basalt headland."
             );
         }
+    }
+
+    /// Finalize one expansion reply against a stub API; the completed result, or the error.
+    async fn finalize_expansion(
+        output: gen_core::core_llm::TextLlmOutput,
+        recovery: crate::minimax_h3_image_prompt_expand::Recovery,
+    ) -> WorkerResult<Value> {
+        const STAMP: &str = "2026-11-20T00:00:00Z";
+        let (api_url, posts) = crate::test_api_stub::smoke_api(
+            crate::test_api_stub::smoke_job("", "prompt_refine", None, None, "w", STAMP),
+            crate::test_api_stub::smoke_worker("", "job_h3_cut", STAMP),
+            None,
+        )
+        .await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().to_path_buf());
+        settings.api_url = api_url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(crate::test_api_stub::smoke_job(
+            "job_h3_cut",
+            "prompt_refine",
+            None,
+            None,
+            "w",
+            STAMP,
+        ))
+        .unwrap();
+        finalize_refine_job(
+            &api,
+            &job,
+            RefineCompletion {
+                task: RefineTask::MiniMaxH3ImageExpand,
+                original_prompt: "a lighthouse".to_owned(),
+                target_model_id: None,
+                model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated".to_owned(),
+                thinking_mode_name: "enabled",
+                max_new_tokens: 4096,
+                done_message: "done",
+                qwen_rewriter: None,
+                h3_expand: Some(H3ExpandReply {
+                    workflow: crate::minimax_h3_image_prompt_expand::Workflow::TextToImage,
+                    aspect: gen_core::core_llm::minimax_h3_image_pe::AspectSelection::Adaptive,
+                    allowed_ratios: vec!["9:16".to_owned()],
+                    model_id: "vision_describe_qwen3_8_27b",
+                    tier: Some("q4"),
+                    weights_source: String::new(),
+                    decode: Value::Null,
+                    recovery,
+                }),
+                image_reference_count: 0,
+                emits_json: true,
+                output,
+                kv_cache: Value::Null,
+            },
+        )
+        .await?;
+        let posts = posts.lock().unwrap().clone();
+        Ok(posts
+            .iter()
+            .rev()
+            .find(|(_, body)| body["status"] == "completed")
+            .map(|(_, body)| body["result"].clone())
+            .expect("a completed result"))
+    }
+
+    /// A reply the budget cut off inside its caption completes with the caption up to its last
+    /// whole sentence, flagged `truncated`, and offers no ratio it never reached — it does not fail
+    /// the expansion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expansion_cut_off_by_its_budget_keeps_its_whole_sentences() {
+        let result = finalize_expansion(
+            gen_core::core_llm::TextLlmOutput {
+                text: r#"{"expanded_caption": "A lighthouse on a basalt headland. Waves break bel"#
+                    .to_owned(),
+                finish_reason: Some(gen_core::core_llm::FinishReason::Length),
+                ..Default::default()
+            },
+            crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry,
+        )
+        .await
+        .expect("a cut-off expansion still completes");
+        assert_eq!(
+            result["refinedPrompt"],
+            "A lighthouse on a basalt headland."
+        );
+        assert_eq!(result["originalPrompt"], "a lighthouse");
+        let suggestion = &result["rewriteSuggestion"];
+        assert_eq!(suggestion["truncated"], true);
+        assert_eq!(suggestion["reasoningSkipped"], true);
+        assert!(suggestion.get("whRatio").is_none(), "{suggestion}");
+    }
+
+    /// Only a cut-off reply with no caption at all is an error, and it names no setting the app
+    /// does not have.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expansion_cut_off_before_any_caption_fails_without_naming_a_setting() {
+        let error = finalize_expansion(
+            gen_core::core_llm::TextLlmOutput {
+                text: String::new(),
+                thinking: Some("Let me think about the lighthouse".to_owned()),
+                finish_reason: Some(gen_core::core_llm::FinishReason::Length),
+                ..Default::default()
+            },
+            crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry,
+        )
+        .await
+        .expect_err("nothing to keep");
+        let message = error.to_string();
+        assert!(message.contains("4096-token budget"), "{message}");
+        assert!(!message.contains("maxNewTokens"), "{message}");
     }
 }
